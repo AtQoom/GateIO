@@ -1,18 +1,17 @@
 from fastapi import FastAPI, Request
 import uvicorn
-
-from storage import store_position
-from trade import place_order
+from api.storage import store_position
+from api.trade import place_order
 import asyncio
-from monitor import monitor_loop
-from config import SYMBOL
+from api.monitor import monitor_loop
+from api.config import SYMBOL
 
 app = FastAPI()
 
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
-    print("🚨 Webhook received:", data)
+    print("📡 Webhook received:", data)
 
     if data.get("signal") == "entry":
         side = data.get("position")
@@ -25,14 +24,9 @@ async def webhook(request: Request):
     return {"status": "ok"}
 
 
-@app.get("/ping")
-def ping():
-    return {"status": "ok"}
-
-
 def get_current_price(symbol):
     import requests
-    url = "https://api.gateio.ws/api/v4/futures/usdt/tickers"
+    url = f"https://api.gateio.ws/api/v4/futures/usdt/tickers"
     res = requests.get(url)
     data = res.json()
     for d in data:
@@ -45,6 +39,5 @@ def get_current_price(symbol):
 async def startup_event():
     asyncio.create_task(monitor_loop())
 
-
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+    uvicorn.run("api.main:app", host="0.0.0.0", port=8000)

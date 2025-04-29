@@ -1,18 +1,18 @@
-# trade.py
 import os
 import hmac
 import hashlib
 import time
 import requests
 import json
+from api.config import SYMBOL
 
-from config import API_KEY, SECRET_KEY, SYMBOL
-
+API_KEY = os.getenv("API_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY")
 GATE_URL = "https://api.gateio.ws"
 HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
-    "KEY": API_KEY,
+    "KEY": API_KEY
 }
 
 def sign_payload(method, url_path, body=""):
@@ -22,17 +22,15 @@ def sign_payload(method, url_path, body=""):
     return nonce, signature
 
 def get_balance():
-    method = "GET"
     path = "/api/v4/wallet/total_balance"
+    method = "GET"
     url = GATE_URL + path
     nonce, sign = sign_payload(method, path)
-
     headers = {
         **HEADERS,
         "Timestamp": nonce,
-        "SIGN": sign,
+        "SIGN": sign
     }
-
     res = requests.get(url, headers=headers)
     data = res.json()
     return float(data["available"]["USDT"])
@@ -41,8 +39,8 @@ def place_order(symbol, side, price, reduce_only=False):
     balance = get_balance()
     size = round(balance / price, 4)
 
-    method = "POST"
     path = "/api/v4/futures/usdt/orders"
+    method = "POST"
     url = GATE_URL + path
 
     body = {
@@ -61,9 +59,9 @@ def place_order(symbol, side, price, reduce_only=False):
     headers = {
         **HEADERS,
         "Timestamp": nonce,
-        "SIGN": sign,
+        "SIGN": sign
     }
 
     res = requests.post(url, headers=headers, data=payload)
-    print(f"📦 주문 결과: {res.status_code} {res.text}")
+    print(f"📤 주문 요청 결과: {res.status_code} {res.text}")
     return res.json()
