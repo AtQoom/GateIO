@@ -2,6 +2,7 @@ import asyncio
 import requests
 from storage import get_position, clear_position
 from trade import place_order
+from config import TP_PERCENT, SL_PERCENT, MONITOR_INTERVAL
 
 async def monitor_loop():
     while True:
