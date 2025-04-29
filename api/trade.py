@@ -3,6 +3,7 @@ import hmac
 import hashlib
 import time
 import requests
+from config import API_KEY, SECRET_KEY, SYMBOL, QUANTITY
 
 API_KEY = os.getenv("API_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY")
