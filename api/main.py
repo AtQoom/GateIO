@@ -8,10 +8,10 @@ from api.config import SYMBOL
 
 app = FastAPI()
 
-@app.get("/ping")
+@app.api_route("/ping", methods=["GET", "HEAD"])
 async def ping():
     return {"status": "ok"}
-
+    
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
