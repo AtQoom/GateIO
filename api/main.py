@@ -4,6 +4,7 @@ from storage import store_position
 from trade import place_order
 import asyncio
 from monitor import monitor_loop
+from config import SYMBOL
 
 app = FastAPI()
 
