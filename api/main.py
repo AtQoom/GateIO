@@ -1,19 +1,54 @@
-from fastapi import FastAPI, Request
-import uvicorn
+import os
+import hmac
+import hashlib
+import time
+import requests
 
-app = FastAPI()
+API_KEY = os.getenv("API_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY")
 
-@app.post("/webhook")
-async def webhook(request: Request):
-    data = await request.json()
-    print("🚨 Webhook received:", data)
-    
-    # 예시: long 진입
-    if data.get("signal") == "entry" and data.get("position") == "long":
-        # 실제 거래 API 연결은 여기에 작성
-        print("📈 Long 진입 시그널 실행")
-    
-    return {"status": "ok"}
+GATE_URL = "https://api.gateio.ws"
+HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "KEY": API_KEY,
+}
 
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+def sign_payload(method, url_path, body=""):
+    nonce = str(int(time.time() * 1000))
+    query = f"{method}\n{url_path}\n{nonce}\n{body}\n"
+    signature = hmac.new(SECRET_KEY.encode(), query.encode(), hashlib.sha512).hexdigest()
+    return nonce, signature
+
+def place_order(symbol, side, price, size, reduce_only=False):
+    path = "/api/v4/futures/usdt/orders"
+    method = "POST"
+    url = GATE_URL + path
+
+    body = {
+        "contract": symbol,
+        "size": size,
+        "price": price,
+        "tif": "gtc",
+        "text": "auto-trade",
+        "reduce_only": reduce_only,
+    }
+
+    if side == "buy":
+        body["side"] = "buy"
+    else:
+        body["side"] = "sell"
+
+    import json
+    payload = json.dumps(body)
+    nonce, sign = sign_payload(method, path, payload)
+
+    headers = {
+        **HEADERS,
+        "Timestamp": nonce,
+        "SIGN": sign
+    }
+
+    res = requests.post(url, headers=headers, data=payload)
+    print(f"[📡] 주문 응답: {res.status_code} {res.text}")
+    return res.json()
