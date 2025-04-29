@@ -32,3 +32,7 @@ def get_current_price(symbol):
         if d["contract"] == symbol:
             return float(d["last"])
     return None
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(monitor_loop())
