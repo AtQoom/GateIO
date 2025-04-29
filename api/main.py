@@ -1,54 +1,41 @@
-import os
-import hmac
-import hashlib
-import time
-import requests
+from fastapi import FastAPI, Request
+import uvicorn
+from storage import store_position
+from trade import place_order
+import asyncio
+from monitor import monitor_loop
 
-API_KEY = os.getenv("API_KEY")
-SECRET_KEY = os.getenv("SECRET_KEY")
+app = FastAPI()
 
-GATE_URL = "https://api.gateio.ws"
-HEADERS = {
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-    "KEY": API_KEY,
-}
+@app.post("/webhook")
+async def webhook(request: Request):
+    data = await request.json()
+    print("🚀 Webhook received:", data)
 
-def sign_payload(method, url_path, body=""):
-    nonce = str(int(time.time() * 1000))
-    query = f"{method}\n{url_path}\n{nonce}\n{body}\n"
-    signature = hmac.new(SECRET_KEY.encode(), query.encode(), hashlib.sha512).hexdigest()
-    return nonce, signature
+    if data.get("signal") == "entry":
+        side = data.get("position")
+        symbol = "SOL_USDT"  # 고정 테스트
+        price = get_current_price(symbol)
+        size = 1  # TODO: 수량 계산 방식으로 교체 가능
 
-def place_order(symbol, side, price, size, reduce_only=False):
-    path = "/api/v4/futures/usdt/orders"
-    method = "POST"
-    url = GATE_URL + path
+        store_position(symbol, "buy" if side == "long" else "sell", price, size)
+        place_order(symbol, "buy" if side == "long" else "sell", price, size)
 
-    body = {
-        "contract": symbol,
-        "size": size,
-        "price": price,
-        "tif": "gtc",
-        "text": "auto-trade",
-        "reduce_only": reduce_only,
-    }
+    return {"status": "ok"}
 
-    if side == "buy":
-        body["side"] = "buy"
-    else:
-        body["side"] = "sell"
+def get_current_price(symbol):
+    import requests
+    url = f"https://api.gateio.ws/api/v4/futures/usdt/tickers"
+    res = requests.get(url)
+    data = res.json()
+    for d in data:
+        if d["contract"] == symbol:
+            return float(d["last"])
+    return None
 
-    import json
-    payload = json.dumps(body)
-    nonce, sign = sign_payload(method, path, payload)
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(monitor_loop())
 
-    headers = {
-        **HEADERS,
-        "Timestamp": nonce,
-        "SIGN": sign
-    }
-
-    res = requests.post(url, headers=headers, data=payload)
-    print(f"[📡] 주문 응답: {res.status_code} {res.text}")
-    return res.json()
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
