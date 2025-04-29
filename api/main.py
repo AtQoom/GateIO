@@ -15,12 +15,11 @@ async def webhook(request: Request):
 
     if data.get("signal") == "entry":
         side = data.get("position")
-        symbol = "SOL_USDT"  # 고정 테스트
+        symbol = "SOL_USDT"
         price = get_current_price(symbol)
-        size = 1  # TODO: 수량 계산 방식으로 교체 가능
 
-        store_position(symbol, "buy" if side == "long" else "sell", price, size)
-        place_order(symbol, "buy" if side == "long" else "sell", price, size)
+        store_position(symbol, "buy" if side == "long" else "sell", price, price)
+        place_order(symbol, "buy" if side == "long" else "sell", price)
 
     return {"status": "ok"}
 
