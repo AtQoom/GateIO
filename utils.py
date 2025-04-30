@@ -3,7 +3,6 @@ import hmac
 import hashlib
 import json
 import requests
-
 from config import BASE_URL, API_KEY, API_SECRET, SYMBOL, MARGIN_MODE
 
 def get_headers():
@@ -11,7 +10,7 @@ def get_headers():
         "Accept": "application/json",
         "Content-Type": "application/json",
         "KEY": API_KEY,
-        "SIGN": ""  # 여기에 나중에 sign 넣어줌
+        "SIGN": "",  # 여기에 서명 추가
     }
 
 def sign_request(body, secret):
@@ -23,7 +22,7 @@ def place_order(side):
         "contract": SYMBOL,
         "size": 1,
         "price": 0,
-        "tif": "ioc",  # 시장가로 즉시 체결
+        "tif": "ioc",
         "text": "entry",
         "reduce_only": False,
         "side": side
@@ -35,7 +34,7 @@ def place_order(side):
 
     try:
         res = requests.post(url, headers=headers, data=body)
-        print(f"[ORDER] Response ({res.status_code}): {res.text}")
+        print(f"📥 Order Response ({res.status_code}): {res.text}")
         res.raise_for_status()
     except Exception as e:
         print(f"❌ Order failed: {e}")
@@ -44,16 +43,15 @@ def get_open_position():
     url = f"{BASE_URL}/futures/usdt/positions"
     try:
         res = requests.get(url, headers=get_headers())
+        res.raise_for_status()
         positions = res.json()
-
         for pos in positions:
             if pos["contract"] == SYMBOL and float(pos["size"]) > 0:
                 return float(pos["entry_price"])
-
     except Exception as e:
-        print(f"❌ Position fetch error: {e}")
+        print(f"⚠️ Position fetch error: {e}")
     return None
 
 def close_position(side):
-    print(f"📤 Closing position with {side.upper()} order")
+    print(f"🔁 Closing position with {side.upper()} order")
     place_order(side)
