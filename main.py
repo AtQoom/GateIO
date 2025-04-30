@@ -1,88 +1,88 @@
-
 import os
 import time
-import logging
+import hmac
+import hashlib
 import requests
+import json
 from flask import Flask, request, jsonify
+
 from config import BASE_URL, SYMBOL, MARGIN_MODE, TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT, API_KEY, API_SECRET
 from utils import get_headers, get_open_position, place_order, close_position
 
-# === 로깅 설정 ===
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
-
 app = Flask(__name__)
 
+# ✅ UptimeRobot /ping 체크 대응용 GET 라우터
+@app.route("/", methods=["GET"])
+@app.route("/ping", methods=["GET"])
+def ping():
+    return jsonify({"status": "alive"}), 200
+
+
+# ✅ 자동매매 웹훅 처리
 @app.route("/", methods=["POST"])
 def webhook():
-    try:
-        data = request.json
-        if not data or "signal" not in data or "position" not in data:
-            logging.warning("🚫 Invalid or missing data in webhook payload")
-            return jsonify({"error": "Invalid data"}), 400
+    data = request.json
+    if not data or "signal" not in data or "position" not in data:
+        return jsonify({"error": "Invalid data"}), 400
 
-        position = data["position"]
-        logging.info(f"📥 Signal received: {position.upper()}")
+    position = data["position"]  # "long" or "short"
+    print(f"📥 Received signal: {position.upper()}")
 
-        side = "buy" if position == "long" else "sell"
-        place_order(side)
+    # 진입 방향 결정
+    side = "buy" if position == "long" else "sell"
+    place_order(side)
 
-        time.sleep(1.5)
-        entry_price = get_open_position()
+    time.sleep(1.5)
 
-        if not entry_price:
-            logging.error("❌ Entry price not found. No position open?")
-            return jsonify({"status": "error", "msg": "no position"}), 500
+    # 평단가 확인
+    entry_price = get_open_position()
+    if not entry_price:
+        print("❌ Failed to get entry price.")
+        return jsonify({"status": "error", "msg": "no position"}), 500
 
-        logging.info(f"✅ Entry at {entry_price}")
+    print(f"✅ Entry price: {entry_price:.4f}")
 
-        tp_price = entry_price * (1 + TAKE_PROFIT_PERCENT) if position == "long" else entry_price * (1 - TAKE_PROFIT_PERCENT)
-        sl_price = entry_price * (1 - STOP_LOSS_PERCENT) if position == "long" else entry_price * (1 + STOP_LOSS_PERCENT)
+    # 익절/손절 가격 설정
+    tp_price = entry_price * (1 + TAKE_PROFIT_PERCENT) if position == "long" else entry_price * (1 - TAKE_PROFIT_PERCENT)
+    sl_price = entry_price * (1 - STOP_LOSS_PERCENT) if position == "long" else entry_price * (1 + STOP_LOSS_PERCENT)
 
-        logging.info(f"🎯 Target: TP={tp_price:.4f}, SL={sl_price:.4f}")
+    print(f"🎯 TP: {tp_price:.4f}, SL: {sl_price:.4f}")
 
-        while True:
-            try:
-                resp = requests.get(f"{BASE_URL}/spot/tickers?currency_pair={SYMBOL}")
-                resp.raise_for_status()
-                current_price = float(resp.json()["tickers"][0]["last"])
-                logging.info(f"📈 Current price: {current_price}")
+    # 모니터링 루프
+    while True:
+        try:
+            r = requests.get(f"{BASE_URL}/spot/tickers?currency_pair={SYMBOL}")
+            current_price = float(r.json()["tickers"][0]["last"])
+            print(f"📊 Current price: {current_price:.4f}")
 
-                if position == "long":
-                    if current_price >= tp_price:
-                        logging.info(f"✅ TP hit at {current_price}")
-                        close_position("sell")
-                        break
-                    elif current_price <= sl_price:
-                        logging.warning(f"❌ SL hit at {current_price}")
-                        close_position("sell")
-                        break
-                else:
-                    if current_price <= tp_price:
-                        logging.info(f"✅ TP hit at {current_price}")
-                        close_position("buy")
-                        break
-                    elif current_price >= sl_price:
-                        logging.warning(f"❌ SL hit at {current_price}")
-                        close_position("buy")
-                        break
+            if position == "long":
+                if current_price >= tp_price:
+                    print(f"✅ TP HIT at {current_price:.4f}")
+                    close_position("sell")
+                    break
+                elif current_price <= sl_price:
+                    print(f"❌ SL HIT at {current_price:.4f}")
+                    close_position("sell")
+                    break
+            else:
+                if current_price <= tp_price:
+                    print(f"✅ TP HIT at {current_price:.4f}")
+                    close_position("buy")
+                    break
+                elif current_price >= sl_price:
+                    print(f"❌ SL HIT at {current_price:.4f}")
+                    close_position("buy")
+                    break
 
-                time.sleep(5)
+            time.sleep(5)
 
-            except Exception as e:
-                logging.error("💥 Error in monitoring loop", exc_info=e)
-                time.sleep(5)
+        except Exception as e:
+            print(f"⚠️ Error during monitoring loop: {str(e)}")
+            time.sleep(5)
 
-        return jsonify({"status": "closed"}), 200
-
-    except Exception as e:
-        logging.critical("🔥 Webhook critical failure", exc_info=e)
-        return jsonify({"error": "internal server error"}), 500
+    return jsonify({"status": "closed"}), 200
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    logging.info(f"🚀 Starting server on port {port}")
     app.run(host="0.0.0.0", port=port)
