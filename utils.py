@@ -3,6 +3,7 @@ import hmac
 import hashlib
 import json
 import requests
+
 from config import BASE_URL, API_KEY, API_SECRET, SYMBOL, MARGIN_MODE
 
 def get_headers():
@@ -10,7 +11,7 @@ def get_headers():
         "Accept": "application/json",
         "Content-Type": "application/json",
         "KEY": API_KEY,
-        "SIGN": "",
+        "SIGN": ""  # 여기에 나중에 sign 넣어줌
     }
 
 def sign_request(body, secret):
@@ -22,33 +23,37 @@ def place_order(side):
         "contract": SYMBOL,
         "size": 1,
         "price": 0,
-        "tif": "ioc",
-        "iceberg": 0,
+        "tif": "ioc",  # 시장가로 즉시 체결
         "text": "entry",
-        "close": False,
-        "side": side,
+        "reduce_only": False,
+        "side": side
     }
+
     body = json.dumps(payload)
     headers = get_headers()
     headers["SIGN"] = sign_request(body, API_SECRET)
 
     try:
         res = requests.post(url, headers=headers, data=body)
-        print(f"[ORDER] {res.status_code}: {res.text}")
+        print(f"[ORDER] Response ({res.status_code}): {res.text}")
+        res.raise_for_status()
     except Exception as e:
-        print(f"❌ Order error: {e}")
+        print(f"❌ Order failed: {e}")
 
 def get_open_position():
     url = f"{BASE_URL}/futures/usdt/positions"
     try:
         res = requests.get(url, headers=get_headers())
         positions = res.json()
+
         for pos in positions:
             if pos["contract"] == SYMBOL and float(pos["size"]) > 0:
                 return float(pos["entry_price"])
+
     except Exception as e:
-        print(f"❌ Position error: {e}")
+        print(f"❌ Position fetch error: {e}")
     return None
 
 def close_position(side):
+    print(f"📤 Closing position with {side.upper()} order")
     place_order(side)
