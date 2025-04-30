@@ -2,8 +2,8 @@
 
 # 일반 설정
 SYMBOL = "SOL_USDT"
-POSITION_MODE = "cross"         # 또는 "isolated"
-LEVERAGE = 5
+POSITION_MODE = "isolated"         # 또는 "isolated""cross"  
+LEVERAGE = 12
 
 # 위험 관리
 RISK_PER_TRADE_PCT = 10
