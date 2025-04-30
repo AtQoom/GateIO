@@ -9,18 +9,17 @@ from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 
 def get_server_time():
     try:
-        client = ntplib.NTPClient()
-        res = client.request("pool.ntp.org", version=3)
-        return int(res.tx_time)
+        ntp_client = ntplib.NTPClient()
+        response = ntp_client.request("pool.ntp.org", version=3)
+        return int(response.tx_time)
     except Exception as e:
-        print(f"[⚠️ NTP 오류] 로컬 시간 사용: {e}")
+        print(f"⚠️ [NTP 오류] 로컬 시간 사용: {e}")
         return int(time.time())
 
-def generate_signature(method, path, query_string, body, timestamp, secret):
-    payload = body if body else ""
-    hashed_payload = hashlib.sha512(payload.encode()).hexdigest()
-    signature_string = f"{method}\n{path}\n{query_string}\n{hashed_payload}\n{timestamp}"
-    return hmac.new(secret.encode(), signature_string.encode(), hashlib.sha512).hexdigest()
+def generate_signature(timestamp, method, path, query_string, body, secret):
+    body_hash = hashlib.sha512(body.encode()).hexdigest() if body else ''
+    signature_payload = f"{method.upper()}\n{path}\n{query_string}\n{body_hash}\n{timestamp}"
+    return hmac.new(secret.encode(), signature_payload.encode(), hashlib.sha512).hexdigest()
 
 def get_headers(signature, timestamp):
     return {
@@ -45,7 +44,7 @@ def place_order(side):
     }
     body = json.dumps(body_data)
     timestamp = get_server_time()
-    signature = generate_signature("POST", path, "", body, timestamp, API_SECRET)
+    signature = generate_signature(timestamp, "POST", path, "", body, API_SECRET)
     headers = get_headers(signature, timestamp)
 
     try:
@@ -59,7 +58,7 @@ def get_open_position():
     path = "/futures/usdt/positions"
     url = BASE_URL + path
     timestamp = get_server_time()
-    signature = generate_signature("GET", path, "", "", timestamp, API_SECRET)
+    signature = generate_signature(timestamp, "GET", path, "", "", API_SECRET)
     headers = get_headers(signature, timestamp)
 
     try:
