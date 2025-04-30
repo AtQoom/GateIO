@@ -1,18 +1,15 @@
-# config.py
+import os
 
-# 일반 설정
+# 기본 설정
 SYMBOL = "SOL_USDT"
-POSITION_MODE = "isolated"         # 또는 "isolated""cross"  
-LEVERAGE = 12
+MARGIN_MODE = "isolated"  # 격리 모드 사용
+ORDER_SIZE_USDT = 10  # 진입 금액 단위 (USDT)
 
-# 위험 관리
-RISK_PER_TRADE_PCT = 10
-MAX_POSITION_SIZE = 100
+# TP/SL 설정
+TAKE_PROFIT_PERCENT = 2.2 / 100  # 2.2%
+STOP_LOSS_PERCENT = 0.7 / 100    # 0.7%
 
-# TP / SL (% 단위)
-TP_PERCENT = 2.2
-SL_PERCENT = 0.7
-
-# 트레일링 스탑
-TRAIL_OFFSET_PCT = 0.6
-TRAIL_STEP_PCT = 1.2
+# 환경변수에서 API 키 로드 (Railway 환경변수에 저장)
+API_KEY = os.getenv("GATEIO_API_KEY")
+API_SECRET = os.getenv("GATEIO_API_SECRET")
+API_PASSPHRASE = os.getenv("GATEIO_API_PASSPHRASE")  # 혹시 사용하는 경우
