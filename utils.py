@@ -9,32 +9,32 @@ from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 
 def get_server_time():
     try:
-        ntp_client = ntplib.NTPClient()
-        response = ntp_client.request("pool.ntp.org", version=3)
-        return int(response.tx_time * 1000)  # 밀리초 단위
+        client = ntplib.NTPClient()
+        res = client.request("pool.ntp.org", version=3)
+        return int(res.tx_time)
     except Exception as e:
         print(f"[⚠️ NTP 오류] 로컬 시간 사용: {e}")
-        return int(time.time() * 1000)
+        return int(time.time())
 
-def get_headers():
+def generate_signature(method, path, query_string, body, timestamp, secret):
+    payload = body if body else ""
+    hashed_payload = hashlib.sha512(payload.encode()).hexdigest()
+    signature_string = f"{method}\n{path}\n{query_string}\n{hashed_payload}\n{timestamp}"
+    return hmac.new(secret.encode(), signature_string.encode(), hashlib.sha512).hexdigest()
+
+def get_headers(signature, timestamp):
     return {
         "Accept": "application/json",
         "Content-Type": "application/json",
         "KEY": API_KEY,
-        "SIGN": "",  # 서명은 나중에 추가
-        "Timestamp": ""  # 타임스탬프는 나중에 추가
+        "SIGN": signature,
+        "Timestamp": str(timestamp)
     }
 
-def sign_request(method, url_path, query_string, body, secret, timestamp):
-    hashed_payload = hashlib.sha512(body.encode()).hexdigest()
-    signature_string = f"{method}\n{url_path}\n{query_string}\n{hashed_payload}\n{timestamp}"
-    sign = hmac.new(secret.encode(), signature_string.encode(), hashlib.sha512).hexdigest()
-    return sign
-
 def place_order(side):
-    url_path = "/futures/usdt/orders"
-    url = f"{BASE_URL}{url_path}"
-    payload = {
+    path = "/futures/usdt/orders"
+    url = BASE_URL + path
+    body_data = {
         "contract": SYMBOL,
         "size": 1,
         "price": 0,
@@ -43,11 +43,10 @@ def place_order(side):
         "reduce_only": False,
         "side": side
     }
-    body = json.dumps(payload)
-    timestamp = str(int(get_server_time() / 1000))  # 초 단위
-    headers = get_headers()
-    headers["Timestamp"] = timestamp
-    headers["SIGN"] = sign_request("POST", url_path, "", body, API_SECRET, timestamp)
+    body = json.dumps(body_data)
+    timestamp = get_server_time()
+    signature = generate_signature("POST", path, "", body, timestamp, API_SECRET)
+    headers = get_headers(signature, timestamp)
 
     try:
         res = requests.post(url, headers=headers, data=body)
@@ -57,12 +56,11 @@ def place_order(side):
         print(f"❌ 주문 실패: {e}")
 
 def get_open_position():
-    url_path = "/futures/usdt/positions"
-    url = f"{BASE_URL}{url_path}"
-    timestamp = str(int(get_server_time() / 1000))  # 초 단위
-    headers = get_headers()
-    headers["Timestamp"] = timestamp
-    headers["SIGN"] = sign_request("GET", url_path, "", "", API_SECRET, timestamp)
+    path = "/futures/usdt/positions"
+    url = BASE_URL + path
+    timestamp = get_server_time()
+    signature = generate_signature("GET", path, "", "", timestamp, API_SECRET)
+    headers = get_headers(signature, timestamp)
 
     try:
         res = requests.get(url, headers=headers)
@@ -76,5 +74,5 @@ def get_open_position():
     return None
 
 def close_position(side):
-    print(f"📉 포지션 종료: {side.upper()} 주문 실행")
+    print(f"📉 포지션 종료: {side.upper()}")
     place_order(side)
