@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import requests
 from flask import Flask, request, jsonify
 
@@ -11,78 +12,75 @@ app = Flask(__name__)
 @app.route("/", methods=["POST"])
 def webhook():
     try:
-        data = request.json
-        print("📥 Received data:", data)
-
+        data = request.get_json()
         if not data or "signal" not in data or "position" not in data:
-            print("❌ Invalid payload")
             return jsonify({"error": "Invalid data"}), 400
 
+        signal = data["signal"].lower()
         position = data["position"].lower()
-        if position not in ["long", "short"]:
-            print("❌ Invalid position:", position)
-            return jsonify({"error": "Invalid position"}), 400
+        print(f"📩 Received: signal={signal}, position={position}")
 
-        # 진입 처리
+        if signal != "entry" or position not in ["long", "short"]:
+            return jsonify({"error": "Invalid signal or position"}), 400
+
+        # 1. 진입
         side = "buy" if position == "long" else "sell"
-        print(f"📌 Placing {position.upper()} order...")
+        print(f"🟢 Placing {position.upper()} order...")
         place_order(side)
 
-        time.sleep(1.5)  # 포지션 갱신 대기
-
-        # 진입가 확인
+        # 2. 약간 대기 후 포지션 확인
+        time.sleep(2)
         entry_price = get_open_position()
-        if not entry_price:
-            print("❌ Entry price not found.")
-            return jsonify({"status": "error", "message": "entry price unavailable"}), 500
+        if entry_price is None:
+            print("❌ Failed to get entry price. Position might not be open.")
+            return jsonify({"status": "entry_failed"}), 500
 
-        print(f"✅ Entry price: {entry_price:.4f}")
+        print(f"📈 Entry price: {entry_price}")
 
-        # TP/SL 계산
-        tp = entry_price * (1 + TAKE_PROFIT_PERCENT) if position == "long" else entry_price * (1 - TAKE_PROFIT_PERCENT)
-        sl = entry_price * (1 - STOP_LOSS_PERCENT) if position == "long" else entry_price * (1 + STOP_LOSS_PERCENT)
+        # 3. 익절 / 손절 가격 계산
+        tp_price = entry_price * (1 + TAKE_PROFIT_PERCENT) if position == "long" else entry_price * (1 - TAKE_PROFIT_PERCENT)
+        sl_price = entry_price * (1 - STOP_LOSS_PERCENT) if position == "long" else entry_price * (1 + STOP_LOSS_PERCENT)
 
-        print(f"🎯 TP: {tp:.4f}, SL: {sl:.4f}")
+        print(f"🎯 TP: {tp_price:.4f}, SL: {sl_price:.4f}")
 
-        # 모니터링 루프
+        # 4. 모니터링
         while True:
             try:
-                response = requests.get(f"{BASE_URL}/spot/tickers?currency_pair={SYMBOL}")
-                data = response.json()
-                current_price = float(data["tickers"][0]["last"])
+                resp = requests.get(f"{BASE_URL}/spot/tickers?currency_pair={SYMBOL}", timeout=5)
+                current_price = float(resp.json()["tickers"][0]["last"])
 
-                print(f"📊 Current Price: {current_price:.4f}")
+                print(f"🔁 Current price: {current_price}")
 
                 if position == "long":
-                    if current_price >= tp:
-                        print("✅ TP Hit")
+                    if current_price >= tp_price:
+                        print(f"✅ TAKE PROFIT triggered at {current_price}")
                         close_position("sell")
                         break
-                    elif current_price <= sl:
-                        print("❌ SL Hit")
+                    elif current_price <= sl_price:
+                        print(f"🛑 STOP LOSS triggered at {current_price}")
                         close_position("sell")
                         break
-                else:
-                    if current_price <= tp:
-                        print("✅ TP Hit")
+                else:  # short
+                    if current_price <= tp_price:
+                        print(f"✅ TAKE PROFIT triggered at {current_price}")
                         close_position("buy")
                         break
-                    elif current_price >= sl:
-                        print("❌ SL Hit")
+                    elif current_price >= sl_price:
+                        print(f"🛑 STOP LOSS triggered at {current_price}")
                         close_position("buy")
                         break
 
                 time.sleep(5)
 
             except Exception as e:
-                print("⚠️ Error during monitoring loop:", e)
+                print(f"⚠️ Error in monitoring: {e}")
                 time.sleep(5)
 
         return jsonify({"status": "closed"}), 200
 
     except Exception as e:
-        print("❌ Main exception:", e)
-        return jsonify({"status": "error", "message": str(e)}), 500
+        print(f"🔥 Webhook error: {e}")
+        return jsonify({"status": "error", "msg": str(e)}), 500
 
 
 if __name__ == "__main__":
