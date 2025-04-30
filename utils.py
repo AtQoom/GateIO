@@ -6,33 +6,37 @@ import requests
 
 from config import BASE_URL, API_KEY, API_SECRET, SYMBOL, MARGIN_MODE
 
-def get_headers():
+def get_headers(timestamp: str) -> dict:
     return {
         "Accept": "application/json",
         "Content-Type": "application/json",
         "KEY": API_KEY,
-        "Timestamp": str(int(time.time() * 1000)),  # 필수!
-        "SIGN": ""  # 아래에서 추가
+        "SIGN": "",  # 여기에 나중에 sign_request로 추가
+        "Timestamp": timestamp
     }
 
-def sign_request(body, secret):
-    return hmac.new(secret.encode(), body.encode(), hashlib.sha512).hexdigest()
+def sign_request(body: str, secret: str, timestamp: str) -> str:
+    message = f"{timestamp}{body}"
+    return hmac.new(secret.encode(), message.encode(), hashlib.sha512).hexdigest()
 
-def place_order(side):
+def place_order(side: str):
     url = f"{BASE_URL}/futures/usdt/orders"
+
     payload = {
         "contract": SYMBOL,
-        "size": 1,  # 최대 수량 진입은 1로 설정되어 있음 (조정 가능)
+        "size": 1,
         "price": 0,
-        "tif": "ioc",
-        "text": "entry",
-        "reduce_only": False,
-        "side": side
+        "tif": "ioc",               # 시장가로 즉시 체결
+        "text": "entry",            # 식별용 태그
+        "reduce_only": False,       # 진입
+        "side": side                # "buy" 또는 "sell"
     }
 
     body = json.dumps(payload)
-    headers = get_headers()
-    headers["SIGN"] = sign_request(body, API_SECRET)
+    timestamp = str(int(time.time() * 1000))
+    sign = sign_request(body, API_SECRET, timestamp)
+    headers = get_headers(timestamp)
+    headers["SIGN"] = sign
 
     try:
         res = requests.post(url, headers=headers, data=body)
@@ -43,19 +47,25 @@ def place_order(side):
 
 def get_open_position():
     url = f"{BASE_URL}/futures/usdt/positions"
+    timestamp = str(int(time.time() * 1000))
+    headers = get_headers(timestamp)
+    body = ""  # GET 요청은 body 없음
+    sign = sign_request(body, API_SECRET, timestamp)
+    headers["SIGN"] = sign
 
     try:
-        res = requests.get(url, headers=get_headers())
+        res = requests.get(url, headers=headers)
+        res.raise_for_status()
         positions = res.json()
 
         for pos in positions:
             if pos["contract"] == SYMBOL and float(pos["size"]) > 0:
                 return float(pos["entry_price"])
+
     except Exception as e:
         print(f"⚠️ Position fetch error: {e}")
-
     return None
 
-def close_position(side):
+def close_position(side: str):
     print(f"📉 Closing position with {side.upper()} order")
     place_order(side)
