@@ -1,93 +1,88 @@
 import time
-import hashlib
-import hmac
-import requests
 import json
-import uuid
+import hmac
+import hashlib
 import ntplib
+import requests
 
-from config import BASE_URL, SYMBOL, API_KEY, API_SECRET
+from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 
-# 서버 시간 동기화
 def get_server_time():
     try:
         ntp_client = ntplib.NTPClient()
         response = ntp_client.request("pool.ntp.org", version=3)
         return int(response.tx_time * 1000)
     except Exception as e:
-        print(f"[⚠️ NTP 오류] 로컬 시간 사용: {e}")
+        print(f"⚠️ NTP 오류! 로컬 시간 사용: {e}")
         return int(time.time() * 1000)
 
-# 공통 헤더 생성
-def get_headers(method, path, body=""):
-    t = str(get_server_time())
-    msg = f"{t}{method.upper()}{path}{body}"
-    signature = hmac.new(API_SECRET.encode(), msg.encode(), hashlib.sha512).hexdigest()
-
+def get_headers():
     return {
-        "KEY": API_KEY,
-        "Timestamp": t,
-        "SIGN": signature,
-        "Content-Type": "application/json"
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "KEY": API_KEY
     }
 
-# 현재 포지션 평단가 확인
-def get_open_position():
-    try:
-        path = f"/futures/usdt/positions/{SYMBOL}"
-        url = BASE_URL + path
-        headers = get_headers("GET", path)
-        res = requests.get(url, headers=headers)
-        pos_data = res.json()
+def sign_request(payload: str, secret: str):
+    return hmac.new(
+        secret.encode(),
+        payload.encode(),
+        hashlib.sha512
+    ).hexdigest()
 
-        if isinstance(pos_data, dict) and float(pos_data.get("size", 0)) > 0:
-            return float(pos_data.get("entry_price"))
+def place_order(side):
+    url = f"{BASE_URL}/futures/usdt/orders"
+
+    payload = {
+        "contract": SYMBOL,
+        "size": 1,
+        "price": 0,
+        "tif": "ioc",
+        "text": "entry",
+        "iceberg": 0,
+        "close": False,
+        "reduce_only": False,
+        "side": side,
+        "auto_size": ""
+    }
+
+    body = json.dumps(payload)
+    headers = get_headers()
+    timestamp = str(get_server_time())
+    signature = sign_request(timestamp + body, API_SECRET)
+
+    headers["Timestamp"] = timestamp
+    headers["SIGN"] = signature
+
+    try:
+        res = requests.post(url, headers=headers, data=body)
+        res.raise_for_status()
+        print(f"✅ 주문 완료: {res.status_code} {res.text}")
     except Exception as e:
-        print(f"❌ 포지션 조회 실패: {e}")
+        print(f"❌ 주문 실패: {e}")
+
+def get_open_position():
+    url = f"{BASE_URL}/futures/usdt/positions"
+    headers = get_headers()
+    timestamp = str(get_server_time())
+    signature = sign_request(timestamp, API_SECRET)
+
+    headers["Timestamp"] = timestamp
+    headers["SIGN"] = signature
+
+    try:
+        res = requests.get(url, headers=headers)
+        res.raise_for_status()
+        positions = res.json()
+
+        for pos in positions:
+            if pos["contract"] == SYMBOL and float(pos["size"]) > 0:
+                return float(pos["entry_price"])
+    except Exception as e:
+        print(f"⚠️ 포지션 조회 오류: {e}")
+
     return None
 
-# 주문 실행
-def place_order(side):
-    try:
-        path = "/futures/usdt/orders"
-        url = BASE_URL + path
-
-        order = {
-            "contract": SYMBOL,
-            "size": 1,
-            "price": 0,  # 시장가
-            "tif": "ioc",
-            "text": f"webhook-{uuid.uuid4().hex[:6]}",
-            "side": side
-        }
-
-        body = json.dumps(order)
-        headers = get_headers("POST", path, body)
-        res = requests.post(url, headers=headers, data=body)
-
-        print(f"📤 주문 전송: {side.upper()}, 응답: {res.status_code}")
-    except Exception as e:
-        print(f"❌ 주문 오류: {e}")
-
-# 포지션 청산
 def close_position(side):
-    try:
-        path = "/futures/usdt/orders"
-        url = BASE_URL + path
-
-        order = {
-            "contract": SYMBOL,
-            "size": -1,
-            "price": 0,
-            "tif": "ioc",
-            "text": f"close-{uuid.uuid4().hex[:6]}",
-            "side": side
-        }
-
-        body = json.dumps(order)
-        headers = get_headers("POST", path, body)
-        res = requests.post(url, headers=headers, data=body)
-
-        print(f"📤 청산 시도: {side.upper()}, 응답: {res.status_code}")
-    except Exception as e:
-        print(f"❌ 청산 오류: {e}")
+    print(f"📤 포지션 종료 요청: {side.upper()}")
+    place_order(side)
