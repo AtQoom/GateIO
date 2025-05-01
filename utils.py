@@ -2,14 +2,19 @@ import time
 import json
 import hmac
 import hashlib
+import ntplib
 import requests
 
 from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 
-
 def get_server_time():
-    return int(time.time() * 1000)
-
+    try:
+        ntp_client = ntplib.NTPClient()
+        response = ntp_client.request("pool.ntp.org", version=3)
+        return int(response.tx_time * 1000)
+    except Exception as e:
+        print(f"⚠️ NTP 오류! 로컬 시간 사용: {e}")
+        return int(time.time() * 1000)
 
 def get_headers():
     return {
@@ -18,19 +23,16 @@ def get_headers():
         "KEY": API_KEY
     }
 
-
-def sign_request(method: str, path: str, query_string: str, body: str, secret: str, timestamp: str):
-    hashed_body = hashlib.sha512(body.encode()).hexdigest()
-    payload = f"{method}\n{path}\n{query_string}\n{hashed_body}\n{timestamp}"
-    return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
-
+def sign_request(payload: str, secret: str):
+    return hmac.new(
+        secret.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha512
+    ).hexdigest()
 
 def place_order(side):
-    method = "POST"
-    path = "/futures/usdt/orders"
-    query_string = ""
-    url = f"{BASE_URL}{path}"
-
+    url = f"{BASE_URL}/futures/usdt/orders"
+    
     payload = {
         "contract": SYMBOL,
         "size": 1,
@@ -47,7 +49,7 @@ def place_order(side):
     try:
         body = json.dumps(payload)
         timestamp = str(get_server_time())
-        signature = sign_request(method, path, query_string, body, API_SECRET, timestamp)
+        signature = sign_request(timestamp + body, API_SECRET)
         headers = get_headers()
         headers["Timestamp"] = timestamp
         headers["SIGN"] = signature
@@ -58,16 +60,12 @@ def place_order(side):
     except Exception as e:
         print(f"❌ 주문 실패: {e}")
 
-
 def get_open_position():
-    method = "GET"
-    path = "/futures/usdt/positions"
-    query_string = ""
-    url = f"{BASE_URL}{path}"
-
+    url = f"{BASE_URL}/futures/usdt/positions"
+    
     try:
         timestamp = str(get_server_time())
-        signature = sign_request(method, path, query_string, "", API_SECRET, timestamp)
+        signature = sign_request(timestamp, API_SECRET)
         headers = get_headers()
         headers["Timestamp"] = timestamp
         headers["SIGN"] = signature
@@ -83,7 +81,6 @@ def get_open_position():
         print(f"⚠️ 포지션 조회 오류: {e}")
 
     return None
-
 
 def close_position(side):
     print(f"📤 포지션 종료 요청: {side.upper()}")
