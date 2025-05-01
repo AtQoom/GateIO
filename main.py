@@ -9,13 +9,16 @@ from utils import get_open_position, place_order, close_position
 
 app = Flask(__name__)
 
-@app.route('/', methods=['POST'])
+@app.route('/', methods=['POST', 'HEAD'])
 def webhook():
+    if request.method == 'HEAD':
+        return '', 200  # 헬스 체크 통과용 응답
+
     data = request.json
     if not data or "signal" not in data or "position" not in data:
         return jsonify({"error": "Invalid data"}), 400
 
-    position = data["position"].lower()
+position = data["position"].lower()
     print(f"\n📥 Received signal: {position.upper()}")
 
     # 진입
