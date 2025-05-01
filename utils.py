@@ -2,19 +2,20 @@ import time
 import json
 import hmac
 import hashlib
-import ntplib
 import requests
 
 from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 
+
 def get_server_time():
     try:
-        ntp_client = ntplib.NTPClient()
-        response = ntp_client.request("pool.ntp.org", version=3)
-        return int(response.tx_time * 1000)
-    except Exception as e:
-        print(f"⚠️ NTP 오류! 로컬 시간 사용: {e}")
+        # Gate.io는 공식적으로 서버 시간 API를 제공하지 않음
+        # 대신 시스템 시간 사용
         return int(time.time() * 1000)
+    except Exception as e:
+        print(f"⚠️ 서버 시간 조회 실패, 로컬 시간 사용: {e}")
+        return int(time.time() * 1000)
+
 
 def get_headers():
     return {
@@ -23,6 +24,7 @@ def get_headers():
         "KEY": API_KEY
     }
 
+
 def sign_request(payload: str, secret: str):
     return hmac.new(
         secret.encode("utf-8"),
@@ -30,9 +32,10 @@ def sign_request(payload: str, secret: str):
         hashlib.sha512
     ).hexdigest()
 
+
 def place_order(side):
     url = f"{BASE_URL}/futures/usdt/orders"
-    
+
     payload = {
         "contract": SYMBOL,
         "size": 1,
@@ -60,9 +63,10 @@ def place_order(side):
     except Exception as e:
         print(f"❌ 주문 실패: {e}")
 
+
 def get_open_position():
     url = f"{BASE_URL}/futures/usdt/positions"
-    
+
     try:
         timestamp = str(get_server_time())
         signature = sign_request(timestamp, API_SECRET)
@@ -81,6 +85,7 @@ def get_open_position():
         print(f"⚠️ 포지션 조회 오류: {e}")
 
     return None
+
 
 def close_position(side):
     print(f"📤 포지션 종료 요청: {side.upper()}")
