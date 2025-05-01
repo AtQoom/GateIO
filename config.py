@@ -1,10 +1,10 @@
 import os
 
-# 거래 설정
+# 기본 설정
 SYMBOL = "SOL_USDT"
 MARGIN_MODE = "isolated"  # 격리 모드
 
-# 수익 및 손실 비율 설정
+# TP/SL 설정 (소수점으로 비율 설정)
 TAKE_PROFIT_PERCENT = 2.2 / 100  # 2.2%
 STOP_LOSS_PERCENT = 0.7 / 100    # 0.7%
 
@@ -12,5 +12,5 @@ STOP_LOSS_PERCENT = 0.7 / 100    # 0.7%
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("SECRET_KEY")
 
-# Gate.io API 기본 URL
+# Gate.io API 엔드포인트 (정확한 도메인 사용)
 BASE_URL = "https://api.gateio.ws/api/v4"
