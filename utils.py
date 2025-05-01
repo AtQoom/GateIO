@@ -1,70 +1,77 @@
-import os
+import time
 import hmac
 import hashlib
-import time
-import requests
 import base64
+import json
+import requests
 import ntplib
-from config import BASE_URL, SYMBOL, API_KEY, API_SECRET
+from config import API_KEY, API_SECRET, SYMBOL, BASE_URL
+
 
 def get_server_time():
     try:
-        ntp_client = ntplib.NTPClient()
-        response = ntp_client.request("pool.ntp.org", version=3)
+        client = ntplib.NTPClient()
+        response = client.request("pool.ntp.org", version=3)
         return int(response.tx_time * 1000)
     except Exception as e:
         print(f"[⚠️ NTP 오류] 로컬 시간 사용: {e}")
         return int(time.time() * 1000)
 
-def get_headers(method, path, query_string='', body=''):
-    t = str(get_server_time())
-    msg = f"{method.upper()}\n{path}\n{query_string}\n{body}\n{t}"
-    signature = hmac.new(API_SECRET.encode(), msg.encode(), hashlib.sha512).hexdigest()
 
+def get_headers():
     return {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
         "KEY": API_KEY,
-        "Timestamp": t,
-        "SIGN": signature,
-        "Content-Type": "application/json"
+        "Timestamp": str(get_server_time())
     }
 
-def fetch_current_price():
-    try:
-        url = f"{BASE_URL}/spot/tickers?currency_pair={SYMBOL}"
-        response = requests.get(url).json()
-        return float(response["tickers"][0]["last"])
-    except Exception as e:
-        print(f"⚠️ 가격 조회 실패: {e}")
-        return None
+
+def sign_request(method, url, query_string="", payload_str=""):
+    t = str(get_server_time())
+    hashed_payload = hashlib.sha512(payload_str.encode()).hexdigest()
+    s = f"{method.upper()}\n{url}\n{query_string}\n{hashed_payload}\n{t}"
+    sign = hmac.new(API_SECRET.encode(), s.encode(), hashlib.sha512).hexdigest()
+
+    headers = {
+        "KEY": API_KEY,
+        "Timestamp": t,
+        "SIGN": sign,
+        "Content-Type": "application/json"
+    }
+    return headers
+
 
 def place_order(side):
-    url = f"{BASE_URL}/futures/usdt/orders"
-    path = "/futures/usdt/orders"
+    url_path = "/futures/usdt/orders"
+    url = BASE_URL + url_path
 
-    order_data = {
+    payload = {
         "contract": SYMBOL,
-        "size": 1,
-        "price": 0,  # 시장가
-        "tif": "ioc",  # 즉시 체결 또는 취소
+        "size": 0,  # 0 means market order with all available
+        "price": 0,
+        "tif": "ioc",
         "close": False,
         "reduce_only": False,
         "side": side
     }
 
-    headers = get_headers("POST", path, body=json_dumps(order_data))
     try:
-        response = requests.post(url, headers=headers, json=order_data)
-        print(f"📤 Order placed ({side.upper()}): {response.status_code} {response.text}")
+        headers = sign_request("POST", url_path, "", json.dumps(payload))
+        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        response.raise_for_status()
+        print(f"📈 Order placed: {side.upper()}")
     except Exception as e:
-        print(f"❌ 주문 실패: {e}")
+        print(f"❌ Order placement failed: {e}")
+
 
 def close_position(side):
-    url = f"{BASE_URL}/futures/usdt/orders"
-    path = "/futures/usdt/orders"
+    url_path = "/futures/usdt/orders"
+    url = BASE_URL + url_path
 
-    order_data = {
+    payload = {
         "contract": SYMBOL,
-        "size": 0,  # 0이면 전체 청산
+        "size": 0,
         "price": 0,
         "tif": "ioc",
         "close": True,
@@ -72,30 +79,29 @@ def close_position(side):
         "side": side
     }
 
-    headers = get_headers("POST", path, body=json_dumps(order_data))
     try:
-        response = requests.post(url, headers=headers, json=order_data)
-        print(f"🔁 Close order ({side.upper()}): {response.status_code} {response.text}")
+        headers = sign_request("POST", url_path, "", json.dumps(payload))
+        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        response.raise_for_status()
+        print(f"📤 Position closed: {side.upper()}")
     except Exception as e:
-        print(f"❌ 청산 실패: {e}")
+        print(f"❌ Close failed: {e}")
+
 
 def get_open_position():
-    url = f"{BASE_URL}/futures/usdt/positions"
-    path = "/futures/usdt/positions"
-    headers = get_headers("GET", path)
+    url_path = f"/futures/usdt/positions"
+    url = BASE_URL + url_path
 
     try:
+        headers = sign_request("GET", url_path)
         response = requests.get(url, headers=headers)
-        positions = response.json()
+        data = response.json()
 
-        for pos in positions:
+        for pos in data:
             if pos["contract"] == SYMBOL and float(pos["size"]) > 0:
                 return float(pos["entry_price"])
+
         return None
     except Exception as e:
-        print(f"⚠️ 포지션 확인 실패: {e}")
+        print(f"❌ Get position failed: {e}")
         return None
-
-def json_dumps(obj):
-    import json
-    return json.dumps(obj, separators=(",", ":"))
