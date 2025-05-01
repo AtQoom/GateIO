@@ -2,43 +2,34 @@ import time
 import json
 import hmac
 import hashlib
-import ntplib
 import requests
-from urllib.parse import urlencode
 
 from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 
 
 def get_server_time():
-    try:
-        client = ntplib.NTPClient()
-        response = client.request('pool.ntp.org')
-        return int(response.tx_time * 1000)
-    except Exception as e:
-        print(f"⚠️ NTP 오류! 로컬 시간 사용: {e}")
-        return int(time.time() * 1000)
-
-
-def sign_request(method, path, query_string, body, timestamp):
-    hashed_body = hashlib.sha512(body.encode()).hexdigest()
-    signature_string = f"{method}\n{path}\n{query_string}\n{hashed_body}\n{timestamp}"
-    signature = hmac.new(API_SECRET.encode(), signature_string.encode(), hashlib.sha512).hexdigest()
-    return signature
+    return int(time.time() * 1000)
 
 
 def get_headers():
     return {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "KEY": API_KEY,
+        "KEY": API_KEY
     }
+
+
+def sign_request(method: str, path: str, query_string: str, body: str, secret: str, timestamp: str):
+    hashed_body = hashlib.sha512(body.encode()).hexdigest()
+    payload = f"{method}\n{path}\n{query_string}\n{hashed_body}\n{timestamp}"
+    return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
 
 
 def place_order(side):
     method = "POST"
     path = "/futures/usdt/orders"
-    url = BASE_URL + path
     query_string = ""
+    url = f"{BASE_URL}{path}"
 
     payload = {
         "contract": SYMBOL,
@@ -53,15 +44,14 @@ def place_order(side):
         "auto_size": ""
     }
 
-    body = json.dumps(payload)
-    timestamp = str(get_server_time())
-    signature = sign_request(method, path, query_string, body, timestamp)
-
-    headers = get_headers()
-    headers["Timestamp"] = timestamp
-    headers["SIGN"] = signature
-
     try:
+        body = json.dumps(payload)
+        timestamp = str(get_server_time())
+        signature = sign_request(method, path, query_string, body, API_SECRET, timestamp)
+        headers = get_headers()
+        headers["Timestamp"] = timestamp
+        headers["SIGN"] = signature
+
         res = requests.post(url, headers=headers, data=body)
         res.raise_for_status()
         print(f"✅ 주문 완료: {res.status_code} {res.text}")
@@ -72,18 +62,16 @@ def place_order(side):
 def get_open_position():
     method = "GET"
     path = "/futures/usdt/positions"
-    url = BASE_URL + path
     query_string = ""
-    body = ""
-
-    timestamp = str(get_server_time())
-    signature = sign_request(method, path, query_string, body, timestamp)
-
-    headers = get_headers()
-    headers["Timestamp"] = timestamp
-    headers["SIGN"] = signature
+    url = f"{BASE_URL}{path}"
 
     try:
+        timestamp = str(get_server_time())
+        signature = sign_request(method, path, query_string, "", API_SECRET, timestamp)
+        headers = get_headers()
+        headers["Timestamp"] = timestamp
+        headers["SIGN"] = signature
+
         res = requests.get(url, headers=headers)
         res.raise_for_status()
         positions = res.json()
