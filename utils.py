@@ -1,13 +1,12 @@
-import time
+import os
 import hmac
 import hashlib
-import json
+import time
 import requests
+import base64
 import ntplib
+from config import BASE_URL, SYMBOL, API_KEY, API_SECRET
 
-from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
-
-# ⏱ 정확한 서버 시간 가져오기
 def get_server_time():
     try:
         ntp_client = ntplib.NTPClient()
@@ -17,69 +16,86 @@ def get_server_time():
         print(f"[⚠️ NTP 오류] 로컬 시간 사용: {e}")
         return int(time.time() * 1000)
 
-# 🧾 헤더 생성
-def get_headers():
+def get_headers(method, path, query_string='', body=''):
+    t = str(get_server_time())
+    msg = f"{method.upper()}\n{path}\n{query_string}\n{body}\n{t}"
+    signature = hmac.new(API_SECRET.encode(), msg.encode(), hashlib.sha512).hexdigest()
+
     return {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
         "KEY": API_KEY,
-        "SIGN": "",
-        "Timestamp": ""
+        "Timestamp": t,
+        "SIGN": signature,
+        "Content-Type": "application/json"
     }
 
-# 🔐 HMAC 서명
-def sign_request(body, secret):
-    return hmac.new(secret.encode(), body.encode(), hashlib.sha512).hexdigest()
+def fetch_current_price():
+    try:
+        url = f"{BASE_URL}/spot/tickers?currency_pair={SYMBOL}"
+        response = requests.get(url).json()
+        return float(response["tickers"][0]["last"])
+    except Exception as e:
+        print(f"⚠️ 가격 조회 실패: {e}")
+        return None
 
-# 📈 주문 실행
 def place_order(side):
     url = f"{BASE_URL}/futures/usdt/orders"
-    timestamp = get_server_time()
+    path = "/futures/usdt/orders"
 
-    payload = {
+    order_data = {
         "contract": SYMBOL,
         "size": 1,
-        "price": 0,
-        "tif": "ioc",
-        "text": "entry",
+        "price": 0,  # 시장가
+        "tif": "ioc",  # 즉시 체결 또는 취소
+        "close": False,
         "reduce_only": False,
-        "side": side,
-        "timestamp": timestamp
+        "side": side
     }
 
-    body = json.dumps(payload)
-    headers = get_headers()
-    headers["SIGN"] = sign_request(body, API_SECRET)
-    headers["Timestamp"] = str(timestamp)
-
+    headers = get_headers("POST", path, body=json_dumps(order_data))
     try:
-        res = requests.post(url, headers=headers, data=body)
-        print(f"📤 주문 응답: {res.status_code} - {res.text}")
-        res.raise_for_status()
+        response = requests.post(url, headers=headers, json=order_data)
+        print(f"📤 Order placed ({side.upper()}): {response.status_code} {response.text}")
     except Exception as e:
         print(f"❌ 주문 실패: {e}")
 
-# 🔍 포지션 조회
+def close_position(side):
+    url = f"{BASE_URL}/futures/usdt/orders"
+    path = "/futures/usdt/orders"
+
+    order_data = {
+        "contract": SYMBOL,
+        "size": 0,  # 0이면 전체 청산
+        "price": 0,
+        "tif": "ioc",
+        "close": True,
+        "reduce_only": True,
+        "side": side
+    }
+
+    headers = get_headers("POST", path, body=json_dumps(order_data))
+    try:
+        response = requests.post(url, headers=headers, json=order_data)
+        print(f"🔁 Close order ({side.upper()}): {response.status_code} {response.text}")
+    except Exception as e:
+        print(f"❌ 청산 실패: {e}")
+
 def get_open_position():
     url = f"{BASE_URL}/futures/usdt/positions"
-    timestamp = get_server_time()
-
-    headers = get_headers()
-    headers["SIGN"] = sign_request("{}", API_SECRET)
-    headers["Timestamp"] = str(timestamp)
+    path = "/futures/usdt/positions"
+    headers = get_headers("GET", path)
 
     try:
-        res = requests.get(url, headers=headers)
-        positions = res.json()
+        response = requests.get(url, headers=headers)
+        positions = response.json()
 
         for pos in positions:
             if pos["contract"] == SYMBOL and float(pos["size"]) > 0:
                 return float(pos["entry_price"])
+        return None
     except Exception as e:
-        print(f"⚠️ 포지션 조회 오류: {e}")
-    return None
+        print(f"⚠️ 포지션 확인 실패: {e}")
+        return None
 
-# 📉 포지션 청산
-def close_position(side):
-    print(f"🔁 포지션 종료 시도: {side.upper()} 방향")
-    place_order(side)
+def json_dumps(obj):
+    import json
+    return json.dumps(obj, separators=(",", ":"))
