@@ -4,13 +4,10 @@ import json
 import requests
 from flask import Flask, request, jsonify
 
-from config import BASE_URL, SYMBOL, TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT
-from utils import get_open_position, place_order, close_position, fetch_current_price
+from config import BASE_URL, SYMBOL, TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT, TRAIL_PERCENT, TRAIL_OFFSET_PERCENT
+from utils import get_open_position, place_order, close_position
 
 app = Flask(__name__)
-
-TRAIL_PERCENT = 0.012  # 1.2% trailing stop distance
-TRAIL_OFFSET = 0.006   # 0.6% offset
 
 @app.route('/', methods=['POST'])
 def webhook():
@@ -19,12 +16,14 @@ def webhook():
         return jsonify({"error": "Invalid data"}), 400
 
     position = data["position"].lower()
-    print(f"📥 Received signal: {position.upper()}")
+    print(f"\n📥 Received signal: {position.upper()}")
 
+    # 진입
     side = "buy" if position == "long" else "sell"
     place_order(side)
     time.sleep(1.5)
 
+    # 평단가 확인
     entry_price = get_open_position()
     if not entry_price:
         print("❌ Failed to retrieve entry price.")
@@ -32,49 +31,49 @@ def webhook():
 
     print(f"✅ Entry price: {entry_price:.4f}")
 
+    # TP / SL 계산
     tp_price = entry_price * (1 + TAKE_PROFIT_PERCENT) if position == "long" else entry_price * (1 - TAKE_PROFIT_PERCENT)
     sl_price = entry_price * (1 - STOP_LOSS_PERCENT) if position == "long" else entry_price * (1 + STOP_LOSS_PERCENT)
 
-    print(f"🎯 TP: {tp_price:.4f}, SL: {sl_price:.4f}")
+    trail_trigger = tp_price
+    trail_offset = entry_price * TRAIL_OFFSET_PERCENT
+    highest_price = entry_price if position == "long" else entry_price
+    print(f"🎯 Target: TP = {tp_price:.4f}, SL = {sl_price:.4f}, TrailOffset = {trail_offset:.4f}")
 
-    highest_price = entry_price
-    lowest_price = entry_price
-
+    # 모니터링 루프
     while True:
         try:
-            current_price = fetch_current_price()
+            resp = requests.get(f"{BASE_URL}/spot/tickers?currency_pair={SYMBOL}")
+            price_data = resp.json()
+            current_price = float(price_data["tickers"][0]["last"])
 
             if position == "long":
                 highest_price = max(highest_price, current_price)
-                trail_sl = highest_price * (1 - TRAIL_PERCENT + TRAIL_OFFSET)
+                dynamic_sl = highest_price - trail_offset
 
                 if current_price >= tp_price:
-                    print(f"✅ TP Hit at {current_price:.4f}")
-                    close_position("sell")
-                    break
+                    print(f"🚀 Trailing Start (LONG): current = {current_price:.4f}, SL = {dynamic_sl:.4f}")
+                    if current_price <= dynamic_sl:
+                        print(f"✅ Trailing SL Hit at {current_price:.4f}")
+                        close_position("sell")
+                        break
                 elif current_price <= sl_price:
-                    print(f"❌ SL Hit at {current_price:.4f}")
-                    close_position("sell")
-                    break
-                elif current_price <= trail_sl:
-                    print(f"🔻 Trailing SL Hit at {current_price:.4f} (Trail SL: {trail_sl:.4f})")
+                    print(f"❌ Hard SL Hit at {current_price:.4f}")
                     close_position("sell")
                     break
 
             else:  # short
-                lowest_price = min(lowest_price, current_price)
-                trail_sl = lowest_price * (1 + TRAIL_PERCENT - TRAIL_OFFSET)
+                lowest_price = min(highest_price, current_price)
+                dynamic_sl = lowest_price + trail_offset
 
                 if current_price <= tp_price:
-                    print(f"✅ TP Hit at {current_price:.4f}")
-                    close_position("buy")
-                    break
+                    print(f"🚀 Trailing Start (SHORT): current = {current_price:.4f}, SL = {dynamic_sl:.4f}")
+                    if current_price >= dynamic_sl:
+                        print(f"✅ Trailing SL Hit at {current_price:.4f}")
+                        close_position("buy")
+                        break
                 elif current_price >= sl_price:
-                    print(f"❌ SL Hit at {current_price:.4f}")
-                    close_position("buy")
-                    break
-                elif current_price >= trail_sl:
-                    print(f"🔺 Trailing SL Hit at {current_price:.4f} (Trail SL: {trail_sl:.4f})")
+                    print(f"❌ Hard SL Hit at {current_price:.4f}")
                     close_position("buy")
                     break
 
