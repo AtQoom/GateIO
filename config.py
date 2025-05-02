@@ -1,7 +1,7 @@
 import os
 
 SYMBOL = "SOL_USDT"
-BASE_URL = "https://api.gateio.ws/api/v4"
+BASE_URL = "https://fx-api.gateio.ws/api/v4"
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 
