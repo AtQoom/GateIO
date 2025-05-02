@@ -1,4 +1,3 @@
-
 import os
 import time
 import json
@@ -13,39 +12,47 @@ app = Flask(__name__)
 @app.route('/', methods=['POST', 'HEAD'])
 def webhook():
     if request.method == 'HEAD':
-        return '', 200  # 헬스체크 응답
+        return '', 200  # 헬스 체크 응답용
 
     data = request.json
-    if not data or "signal" not in data or "position" not in data:
-        return jsonify({"error": "Invalid data"}), 400
+    required_fields = {"signal", "position"}
+    if not data or not required_fields.issubset(data.keys()):
+        return jsonify({"error": "Invalid data format"}), 400
 
     position = data["position"].lower()
-    print(f"📥 시그널 수신: {position.upper()}")
+    print(f"📥 시그널 수신: {position.upper()} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
+    # 진입 요청
     side = "buy" if position == "long" else "sell"
     place_order(side)
     time.sleep(1.5)
 
+    # 진입가 확인
     entry_price = get_open_position()
     if not entry_price:
-        print("❌ 평단가 확인 실패")
+        print("❌ 평단가 확인 실패 (포지션 없음 또는 잔고 부족)")
         return jsonify({"status": "error", "msg": "entry price not found"}), 500
 
     print(f"✅ 진입가: {entry_price:.4f}")
 
+    # TP / SL 설정
     tp_price = entry_price * (1 + TAKE_PROFIT_PERCENT) if position == "long" else entry_price * (1 - TAKE_PROFIT_PERCENT)
     sl_price = entry_price * (1 - STOP_LOSS_PERCENT) if position == "long" else entry_price * (1 + STOP_LOSS_PERCENT)
+    print(f"🎯 TP = {tp_price:.4f}, SL = {sl_price:.4f}")
 
-    print(f"🎯 목표가: TP = {tp_price:.4f}, SL = {sl_price:.4f}")
-
-    # 트레일링 슬 설정
+    # 트레일링 SL 초기화
     highest_price = entry_price
     lowest_price = entry_price
 
     while True:
         try:
             res = requests.get(f"{BASE_URL}/spot/tickers?currency_pair={SYMBOL}")
-            current_price = float(res.json()["tickers"][0]["last"])
+            price_data = res.json()
+
+            if "tickers" not in price_data or not price_data["tickers"]:
+                raise ValueError("🚫 가격 정보 누락")
+
+            current_price = float(price_data["tickers"][0]["last"])
         except Exception as e:
             print(f"⚠️ 가격 조회 실패: {e}")
             time.sleep(5)
@@ -53,6 +60,7 @@ def webhook():
 
         print(f"💹 현재가: {current_price:.4f}")
 
+        # 트레일링 계산
         profit_ratio = (current_price / entry_price - 1) if position == "long" else (entry_price / current_price - 1)
 
         trail_pct = (
@@ -80,7 +88,7 @@ def webhook():
                 close_position("sell")
                 break
 
-        else:
+        else:  # short
             lowest_price = min(lowest_price, current_price)
             trail_sl = lowest_price * (1 + trail_pct)
 
@@ -103,4 +111,5 @@ def webhook():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
+    print(f"🚀 서버 실행중: http://localhost:{port}")
     app.run(host="0.0.0.0", port=port)
