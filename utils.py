@@ -35,7 +35,7 @@ def place_order(side):
         "side": side,
         "auto_size": ""
     }
-    body = json.dumps(payload)
+    body = json.dumps(payload, separators=(',', ':'), sort_keys=True)
     timestamp = get_timestamp()
     sign_payload = f"POST\n/api/v4{url_path}\n\n{body}\n{timestamp}"
     sign = sign_request(API_SECRET, sign_payload)
@@ -47,6 +47,38 @@ def place_order(side):
         print(f"✅ 주문 성공: {res.status_code} - {res.text}")
     except Exception as e:
         print(f"❌ 주문 실패: {e}")
+
+def place_trigger_order(trigger_price, order_price, side, is_exit=False):
+    url_path = "/futures/usdt/price_orders"
+    url = f"{BASE_URL}{url_path}"
+    payload = {
+        "contract": SYMBOL,
+        "size": 1,
+        "price": str(order_price),
+        "close": is_exit,
+        "tif": "gtc",
+        "reduce_only": is_exit,
+        "side": side,
+        "auto_size": "",
+        "trigger": {
+            "strategy_type": 0,
+            "price_type": 0,
+            "price": str(trigger_price)
+        },
+        "text": "trigger-order"
+    }
+    body = json.dumps(payload, separators=(',', ':'), sort_keys=True)
+    timestamp = get_timestamp()
+    sign_payload = f"POST\n/api/v4{url_path}\n\n{body}\n{timestamp}"
+    sign = sign_request(API_SECRET, sign_payload)
+    headers = get_headers(timestamp, sign)
+
+    try:
+        res = requests.post(url, headers=headers, data=body)
+        res.raise_for_status()
+        print(f"✅ 트리거 주문 성공: {res.status_code} - {res.text}")
+    except Exception as e:
+        print(f"❌ 트리거 주문 실패: {e}")
 
 def get_open_position():
     url_path = "/futures/usdt/positions"
@@ -83,7 +115,7 @@ def close_position(side):
         "side": side,
         "auto_size": ""
     }
-    body = json.dumps(payload)
+    body = json.dumps(payload, separators=(',', ':'), sort_keys=True)
     timestamp = get_timestamp()
     sign_payload = f"POST\n/api/v4{url_path}\n\n{body}\n{timestamp}"
     sign = sign_request(API_SECRET, sign_payload)
