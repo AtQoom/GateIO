@@ -3,20 +3,20 @@ import time
 import json
 import hmac
 import hashlib
+import ntplib
 import requests
 from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 
 # ⏱ 서버 시간
-def get_server_time():
+def get_timestamp():
     try:
-        res = requests.get("https://api.gateio.ws/api/v4/time", timeout=2)
-        res.raise_for_status()
-        data = res.json()
-        return str(data["server_time"])
+        client = ntplib.NTPClient()
+        response = client.request("pool.ntp.org", version=3)
+        return str(int(response.tx_time * 1000))
     except Exception as e:
-        print(f"[⚠️ 서버 시간 API 실패 → 로컬 사용] {e}")
+        print(f"[⚠️ NTP 오류 → 로컬 시간 사용] {e}")
         return str(int(time.time() * 1000))
-
+        
 # 🔐 서명 생성
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha512).hexdigest()
