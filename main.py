@@ -14,7 +14,7 @@ def webhook():
         return '', 200
 
     data = request.json
-    if not data or "signal" not in data or "position" not in data:
+    if not data or "position" not in data:
         return jsonify({"error": "Invalid data format"}), 400
 
     position = data["position"].lower()
@@ -37,7 +37,12 @@ def webhook():
     highest_price = entry_price
     lowest_price = entry_price
 
-    while True:
+    max_checks = 300  # 최대 25분 (5초마다 체크)
+    check_count = 0
+
+    while check_count < max_checks:
+        check_count += 1
+
         try:
             res = requests.get(f"{BASE_URL}/futures/usdt/ticker?contract={SYMBOL}")
             res.raise_for_status()
