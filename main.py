@@ -1,4 +1,3 @@
-
 import os
 import time
 import json
@@ -6,7 +5,7 @@ import requests
 from flask import Flask, request, jsonify
 
 from config import BASE_URL, SYMBOL, TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT
-from utils import get_open_position, place_order, close_position
+from utils import get_timestamp, get_open_position, place_order, close_position
 
 app = Flask(__name__)
 
@@ -23,10 +22,12 @@ def webhook():
     print(f"📥 [{time.strftime('%Y-%m-%d %H:%M:%S')}] 시그널 수신: {position.upper()}")
 
     side = "buy" if position == "long" else "sell"
-    place_order(side)
+
+    timestamp = get_timestamp()
+    place_order(side, timestamp)
     time.sleep(1.5)
 
-    entry_price = get_open_position()
+    entry_price = get_open_position(timestamp)
     if not entry_price:
         print("❌ 평단가 확인 실패 (포지션 없음 또는 잔고 부족)")
         return jsonify({"status": "error", "msg": "entry price not found"}), 500
@@ -39,6 +40,7 @@ def webhook():
 
     highest_price = entry_price
     lowest_price = entry_price
+    retry_delay = 5
 
     while True:
         try:
@@ -47,7 +49,8 @@ def webhook():
             current_price = float(res.json()["last"])
         except Exception as e:
             print(f"⚠️ 가격 조회 실패: {e}")
-            time.sleep(5)
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
             continue
 
         print(f"[{time.strftime('%H:%M:%S')}] 💹 현재가: {current_price:.4f}")
@@ -64,14 +67,35 @@ def webhook():
         if position == "long":
             highest_price = max(highest_price, current_price)
             trail_sl = highest_price * (1 - trail_pct)
-            if current_price >= tp_price or current_price <= sl_price or current_price <= trail_sl:
-                close_position("sell")
+
+            if current_price >= tp_price:
+                print(f"✅ TP 도달: {current_price:.4f}")
+                close_position("sell", get_timestamp())
                 break
+            elif current_price <= sl_price:
+                print(f"❌ SL 도달: {current_price:.4f}")
+                close_position("sell", get_timestamp())
+                break
+            elif current_price <= trail_sl:
+                print(f"🔻 트레일링 SL 도달: {current_price:.4f} <= {trail_sl:.4f}")
+                close_position("sell", get_timestamp())
+                break
+
         else:
             lowest_price = min(lowest_price, current_price)
             trail_sl = lowest_price * (1 + trail_pct)
-            if current_price <= tp_price or current_price >= sl_price or current_price >= trail_sl:
-                close_position("buy")
+
+            if current_price <= tp_price:
+                print(f"✅ TP 도달: {current_price:.4f}")
+                close_position("buy", get_timestamp())
+                break
+            elif current_price >= sl_price:
+                print(f"❌ SL 도달: {current_price:.4f}")
+                close_position("buy", get_timestamp())
+                break
+            elif current_price >= trail_sl:
+                print(f"🔺 트레일링 SL 도달: {current_price:.4f} >= {trail_sl:.4f}")
+                close_position("buy", get_timestamp())
                 break
 
         time.sleep(5)
