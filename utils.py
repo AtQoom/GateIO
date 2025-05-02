@@ -1,3 +1,4 @@
+
 import time
 import json
 import hmac
@@ -6,24 +7,41 @@ import requests
 
 from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 
-def get_timestamp():
-    return str(int(time.time() * 1000))
 
-def get_headers(method, endpoint, body=""):
-    timestamp = get_timestamp()
-    hashed_payload = hashlib.sha512(body.encode()).hexdigest() if body else ""
-    sign_str = f"{method}\n{endpoint}\n\n{hashed_payload}\n{timestamp}"
-    sign = hmac.new(API_SECRET.encode(), sign_str.encode(), hashlib.sha512).hexdigest()
+# ⏱ 서버 시간 동기화 (Gate.io 공식 서버 시간 API 사용)
+def get_server_time():
+    try:
+        res = requests.get("https://api.gateio.ws/api/v4/time")
+        res.raise_for_status()
+        return str(res.json()["server_time"])
+    except Exception as e:
+        print(f"⚠️ 서버 시간 조회 실패: {e}")
+        return str(int(time.time() * 1000))  # fallback
+
+
+# 🧾 시그니처 생성
+def sign_request(secret, payload):
+    return hmac.new(
+        secret.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha512
+    ).hexdigest()
+
+
+# 📬 요청 헤더 생성
+def get_headers(timestamp, sign):
     return {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
         "KEY": API_KEY,
         "Timestamp": timestamp,
-        "SIGN": sign,
-        "Content-Type": "application/json"
+        "SIGN": sign
     }
 
+
+# 🟢 진입 주문
 def place_order(side):
-    endpoint = "/futures/usdt/orders"
-    url = f"{BASE_URL}{endpoint}"
+    url = f"{BASE_URL}/futures/usdt/orders"
 
     payload = {
         "contract": SYMBOL,
@@ -39,7 +57,9 @@ def place_order(side):
     }
 
     body = json.dumps(payload)
-    headers = get_headers("POST", endpoint, body)
+    timestamp = get_server_time()
+    sign = sign_request(API_SECRET, timestamp + body)
+    headers = get_headers(timestamp, sign)
 
     try:
         res = requests.post(url, headers=headers, data=body)
@@ -50,25 +70,34 @@ def place_order(side):
     except Exception as e:
         print(f"❌ 주문 실패: {e}")
 
+
+# 📈 진입가 조회
 def get_open_position():
-    endpoint = "/futures/usdt/positions"
-    url = f"{BASE_URL}{endpoint}"
-    headers = get_headers("GET", endpoint)
+    url = f"{BASE_URL}/futures/usdt/positions"
+
+    timestamp = get_server_time()
+    sign = sign_request(API_SECRET, timestamp)
+    headers = get_headers(timestamp, sign)
 
     try:
         res = requests.get(url, headers=headers)
         res.raise_for_status()
-        for pos in res.json():
+        data = res.json()
+        for pos in data:
             if pos["contract"] == SYMBOL and float(pos["size"]) > 0:
                 return float(pos["entry_price"])
+    except requests.exceptions.HTTPError as e:
+        print(f"⚠️ 포지션 조회 실패 (HTTP): {e.response.status_code} - {e.response.text}")
     except Exception as e:
         print(f"⚠️ 포지션 조회 실패: {e}")
+
     return None
 
+
+# 🔴 포지션 종료
 def close_position(side):
     print(f"📤 종료 요청: {side.upper()}")
-    endpoint = "/futures/usdt/orders"
-    url = f"{BASE_URL}{endpoint}"
+    url = f"{BASE_URL}/futures/usdt/orders"
 
     payload = {
         "contract": SYMBOL,
@@ -84,7 +113,9 @@ def close_position(side):
     }
 
     body = json.dumps(payload)
-    headers = get_headers("POST", endpoint, body)
+    timestamp = get_server_time()
+    sign = sign_request(API_SECRET, timestamp + body)
+    headers = get_headers(timestamp, sign)
 
     try:
         res = requests.post(url, headers=headers, data=body)
