@@ -13,11 +13,10 @@ def get_timestamp():
     except Exception as e:
         print(f"[⚠️ 시간 조회 실패 → 로컬 사용] {e}")
         return str(int(time.time() * 1000))
-        
+
 # 🔐 서명 생성
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha512).hexdigest()
-
 
 # 📬 요청 헤더
 def get_headers(method, endpoint, body=""):
@@ -31,10 +30,12 @@ def get_headers(method, endpoint, body=""):
         "SIGN": sign,
         "Content-Type": "application/json"
     }
-    
+
 # 🟢 진입 주문
 def place_order(side):
     url = f"{BASE_URL}/futures/usdt/orders"
+    endpoint = "/futures/usdt/orders"
+
     payload = {
         "contract": SYMBOL,
         "size": 1,
@@ -49,9 +50,7 @@ def place_order(side):
     }
 
     body = json.dumps(payload)
-    timestamp = get_server_time()
-    sign = sign_request(API_SECRET, timestamp + body)
-    headers = get_headers(timestamp, sign)
+    headers = get_headers("POST", endpoint, body)
 
     try:
         res = requests.post(url, headers=headers, data=body)
@@ -62,13 +61,11 @@ def place_order(side):
     except Exception as e:
         print(f"❌ 주문 실패: {e}")
 
-
 # 📈 포지션 조회
 def get_open_position():
     url = f"{BASE_URL}/futures/usdt/positions"
-    timestamp = get_server_time()
-    sign = sign_request(API_SECRET, timestamp)
-    headers = get_headers(timestamp, sign)
+    endpoint = "/futures/usdt/positions"
+    headers = get_headers("GET", endpoint)
 
     try:
         res = requests.get(url, headers=headers)
@@ -83,11 +80,12 @@ def get_open_position():
         print(f"⚠️ 포지션 조회 실패: {e}")
     return None
 
-
 # 🔴 포지션 종료
 def close_position(side):
     print(f"📤 종료 요청: {side.upper()}")
     url = f"{BASE_URL}/futures/usdt/orders"
+    endpoint = "/futures/usdt/orders"
+
     payload = {
         "contract": SYMBOL,
         "size": 1,
@@ -102,9 +100,7 @@ def close_position(side):
     }
 
     body = json.dumps(payload)
-    timestamp = get_server_time()
-    sign = sign_request(API_SECRET, timestamp + body)
-    headers = get_headers(timestamp, sign)
+    headers = get_headers("POST", endpoint, body)
 
     try:
         res = requests.post(url, headers=headers, data=body)
