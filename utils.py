@@ -41,6 +41,12 @@ def place_order(side):
     sign = sign_request(API_SECRET, sign_payload)
     headers = get_headers(timestamp, sign)
 
+        # ✅ 서명 디버깅 출력
+    print("🧾 SIGN Payload:\n", sign_payload)
+    print("🔑 SIGN:", sign)
+    print("📦 Headers:", headers)
+    print("📤 Body:", body)
+    
     try:
         res = requests.post(url, headers=headers, data=body)
         res.raise_for_status()
