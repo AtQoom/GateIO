@@ -10,13 +10,14 @@ from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 # ⏱ 서버 시간 동기화
 def get_server_time():
     try:
-        client = ntplib.NTPClient()
-        response = client.request("pool.ntp.org")
-        return int(response.tx_time * 1000)
+        response = requests.get("https://api.gateio.ws/api/v4/spot/time")
+        response.raise_for_status()
+        server_time = response.json()["server_time"]
+        return int(server_time * 1000)  # 밀리초 단위로 반환
     except Exception as e:
-        print(f"⚠️ NTP 오류: {e} → 로컬 시간 사용")
+        print(f"⚠️ 서버 시간 조회 실패: {e} → 로컬 시간 사용")
         return int(time.time() * 1000)
-
+        
 # 🧾 시그니처 생성
 def sign_request(secret, payload):
     return hmac.new(
