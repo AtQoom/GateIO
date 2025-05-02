@@ -5,8 +5,8 @@ SYMBOL = "SOL_USDT"
 BASE_URL = "https://api.gateio.ws/api/v4"
 
 # 환경변수 (Railway 기준 이름으로 통일)
-API_KEY = os.getenv("GATEIO_API_KEY")
-API_SECRET = os.getenv("GATEIO_API_SECRET")
+API_KEY = os.getenv("API_KEY")
+API_SECRET = os.getenv("API_SECRET")
 
 # 환경 변수 유효성 검사
 if not API_KEY or not API_SECRET:
