@@ -6,33 +6,32 @@ import requests
 from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 
 # ⏱ 서버 시간 (Gate.io 공식 API)
-def get_server_time():
+def get_timestamp():
     try:
-        res = requests.get(f"{BASE_URL}/futures/usdt/server_time", timeout=3)
-        res.raise_for_status()
-        ts = res.json().get("server_time")
-        return str(ts) if isinstance(ts, int) else str(int(time.time() * 1000))
+        res = requests.get("https://api.gateio.ws/api/v4/time", timeout=2)
+        return str(res.json()["server_time"])
     except Exception as e:
-        print(f"⚠️ 서버 시간 오류: {e} → 로컬 시간 사용")
+        print(f"[⚠️ 시간 조회 실패 → 로컬 사용] {e}")
         return str(int(time.time() * 1000))
-
-
+        
 # 🔐 서명 생성
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha512).hexdigest()
 
 
 # 📬 요청 헤더
-def get_headers(timestamp: str, sign: str):
+def get_headers(method, endpoint, body=""):
+    timestamp = get_timestamp()
+    hashed_payload = hashlib.sha512(body.encode()).hexdigest() if body else ""
+    sign_str = f"{method}\n{endpoint}\n\n{hashed_payload}\n{timestamp}"
+    sign = hmac.new(API_SECRET.encode(), sign_str.encode(), hashlib.sha512).hexdigest()
     return {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
         "KEY": API_KEY,
         "Timestamp": timestamp,
-        "SIGN": sign
+        "SIGN": sign,
+        "Content-Type": "application/json"
     }
-
-
+    
 # 🟢 진입 주문
 def place_order(side):
     url = f"{BASE_URL}/futures/usdt/orders"
