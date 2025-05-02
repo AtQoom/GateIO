@@ -1,31 +1,29 @@
+
 import time
 import json
 import hmac
 import hashlib
-import ntplib
 import requests
 from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 
-# ⏱ 서버 시간 (Gate.io 공식 API)
-def get_timestamp():
+# ⏱ 서버 시간
+def get_server_time():
     try:
         res = requests.get("https://api.gateio.ws/api/v4/time", timeout=2)
-        return str(res.json()["server_time"])
-    except:
-        try:
-            client = ntplib.NTPClient()
-            response = client.request("pool.ntp.org")
-            return str(int(response.tx_time * 1000))
-        except Exception as e:
-            print(f"[⚠️ 시간 조회 실패 → 로컬 사용] {e}")
-            return str(int(time.time() * 1000))
+        res.raise_for_status()
+        data = res.json()
+        return str(data["server_time"])
+    except Exception as e:
+        print(f"[⚠️ 서버 시간 API 실패 → 로컬 사용] {e}")
+        return str(int(time.time() * 1000))
+
 # 🔐 서명 생성
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha512).hexdigest()
 
 # 📬 요청 헤더
 def get_headers(method, endpoint, body=""):
-    timestamp = get_timestamp()
+    timestamp = get_server_time()
     hashed_payload = hashlib.sha512(body.encode()).hexdigest() if body else ""
     sign_str = f"{method}\n{endpoint}\n\n{hashed_payload}\n{timestamp}"
     sign = hmac.new(API_SECRET.encode(), sign_str.encode(), hashlib.sha512).hexdigest()
@@ -39,8 +37,6 @@ def get_headers(method, endpoint, body=""):
 # 🟢 진입 주문
 def place_order(side):
     url = f"{BASE_URL}/futures/usdt/orders"
-    endpoint = "/futures/usdt/orders"
-
     payload = {
         "contract": SYMBOL,
         "size": 1,
@@ -53,9 +49,10 @@ def place_order(side):
         "side": side,
         "auto_size": ""
     }
-
     body = json.dumps(payload)
-    headers = get_headers("POST", endpoint, body)
+    timestamp = get_server_time()
+    sign = sign_request(API_SECRET, timestamp + body)
+    headers = get_headers("POST", "/futures/usdt/orders", body)
 
     try:
         res = requests.post(url, headers=headers, data=body)
@@ -69,8 +66,9 @@ def place_order(side):
 # 📈 포지션 조회
 def get_open_position():
     url = f"{BASE_URL}/futures/usdt/positions"
-    endpoint = "/futures/usdt/positions"
-    headers = get_headers("GET", endpoint)
+    timestamp = get_server_time()
+    sign = sign_request(API_SECRET, timestamp)
+    headers = get_headers("GET", "/futures/usdt/positions")
 
     try:
         res = requests.get(url, headers=headers)
@@ -89,8 +87,6 @@ def get_open_position():
 def close_position(side):
     print(f"📤 종료 요청: {side.upper()}")
     url = f"{BASE_URL}/futures/usdt/orders"
-    endpoint = "/futures/usdt/orders"
-
     payload = {
         "contract": SYMBOL,
         "size": 1,
@@ -103,9 +99,10 @@ def close_position(side):
         "side": side,
         "auto_size": ""
     }
-
     body = json.dumps(payload)
-    headers = get_headers("POST", endpoint, body)
+    timestamp = get_server_time()
+    sign = sign_request(API_SECRET, timestamp + body)
+    headers = get_headers("POST", "/futures/usdt/orders", body)
 
     try:
         res = requests.post(url, headers=headers, data=body)

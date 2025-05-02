@@ -1,3 +1,4 @@
+
 import os
 import time
 import json
@@ -12,7 +13,7 @@ app = Flask(__name__)
 @app.route('/', methods=['POST', 'HEAD'])
 def webhook():
     if request.method == 'HEAD':
-        return '', 200  # 헬스 체크 응답
+        return '', 200
 
     data = request.json
     if not data or "signal" not in data or "position" not in data:
@@ -38,7 +39,6 @@ def webhook():
 
     highest_price = entry_price
     lowest_price = entry_price
-    retry_delay = 5
 
     while True:
         try:
@@ -47,8 +47,7 @@ def webhook():
             current_price = float(res.json()["last"])
         except Exception as e:
             print(f"⚠️ 가격 조회 실패: {e}")
-            time.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 60)
+            time.sleep(5)
             continue
 
         print(f"[{time.strftime('%H:%M:%S')}] 💹 현재가: {current_price:.4f}")
@@ -65,41 +64,19 @@ def webhook():
         if position == "long":
             highest_price = max(highest_price, current_price)
             trail_sl = highest_price * (1 - trail_pct)
-
-            if current_price >= tp_price:
-                print(f"✅ TP 도달: {current_price:.4f}")
+            if current_price >= tp_price or current_price <= sl_price or current_price <= trail_sl:
                 close_position("sell")
                 break
-            elif current_price <= sl_price:
-                print(f"❌ SL 도달: {current_price:.4f}")
-                close_position("sell")
-                break
-            elif current_price <= trail_sl:
-                print(f"🔻 트레일링 SL 도달: {current_price:.4f} <= {trail_sl:.4f}")
-                close_position("sell")
-                break
-
         else:
             lowest_price = min(lowest_price, current_price)
             trail_sl = lowest_price * (1 + trail_pct)
-
-            if current_price <= tp_price:
-                print(f"✅ TP 도달: {current_price:.4f}")
-                close_position("buy")
-                break
-            elif current_price >= sl_price:
-                print(f"❌ SL 도달: {current_price:.4f}")
-                close_position("buy")
-                break
-            elif current_price >= trail_sl:
-                print(f"🔺 트레일링 SL 도달: {current_price:.4f} >= {trail_sl:.4f}")
+            if current_price <= tp_price or current_price >= sl_price or current_price >= trail_sl:
                 close_position("buy")
                 break
 
         time.sleep(5)
 
     return jsonify({"status": "closed"}), 200
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))

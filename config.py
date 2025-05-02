@@ -1,3 +1,4 @@
+
 import os
 
 # 거래 설정
@@ -15,5 +16,3 @@ if not API_KEY or not API_SECRET:
 # TP/SL 퍼센트
 TAKE_PROFIT_PERCENT = 0.022  # 2.2%
 STOP_LOSS_PERCENT = 0.007    # 0.7%
-
-# 트레일링 익절은 main.py에서 동적으로 처리
