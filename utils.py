@@ -4,7 +4,7 @@ import json
 import hmac
 import hashlib
 import requests
-
+import ntplib
 from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 
 
