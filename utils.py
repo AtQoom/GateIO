@@ -2,20 +2,19 @@ import time
 import json
 import hmac
 import hashlib
+import ntplib
 import requests
 from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 
-# ⏱ 서버 시간 (Gate.io 공식 API)
+# ⏱ 서버 시간
 def get_server_time():
     try:
-        res = requests.get(f"{BASE_URL}/futures/usdt/server_time", timeout=3)
-        res.raise_for_status()
-        ts = res.json().get("server_time")
-        return str(ts) if isinstance(ts, int) else str(int(time.time() * 1000))
+        ntp_client = ntplib.NTPClient()
+        response = ntp_client.request("pool.ntp.org", version=3)
+        return int(response.tx_time * 1000)
     except Exception as e:
-        print(f"⚠️ 서버 시간 오류: {e} → 로컬 시간 사용")
-        return str(int(time.time() * 1000))
-
+        print(f"[⚠️ NTP 오류] 로컬 시간 사용: {e}")
+        return int(time.time() * 1000)
 
 # 🔐 서명 생성
 def sign_request(secret, payload: str):
