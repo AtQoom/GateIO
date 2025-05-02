@@ -5,14 +5,8 @@ import hashlib
 import requests
 from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 
-def get_server_time():
-    try:
-        res = requests.get("https://api.gateio.ws/api/v4/time", timeout=2)
-        res.raise_for_status()
-        return str(res.json()["server_time"])
-    except Exception as e:
-        print(f"[⚠️ 서버 시간 조회 실패 → 로컬 시간 사용] {e}")
-        return str(int(time.time() * 1000))
+def get_timestamp():
+    return str(int(time.time() * 1000))
 
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha512).hexdigest()
@@ -27,7 +21,8 @@ def get_headers(timestamp, sign):
     }
 
 def place_order(side):
-    url = f"{BASE_URL}/futures/usdt/orders"
+    url_path = "/futures/usdt/orders"
+    url = f"{BASE_URL}{url_path}"
     payload = {
         "contract": SYMBOL,
         "size": 1,
@@ -41,8 +36,9 @@ def place_order(side):
         "auto_size": ""
     }
     body = json.dumps(payload)
-    timestamp = get_server_time()
-    sign = sign_request(API_SECRET, timestamp + body)
+    timestamp = get_timestamp()
+    sign_payload = f"POST\n/api/v4{url_path}\n\n{body}\n{timestamp}"
+    sign = sign_request(API_SECRET, sign_payload)
     headers = get_headers(timestamp, sign)
 
     try:
@@ -53,9 +49,11 @@ def place_order(side):
         print(f"❌ 주문 실패: {e}")
 
 def get_open_position():
-    url = f"{BASE_URL}/futures/usdt/positions"
-    timestamp = get_server_time()
-    sign = sign_request(API_SECRET, timestamp)
+    url_path = "/futures/usdt/positions"
+    url = f"{BASE_URL}{url_path}"
+    timestamp = get_timestamp()
+    sign_payload = f"GET\n/api/v4{url_path}\n\n\n{timestamp}"
+    sign = sign_request(API_SECRET, sign_payload)
     headers = get_headers(timestamp, sign)
 
     try:
@@ -71,7 +69,8 @@ def get_open_position():
 
 def close_position(side):
     print(f"📤 종료 요청: {side.upper()}")
-    url = f"{BASE_URL}/futures/usdt/orders"
+    url_path = "/futures/usdt/orders"
+    url = f"{BASE_URL}{url_path}"
     payload = {
         "contract": SYMBOL,
         "size": 1,
@@ -85,8 +84,9 @@ def close_position(side):
         "auto_size": ""
     }
     body = json.dumps(payload)
-    timestamp = get_server_time()
-    sign = sign_request(API_SECRET, timestamp + body)
+    timestamp = get_timestamp()
+    sign_payload = f"POST\n/api/v4{url_path}\n\n{body}\n{timestamp}"
+    sign = sign_request(API_SECRET, sign_payload)
     headers = get_headers(timestamp, sign)
 
     try:
