@@ -4,13 +4,11 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# 🔐 환경변수에서 API 키 정보 불러오기
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 BASE_URL = "https://api.gateio.ws/api/v4"
 SYMBOL = "SOL_USDT"
 
-# 📊 트레이딩 파라미터
 MIN_ORDER_USDT = 3
 MIN_QTY = 1
 LEVERAGE = 1
@@ -18,35 +16,28 @@ RISK_PCT = 0.5
 
 entry_price = None
 entry_side = None
-time_offset = 0  # 서버 시간 보정용 (ms 단위)
 
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-# ✅ 시간 동기화
-def sync_time_with_gate():
-    global time_offset
+def get_server_time():
     try:
         r = requests.get(f"{BASE_URL}/spot/time")
-        if r.status_code == 200:
-            server_time = int(r.json()['server_time'])
-            local_time = int(time.time() * 1000)
-            time_offset = server_time - local_time
-            log_debug("🕒 시간 동기화", f"offset: {time_offset}ms")
-    except Exception as e:
-        log_debug("❌ 시간 동기화 실패", str(e))
+        r.raise_for_status()
+        return str(r.json()["server_time"])
+    except:
+        return str(int(time.time() * 1000))  # fallback
 
-# 🧾 서명 생성
-def sign_request(secret, payload: str):
+def sign_request(secret, payload):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
 
-# 🧾 헤더 구성
 def get_headers(method, endpoint, query="", body=""):
-    timestamp = str(int(time.time() * 1000) + time_offset)
+    timestamp = get_server_time()
     full_path = f"/api/v4{endpoint}"
     hashed_payload = hashlib.sha512((body or "").encode()).hexdigest()
     sign_str = f"{method.upper()}\n{full_path}\n{query}\n{hashed_payload}\n{timestamp}"
     signature = sign_request(API_SECRET, sign_str)
+
     return {
         "KEY": API_KEY,
         "Timestamp": timestamp,
@@ -58,7 +49,6 @@ def get_headers(method, endpoint, query="", body=""):
 def debug_api_response(name, response):
     log_debug(name, f"HTTP {response.status_code} - {response.text}")
 
-# 💰 잔고 조회 (통합 계정)
 def get_equity():
     endpoint = "/unified/accounts"
     headers = get_headers("GET", endpoint)
@@ -66,14 +56,14 @@ def get_equity():
         r = requests.get(BASE_URL + endpoint, headers=headers)
         debug_api_response("잔고 조회", r)
         r.raise_for_status()
-        for item in r.json():
-            if item["currency"] == "USDT":
-                return float(item["available"])
+        data = r.json()
+        for asset in data:
+            if asset["currency"] == "USDT":
+                return float(asset["available"])
     except Exception as e:
         log_debug("❌ 잔고 오류", str(e))
     return 0
 
-# 📈 시세 조회
 def get_market_price():
     endpoint = "/futures/usdt/tickers"
     headers = get_headers("GET", endpoint)
@@ -87,7 +77,6 @@ def get_market_price():
         log_debug("❌ 시세 오류", str(e))
     return 0
 
-# 📦 포지션 수량 조회
 def get_position_size():
     endpoint = "/futures/usdt/positions"
     headers = get_headers("GET", endpoint)
@@ -102,7 +91,6 @@ def get_position_size():
         log_debug("❌ 포지션 오류", str(e))
     return 0
 
-# 🛒 주문 실행
 def place_order(side, qty=1, reduce_only=False):
     global entry_price, entry_side
     if reduce_only:
@@ -146,7 +134,6 @@ def place_order(side, qty=1, reduce_only=False):
     except Exception as e:
         log_debug("❌ 주문 예외", str(e))
 
-# 🎯 TP/SL 체크 루프
 def check_tp_sl_loop():
     global entry_price, entry_side
     while True:
@@ -177,7 +164,6 @@ def check_tp_sl_loop():
             log_debug("❌ TP/SL 오류", str(e))
         time.sleep(3)
 
-# 📨 웹훅 핸들러
 @app.route("/", methods=["POST"])
 def webhook():
     global entry_price, entry_side
@@ -213,14 +199,11 @@ def webhook():
         log_debug("❌ 웹훅 처리 예외", str(e))
         return jsonify({"error": "internal error"}), 500
 
-# ⏱️ 업타임 로봇 Ping 확인용 엔드포인트
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
 
-# 🧠 앱 실행
 if __name__ == "__main__":
-    sync_time_with_gate()
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
     threading.Thread(target=check_tp_sl_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=8080)
