@@ -24,7 +24,8 @@ def get_server_time():
     try:
         r = requests.get(f"{BASE_URL}/spot/time")
         r.raise_for_status()
-        return str(r.json()["server_time"])
+        # ⚠️ 'server_time'은 초 단위이므로 * 1000 해줌
+        return str(int(r.json()["server_time"]) * 1000)
     except:
         return str(int(time.time() * 1000))  # fallback
 
