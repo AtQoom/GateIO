@@ -6,43 +6,40 @@ app = Flask(__name__)
 
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
-BASE_URL = "https://api.gateio.ws/api/v4"
+BASE_URL = "https://api.gateio.ws"
 SYMBOL = "SOL_USDT"
 
 MIN_ORDER_USDT = 3
 MIN_QTY = 1
 LEVERAGE = 1
-RISK_PCT = 0.5
+RISK_PCT = 0.2
 
 entry_price = None
 entry_side = None
-time_offset = 0  # 서버 시간 오차(ms)
 
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-def sync_time_offset():
-    global time_offset
-    try:
-        r = requests.get(f"{BASE_URL}/spot/time", timeout=3)
-        r.raise_for_status()
-        server_ms = int(r.json()["server_time"])
-        local_ms = int(time.time() * 1000)
-        time_offset = server_ms - local_ms
-        log_debug("🕒 시간 동기화", f"offset: {time_offset}ms")
-    except Exception as e:
-        log_debug("❌ 시간 동기화 실패", str(e))
-
 def get_timestamp():
-    return str(int(time.time() * 1000) + time_offset)
+    # 서버 시간 확인 (spot/time 경로 이용, UNIX 초 반환)
+    try:
+        r = requests.get(f"{BASE_URL}/api/v4/spot/time")
+        server_time = int(r.json()["server_time"])
+        local_time = int(time.time())
+        offset = local_time - server_time
+        log_debug("⏱ 시간 동기화", f"offset: {offset}s")
+        return str(server_time)
+    except Exception as e:
+        log_debug("❌ 시간 조회 실패", str(e))
+        return str(int(time.time()))
 
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
 
-def get_headers(method, endpoint, body="", query=""):
+def get_headers(method, endpoint, query="", body=""):
     timestamp = get_timestamp()
     full_path = f"/api/v4{endpoint}"
-    hashed_body = hashlib.sha512((body or "").encode()).hexdigest()
+    hashed_body = hashlib.sha512(body.encode()).hexdigest() if body else ""
     sign_str = f"{method.upper()}\n{full_path}\n{query}\n{hashed_body}\n{timestamp}"
     sign = sign_request(API_SECRET, sign_str)
     return {
@@ -57,22 +54,20 @@ def debug_api_response(name, response):
     log_debug(name, f"HTTP {response.status_code} - {response.text}")
 
 def get_equity():
-    endpoint = "/unified/accounts"
-    headers = get_headers("GET", endpoint)
+    endpoint = "/api/v4/unified/accounts"
+    headers = get_headers("GET", "/unified/accounts")
     try:
         r = requests.get(BASE_URL + endpoint, headers=headers)
         debug_api_response("잔고 조회", r)
         r.raise_for_status()
-        for item in r.json():
-            if item["currency"] == "USDT":
-                return float(item["available"])
+        return float(r.json()["total"])
     except Exception as e:
-        log_debug("❌ 잔고 오류", str(e))
+        log_debug("❌ 잔고 조회 오류", str(e))
     return 0
 
 def get_market_price():
-    endpoint = "/futures/usdt/tickers"
-    headers = get_headers("GET", endpoint)
+    endpoint = "/api/v4/futures/usdt/tickers"
+    headers = get_headers("GET", "/futures/usdt/tickers")
     try:
         r = requests.get(BASE_URL + endpoint, headers=headers)
         r.raise_for_status()
@@ -84,8 +79,8 @@ def get_market_price():
     return 0
 
 def get_position_size():
-    endpoint = "/futures/usdt/positions"
-    headers = get_headers("GET", endpoint)
+    endpoint = "/api/v4/futures/usdt/positions"
+    headers = get_headers("GET", "/futures/usdt/positions")
     try:
         r = requests.get(BASE_URL + endpoint, headers=headers)
         debug_api_response("포지션 조회", r)
@@ -124,8 +119,8 @@ def place_order(side, qty=1, reduce_only=False):
         "close": reduce_only
     })
 
-    endpoint = "/futures/usdt/orders"
-    headers = get_headers("POST", endpoint, body)
+    endpoint = "/api/v4/futures/usdt/orders"
+    headers = get_headers("POST", "/futures/usdt/orders", body=body)
 
     try:
         r = requests.post(BASE_URL + endpoint, headers=headers, data=body)
@@ -148,24 +143,22 @@ def check_tp_sl_loop():
                 price = get_market_price()
                 if not price:
                     continue
-                if entry_side == "buy":
-                    if price >= entry_price * 1.01:
-                        log_debug("🎯 롱 TP", f"{price:.2f} ≥ {entry_price * 1.01:.2f}")
-                        place_order("sell", reduce_only=True)
-                        entry_price = None
-                    elif price <= entry_price * 0.985:
-                        log_debug("🛑 롱 SL", f"{price:.2f} ≤ {entry_price * 0.985:.2f}")
-                        place_order("sell", reduce_only=True)
-                        entry_price = None
-                elif entry_side == "sell":
-                    if price <= entry_price * 0.99:
-                        log_debug("🎯 숏 TP", f"{price:.2f} ≤ {entry_price * 0.99:.2f}")
-                        place_order("buy", reduce_only=True)
-                        entry_price = None
-                    elif price >= entry_price * 1.015:
-                        log_debug("🛑 숏 SL", f"{price:.2f} ≥ {entry_price * 1.015:.2f}")
-                        place_order("buy", reduce_only=True)
-                        entry_price = None
+                if entry_side == "buy" and price >= entry_price * 1.01:
+                    log_debug("🎯 롱 TP", f"{price:.2f}")
+                    place_order("sell", reduce_only=True)
+                    entry_price = None
+                elif entry_side == "buy" and price <= entry_price * 0.985:
+                    log_debug("🛑 롱 SL", f"{price:.2f}")
+                    place_order("sell", reduce_only=True)
+                    entry_price = None
+                elif entry_side == "sell" and price <= entry_price * 0.99:
+                    log_debug("🎯 숏 TP", f"{price:.2f}")
+                    place_order("buy", reduce_only=True)
+                    entry_price = None
+                elif entry_side == "sell" and price >= entry_price * 1.015:
+                    log_debug("🛑 숏 SL", f"{price:.2f}")
+                    place_order("buy", reduce_only=True)
+                    entry_price = None
         except Exception as e:
             log_debug("❌ TP/SL 오류", str(e))
         time.sleep(3)
@@ -176,12 +169,8 @@ def webhook():
     try:
         data = request.get_json(force=True)
         log_debug("📨 웹훅 수신", json.dumps(data, ensure_ascii=False))
-
         signal = data.get("signal", "").lower()
         position = data.get("position", "").lower()
-
-        if not signal or not position:
-            return jsonify({"error": "signal 또는 position 누락"}), 400
 
         if position == "long":
             place_order("sell", reduce_only=True)
@@ -210,7 +199,6 @@ def ping():
     return "pong", 200
 
 if __name__ == "__main__":
-    sync_time_offset()
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
     threading.Thread(target=check_tp_sl_loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=8081)
+    app.run(host="0.0.0.0", port=8080)
