@@ -22,20 +22,23 @@ def log_debug(title, content):
 
 def get_server_time():
     try:
-        r = requests.get(f"{BASE_URL}/spot/time")
+        r = requests.get(f"{BASE_URL}/spot/time", timeout=3)
         r.raise_for_status()
-        # ⚠️ 'server_time'은 초 단위이므로 * 1000 해줌
-        return str(int(r.json()["server_time"]) * 1000)
-    except:
-        return str(int(time.time() * 1000))  # fallback
+        server_time = int(r.json()["server_time"]) * 1000
+        offset = server_time - int(time.time() * 1000)
+        log_debug("🕒 시간 동기화", f"offset: {offset}ms")
+        return server_time
+    except Exception as e:
+        log_debug("❌ 서버 시간 오류", str(e))
+        return int(time.time() * 1000)
 
-def sign_request(secret, payload):
+def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
 
-def get_headers(method, endpoint, query="", body=""):
-    timestamp = get_server_time()
+def get_headers(method, endpoint, body="", query=""):
+    timestamp = str(get_server_time())
     full_path = f"/api/v4{endpoint}"
-    hashed_payload = hashlib.sha512((body or "").encode()).hexdigest()
+    hashed_payload = hashlib.sha512(body.encode()).hexdigest() if body else ""
     sign_str = f"{method.upper()}\n{full_path}\n{query}\n{hashed_payload}\n{timestamp}"
     signature = sign_request(API_SECRET, sign_str)
 
@@ -57,10 +60,9 @@ def get_equity():
         r = requests.get(BASE_URL + endpoint, headers=headers)
         debug_api_response("잔고 조회", r)
         r.raise_for_status()
-        data = r.json()
-        for asset in data:
-            if asset["currency"] == "USDT":
-                return float(asset["available"])
+        for item in r.json():
+            if item["currency"] == "USDT":
+                return float(item["available"])
     except Exception as e:
         log_debug("❌ 잔고 오류", str(e))
     return 0
@@ -120,7 +122,7 @@ def place_order(side, qty=1, reduce_only=False):
     })
 
     endpoint = "/futures/usdt/orders"
-    headers = get_headers("POST", endpoint, "", body)
+    headers = get_headers("POST", endpoint, body)
 
     try:
         r = requests.post(BASE_URL + endpoint, headers=headers, data=body)
