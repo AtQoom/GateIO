@@ -25,12 +25,12 @@ def log_debug(title, content):
 # ✅ Gate.io 서버 시간 동기화
 def get_server_timestamp():
     try:
-        r = requests.get(f"{BASE_URL}/spot/time", timeout=5)
+        r = requests.get("https://api.gateio.ws/api/v4/spot/time", timeout=5)
         r.raise_for_status()
         return str(r.json()["server_time"])
     except Exception as e:
-        log_debug("⚠️ 시간 조회 실패", str(e))
-        return str(int(time.time() * 1000))
+        log_debug("❌ 서버 시간 동기화 실패", str(e))
+        return str(int(time.time() * 1000))  # fallback
 
 # ✅ 서명 생성 함수 (문서 기준)
 def sign_request(secret, payload: str):
