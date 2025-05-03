@@ -1,3 +1,3 @@
 flask
 requests
-ntplib
+python-dotenv
