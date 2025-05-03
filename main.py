@@ -4,11 +4,13 @@ from datetime import datetime
 
 app = Flask(__name__)
 
+# ✅ 환경 변수에서 API 정보 로드
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 BASE_URL = "https://api.gateio.ws/api/v4"
 SYMBOL = "SOL_USDT"
 
+# 거래 설정
 MIN_ORDER_USDT = 3
 MIN_QTY = 1
 LEVERAGE = 1
@@ -20,28 +22,30 @@ entry_side = None
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
+# ✅ Gate.io 서버 시간 동기화
 def get_server_timestamp():
     try:
-        r = requests.get(f"{BASE_URL}/spot/time", timeout=3)
+        r = requests.get(f"{BASE_URL}/spot/time", timeout=5)
         r.raise_for_status()
-        return str(r.json()["server_time"])  # ✅ 서버에서 받은 timestamp 사용
+        return str(r.json()["server_time"])
     except Exception as e:
-        log_debug("❌ 서버 시간 조회 실패", str(e))
+        log_debug("⚠️ 시간 조회 실패", str(e))
         return str(int(time.time() * 1000))
 
+# ✅ 서명 생성 함수 (문서 기준)
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
 
-def get_headers(method, endpoint, query="", body=""):
+def get_headers(method, endpoint, body="", query=""):
     timestamp = get_server_timestamp()
-    full_path = f"/api/v4{endpoint}"
-    hashed_body = hashlib.sha512((body or "").encode()).hexdigest()
-    sign_str = f"{method.upper()}\n{full_path}\n{query}\n{hashed_body}\n{timestamp}"
-    signature = sign_request(API_SECRET, sign_str)
+    path = f"/api/v4{endpoint}"
+    hashed_body = hashlib.sha512(body.encode('utf-8')).hexdigest() if body else ""
+    sign_str = f"{method.upper()}\n{path}\n{query}\n{hashed_body}\n{timestamp}"
+    sign = sign_request(API_SECRET, sign_str)
     return {
         "KEY": API_KEY,
         "Timestamp": timestamp,
-        "SIGN": signature,
+        "SIGN": sign,
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
@@ -196,6 +200,7 @@ def webhook():
         log_debug("❌ 웹훅 처리 예외", str(e))
         return jsonify({"error": "internal error"}), 500
 
+# ✅ UptimeRobot용 ping 엔드포인트
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
