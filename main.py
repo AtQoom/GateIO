@@ -12,51 +12,53 @@ SYMBOL = "SOL_USDT"
 MIN_ORDER_USDT = 3
 MIN_QTY = 1
 LEVERAGE = 1
-RISK_PCT = 0.16
+RISK_PCT = 0.5
 
 entry_price = None
 entry_side = None
 
+
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-def get_server_time_offset():
+
+def get_server_timestamp():
     try:
         r = requests.get(f"{BASE_URL}/spot/time", timeout=3)
         r.raise_for_status()
         server_time = int(r.json()["server_time"])
         local_time = int(time.time() * 1000)
-        offset = server_time - local_time
-        log_debug("🕒 시간 동기화", f"offset: {offset}ms")
-        return offset
+        offset = local_time - server_time
+        log_debug("⏱️ 시간 동기화", f"offset: {offset}ms")
+        return str(server_time)
     except Exception as e:
-        log_debug("❌ 시간 동기화 실패", str(e))
-        return 0
+        log_debug("❌ 시간 조회 오류", str(e))
+        return str(int(time.time() * 1000))
 
-TIME_OFFSET = get_server_time_offset()
-
-def get_timestamp():
-    return str(int(time.time() * 1000) + TIME_OFFSET)
 
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
 
-def get_headers(method, endpoint, body="", query=""):
-    timestamp = get_timestamp()
+
+def get_headers(method, endpoint, query="", body=""):
+    timestamp = get_server_timestamp()
     full_path = f"/api/v4{endpoint}"
-    hashed_body = hashlib.sha512(body.encode()).hexdigest() if body else ""
-    sign_str = f"{method.upper()}\n{full_path}\n{query}\n{hashed_body}\n{timestamp}"
-    sign = sign_request(API_SECRET, sign_str)
+    hashed_payload = hashlib.sha512((body or "").encode()).hexdigest()
+    sign_str = f"{method.upper()}\n{full_path}\n{query}\n{hashed_payload}\n{timestamp}"
+    signature = sign_request(API_SECRET, sign_str)
+
     return {
         "KEY": API_KEY,
         "Timestamp": timestamp,
-        "SIGN": sign,
+        "SIGN": signature,
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
 
+
 def debug_api_response(name, response):
     log_debug(name, f"HTTP {response.status_code} - {response.text}")
+
 
 def get_equity():
     endpoint = "/unified/accounts"
@@ -65,13 +67,13 @@ def get_equity():
         r = requests.get(BASE_URL + endpoint, headers=headers)
         debug_api_response("잔고 조회", r)
         r.raise_for_status()
-        balances = r.json()
-        for item in balances:
+        for item in r.json():
             if item["currency"] == "USDT":
                 return float(item["available"])
     except Exception as e:
         log_debug("❌ 잔고 오류", str(e))
     return 0
+
 
 def get_market_price():
     endpoint = "/futures/usdt/tickers"
@@ -86,6 +88,7 @@ def get_market_price():
         log_debug("❌ 시세 오류", str(e))
     return 0
 
+
 def get_position_size():
     endpoint = "/futures/usdt/positions"
     headers = get_headers("GET", endpoint)
@@ -99,6 +102,7 @@ def get_position_size():
     except Exception as e:
         log_debug("❌ 포지션 오류", str(e))
     return 0
+
 
 def place_order(side, qty=1, reduce_only=False):
     global entry_price, entry_side
@@ -128,7 +132,7 @@ def place_order(side, qty=1, reduce_only=False):
     })
 
     endpoint = "/futures/usdt/orders"
-    headers = get_headers("POST", endpoint, body)
+    headers = get_headers("POST", endpoint, body=body)
 
     try:
         r = requests.post(BASE_URL + endpoint, headers=headers, data=body)
@@ -142,6 +146,7 @@ def place_order(side, qty=1, reduce_only=False):
             log_debug("❌ 주문 실패", r.text)
     except Exception as e:
         log_debug("❌ 주문 예외", str(e))
+
 
 def check_tp_sl_loop():
     global entry_price, entry_side
@@ -172,6 +177,7 @@ def check_tp_sl_loop():
         except Exception as e:
             log_debug("❌ TP/SL 오류", str(e))
         time.sleep(3)
+
 
 @app.route("/", methods=["POST"])
 def webhook():
@@ -208,9 +214,11 @@ def webhook():
         log_debug("❌ 웹훅 처리 예외", str(e))
         return jsonify({"error": "internal error"}), 500
 
+
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
+
 
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
