@@ -21,25 +21,18 @@ def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
 def get_timestamp():
-    try:
-        r = requests.get("https://api.gateio.ws/api/v4/spot/time", timeout=3)
-        return str(r.json()['server_time'])
-    except Exception as e:
-        log_debug("⚠️ 시간 동기화 실패", f"{e} (로컬 시간 사용)")
-        return str(int(time.time()))
+    return str(int(time.time() * 1000))
 
-def sign_request(secret, payload: str):
-    return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
-
-def get_headers(method, endpoint, body="", query_string=""):
+def get_headers(method, endpoint, query="", body=""):
     timestamp = get_timestamp()
-    hashed_body = hashlib.sha512(body.encode()).hexdigest() if body else ""
-    sign_str = f"{method}\n{endpoint}\n{query_string}\n{hashed_body}\n{timestamp}"
-    signature = sign_request(API_SECRET, sign_str)
+    full_path = f"/api/v4{endpoint}"
+    hashed_payload = hashlib.sha512((body or "").encode('utf-8')).hexdigest()
+    sign_str = f"{method.upper()}\n{full_path}\n{query}\n{hashed_payload}\n{timestamp}"
+    sign = hmac.new(API_SECRET.encode(), sign_str.encode(), hashlib.sha512).hexdigest()
     return {
         "KEY": API_KEY,
         "Timestamp": timestamp,
-        "SIGN": signature,
+        "SIGN": sign,
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
@@ -114,7 +107,7 @@ def place_order(side, qty=1, reduce_only=False):
     })
 
     endpoint = "/futures/usdt/orders"
-    headers = get_headers("POST", endpoint, body)
+    headers = get_headers("POST", endpoint, body=body)
 
     try:
         r = requests.post(BASE_URL + endpoint, headers=headers, data=body)
