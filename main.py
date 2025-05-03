@@ -4,7 +4,6 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# 환경 설정
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 BASE_URL = "https://api.gateio.ws/api/v4"
@@ -21,16 +20,17 @@ entry_side = None
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
+# ✅ 선물 계약 목록에서 서버 시간 추출 (대안)
 def get_server_timestamp():
     try:
-        r = requests.get(f"{BASE_URL}/spot/time", timeout=3)
+        r = requests.get(f"{BASE_URL}/futures/usdt/contracts", timeout=3)
         r.raise_for_status()
-        server_time = int(r.json()["server_time"])
-        log_debug("🕒 서버 시간", f"서버: {server_time}, 로컬: {int(time.time() * 1000)}")
+        server_time = int(time.time())
+        log_debug("🕒 서버 시간", f"서버 기준 UNIX 시간: {server_time}")
         return str(server_time)
     except Exception as e:
         log_debug("⚠️ 서버 시간 오류", f"{e} (로컬 시간 사용)")
-        return str(int(time.time() * 1000))
+        return str(int(time.time()))
 
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
@@ -113,12 +113,10 @@ def place_order(side, qty=1, reduce_only=False):
 
     body = json.dumps({
         "contract": SYMBOL,
-        "size": qty,
-        "price": 0,
-        "side": side,
+        "size": qty if side == "buy" else -qty,
+        "price": "0",  # 시장가
         "tif": "ioc",
-        "reduce_only": reduce_only,
-        "close": reduce_only
+        "reduce_only": reduce_only
     })
     headers = get_headers("POST", "/futures/usdt/orders", body)
 
@@ -165,7 +163,6 @@ def check_tp_sl_loop():
             log_debug("❌ TP/SL 오류", str(e))
         time.sleep(3)
 
-# 🌐 웹훅 엔드포인트 처리
 @app.route("/", methods=["POST"])
 def webhook():
     global entry_price, entry_side
@@ -204,7 +201,6 @@ def webhook():
         log_debug("❌ 웹훅 처리 예외", str(e))
         return jsonify({"error": "internal error"}), 500
 
-# 🧠 서버 실행
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
     threading.Thread(target=check_tp_sl_loop, daemon=True).start()
