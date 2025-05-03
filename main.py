@@ -12,7 +12,7 @@ SYMBOL = "SOL_USDT"
 MIN_ORDER_USDT = 3
 MIN_QTY = 1
 LEVERAGE = 1
-RISK_PCT = 0.16
+RISK_PCT = 0.5
 
 entry_price = None
 entry_side = None
@@ -21,17 +21,17 @@ def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
 def get_timestamp():
-    return str(int(time.time()))
+    return str(int(time.time() * 1000))  # ✅ 밀리초 단위
 
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
 
-def get_headers(method, endpoint, body=""):
+def get_headers(method, endpoint, body="", query_string=""):
     timestamp = get_timestamp()
-    hashed_payload = hashlib.sha512(body.encode()).hexdigest() if body else ""
-    # ✅ Gate.io 문서 기준: endpoint는 path만 포함해야 함!
-    sign_str = f"{method}\n{endpoint}\n\n{hashed_payload}\n{timestamp}"
+    hashed_body = hashlib.sha512(body.encode()).hexdigest() if body else ""
+    sign_str = f"{method}\n{endpoint}\n{query_string}\n{hashed_body}\n{timestamp}"
     signature = sign_request(API_SECRET, sign_str)
+
     return {
         "KEY": API_KEY,
         "Timestamp": timestamp,
