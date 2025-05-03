@@ -1,14 +1,17 @@
+# main.py
 import os, time, json, hmac, hashlib, requests, threading
 from flask import Flask, request, jsonify
 from datetime import datetime
 
 app = Flask(__name__)
 
+# ✅ 환경변수에서 API 정보 불러오기
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 BASE_URL = "https://api.gateio.ws/api/v4"
 SYMBOL = "SOL_USDT"
 
+# 기본 설정
 MIN_ORDER_USDT = 3
 MIN_QTY = 1
 LEVERAGE = 1
@@ -20,16 +23,13 @@ entry_side = None
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-# ✅ 선물 계약 목록에서 서버 시간 추출 (대안)
 def get_server_timestamp():
     try:
-        r = requests.get(f"{BASE_URL}/futures/usdt/contracts", timeout=3)
+        r = requests.get(f"{BASE_URL}/futures/usdt/time", timeout=3)
         r.raise_for_status()
-        server_time = int(time.time())
-        log_debug("🕒 서버 시간", f"서버 기준 UNIX 시간: {server_time}")
-        return str(server_time)
+        return str(r.json()["server_time"])
     except Exception as e:
-        log_debug("⚠️ 서버 시간 오류", f"{e} (로컬 시간 사용)")
+        log_debug("❌ 시간 조회 실패", str(e))
         return str(int(time.time()))
 
 def sign_request(secret, payload: str):
@@ -39,20 +39,17 @@ def get_headers(method, endpoint, body=""):
     timestamp = get_server_timestamp()
     hashed_payload = hashlib.sha512(body.encode()).hexdigest() if body else ""
     sign_str = f"{method}\n{endpoint}\n\n{hashed_payload}\n{timestamp}"
-    sign = sign_request(API_SECRET, sign_str)
+    signature = sign_request(API_SECRET, sign_str)
     return {
         "KEY": API_KEY,
         "Timestamp": timestamp,
-        "SIGN": sign,
+        "SIGN": signature,
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
 
 def debug_api_response(name, response):
-    try:
-        log_debug(name, f"HTTP {response.status_code} - {response.text}")
-    except Exception as e:
-        log_debug("API 디버그 실패", str(e))
+    log_debug(name, f"HTTP {response.status_code} - {response.text}")
 
 def get_equity():
     endpoint = "/futures/usdt/accounts"
@@ -63,15 +60,14 @@ def get_equity():
         r.raise_for_status()
         return float(r.json()["available"])
     except Exception as e:
-        log_debug("❌ 잔고 조회 오류", str(e))
-    return 0
+        log_debug("❌ 잔고 오류", str(e))
+        return 0
 
 def get_market_price():
     endpoint = "/futures/usdt/tickers"
     headers = get_headers("GET", endpoint)
     try:
         r = requests.get(BASE_URL + endpoint, headers=headers)
-        debug_api_response("시세 조회", r)
         r.raise_for_status()
         for item in r.json():
             if item["contract"] == SYMBOL:
@@ -113,15 +109,19 @@ def place_order(side, qty=1, reduce_only=False):
 
     body = json.dumps({
         "contract": SYMBOL,
-        "size": qty if side == "buy" else -qty,
-        "price": "0",  # 시장가
+        "size": qty,
+        "price": 0,
+        "side": side,
         "tif": "ioc",
-        "reduce_only": reduce_only
+        "reduce_only": reduce_only,
+        "close": reduce_only
     })
-    headers = get_headers("POST", "/futures/usdt/orders", body)
+
+    endpoint = "/futures/usdt/orders"
+    headers = get_headers("POST", endpoint, body)
 
     try:
-        r = requests.post(BASE_URL + "/futures/usdt/orders", headers=headers, data=body)
+        r = requests.post(BASE_URL + endpoint, headers=headers, data=body)
         debug_api_response("주문 전송", r)
         if r.status_code == 200:
             log_debug("✅ 주문 성공", f"{side.upper()} {qty}개")
@@ -129,7 +129,7 @@ def place_order(side, qty=1, reduce_only=False):
                 entry_price = price
                 entry_side = side
         else:
-            log_debug("❌ 주문 실패", f"{r.status_code} - {r.text}")
+            log_debug("❌ 주문 실패", r.text)
     except Exception as e:
         log_debug("❌ 주문 예외", str(e))
 
@@ -174,10 +174,8 @@ def webhook():
         position = data.get("position", "").lower()
 
         if not signal or not position:
-            log_debug("❌ 포맷 오류", f"signal: {signal}, position: {position}")
             return jsonify({"error": "signal 또는 position 누락"}), 400
 
-        # 기존 포지션 정리
         if position == "long":
             place_order("sell", reduce_only=True)
             side = "buy"
@@ -185,7 +183,6 @@ def webhook():
             place_order("buy", reduce_only=True)
             side = "sell"
         else:
-            log_debug("❌ 포지션 지정 오류", position)
             return jsonify({"error": "invalid position"}), 400
 
         equity = get_equity()
