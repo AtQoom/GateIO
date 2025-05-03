@@ -1,3 +1,4 @@
+import os
 import time
 import json
 import hmac
@@ -5,25 +6,42 @@ import hashlib
 import requests
 from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 
+# ✅ 서버 시간
 def get_timestamp():
-    return str(int(time.time() * 1000))
+    try:
+        res = requests.get(f"{BASE_URL}/spot/time", timeout=2)
+        res.raise_for_status()
+        return str(res.json()["server_time"])
+    except Exception as e:
+        print(f"[⚠️ 시간 조회 실패 → 로컬 시간 사용] {e}")
+        return str(int(time.time() * 1000))
 
+# 🔐 시그니처 생성
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha512).hexdigest()
 
-def get_headers(timestamp, sign):
+# 📬 헤더 생성
+def get_headers(method, endpoint, body=""):
+    timestamp = get_timestamp()
+    hashed_payload = hashlib.sha512(body.encode()).hexdigest() if body else ""
+    
+    # 경로에 /api/v4 붙이기 (서명용)
+    full_path = endpoint if endpoint.startswith("/api/v4") else f"/api/v4{endpoint}"
+    sign_str = f"{method.upper()}\n{full_path}\n\n{hashed_payload}\n{timestamp}"
+    
+    sign = sign_request(API_SECRET, sign_str)
     return {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
         "KEY": API_KEY,
         "Timestamp": timestamp,
-        "SIGN": sign
+        "SIGN": sign,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
     }
 
+# ✅ 진입 주문
 def place_order(side):
-    url_path = "/futures/usdt/orders"
-    url = f"{BASE_URL}{url_path}"
-    method = "POST"
+    endpoint = "/futures/usdt/orders"
+    url = f"{BASE_URL}{endpoint}"
     
     payload = {
         "contract": SYMBOL,
@@ -38,78 +56,26 @@ def place_order(side):
         "auto_size": ""
     }
 
-    body = json.dumps(payload, separators=(',', ':'), sort_keys=True)
-    timestamp = get_timestamp()
-    sign_payload = f"{method}\n/api/v4{url_path}\n\n{body}\n{timestamp}"
-    sign = sign_request(API_SECRET, sign_payload)
-    headers = get_headers(timestamp, sign)
-
-    # ✅ 디버그 출력
-    print("🧾 SIGN Payload:\n", sign_payload)
-    print("🔑 SIGN:", sign)
-    print("📦 Headers:", headers)
-    print("📤 Body:", body)
+    body = json.dumps(payload)
+    headers = get_headers("POST", endpoint, body)
 
     try:
         res = requests.post(url, headers=headers, data=body)
         res.raise_for_status()
         print(f"✅ 주문 성공: {res.status_code} - {res.text}")
+    except requests.exceptions.HTTPError as e:
+        try:
+            print(f"❌ 주문 실패 (HTTP): {e.response.status_code} - {e.response.json()}")
+        except:
+            print(f"❌ 주문 실패 (HTTP): {e.response.status_code} - {e.response.text}")
     except Exception as e:
         print(f"❌ 주문 실패: {e}")
 
-def place_trigger_order(trigger_price, order_price, side, is_exit=False):
-    url_path = "/futures/usdt/price_orders"
-    url = f"{BASE_URL}{url_path}"
-    method = "POST"
-
-    payload = {
-        "contract": SYMBOL,
-        "size": 1,
-        "price": str(order_price),
-        "close": is_exit,
-        "tif": "gtc",
-        "reduce_only": is_exit,
-        "side": side,
-        "auto_size": "",
-        "trigger": {
-            "strategy_type": 0,
-            "price_type": 0,
-            "price": str(trigger_price)
-        },
-        "text": "trigger-order"
-    }
-
-    body = json.dumps(payload, separators=(',', ':'), sort_keys=True)
-    timestamp = get_timestamp()
-    sign_payload = f"{method}\n/api/v4{url_path}\n\n{body}\n{timestamp}"
-    sign = sign_request(API_SECRET, sign_payload)
-    headers = get_headers(timestamp, sign)
-
-    # ✅ 디버그 출력
-    print("🧾 TRIGGER SIGN Payload:\n", sign_payload)
-    print("🔑 SIGN:", sign)
-    print("📦 Headers:", headers)
-    print("📤 Body:", body)
-
-    try:
-        res = requests.post(url, headers=headers, data=body)
-        res.raise_for_status()
-        print(f"✅ 트리거 주문 성공: {res.status_code} - {res.text}")
-    except Exception as e:
-        print(f"❌ 트리거 주문 실패: {e}")
-
+# 📈 포지션 조회
 def get_open_position():
-    url_path = "/futures/usdt/positions"
-    url = f"{BASE_URL}{url_path}"
-    method = "GET"
-    
-    timestamp = get_timestamp()
-    sign_payload = f"{method}\n/api/v4{url_path}\n\n\n{timestamp}"
-    sign = sign_request(API_SECRET, sign_payload)
-    headers = get_headers(timestamp, sign)
-
-    print("🧾 POSITION SIGN Payload:\n", sign_payload)
-    print("🔑 SIGN:", sign)
+    endpoint = "/futures/usdt/positions"
+    url = f"{BASE_URL}{endpoint}"
+    headers = get_headers("GET", endpoint)
 
     try:
         res = requests.get(url, headers=headers)
@@ -118,15 +84,20 @@ def get_open_position():
         for pos in data:
             if pos["contract"] == SYMBOL and float(pos["size"]) > 0:
                 return float(pos["entry_price"])
+    except requests.exceptions.HTTPError as e:
+        try:
+            print(f"⚠️ 포지션 조회 실패 (HTTP): {e.response.status_code} - {e.response.json()}")
+        except:
+            print(f"⚠️ 포지션 조회 실패 (HTTP): {e.response.status_code} - {e.response.text}")
     except Exception as e:
         print(f"⚠️ 포지션 조회 실패: {e}")
     return None
 
+# 🔴 포지션 종료
 def close_position(side):
     print(f"📤 종료 요청: {side.upper()}")
-    url_path = "/futures/usdt/orders"
-    url = f"{BASE_URL}{url_path}"
-    method = "POST"
+    endpoint = "/futures/usdt/orders"
+    url = f"{BASE_URL}{endpoint}"
 
     payload = {
         "contract": SYMBOL,
@@ -141,18 +112,17 @@ def close_position(side):
         "auto_size": ""
     }
 
-    body = json.dumps(payload, separators=(',', ':'), sort_keys=True)
-    timestamp = get_timestamp()
-    sign_payload = f"{method}\n/api/v4{url_path}\n\n{body}\n{timestamp}"
-    sign = sign_request(API_SECRET, sign_payload)
-    headers = get_headers(timestamp, sign)
-
-    print("🧾 CLOSE SIGN Payload:\n", sign_payload)
-    print("🔑 SIGN:", sign)
+    body = json.dumps(payload)
+    headers = get_headers("POST", endpoint, body)
 
     try:
         res = requests.post(url, headers=headers, data=body)
         res.raise_for_status()
         print(f"✅ 종료 성공: {res.status_code} - {res.text}")
+    except requests.exceptions.HTTPError as e:
+        try:
+            print(f"❌ 종료 실패 (HTTP): {e.response.status_code} - {e.response.json()}")
+        except:
+            print(f"❌ 종료 실패 (HTTP): {e.response.status_code} - {e.response.text}")
     except Exception as e:
         print(f"❌ 종료 실패: {e}")
