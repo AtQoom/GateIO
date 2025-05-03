@@ -168,6 +168,8 @@ def check_tp_sl_loop():
             log_debug("❌ TP/SL 오류", str(e))
         time.sleep(3)
 
+import traceback  # 파일 상단에 추가
+
 @app.route("/", methods=["POST"])
 def webhook():
     global entry_price, entry_side
@@ -199,8 +201,10 @@ def webhook():
         log_debug("🧮 주문 계산", f"잔고: {equity}, 가격: {price}, 수량: {qty}")
         place_order(side, qty)
         return jsonify({"status": "주문 완료", "side": side, "qty": qty})
+    
     except Exception as e:
-        log_debug("❌ 웹훅 처리 예외", str(e))
+        error_details = traceback.format_exc()
+        log_debug("❌ 웹훅 처리 예외", f"{e}\n{error_details}")
         return jsonify({"error": "internal error"}), 500
 
 @app.route("/ping", methods=["GET"])
