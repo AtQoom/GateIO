@@ -4,7 +4,6 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# 환경 변수에서 API Key/Secret 불러오기
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 BASE_URL = "https://api.gateio.ws/api/v4"
@@ -17,38 +16,39 @@ RISK_PCT = 0.5
 
 entry_price = None
 entry_side = None
+time_offset = 0  # 서버 시간 오차(ms)
 
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-# Gate.io 서버 시간 동기화
-def get_server_timestamp():
+def sync_time_offset():
+    global time_offset
     try:
-        url = f"{BASE_URL}/spot/time"
-        r = requests.get(url, timeout=3)
+        r = requests.get(f"{BASE_URL}/spot/time", timeout=3)
         r.raise_for_status()
-        ts = str(r.json()["server_time"])
-        offset = int(ts) - int(time.time() * 1000)
-        log_debug("🕒 시간 동기화", f"offset: {offset}ms")
-        return ts
+        server_ms = int(r.json()["server_time"])
+        local_ms = int(time.time() * 1000)
+        time_offset = server_ms - local_ms
+        log_debug("🕒 시간 동기화", f"offset: {time_offset}ms")
     except Exception as e:
-        log_debug("⚠️ 시간 조회 실패", str(e))
-        return str(int(time.time() * 1000))
+        log_debug("❌ 시간 동기화 실패", str(e))
 
-# 요청 서명
+def get_timestamp():
+    return str(int(time.time() * 1000) + time_offset)
+
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
 
-def get_headers(method, endpoint, query="", body=""):
-    timestamp = get_server_timestamp()
-    hashed_payload = hashlib.sha512((body or "").encode()).hexdigest()
+def get_headers(method, endpoint, body="", query=""):
+    timestamp = get_timestamp()
     full_path = f"/api/v4{endpoint}"
-    sign_str = f"{method.upper()}\n{full_path}\n{query}\n{hashed_payload}\n{timestamp}"
-    signature = sign_request(API_SECRET, sign_str)
+    hashed_body = hashlib.sha512((body or "").encode()).hexdigest()
+    sign_str = f"{method.upper()}\n{full_path}\n{query}\n{hashed_body}\n{timestamp}"
+    sign = sign_request(API_SECRET, sign_str)
     return {
         "KEY": API_KEY,
         "Timestamp": timestamp,
-        "SIGN": signature,
+        "SIGN": sign,
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
@@ -56,7 +56,6 @@ def get_headers(method, endpoint, query="", body=""):
 def debug_api_response(name, response):
     log_debug(name, f"HTTP {response.status_code} - {response.text}")
 
-# 통합 계정 잔고 조회
 def get_equity():
     endpoint = "/unified/accounts"
     headers = get_headers("GET", endpoint)
@@ -64,14 +63,13 @@ def get_equity():
         r = requests.get(BASE_URL + endpoint, headers=headers)
         debug_api_response("잔고 조회", r)
         r.raise_for_status()
-        for asset in r.json()["assets"]:
-            if asset["currency"] == "USDT":
-                return float(asset["available"])
+        for item in r.json():
+            if item["currency"] == "USDT":
+                return float(item["available"])
     except Exception as e:
         log_debug("❌ 잔고 오류", str(e))
     return 0
 
-# 현재 시세 조회
 def get_market_price():
     endpoint = "/futures/usdt/tickers"
     headers = get_headers("GET", endpoint)
@@ -85,7 +83,6 @@ def get_market_price():
         log_debug("❌ 시세 오류", str(e))
     return 0
 
-# 현재 포지션 크기
 def get_position_size():
     endpoint = "/futures/usdt/positions"
     headers = get_headers("GET", endpoint)
@@ -100,7 +97,6 @@ def get_position_size():
         log_debug("❌ 포지션 오류", str(e))
     return 0
 
-# 주문 전송
 def place_order(side, qty=1, reduce_only=False):
     global entry_price, entry_side
     if reduce_only:
@@ -129,7 +125,7 @@ def place_order(side, qty=1, reduce_only=False):
     })
 
     endpoint = "/futures/usdt/orders"
-    headers = get_headers("POST", endpoint, body=body)
+    headers = get_headers("POST", endpoint, body)
 
     try:
         r = requests.post(BASE_URL + endpoint, headers=headers, data=body)
@@ -144,7 +140,6 @@ def place_order(side, qty=1, reduce_only=False):
     except Exception as e:
         log_debug("❌ 주문 예외", str(e))
 
-# TP/SL 감시 루프
 def check_tp_sl_loop():
     global entry_price, entry_side
     while True:
@@ -175,7 +170,6 @@ def check_tp_sl_loop():
             log_debug("❌ TP/SL 오류", str(e))
         time.sleep(3)
 
-# 웹훅 처리
 @app.route("/", methods=["POST"])
 def webhook():
     global entry_price, entry_side
@@ -211,12 +205,12 @@ def webhook():
         log_debug("❌ 웹훅 처리 예외", str(e))
         return jsonify({"error": "internal error"}), 500
 
-# UptimeRobot 핑 응답
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
 
 if __name__ == "__main__":
+    sync_time_offset()
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
     threading.Thread(target=check_tp_sl_loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=8081)
