@@ -4,48 +4,56 @@ from datetime import datetime
 
 app = Flask(__name__)
 
+# 환경변수 불러오기
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 BASE_URL = "https://api.gateio.ws/api/v4"
 SYMBOL = "SOL_USDT"
 
+# 설정
 MIN_ORDER_USDT = 3
 MIN_QTY = 1
 LEVERAGE = 1
 RISK_PCT = 0.5
+SERVER_TIME_OFFSET = 0  # 서버 시간과 로컬 시간의 차이(ms)
 
 entry_price = None
 entry_side = None
 
+# 로그 출력 함수
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-def get_server_time():
+# 서버 시간과 로컬 시간 차이 동기화
+def sync_server_time_offset():
+    global SERVER_TIME_OFFSET
     try:
         r = requests.get(f"{BASE_URL}/spot/time", timeout=3)
         r.raise_for_status()
         server_time = int(r.json()["server_time"]) * 1000
-        offset = server_time - int(time.time() * 1000)
-        log_debug("🕒 시간 동기화", f"offset: {offset}ms")
-        return server_time
+        local_time = int(time.time() * 1000)
+        SERVER_TIME_OFFSET = server_time - local_time
+        log_debug("🕒 시간 동기화", f"offset: {SERVER_TIME_OFFSET}ms")
     except Exception as e:
-        log_debug("❌ 서버 시간 오류", str(e))
-        return int(time.time() * 1000)
+        log_debug("❌ 시간 동기화 실패", str(e))
+        SERVER_TIME_OFFSET = 0
+
+def get_timestamp():
+    return str(int(time.time() * 1000) + SERVER_TIME_OFFSET)
 
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
 
-def get_headers(method, endpoint, body="", query=""):
-    timestamp = str(get_server_time())
+def get_headers(method, endpoint, query="", body=""):
+    timestamp = get_timestamp()
     full_path = f"/api/v4{endpoint}"
-    hashed_payload = hashlib.sha512(body.encode()).hexdigest() if body else ""
+    hashed_payload = hashlib.sha512((body or "").encode()).hexdigest()
     sign_str = f"{method.upper()}\n{full_path}\n{query}\n{hashed_payload}\n{timestamp}"
-    signature = sign_request(API_SECRET, sign_str)
-
+    sign = sign_request(API_SECRET, sign_str)
     return {
         "KEY": API_KEY,
         "Timestamp": timestamp,
-        "SIGN": signature,
+        "SIGN": sign,
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
@@ -122,7 +130,7 @@ def place_order(side, qty=1, reduce_only=False):
     })
 
     endpoint = "/futures/usdt/orders"
-    headers = get_headers("POST", endpoint, body)
+    headers = get_headers("POST", endpoint, body=body)
 
     try:
         r = requests.post(BASE_URL + endpoint, headers=headers, data=body)
@@ -207,6 +215,7 @@ def ping():
     return "pong", 200
 
 if __name__ == "__main__":
+    sync_server_time_offset()  # 서버 시작 시 시간 오프셋 동기화
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
     threading.Thread(target=check_tp_sl_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=8080)
