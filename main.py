@@ -114,8 +114,12 @@ def place_order(side, qty, reduce_only=False):
             if not reduce_only:
                 entry_price = price
                 entry_side = side
-        else:
-            print(f"❌ 주문 실패: {res.status_code} - {res.text}")
+                else:
+            try:
+                error = res.json()
+                print(f"❌ 주문 실패: {res.status_code} - {error.get('message', res.text)} | label: {error.get('label')}")
+            except:
+                print(f"❌ 주문 실패: {res.status_code} - {res.text}")
     except Exception as e:
         print(f"[오류] 주문 전송 실패: {e}")
 
