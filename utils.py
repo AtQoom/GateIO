@@ -9,7 +9,7 @@ from config import BASE_URL, API_KEY, API_SECRET, SYMBOL
 # ✅ 서버 시간
 def get_timestamp():
     try:
-        res = requests.get("https://api.gateio.ws/api/v4/time", timeout=2)  # ✅ 여기가 중요!
+        res = requests.get("https://fx-api.gateio.ws/api/v4/time", timeout=2)  # 🔁 여기!
         res.raise_for_status()
         return str(res.json()["server_time"])
     except Exception as e:
