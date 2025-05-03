@@ -1,4 +1,3 @@
-
 import os, time, json, hmac, hashlib, requests, threading
 from flask import Flask, request, jsonify
 from datetime import datetime
@@ -21,82 +20,62 @@ entry_side = None
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-def get_server_timestamp():
-    try:
-        r = requests.get(f"{BASE_URL}/spot/time", timeout=3)
-        r.raise_for_status()
-        server_time = int(r.json().get("serverTime", time.time() * 1000))
-        offset = server_time - int(time.time() * 1000)
-        log_debug("⏱️ 시간 동기화", f"offset: {offset}ms")
-        return str(server_time)
-    except Exception as e:
-        log_debug("❌ 시간 조회 실패", str(e))
-        return str(int(time.time() * 1000))
+def get_timestamp():
+    return str(int(time.time() * 1000))
 
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
 
-def safe_request(method, url, **kwargs):
-    for i in range(3):  # 최대 3회 재시도
-        try:
-            r = requests.request(method, url, timeout=5, **kwargs)
-            if r.status_code == 503:
-                log_debug("⏳ 재시도", f"{url} - 503 오류 발생, {i+1}/3회 재시도")
-                time.sleep(3)
-                continue
-            return r
-        except Exception as e:
-            log_debug("❌ 요청 실패", str(e))
-    return None
+def get_headers(method, endpoint, body="", query_string=""):
+    timestamp = get_timestamp()
+    hashed_body = hashlib.sha512(body.encode()).hexdigest() if body else ""
+    sign_str = f"{method.upper()}\n/api/v4{endpoint}\n{query_string}\n{hashed_body}\n{timestamp}"
+    signature = sign_request(API_SECRET, sign_str)
 
-def get_headers(method, endpoint, body="", query=""):
-    timestamp = get_server_timestamp()
-    full_path = f"/api/v4{endpoint}"
-    hashed_body = hashlib.sha512((body or "").encode()).hexdigest()
-    sign_str = f"{method.upper()}\n{full_path}\n{query}\n{hashed_body}\n{timestamp}"
-    sign = sign_request(API_SECRET, sign_str)
     return {
         "KEY": API_KEY,
         "Timestamp": timestamp,
-        "SIGN": sign,
+        "SIGN": signature,
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
 
-def debug_api_response(name, response):
-    if response:
-        log_debug(name, f"HTTP {response.status_code} - {response.text}")
-    else:
-        log_debug(name, "응답 없음 (None)")
-
 def get_equity():
     endpoint = "/futures/usdt/accounts"
     headers = get_headers("GET", endpoint)
-    r = safe_request("GET", BASE_URL + endpoint, headers=headers)
-    debug_api_response("잔고 조회", r)
-    if r and r.status_code == 200:
-        return float(r.json().get("available", 0))
+    try:
+        r = requests.get(BASE_URL + endpoint, headers=headers)
+        log_debug("💰 잔고 응답", f"{r.status_code} - {r.text}")
+        r.raise_for_status()
+        return float(r.json()["available"])
+    except Exception as e:
+        log_debug("❌ 잔고 오류", str(e))
     return 0
 
 def get_market_price():
     endpoint = "/futures/usdt/tickers"
-    headers = get_headers("GET", endpoint)
-    r = safe_request("GET", BASE_URL + endpoint, headers=headers)
-    if r and r.status_code == 200:
+    try:
+        r = requests.get(BASE_URL + endpoint)
+        r.raise_for_status()
         for item in r.json():
-            if item.get("contract") == SYMBOL:
-                return float(item.get("last", 0))
+            if item["contract"] == SYMBOL:
+                return float(item["last"])
+    except Exception as e:
+        log_debug("❌ 시세 오류", str(e))
     return 0
 
 def get_position_size():
     endpoint = "/futures/usdt/positions"
     headers = get_headers("GET", endpoint)
-    r = safe_request("GET", BASE_URL + endpoint, headers=headers)
-    debug_api_response("포지션 조회", r)
-    if r and r.status_code == 200:
+    try:
+        r = requests.get(BASE_URL + endpoint, headers=headers)
+        log_debug("📦 포지션 응답", f"{r.status_code} - {r.text}")
+        r.raise_for_status()
         for item in r.json():
-            if item.get("contract") == SYMBOL:
-                return float(item.get("size", 0))
+            if item["contract"] == SYMBOL:
+                return float(item["size"])
+    except Exception as e:
+        log_debug("❌ 포지션 오류", str(e))
     return 0
 
 def place_order(side, qty=1, reduce_only=False):
@@ -128,15 +107,19 @@ def place_order(side, qty=1, reduce_only=False):
 
     endpoint = "/futures/usdt/orders"
     headers = get_headers("POST", endpoint, body)
-    r = safe_request("POST", BASE_URL + endpoint, headers=headers, data=body)
-    debug_api_response("주문 전송", r)
-    if r and r.status_code == 200:
-        log_debug("✅ 주문 성공", f"{side.upper()} {qty}개")
-        if not reduce_only:
-            entry_price = price
-            entry_side = side
-    else:
-        log_debug("❌ 주문 실패", r.text if r else "응답 없음")
+
+    try:
+        r = requests.post(BASE_URL + endpoint, headers=headers, data=body)
+        log_debug("📤 주문 응답", f"{r.status_code} - {r.text}")
+        if r.status_code == 200:
+            log_debug("✅ 주문 성공", f"{side.upper()} {qty}개")
+            if not reduce_only:
+                entry_price = price
+                entry_side = side
+        else:
+            log_debug("❌ 주문 실패", r.text)
+    except Exception as e:
+        log_debug("❌ 주문 예외", str(e))
 
 def check_tp_sl_loop():
     global entry_price, entry_side
@@ -208,6 +191,8 @@ def ping():
     return "pong", 200
 
 if __name__ == "__main__":
+    offset = int(requests.get("http://worldtimeapi.org/api/timezone/Etc/UTC").json()["unixtime"]) - int(time.time())
+    log_debug("⏱️ 시간 동기화", f"offset: {offset}ms")
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
     threading.Thread(target=check_tp_sl_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=8080)
