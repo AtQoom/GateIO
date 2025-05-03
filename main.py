@@ -4,17 +4,15 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# 환경 변수
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 BASE_URL = "https://api.gateio.ws/api/v4"
 SYMBOL = "SOL_USDT"
 
-# 설정 값
 MIN_ORDER_USDT = 3
 MIN_QTY = 1
 LEVERAGE = 1
-RISK_PCT = 0.5
+RISK_PCT = 0.16
 
 entry_price = None
 entry_side = None
@@ -22,21 +20,16 @@ entry_side = None
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-def get_server_timestamp():
-    try:
-        r = requests.get(f"{BASE_URL}/futures/usdt/time", timeout=3)
-        r.raise_for_status()
-        return str(r.json()["server_time"])
-    except Exception as e:
-        log_debug("❌ 시간 오류", str(e))
-        return str(int(time.time()))
+def get_timestamp():
+    return str(int(time.time()))
 
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
 
 def get_headers(method, endpoint, body=""):
-    timestamp = get_server_timestamp()
+    timestamp = get_timestamp()
     hashed_payload = hashlib.sha512(body.encode()).hexdigest() if body else ""
+    # ✅ Gate.io 문서 기준: endpoint는 path만 포함해야 함!
     sign_str = f"{method}\n{endpoint}\n\n{hashed_payload}\n{timestamp}"
     signature = sign_request(API_SECRET, sign_str)
     return {
