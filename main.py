@@ -1,17 +1,16 @@
-# main.py
 import os, time, json, hmac, hashlib, requests, threading
 from flask import Flask, request, jsonify
 from datetime import datetime
 
 app = Flask(__name__)
 
-# ✅ 환경변수에서 API 정보 불러오기
+# 🔐 환경 변수에서 API KEY 로드
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 BASE_URL = "https://api.gateio.ws/api/v4"
-SYMBOL = "SOL_USDT"
+SYMBOL = "SOL_USDT"  # 원하는 심볼로 변경 가능
 
-# 기본 설정
+# ⚙️ 기본 설정
 MIN_ORDER_USDT = 3
 MIN_QTY = 1
 LEVERAGE = 1
@@ -23,9 +22,10 @@ entry_side = None
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
+# ✅ 반드시 /spot/time 사용해야 함
 def get_server_timestamp():
     try:
-        r = requests.get(f"{BASE_URL}/futures/usdt/time", timeout=3)
+        r = requests.get(f"{BASE_URL}/spot/time", timeout=3)
         r.raise_for_status()
         return str(r.json()["server_time"])
     except Exception as e:
