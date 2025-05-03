@@ -4,17 +4,17 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# 🔐 환경 변수에서 API KEY 로드
+# 환경 변수
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 BASE_URL = "https://api.gateio.ws/api/v4"
-SYMBOL = "SOL_USDT"  # 원하는 심볼로 변경 가능
+SYMBOL = "SOL_USDT"
 
-# ⚙️ 기본 설정
+# 설정 값
 MIN_ORDER_USDT = 3
 MIN_QTY = 1
 LEVERAGE = 1
-RISK_PCT = 0.16
+RISK_PCT = 0.5
 
 entry_price = None
 entry_side = None
@@ -22,14 +22,13 @@ entry_side = None
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-# ✅ 반드시 /spot/time 사용해야 함
 def get_server_timestamp():
     try:
-        r = requests.get(f"{BASE_URL}/spot/time", timeout=3)
+        r = requests.get(f"{BASE_URL}/futures/usdt/time", timeout=3)
         r.raise_for_status()
         return str(r.json()["server_time"])
     except Exception as e:
-        log_debug("❌ 시간 조회 실패", str(e))
+        log_debug("❌ 시간 오류", str(e))
         return str(int(time.time()))
 
 def sign_request(secret, payload: str):
@@ -61,7 +60,7 @@ def get_equity():
         return float(r.json()["available"])
     except Exception as e:
         log_debug("❌ 잔고 오류", str(e))
-        return 0
+    return 0
 
 def get_market_price():
     endpoint = "/futures/usdt/tickers"
@@ -197,6 +196,10 @@ def webhook():
     except Exception as e:
         log_debug("❌ 웹훅 처리 예외", str(e))
         return jsonify({"error": "internal error"}), 500
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    return "pong", 200
 
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
