@@ -12,7 +12,7 @@ BASE_URL = "https://api.gateio.ws/api/v4"
 SYMBOL = "SOL_USDT"
 MIN_ORDER_USDT = 3
 MIN_QTY = 1
-LEVERAGE = 6
+LEVERAGE = 1
 RISK_PCT = 0.16
 
 entry_price = None
