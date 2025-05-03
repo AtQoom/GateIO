@@ -1,4 +1,3 @@
-
 import os, time, json, hmac, hashlib, requests, threading
 from flask import Flask, request, jsonify
 from datetime import datetime
@@ -37,7 +36,7 @@ def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
 
 def safe_request(method, url, **kwargs):
-    for i in range(3):  # 최대 3회 재시도
+    for i in range(3):
         try:
             r = requests.request(method, url, timeout=5, **kwargs)
             if r.status_code == 503:
@@ -70,12 +69,12 @@ def debug_api_response(name, response):
         log_debug(name, "응답 없음 (None)")
 
 def get_equity():
-    endpoint = "/futures/usdt/accounts"
+    endpoint = "/unified/accounts"
     headers = get_headers("GET", endpoint)
     r = safe_request("GET", BASE_URL + endpoint, headers=headers)
     debug_api_response("잔고 조회", r)
     if r and r.status_code == 200:
-        return float(r.json().get("available", 0))
+        return float(r.json()[0].get("available", 0))
     return 0
 
 def get_market_price():
@@ -89,7 +88,7 @@ def get_market_price():
     return 0
 
 def get_position_size():
-    endpoint = "/futures/usdt/positions"
+    endpoint = "/unified/positions"
     headers = get_headers("GET", endpoint)
     r = safe_request("GET", BASE_URL + endpoint, headers=headers)
     debug_api_response("포지션 조회", r)
@@ -126,7 +125,7 @@ def place_order(side, qty=1, reduce_only=False):
         "close": reduce_only
     })
 
-    endpoint = "/futures/usdt/orders"
+    endpoint = "/unified/orders"
     headers = get_headers("POST", endpoint, body)
     r = safe_request("POST", BASE_URL + endpoint, headers=headers, data=body)
     debug_api_response("주문 전송", r)
@@ -168,7 +167,7 @@ def check_tp_sl_loop():
             log_debug("❌ TP/SL 오류", str(e))
         time.sleep(3)
 
-import traceback  # 파일 상단에 추가
+import traceback
 
 @app.route("/", methods=["POST"])
 def webhook():
@@ -201,7 +200,7 @@ def webhook():
         log_debug("🧮 주문 계산", f"잔고: {equity}, 가격: {price}, 수량: {qty}")
         place_order(side, qty)
         return jsonify({"status": "주문 완료", "side": side, "qty": qty})
-    
+
     except Exception as e:
         error_details = traceback.format_exc()
         log_debug("❌ 웹훅 처리 예외", f"{e}\n{error_details}")
