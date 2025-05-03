@@ -21,7 +21,12 @@ def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
 def get_timestamp():
-    return str(int(time.time() * 1000))  # ✅ 밀리초 단위
+    try:
+        r = requests.get("https://api.gateio.ws/api/v4/spot/time", timeout=3)
+        return str(r.json()['server_time'])
+    except Exception as e:
+        log_debug("⚠️ 시간 동기화 실패", f"{e} (로컬 시간 사용)")
+        return str(int(time.time()))
 
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
@@ -31,7 +36,6 @@ def get_headers(method, endpoint, body="", query_string=""):
     hashed_body = hashlib.sha512(body.encode()).hexdigest() if body else ""
     sign_str = f"{method}\n{endpoint}\n{query_string}\n{hashed_body}\n{timestamp}"
     signature = sign_request(API_SECRET, sign_str)
-
     return {
         "KEY": API_KEY,
         "Timestamp": timestamp,
