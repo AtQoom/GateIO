@@ -1,7 +1,6 @@
 import os, time, json, hmac, hashlib, requests, threading
 from flask import Flask, request, jsonify
 from datetime import datetime
-import traceback
 
 app = Flask(__name__)
 
@@ -70,12 +69,14 @@ def debug_api_response(name, response):
         log_debug(name, "응답 없음 (None)")
 
 def get_equity():
-    endpoint = "/futures/usdt/accounts"
+    endpoint = "/unified/accounts"
     headers = get_headers("GET", endpoint)
     r = safe_request("GET", BASE_URL + endpoint, headers=headers)
     debug_api_response("잔고 조회", r)
     if r and r.status_code == 200:
-        return float(r.json().get("available", 0))
+        for asset in r.json().get("assets", []):
+            if asset.get("currency") == "USDT":
+                return float(asset.get("available", 0))
     return 0
 
 def get_market_price():
@@ -89,24 +90,23 @@ def get_market_price():
     return 0
 
 def get_position_size():
-    endpoint = "/futures/usdt/positions"
+    endpoint = "/unified/positions"
     headers = get_headers("GET", endpoint)
     r = safe_request("GET", BASE_URL + endpoint, headers=headers)
     debug_api_response("포지션 조회", r)
     if r and r.status_code == 200:
         for item in r.json():
-            if item.get("contract") == SYMBOL:
+            if item.get("symbol") == SYMBOL:
                 return float(item.get("size", 0))
     return 0
 
 def place_order(side, qty=1, reduce_only=False):
     global entry_price, entry_side
-
-    position_size = get_position_size()
-
-    if reduce_only and position_size <= 0:
-        log_debug("⛔ 종료 스킵", "포지션 없음")
-        return
+    if reduce_only:
+        qty = get_position_size()
+        if qty <= 0:
+            log_debug("⛔ 종료 스킵", "포지션 없음")
+            return
 
     price = get_market_price()
     if price == 0:
@@ -117,21 +117,16 @@ def place_order(side, qty=1, reduce_only=False):
         log_debug("❌ 주문 금액 부족", f"{qty * price:.2f} < {MIN_ORDER_USDT}")
         return
 
-    body_data = {
-        "contract": SYMBOL,
+    body = json.dumps({
+        "symbol": SYMBOL,
         "size": qty,
         "price": 0,
         "side": side,
-        "tif": "ioc",
-        "text": f"order_{int(time.time())}"
-    }
+        "order_type": "market",
+        "reduce_only": reduce_only
+    })
 
-    if reduce_only:
-        body_data.update({"reduce_only": True, "close": True})
-
-    body = json.dumps(body_data)
-
-    endpoint = "/futures/usdt/orders"
+    endpoint = "/unified/orders"
     headers = get_headers("POST", endpoint, body)
     r = safe_request("POST", BASE_URL + endpoint, headers=headers, data=body)
     debug_api_response("주문 전송", r)
@@ -172,6 +167,8 @@ def check_tp_sl_loop():
         except Exception as e:
             log_debug("❌ TP/SL 오류", str(e))
         time.sleep(3)
+
+import traceback
 
 @app.route("/", methods=["POST"])
 def webhook():
