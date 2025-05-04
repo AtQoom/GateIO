@@ -74,9 +74,9 @@ def get_equity():
     r = safe_request("GET", BASE_URL + endpoint, headers=headers)
     debug_api_response("잔고 조회", r)
     if r and r.status_code == 200:
-        for asset in r.json().get("assets", []):
-            if asset.get("currency") == "USDT":
-                return float(asset.get("available", 0))
+        usdt = next((a for a in r.json() if a["currency"] == "USDT"), None)
+        if usdt:
+            return float(usdt.get("available", 0))
     return 0
 
 def get_market_price():
@@ -119,9 +119,8 @@ def place_order(side, qty=1, reduce_only=False):
 
     body = json.dumps({
         "symbol": SYMBOL,
-        "size": qty,
-        "price": 0,
         "side": side,
+        "size": qty,
         "order_type": "market",
         "reduce_only": reduce_only
     })
@@ -168,8 +167,6 @@ def check_tp_sl_loop():
             log_debug("❌ TP/SL 오류", str(e))
         time.sleep(3)
 
-import traceback
-
 @app.route("/", methods=["POST"])
 def webhook():
     global entry_price, entry_side
@@ -201,8 +198,9 @@ def webhook():
         log_debug("🧮 주문 계산", f"잔고: {equity}, 가격: {price}, 수량: {qty}")
         place_order(side, qty)
         return jsonify({"status": "주문 완료", "side": side, "qty": qty})
-
+    
     except Exception as e:
+        import traceback
         error_details = traceback.format_exc()
         log_debug("❌ 웹훅 처리 예외", f"{e}\n{error_details}")
         return jsonify({"error": "internal error"}), 500
