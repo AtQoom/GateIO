@@ -4,7 +4,7 @@ import time
 import threading
 from datetime import datetime
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
+from gate_api import ApiClient, Configuration, FuturesApi, UserApi, FuturesOrder
 from gate_api.exceptions import ApiException
 
 app = Flask(__name__)
@@ -21,6 +21,7 @@ RISK_PCT = 0.5
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api_instance = FuturesApi(client)
+user_api = UserApi(client)  # ✅ 유저 API 추가
 
 entry_price = None
 entry_side = None
@@ -30,9 +31,12 @@ def log_debug(title, content):
 
 def get_equity():
     try:
-        account = api_instance.get_futures_account(settle=SETTLE)
-        log_debug("잔고 조회", account.to_dict())
-        return float(account.available)
+        balances = user_api.get_wallet_balance(SETTLE)  # ✅ 유저 지갑 조회
+        for b in balances:
+            if b.currency == SETTLE:
+                log_debug("잔고 조회", b.to_dict())
+                return float(b.available)
+        return 0
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
         return 0
@@ -48,7 +52,7 @@ def get_position_size():
 
 def get_market_price():
     try:
-        ticker = api_instance.get_futures_ticker(SETTLE, SYMBOL)
+        ticker = api_instance.get_futures_ticker(SYMBOL, SETTLE)  # ✅ 순서 수정
         return float(ticker.last)
     except ApiException as e:
         log_debug("❌ 시세 조회 실패", f"{e.status} - {e.body}")
@@ -78,7 +82,6 @@ def place_order(side, qty=1, reduce_only=False):
     except Exception as e:
         log_debug("❌ 예외 발생", str(e))
 
-
 def check_tp_sl_loop():
     global entry_price, entry_side
     while True:
@@ -99,7 +102,6 @@ def check_tp_sl_loop():
         except Exception as e:
             log_debug("❌ TP/SL 오류", str(e))
         time.sleep(3)
-
 
 @app.route("/", methods=["POST"])
 def webhook():
@@ -137,11 +139,9 @@ def webhook():
         log_debug("❌ 웹훅 처리 실패", str(e))
         return jsonify({"error": "서버 오류"}), 500
 
-
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
-
 
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
