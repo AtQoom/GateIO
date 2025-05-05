@@ -7,7 +7,6 @@ import websockets
 from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
-from gate_api.exceptions import ApiException
 
 app = Flask(__name__)
 
@@ -18,12 +17,10 @@ SETTLE = "usdt"
 RISK_PCT = 1.0
 MIN_QTY = 1
 
-# API 세팅
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api_instance = FuturesApi(client)
 
-# 상태 변수
 entry_price = None
 entry_side = None
 peak_price = None
@@ -35,7 +32,6 @@ def log_debug(title, content):
 def get_equity():
     try:
         accounts = api_instance.list_futures_accounts(settle=SETTLE)
-        log_debug("잔고 조회", accounts.to_dict())
         return float(accounts.available)
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
@@ -48,8 +44,8 @@ def get_market_price():
             if t.contract == SYMBOL:
                 return float(t.last)
         return 0
-    except ApiException as e:
-        log_debug("❌ 시세 조회 실패", f"{e.status} - {e.body}")
+    except Exception as e:
+        log_debug("❌ 시세 조회 실패", str(e))
         return 0
 
 def place_order(side, qty=1, reduce_only=False):
@@ -76,14 +72,31 @@ def get_trailing_pct(profit_ratio):
     elif profit_ratio >= 0.03:
         return 0.015
     elif profit_ratio >= 0.02:
-        return 0.012
+        return 0.010
     elif profit_ratio >= 0.01:
-        return 0.009
+        return 0.008
     else:
         return 0.006
 
-async def price_listener():
+def update_position_state():
     global entry_price, entry_side, peak_price, floor_price
+    try:
+        pos = api_instance.get_position(SETTLE, SYMBOL)
+        size = float(pos.size)
+        if size > 0:
+            entry_price = float(pos.entry_price)
+            entry_side = "buy"
+            peak_price = entry_price if peak_price is None else max(peak_price, entry_price)
+        elif size < 0:
+            entry_price = float(pos.entry_price)
+            entry_side = "sell"
+            floor_price = entry_price if floor_price is None else min(floor_price, entry_price)
+        else:
+            entry_price, entry_side, peak_price, floor_price = None, None, None, None
+    except Exception as e:
+        log_debug("❌ 포지션 감지 실패", str(e))
+
+async def price_listener():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     async with websockets.connect(uri) as ws:
         await ws.send(json.dumps({
@@ -97,10 +110,12 @@ async def price_listener():
             data = json.loads(msg)
             if 'result' in data and isinstance(data['result'], dict):
                 price = float(data['result'].get("last", 0))
+                update_position_state()
                 if not (entry_price and entry_side):
                     continue
 
                 if entry_side == "buy":
+                    global peak_price
                     peak_price = max(peak_price, price)
                     profit_ratio = (peak_price / entry_price) - 1
                     trail_pct = get_trailing_pct(profit_ratio)
@@ -111,11 +126,12 @@ async def price_listener():
                         place_order("sell", reduce_only=True)
                         entry_price, entry_side = None, None
                     elif price <= trail_price:
-                        log_debug("🐾 롱 트레일링 청산", f"{price=}, trail={trail_price}, peak={peak_price}")
+                        log_debug("🐾 롱 트레일링 청산", f"{price=}, trail={trail_price}")
                         place_order("sell", reduce_only=True)
                         entry_price, entry_side = None, None
 
                 elif entry_side == "sell":
+                    global floor_price
                     floor_price = min(floor_price, price)
                     profit_ratio = (entry_price / floor_price) - 1
                     trail_pct = get_trailing_pct(profit_ratio)
@@ -126,7 +142,7 @@ async def price_listener():
                         place_order("buy", reduce_only=True)
                         entry_price, entry_side = None, None
                     elif price >= trail_price:
-                        log_debug("🐾 숏 트레일링 청산", f"{price=}, trail={trail_price}, floor={floor_price}")
+                        log_debug("🐾 숏 트레일링 청산", f"{price=}, trail={trail_price}")
                         place_order("buy", reduce_only=True)
                         entry_price, entry_side = None, None
 
@@ -141,8 +157,6 @@ def webhook():
     try:
         data = request.get_json(force=True)
         signal = data.get("side", "").lower()
-        log_debug("📨 웹훅 수신", json.dumps(data))
-
         if signal not in ["long", "short"]:
             return jsonify({"error": "invalid signal"}), 400
 
@@ -157,7 +171,6 @@ def webhook():
             return jsonify({"error": "잔고 또는 시세 오류"}), 500
 
         qty = max(int(equity * RISK_PCT / price), MIN_QTY)
-        log_debug("🧮 주문 계산", f"잔고: {equity}, 가격: {price}, 수량: {qty}")
         side = "buy" if signal == "long" else "sell"
         place_order(side, qty)
         return jsonify({"status": "주문 완료", "side": side, "qty": qty})
