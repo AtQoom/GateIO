@@ -73,7 +73,7 @@ def place_order(side, qty=1.0, reduce_only=False):
 
 async def price_listener():
     global entry_price, entry_side
-    uri = "wss://fx-ws.gate.io/v4/ws/usdt"
+    uri = "wss://api.gate.io/ws/v4/"
     async with websockets.connect(uri) as ws:
         await ws.send(json.dumps({
             "time": int(time.time()),
@@ -87,15 +87,16 @@ async def price_listener():
             if 'result' in data and isinstance(data['result'], dict):
                 price = float(data['result'].get("last", 0))
                 if entry_price and entry_side:
+                    # TP/SL 조건 (롱: +2.2%, -0.6%) (숏: -2.2%, +0.6%)
                     if entry_side == "buy":
                         if price >= entry_price * 1.022 or price <= entry_price * 0.994:
-                            log_debug("🎯 롱 TP/SL", f"price={price}, entry_price={entry_price}")
+                            log_debug("🎯 롱 TP/SL", f"{price=}, {entry_price=}")
                             place_order("sell", reduce_only=True)
                             entry_price = None
                             entry_side = None
                     elif entry_side == "sell":
                         if price <= entry_price * 0.978 or price >= entry_price * 1.006:
-                            log_debug("🎯 숏 TP/SL", f"price={price}, entry_price={entry_price}")
+                            log_debug("🎯 숏 TP/SL", f"{price=}, {entry_price=}")
                             place_order("buy", reduce_only=True)
                             entry_price = None
                             entry_side = None
