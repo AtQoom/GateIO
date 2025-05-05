@@ -30,13 +30,18 @@ def log_debug(title, content):
 
 def get_equity():
     try:
-        account = api_instance.get_futures_account(SETTLE)
-        log_debug("잔고 조회", account.to_dict())
-        return float(account.available)
+        accounts = api_instance.list_futures_accounts(SETTLE)
+        account = next((acc for acc in accounts if acc.currency == "USDT"), None)
+        if account:
+            log_debug("잔고 조회", account.to_dict())
+            return float(account.available)
+        else:
+            log_debug("❌ 잔고 조회 실패", "USDT 잔고 없음")
+            return 0
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
         return 0
-
+        
 def get_position_size():
     try:
         position = api_instance.get_futures_position(SETTLE, SYMBOL)
@@ -48,12 +53,16 @@ def get_position_size():
 
 def get_market_price():
     try:
-        ticker = api_instance.get_futures_ticker(SETTLE, SYMBOL)
-        return float(ticker.last)
+        tickers = api_instance.list_futures_tickers(SETTLE)
+        for t in tickers:
+            if t.contract == SYMBOL:
+                return float(t.last)
+        log_debug("❌ 가격 조회 실패", f"{SYMBOL} 시세 없음")
+        return 0
     except Exception as e:
         log_debug("❌ 가격 조회 실패", str(e))
         return 0
-
+        
 def place_order(side, qty=1, reduce_only=False):
     global entry_price, entry_side
     try:
