@@ -30,18 +30,13 @@ def log_debug(title, content):
 
 def get_equity():
     try:
-        accounts = api_instance.list_futures_accounts(SETTLE)
-        account = next((acc for acc in accounts if acc.currency == "USDT"), None)
-        if account:
-            log_debug("잔고 조회", account.to_dict())
-            return float(account.available)
-        else:
-            log_debug("❌ 잔고 조회 실패", "USDT 잔고 없음")
-            return 0
+        account = api_instance.get_futures_account(SETTLE)
+        log_debug("잔고 조회", account.to_dict())
+        return float(account.available)
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
         return 0
-        
+
 def get_position_size():
     try:
         position = api_instance.get_futures_position(SETTLE, SYMBOL)
