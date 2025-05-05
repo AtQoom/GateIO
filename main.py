@@ -15,7 +15,7 @@ API_SECRET = os.environ.get("API_SECRET", "")
 SYMBOL = "SOL_USDT"
 SETTLE = "usdt"
 MIN_QTY = 1
-RISK_PCT = 0.5
+RISK_PCT = 1.0
 
 # API 초기화
 config = Configuration(key=API_KEY, secret=API_SECRET)
