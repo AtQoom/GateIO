@@ -221,5 +221,5 @@ def ping():
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
     threading.Thread(target=check_tp_sl_loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=8081)
 
