@@ -1,12 +1,6 @@
-from datetime import datetime
-import os
-import json
-import hmac
-import time
-import hashlib
-import threading
-import requests
+import os, time, json, hmac, hashlib, requests, threading
 from flask import Flask, request, jsonify
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -59,11 +53,16 @@ def get_headers(method, endpoint, body="", query=""):
     timestamp = get_server_timestamp()
     full_path = f"/api/v4{endpoint}"
     hashed_body = hashlib.sha512((body or "").encode()).hexdigest()
-    sign_str = f"{method.upper()}\n{full_path}\n{query}\n{hashed_body}\n{timestamp}"
-{full_path}
-{query}
-{hashed_body}
-{timestamp}
+
+    # ✨ 수정된 안전한 f-string
+    sign_str = (
+        f"{method.upper()}\n"
+        f"{full_path}\n"
+        f"{query}\n"
+        f"{hashed_body}\n"
+        f"{timestamp}"
+    )
+
     sign = sign_request(API_SECRET, sign_str)
     return {
         "KEY": API_KEY,
@@ -134,7 +133,7 @@ def place_order(side, qty=1, reduce_only=False):
         "size": size,
         "price": 0,
         "tif": "ioc",
-        "reduce_only": str(reduce_only).lower()
+        "reduce_only": reduce_only  # ← 이 값도 boolean 그대로 유지
     })
 
     endpoint = f"/futures/{SETTLE}/orders"
