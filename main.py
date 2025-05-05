@@ -4,7 +4,7 @@ import time
 import threading
 from datetime import datetime
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, UserApi, FuturesOrder
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 from gate_api.exceptions import ApiException
 
 app = Flask(__name__)
@@ -21,7 +21,6 @@ RISK_PCT = 0.5
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api_instance = FuturesApi(client)
-user_api = UserApi(client)  # ✅ 유저 API 추가
 
 entry_price = None
 entry_side = None
@@ -31,11 +30,11 @@ def log_debug(title, content):
 
 def get_equity():
     try:
-        balances = user_api.get_wallet_balance(SETTLE)  # ✅ 유저 지갑 조회
-        for b in balances:
-            if b.currency == SETTLE:
-                log_debug("잔고 조회", b.to_dict())
-                return float(b.available)
+        accounts = api_instance.list_futures_accounts()
+        for acc in accounts:
+            if acc.settle == SETTLE:
+                log_debug("잔고 조회", acc.to_dict())
+                return float(acc.available)
         return 0
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
@@ -52,7 +51,7 @@ def get_position_size():
 
 def get_market_price():
     try:
-        ticker = api_instance.get_futures_ticker(SYMBOL, SETTLE)  # ✅ 순서 수정
+        ticker = api_instance.get_futures_ticker(SYMBOL, SETTLE)
         return float(ticker.last)
     except ApiException as e:
         log_debug("❌ 시세 조회 실패", f"{e.status} - {e.body}")
