@@ -1,4 +1,10 @@
-import os, time, json, hmac, hashlib, requests, threading
+import os
+import time
+import json
+import hmac
+import hashlib
+import requests
+import threading
 from flask import Flask, request, jsonify
 from datetime import datetime
 
@@ -35,19 +41,6 @@ def get_server_timestamp():
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
 
-def safe_request(method, url, **kwargs):
-    for i in range(3):
-        try:
-            r = requests.request(method, url, timeout=5, **kwargs)
-            if r.status_code == 503:
-                log_debug("⏳ 재시도", f"{url} - 503 오류 발생, {i+1}/3회 재시도")
-                time.sleep(3)
-                continue
-            return r
-        except Exception as e:
-            log_debug("❌ 요청 실패", str(e))
-    return None
-
 def get_headers(method, endpoint, body="", query=""):
     timestamp = get_server_timestamp()
     full_path = f"/api/v4{endpoint}"
@@ -62,6 +55,19 @@ def get_headers(method, endpoint, body="", query=""):
         "Accept": "application/json"
     }
 
+def safe_request(method, url, **kwargs):
+    for i in range(3):
+        try:
+            r = requests.request(method, url, timeout=5, **kwargs)
+            if r.status_code == 503:
+                log_debug("⏳ 재시도", f"{url} - 503 오류 발생, {i+1}/3회 재시도")
+                time.sleep(3)
+                continue
+            return r
+        except Exception as e:
+            log_debug("❌ 요청 실패", str(e))
+    return None
+
 def debug_api_response(name, response):
     if response:
         log_debug(name, f"HTTP {response.status_code} - {response.text}")
@@ -74,9 +80,9 @@ def get_equity():
     r = safe_request("GET", BASE_URL + endpoint, headers=headers)
     debug_api_response("잔고 조회", r)
     if r and r.status_code == 200:
-        usdt = next((a for a in r.json() if a["currency"] == "USDT"), None)
-        if usdt:
-            return float(usdt.get("available", 0))
+        for acc in r.json():
+            if acc.get("currency") == "USDT":
+                return float(acc.get("available", 0))
     return 0
 
 def get_market_price():
@@ -90,13 +96,13 @@ def get_market_price():
     return 0
 
 def get_position_size():
-    endpoint = "/unified/positions"
+    endpoint = f"/unified/positions"
     headers = get_headers("GET", endpoint)
     r = safe_request("GET", BASE_URL + endpoint, headers=headers)
     debug_api_response("포지션 조회", r)
     if r and r.status_code == 200:
         for item in r.json():
-            if item.get("symbol") == SYMBOL:
+            if item.get("contract") == SYMBOL:
                 return float(item.get("size", 0))
     return 0
 
@@ -118,11 +124,14 @@ def place_order(side, qty=1, reduce_only=False):
         return
 
     body = json.dumps({
-        "symbol": SYMBOL,
-        "side": side,
+        "contract": SYMBOL,
         "size": qty,
-        "order_type": "market",
-        "reduce_only": reduce_only
+        "price": 0,
+        "side": side,
+        "tif": "ioc",
+        "reduce_only": reduce_only,
+        "auto_size": "",  # 필수 항목 아님
+        "close": reduce_only
     })
 
     endpoint = "/unified/orders"
@@ -198,7 +207,7 @@ def webhook():
         log_debug("🧮 주문 계산", f"잔고: {equity}, 가격: {price}, 수량: {qty}")
         place_order(side, qty)
         return jsonify({"status": "주문 완료", "side": side, "qty": qty})
-    
+
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
@@ -213,3 +222,4 @@ if __name__ == "__main__":
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
     threading.Thread(target=check_tp_sl_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=8080)
+
