@@ -59,7 +59,11 @@ def get_headers(method, endpoint, body="", query=""):
     timestamp = get_server_timestamp()
     full_path = f"/api/v4{endpoint}"
     hashed_body = hashlib.sha512((body or "").encode()).hexdigest()
-    sign_str = f"{method.upper()}\n{full_path}\n{query}\n{hashed_body}\n{timestamp}"
+    sign_str = f"{method.upper()}
+{full_path}
+{query}
+{hashed_body}
+{timestamp}"
     sign = sign_request(API_SECRET, sign_str)
     return {
         "KEY": API_KEY,
@@ -130,7 +134,7 @@ def place_order(side, qty=1, reduce_only=False):
         "size": size,
         "price": 0,
         "tif": "ioc",
-        "reduce_only": reduce_only
+        "reduce_only": str(reduce_only).lower()
     })
 
     endpoint = f"/futures/{SETTLE}/orders"
