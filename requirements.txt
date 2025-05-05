@@ -1,2 +1,2 @@
 flask
-gate-api
+gate-api==6.25.3
