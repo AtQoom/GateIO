@@ -59,7 +59,7 @@ def get_headers(method, endpoint, body="", query=""):
     timestamp = get_server_timestamp()
     full_path = f"/api/v4{endpoint}"
     hashed_body = hashlib.sha512((body or "").encode()).hexdigest()
-    sign_str = f"{method.upper()}
+    sign_str = f"{method.upper()}\n{full_path}\n{query}\n{hashed_body}\n{timestamp}"
 {full_path}
 {query}
 {hashed_body}
