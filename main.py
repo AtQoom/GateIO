@@ -15,7 +15,7 @@ SYMBOL = "SOL_USDT"
 SETTLE = "usdt"
 MIN_QTY = 1
 
-# Gate.io SDK 초기화 (전역)
+# Gate.io SDK 초기화
 configuration = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(configuration)
 api_instance = FuturesApi(client)
@@ -28,9 +28,12 @@ def log_debug(title, content):
 
 def get_equity():
     try:
-        account = api_instance.get_futures_account(SETTLE)
-        log_debug("잔고 조회", account.to_dict())
-        return float(account.available)
+        accounts = api_instance.list_futures_accounts()
+        for acc in accounts:
+            if acc.settle == SETTLE:
+                log_debug("잔고 조회", acc.to_dict())
+                return float(acc.available)
+        return 0
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
         return 0
@@ -42,6 +45,14 @@ def get_position_size():
         return float(position.size)
     except Exception as e:
         log_debug("❌ 포지션 조회 실패", str(e))
+        return 0
+
+def get_market_price():
+    try:
+        ticker = api_instance.get_futures_ticker(SYMBOL)
+        return float(ticker.last)
+    except Exception as e:
+        log_debug("❌ 가격 조회 실패", str(e))
         return 0
 
 def place_order(side, qty=1, reduce_only=False):
@@ -76,13 +87,13 @@ def check_tp_sl_loop():
                 price = float(position.mark_price)
                 if entry_side == "buy":
                     if price >= entry_price * 1.01 or price <= entry_price * 0.985:
-                        log_debug("TP/SL 조건 충족", f"가격: {price}, 진입가: {entry_price}")
+                        log_debug("🎯 롱 TP/SL", f"현재가: {price}, 진입가: {entry_price}")
                         place_order("sell", reduce_only=True)
                         entry_price = None
                         entry_side = None
                 elif entry_side == "sell":
                     if price <= entry_price * 0.99 or price >= entry_price * 1.015:
-                        log_debug("TP/SL 조건 충족", f"가격: {price}, 진입가: {entry_price}")
+                        log_debug("🎯 숏 TP/SL", f"현재가: {price}, 진입가: {entry_price}")
                         place_order("buy", reduce_only=True)
                         entry_price = None
                         entry_side = None
@@ -112,12 +123,12 @@ def webhook():
             return jsonify({"error": "invalid position"}), 400
 
         equity = get_equity()
-        price = float(api_instance.get_futures_ticker(SETTLE, SYMBOL).last)
+        price = get_market_price()
         if equity == 0 or price == 0:
             return jsonify({"error": "잔고 또는 가격 오류"}), 500
 
         qty = max(int(equity * 0.5 / price), MIN_QTY)
-        log_debug("🧮 주문 계산", f"잔고: {equity}, 수량: {qty}")
+        log_debug("🧮 주문 계산", f"잔고: {equity}, 가격: {price}, 수량: {qty}")
         place_order(side, qty)
         return jsonify({"status": "주문 완료", "side": side, "qty": qty})
     except Exception as e:
