@@ -17,7 +17,7 @@ API_SECRET = os.environ.get("API_SECRET", "")
 SYMBOL = "SOL_USDT"
 SETTLE = "usdt"
 RISK_PCT = 1.0
-MIN_QTY = 0.001
+MIN_QTY = 1  # 🔧 최소 수량 정수로 설정 (SOL은 소수점 수량 불가)
 
 # API 초기화
 config = Configuration(key=API_KEY, secret=API_SECRET)
@@ -50,7 +50,7 @@ def get_market_price():
         log_debug("❌ 시세 조회 실패", f"{e.status} - {e.body}")
         return 0
 
-def place_order(side, qty=1.0, reduce_only=False):
+def place_order(side, qty=1, reduce_only=False):
     global entry_price, entry_side
     try:
         size = qty if side == "buy" else -qty
@@ -90,19 +90,16 @@ async def price_listener():
             if 'result' in data and isinstance(data['result'], dict):
                 price = float(data['result'].get("last", 0))
                 if entry_price and entry_side:
-                    # TP/SL 조건 (롱: +2.2%, -0.6%) (숏: -2.2%, +0.6%)
                     if entry_side == "buy":
                         if price >= entry_price * 1.022 or price <= entry_price * 0.994:
                             log_debug("🎯 롱 TP/SL", f"{price=}, {entry_price=}")
-                            place_order("sell", reduce_only=True)
-                            entry_price = None
-                            entry_side = None
+                            place_order("sell", qty=1, reduce_only=True)
+                            entry_price, entry_side = None, None
                     elif entry_side == "sell":
                         if price <= entry_price * 0.978 or price >= entry_price * 1.006:
                             log_debug("🎯 숏 TP/SL", f"{price=}, {entry_price=}")
-                            place_order("buy", reduce_only=True)
-                            entry_price = None
-                            entry_side = None
+                            place_order("buy", qty=1, reduce_only=True)
+                            entry_price, entry_side = None, None
 
 def start_price_listener():
     loop = asyncio.new_event_loop()
@@ -122,9 +119,9 @@ def webhook():
 
         # 기존 포지션 정리
         if entry_side == "buy":
-            place_order("sell", reduce_only=True)
+            place_order("sell", qty=1, reduce_only=True)
         elif entry_side == "sell":
-            place_order("buy", reduce_only=True)
+            place_order("buy", qty=1, reduce_only=True)
 
         # 새로운 포지션 진입
         equity = get_equity()
@@ -132,7 +129,7 @@ def webhook():
         if equity == 0 or price == 0:
             return jsonify({"error": "잔고 또는 시세 오류"}), 500
 
-        qty = max(round(equity * RISK_PCT / price, 3), MIN_QTY)
+        qty = max(int(equity * RISK_PCT / price), MIN_QTY)
         log_debug("🧮 주문 계산", f"잔고: {equity}, 가격: {price}, 수량: {qty}")
         side = "buy" if signal == "long" else "sell"
         place_order(side, qty)
