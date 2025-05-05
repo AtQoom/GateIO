@@ -30,12 +30,9 @@ def log_debug(title, content):
 
 def get_equity():
     try:
-        accounts = api_instance.list_futures_accounts()
-        for acc in accounts:
-            if acc.settle == SETTLE:
-                log_debug("잔고 조회", acc.to_dict())
-                return float(acc.available)
-        return 0
+        account = api_instance.list_futures_accounts(SETTLE)  # ✅ 인자 추가
+        log_debug("잔고 조회", account.to_dict())
+        return float(account.available)
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
         return 0
@@ -51,8 +48,11 @@ def get_position_size():
 
 def get_market_price():
     try:
-        ticker = api_instance.get_futures_ticker(SYMBOL, SETTLE)
-        return float(ticker.last)
+        tickers = api_instance.list_futures_tickers(SETTLE)  # ✅ 전체 시세 리스트 가져옴
+        for t in tickers:
+            if t.contract == SYMBOL:
+                return float(t.last)
+        return 0
     except ApiException as e:
         log_debug("❌ 시세 조회 실패", f"{e.status} - {e.body}")
         return 0
