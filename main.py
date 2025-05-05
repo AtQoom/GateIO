@@ -32,11 +32,14 @@ def log_debug(title, content):
 
 def get_equity():
     try:
-        account = api.get_account(settle=SETTLE)
-        return float(account.available)
+        response = api_instance.list_futures_accounts()
+        for acc in response:
+            if acc.settle == "usdt":
+                return float(acc.available)
+        log_debug("❌ USDT 계좌 없음", "")
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
-        return 0
+    return 0
 
 def get_market_price():
     try:
