@@ -32,17 +32,20 @@ def log_debug(title, content):
 
 def get_equity():
     try:
-        account = api_instance.get_futures_account(settle=SETTLE)
-        log_debug("잔고 조회", account.to_dict())
-        return float(account.available)
+        accounts = api_instance.list_futures_accounts(settle=SETTLE)
+        log_debug("잔고 조회", accounts.to_dict())
+        return float(accounts.available)
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
         return 0
 
 def get_market_price():
     try:
-        ticker = api_instance.get_futures_ticker(SETTLE, SYMBOL)
-        return float(ticker.last)
+        tickers = api_instance.list_futures_tickers(settle=SETTLE)
+        for t in tickers:
+            if t.contract == SYMBOL:
+                return float(t.last)
+        return 0
     except ApiException as e:
         log_debug("❌ 시세 조회 실패", f"{e.status} - {e.body}")
         return 0
