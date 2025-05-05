@@ -1,6 +1,12 @@
-import os, time, json, hmac, hashlib, requests, threading
-from flask import Flask, request, jsonify
 from datetime import datetime
+import os
+import json
+import hmac
+import time
+import hashlib
+import threading
+import requests
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
@@ -18,10 +24,8 @@ RISK_PCT = 0.5
 entry_price = None
 entry_side = None
 
-
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
-
 
 def get_server_timestamp():
     try:
@@ -35,10 +39,8 @@ def get_server_timestamp():
         log_debug("❌ 시간 조회 실패", str(e))
         return str(int(time.time() * 1000))
 
-
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
-
 
 def safe_request(method, url, **kwargs):
     for i in range(3):
@@ -52,7 +54,6 @@ def safe_request(method, url, **kwargs):
         except Exception as e:
             log_debug("❌ 요청 실패", str(e))
     return None
-
 
 def get_headers(method, endpoint, body="", query=""):
     timestamp = get_server_timestamp()
@@ -68,13 +69,11 @@ def get_headers(method, endpoint, body="", query=""):
         "Accept": "application/json"
     }
 
-
 def debug_api_response(name, response):
     if response:
         log_debug(name, f"HTTP {response.status_code} - {response.text}")
     else:
         log_debug(name, "응답 없음 (None)")
-
 
 def get_equity():
     endpoint = f"/futures/{SETTLE}/accounts"
@@ -84,7 +83,6 @@ def get_equity():
     if r and r.status_code == 200:
         return float(r.json().get("available", 0))
     return 0
-
 
 def get_market_price():
     endpoint = f"/futures/{SETTLE}/tickers"
@@ -96,7 +94,6 @@ def get_market_price():
                 return float(item.get("last", 0))
     return 0
 
-
 def get_position_size():
     endpoint = f"/futures/{SETTLE}/positions/{SYMBOL}"
     headers = get_headers("GET", endpoint)
@@ -105,7 +102,6 @@ def get_position_size():
     if r and r.status_code == 200:
         return float(r.json().get("size", 0))
     return 0
-
 
 def place_order(side, qty=1, reduce_only=False):
     global entry_price, entry_side
@@ -149,7 +145,6 @@ def place_order(side, qty=1, reduce_only=False):
     else:
         log_debug("❌ 주문 실패", r.text if r else "응답 없음")
 
-
 def check_tp_sl_loop():
     global entry_price, entry_side
     while True:
@@ -158,26 +153,27 @@ def check_tp_sl_loop():
                 price = get_market_price()
                 if not price:
                     continue
-                if entry_side == "buy" and price >= entry_price * 1.01:
-                    log_debug("🎯 롱 TP", f"{price:.2f} ≥ {entry_price * 1.01:.2f}")
-                    place_order("sell", reduce_only=True)
-                    entry_price = None
-                elif entry_side == "buy" and price <= entry_price * 0.985:
-                    log_debug("🛑 롱 SL", f"{price:.2f} ≤ {entry_price * 0.985:.2f}")
-                    place_order("sell", reduce_only=True)
-                    entry_price = None
-                elif entry_side == "sell" and price <= entry_price * 0.99:
-                    log_debug("🎯 숏 TP", f"{price:.2f} ≤ {entry_price * 0.99:.2f}")
-                    place_order("buy", reduce_only=True)
-                    entry_price = None
-                elif entry_side == "sell" and price >= entry_price * 1.015:
-                    log_debug("🛑 숏 SL", f"{price:.2f} ≥ {entry_price * 1.015:.2f}")
-                    place_order("buy", reduce_only=True)
-                    entry_price = None
+                if entry_side == "buy":
+                    if price >= entry_price * 1.01:
+                        log_debug("🎯 롱 TP", f"{price:.2f} ≥ {entry_price * 1.01:.2f}")
+                        place_order("sell", reduce_only=True)
+                        entry_price = None
+                    elif price <= entry_price * 0.985:
+                        log_debug("🛑 롱 SL", f"{price:.2f} ≤ {entry_price * 0.985:.2f}")
+                        place_order("sell", reduce_only=True)
+                        entry_price = None
+                elif entry_side == "sell":
+                    if price <= entry_price * 0.99:
+                        log_debug("🎯 숏 TP", f"{price:.2f} ≤ {entry_price * 0.99:.2f}")
+                        place_order("buy", reduce_only=True)
+                        entry_price = None
+                    elif price >= entry_price * 1.015:
+                        log_debug("🛑 숏 SL", f"{price:.2f} ≥ {entry_price * 1.015:.2f}")
+                        place_order("buy", reduce_only=True)
+                        entry_price = None
         except Exception as e:
             log_debug("❌ TP/SL 오류", str(e))
         time.sleep(3)
-
 
 @app.route("/", methods=["POST"])
 def webhook():
@@ -216,11 +212,9 @@ def webhook():
         log_debug("❌ 웹훅 예외", traceback.format_exc())
         return jsonify({"error": "internal error"}), 500
 
-
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
-
 
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
