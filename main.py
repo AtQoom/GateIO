@@ -135,13 +135,13 @@ def place_order(side, qty=1, reduce_only=False):
         return False
 
     body = json.dumps({
-        "contract": SYMBOL,
-        "size": qty if side == "buy" else -qty,
-        "price": 0,
-        "side": side,
-        "tif": "ioc",
-        "reduce_only": reduce_only,
-        "close": reduce_only
+    "contract": SYMBOL,
+    "size": qty if side == "buy" else -qty,
+    "price": 0,
+    "side": side,
+    "tif": "ioc",
+    "reduce_only": reduce_only,
+    "close": reduce_only
     })
 
     endpoint = f"/futures/{SETTLE}/orders"
