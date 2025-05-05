@@ -30,11 +30,11 @@ def log_debug(title, content):
 
 def get_equity():
     try:
-        account = api_instance.get_futures_account(SETTLE)
+        account = api_instance.get_futures_account(settle=SETTLE)
         log_debug("잔고 조회", account.to_dict())
         return float(account.available)
-    except ApiException as e:
-        log_debug("❌ 잔고 조회 실패", f"{e.status} - {e.body}")
+    except Exception as e:
+        log_debug("❌ 잔고 조회 실패", str(e))
         return 0
 
 def get_position_size():
