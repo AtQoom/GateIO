@@ -1,7 +1,12 @@
-import os, time, json, hmac, hashlib, requests, threading
+import os
+import time
+import json
+import hmac
+import hashlib
+import requests
+import threading
 from flask import Flask, request, jsonify
 from datetime import datetime
-import traceback
 
 app = Flask(__name__)
 
@@ -111,37 +116,31 @@ def get_position_size():
 def place_order(side, qty=1, reduce_only=False):
     global entry_price, entry_side
 
-    log_debug("📝 주문 시도", f"side: {side}, qty: {qty}, reduce_only: {reduce_only}")
-
     if reduce_only:
         qty = get_position_size()
-        log_debug("📉 종료 주문 수량", f"{qty}")
         if qty <= 0:
             log_debug("⛔ 종료 스킵", "포지션 없음")
-            return False
+            return
 
     price = get_market_price()
-    log_debug("📈 현재 시세", f"{price}")
-
     if price == 0:
         log_debug("❌ 주문 실패", "가격 없음")
-        return False
+        return
 
-    notional = qty * price
-    log_debug("💵 주문 금액", f"{qty} * {price} = {notional:.2f}")
+    if not reduce_only and (qty * price) < MIN_ORDER_USDT:
+        log_debug("❌ 주문 금액 부족", f"{qty * price:.2f} < {MIN_ORDER_USDT}")
+        return
 
-    if not reduce_only and notional < MIN_ORDER_USDT:
-        log_debug("❌ 주문 금액 부족", f"{notional:.2f} < {MIN_ORDER_USDT}")
-        return False
+    # 주문 방향과 수량 표시
+    log_debug("📤 주문 시도", f"side: {side}, qty: {qty}, reduce_only: {reduce_only}")
 
     body = json.dumps({
-    "contract": SYMBOL,
-    "size": qty if side == "buy" else -qty,
-    "price": 0,
-    "side": side,
-    "tif": "ioc",
-    "reduce_only": reduce_only,
-    "close": reduce_only
+        "contract": SYMBOL,
+        "size": qty if side == "buy" else -qty,
+        "price": 0,
+        "tif": "ioc",
+        "reduce_only": reduce_only,
+        "close": reduce_only
     })
 
     endpoint = f"/futures/{SETTLE}/orders"
@@ -154,10 +153,8 @@ def place_order(side, qty=1, reduce_only=False):
         if not reduce_only:
             entry_price = price
             entry_side = side
-        return True
     else:
         log_debug("❌ 주문 실패", r.text if r else "응답 없음")
-        return False
 
 
 def check_tp_sl_loop():
@@ -218,15 +215,13 @@ def webhook():
         if equity == 0 or price == 0:
             return jsonify({"error": "잔고 또는 시세 오류"}), 500
 
-        qty = round((equity * RISK_PCT * LEVERAGE) / price, 3)
+        qty = max(int((equity * RISK_PCT * LEVERAGE) / price), MIN_QTY)
         log_debug("🧮 주문 계산", f"잔고: {equity}, 가격: {price}, 수량: {qty}")
-
-        success = place_order(side, qty)
-        if not success:
-            return jsonify({"error": "진입 실패"}), 500
+        place_order(side, qty)
         return jsonify({"status": "주문 완료", "side": side, "qty": qty})
 
     except Exception as e:
+        import traceback
         error_details = traceback.format_exc()
         log_debug("❌ 웹훅 처리 예외", f"{e}\n{error_details}")
         return jsonify({"error": "internal error"}), 500
@@ -240,4 +235,5 @@ def ping():
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
     threading.Thread(target=check_tp_sl_loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=8080)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
