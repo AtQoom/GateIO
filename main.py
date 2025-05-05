@@ -25,23 +25,17 @@ api_instance = FuturesApi(client)
 entry_price = None
 entry_side = None
 
-
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-
 def get_equity():
     try:
-        accounts = api_instance.list_futures_accounts(SETTLE)
-        for acc in accounts:
-            if acc.contract == SYMBOL:
-                log_debug("잔고 조회", acc.to_dict())
-                return float(acc.available)
-        return float(accounts[0].available) if accounts else 0
+        account = api_instance.get_futures_account(SETTLE)
+        log_debug("잔고 조회", account.to_dict())
+        return float(account.available)
     except ApiException as e:
         log_debug("❌ 잔고 조회 실패", f"{e.status} - {e.body}")
         return 0
-
 
 def get_position_size():
     try:
@@ -52,7 +46,6 @@ def get_position_size():
         log_debug("❌ 포지션 조회 실패", f"{e.status} - {e.body}")
         return 0
 
-
 def get_market_price():
     try:
         ticker = api_instance.get_futures_ticker(SETTLE, SYMBOL)
@@ -60,7 +53,6 @@ def get_market_price():
     except ApiException as e:
         log_debug("❌ 시세 조회 실패", f"{e.status} - {e.body}")
         return 0
-
 
 def place_order(side, qty=1, reduce_only=False):
     global entry_price, entry_side
