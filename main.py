@@ -1,6 +1,7 @@
 import os, time, json, hmac, hashlib, requests, threading
 from flask import Flask, request, jsonify
 from datetime import datetime
+import traceback
 
 app = Flask(__name__)
 
@@ -18,10 +19,11 @@ RISK_PCT = 0.5
 entry_price = None
 entry_side = None
 
+
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-# ✅ 수정된 서버 시간 엔드포인트
+
 def get_server_timestamp():
     try:
         r = requests.get(f"{BASE_URL}/spot/time", timeout=3)
@@ -34,8 +36,10 @@ def get_server_timestamp():
         log_debug("❌ 시간 조회 실패", str(e))
         return str(int(time.time() * 1000))
 
+
 def sign_request(secret, payload: str):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
+
 
 def safe_request(method, url, **kwargs):
     for i in range(3):
@@ -49,6 +53,7 @@ def safe_request(method, url, **kwargs):
         except Exception as e:
             log_debug("❌ 요청 실패", str(e))
     return None
+
 
 def get_headers(method, endpoint, body="", query=""):
     timestamp = get_server_timestamp()
@@ -64,11 +69,13 @@ def get_headers(method, endpoint, body="", query=""):
         "Accept": "application/json"
     }
 
+
 def debug_api_response(name, response):
     if response:
         log_debug(name, f"HTTP {response.status_code} - {response.text}")
     else:
         log_debug(name, "응답 없음 (None)")
+
 
 def get_equity():
     endpoint = f"/futures/{SETTLE}/accounts"
@@ -78,6 +85,7 @@ def get_equity():
     if r and r.status_code == 200:
         return float(r.json().get("available", 0))
     return 0
+
 
 def get_market_price():
     endpoint = f"/futures/{SETTLE}/tickers"
@@ -89,6 +97,7 @@ def get_market_price():
                 return float(item.get("last", 0))
     return 0
 
+
 def get_position_size():
     endpoint = f"/futures/{SETTLE}/positions/{SYMBOL}"
     headers = get_headers("GET", endpoint)
@@ -98,32 +107,38 @@ def get_position_size():
         return float(r.json().get("size", 0))
     return 0
 
+
 def place_order(side, qty=1, reduce_only=False):
     global entry_price, entry_side
+
+    log_debug("📝 주문 시도", f"side: {side}, qty: {qty}, reduce_only: {reduce_only}")
+
     if reduce_only:
         qty = get_position_size()
+        log_debug("📉 종료 주문 수량", f"{qty}")
         if qty <= 0:
             log_debug("⛔ 종료 스킵", "포지션 없음")
-            return
+            return False
 
     price = get_market_price()
+    log_debug("📈 현재 시세", f"{price}")
+
     if price == 0:
         log_debug("❌ 주문 실패", "가격 없음")
-        return
+        return False
 
-    if not reduce_only and (qty * price) < MIN_ORDER_USDT:
-        log_debug("❌ 주문 금액 부족", f"{qty * price:.2f} < {MIN_ORDER_USDT}")
-        return
+    notional = qty * price
+    log_debug("💵 주문 금액", f"{qty} * {price} = {notional:.2f}")
 
-    # size 방향 설정
-    size = qty if side == "buy" else -qty
-    if reduce_only:
-        size = -size  # 평청 시 방향 반대로
+    if not reduce_only and notional < MIN_ORDER_USDT:
+        log_debug("❌ 주문 금액 부족", f"{notional:.2f} < {MIN_ORDER_USDT}")
+        return False
 
     body = json.dumps({
         "contract": SYMBOL,
-        "size": size,
+        "size": qty if side == "buy" else -qty,
         "price": 0,
+        "side": side,
         "tif": "ioc",
         "reduce_only": reduce_only,
         "close": reduce_only
@@ -133,13 +148,17 @@ def place_order(side, qty=1, reduce_only=False):
     headers = get_headers("POST", endpoint, body)
     r = safe_request("POST", BASE_URL + endpoint, headers=headers, data=body)
     debug_api_response("주문 전송", r)
+
     if r and r.status_code == 200:
         log_debug("✅ 주문 성공", f"{side.upper()} {qty}개")
         if not reduce_only:
             entry_price = price
             entry_side = side
+        return True
     else:
         log_debug("❌ 주문 실패", r.text if r else "응답 없음")
+        return False
+
 
 def check_tp_sl_loop():
     global entry_price, entry_side
@@ -171,6 +190,7 @@ def check_tp_sl_loop():
             log_debug("❌ TP/SL 오류", str(e))
         time.sleep(3)
 
+
 @app.route("/", methods=["POST"])
 def webhook():
     global entry_price, entry_side
@@ -198,20 +218,24 @@ def webhook():
         if equity == 0 or price == 0:
             return jsonify({"error": "잔고 또는 시세 오류"}), 500
 
-        qty = max(int((equity * RISK_PCT * LEVERAGE) / price), MIN_QTY)
+        qty = round((equity * RISK_PCT * LEVERAGE) / price, 3)
         log_debug("🧮 주문 계산", f"잔고: {equity}, 가격: {price}, 수량: {qty}")
-        place_order(side, qty)
+
+        success = place_order(side, qty)
+        if not success:
+            return jsonify({"error": "진입 실패"}), 500
         return jsonify({"status": "주문 완료", "side": side, "qty": qty})
 
     except Exception as e:
-        import traceback
         error_details = traceback.format_exc()
         log_debug("❌ 웹훅 처리 예외", f"{e}\n{error_details}")
         return jsonify({"error": "internal error"}), 500
 
+
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
+
 
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
