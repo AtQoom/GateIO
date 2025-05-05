@@ -1,23 +1,24 @@
-import os
-import time
-import json
-import hmac
-import hashlib
-import threading
-from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 import gate_api.exceptions
+import os
+import threading
+import time
+from datetime import datetime
 
 app = Flask(__name__)
 
-# 환경 변수에서 API 키 불러오기
-API_KEY = os.environ.get("API_KEY", "")
-API_SECRET = os.environ.get("API_SECRET", "")
+# Load API key and secret from environment variables
+api_key = os.environ.get("API_KEY", "")
+api_secret = os.environ.get("API_SECRET", "")
+
+config = Configuration(key=api_key, secret=api_secret)
+client = ApiClient(config)
+api = FuturesApi(client)
+
 SYMBOL = "SOL_USDT"
 SETTLE = "usdt"
 
-# 리스크 설정
 MIN_ORDER_USDT = 3
 MIN_QTY = 1
 LEVERAGE = 1
@@ -26,39 +27,34 @@ RISK_PCT = 0.5
 entry_price = None
 entry_side = None
 
-# SDK 설정
-config = Configuration(key=API_KEY, secret=API_SECRET)
-client = ApiClient(config)
-api_instance = FuturesApi(client)
-
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-def get_market_price():
-    try:
-        tickers = api_instance.list_futures_tickers(settle=SETTLE)
-        for t in tickers:
-            if t.contract == SYMBOL:
-                return float(t.last)
-    except Exception as e:
-        log_debug("❌ 시세 조회 오류", str(e))
-    return 0
-
 def get_equity():
     try:
-        acc = api_instance.get_futures_account(SETTLE)
-        return float(acc.available)
+        account = api.get_account(settle=SETTLE)
+        return float(account.available)
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
+        return 0
+
+def get_market_price():
+    try:
+        tickers = api.list_futures_tickers(settle=SETTLE)
+        for ticker in tickers:
+            if ticker.contract == SYMBOL:
+                return float(ticker.last)
+    except Exception as e:
+        log_debug("❌ 가격 조회 실패", str(e))
     return 0
 
 def get_position_size():
     try:
-        position = api_instance.get_futures_position(settle=SETTLE, contract=SYMBOL)
+        position = api.get_position(settle=SETTLE, contract=SYMBOL)
         return float(position.size)
     except Exception as e:
         log_debug("❌ 포지션 조회 실패", str(e))
-    return 0
+        return 0
 
 def place_order(side, qty=1, reduce_only=False):
     global entry_price, entry_side
@@ -90,13 +86,13 @@ def place_order(side, qty=1, reduce_only=False):
             tif="ioc",
             reduce_only=reduce_only
         )
-        response = api_instance.create_futures_order(settle=SETTLE, futures_order=order)
-        log_debug("✅ 주문 성공", str(response))
+        response = api.create_futures_order(settle=SETTLE, futures_order=order)
+        log_debug("✅ 주문 성공", f"{side.upper()} {qty}개")
         if not reduce_only:
             entry_price = price
             entry_side = side
     except gate_api.exceptions.ApiException as e:
-        log_debug("❌ 주문 실패", e.body)
+        log_debug("❌ 주문 실패", f"{e.status} - {e.body}")
 
 def check_tp_sl_loop():
     global entry_price, entry_side
@@ -133,7 +129,7 @@ def webhook():
     global entry_price, entry_side
     try:
         data = request.get_json(force=True)
-        log_debug("📨 웹훅 수신", json.dumps(data, ensure_ascii=False))
+        log_debug("📨 웹훅 수신", str(data))
 
         signal = data.get("signal", "").lower()
         position = data.get("position", "").lower()
