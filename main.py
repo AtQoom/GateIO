@@ -4,11 +4,12 @@ import json
 import time
 import threading
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, GateApiException
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
+from gate_api.exceptions import ApiException  # ✅ 수정된 부분
 
 app = Flask(__name__)
 
-# 환경 변수에서 API 키 불러오기
+# 환경 변수에서 API 키 가져오기
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SYMBOL = "SOL_USDT"
@@ -16,7 +17,7 @@ SETTLE = "usdt"
 MIN_QTY = 1
 RISK_PCT = 0.5
 
-# Gate API 클라이언트 초기화
+# Gate.io API 초기화
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api_instance = FuturesApi(client)
@@ -24,21 +25,17 @@ api_instance = FuturesApi(client)
 entry_price = None
 entry_side = None
 
-
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-
 def get_equity():
     try:
-        accounts = api_instance.list_futures_accounts(settle=SETTLE)
-        account = accounts[0] if isinstance(accounts, list) else accounts
+        account = api_instance.get_futures_account(SETTLE)
         log_debug("잔고 조회", account.to_dict())
         return float(account.available)
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
         return 0
-
 
 def get_position_size():
     try:
@@ -49,7 +46,6 @@ def get_position_size():
         log_debug("❌ 포지션 조회 실패", str(e))
         return 0
 
-
 def get_market_price():
     try:
         ticker = api_instance.get_futures_ticker(SETTLE, SYMBOL)
@@ -58,10 +54,8 @@ def get_market_price():
         log_debug("❌ 가격 조회 실패", str(e))
         return 0
 
-
 def place_order(side, qty=1, reduce_only=False):
     global entry_price, entry_side
-
     try:
         size = qty if side == "buy" else -qty
         if reduce_only:
@@ -80,15 +74,13 @@ def place_order(side, qty=1, reduce_only=False):
         if not reduce_only:
             entry_price = float(response.fill_price or 0)
             entry_side = side
-    except GateApiException as e:
+    except ApiException as e:  # ✅ 수정된 부분
         log_debug("❌ 주문 실패", f"{e.status} - {e.body}")
     except Exception as e:
         log_debug("❌ 예외 발생", str(e))
 
-
 def check_tp_sl_loop():
     global entry_price, entry_side
-
     while True:
         try:
             if entry_price and entry_side:
@@ -110,11 +102,9 @@ def check_tp_sl_loop():
             log_debug("❌ TP/SL 오류", str(e))
         time.sleep(3)
 
-
 @app.route("/", methods=["POST"])
 def webhook():
     global entry_price, entry_side
-
     try:
         data = request.get_json(force=True)
         log_debug("📨 웹훅 수신", json.dumps(data))
@@ -149,11 +139,9 @@ def webhook():
         log_debug("❌ 웹훅 처리 실패", str(e))
         return jsonify({"error": "서버 오류"}), 500
 
-
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
-
 
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "TP/SL 감시 스레드 실행")
