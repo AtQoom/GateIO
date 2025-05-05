@@ -63,7 +63,7 @@ def get_headers(method, endpoint, body="", query=""):
 {full_path}
 {query}
 {hashed_body}
-{timestamp}"
+{timestamp}
     sign = sign_request(API_SECRET, sign_str)
     return {
         "KEY": API_KEY,
