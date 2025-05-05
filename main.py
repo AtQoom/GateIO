@@ -2,6 +2,8 @@ import os
 import json
 import time
 import threading
+import asyncio
+import websockets
 from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
@@ -14,8 +16,8 @@ API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SYMBOL = "SOL_USDT"
 SETTLE = "usdt"
-MIN_QTY = 1
 RISK_PCT = 1.0
+MIN_QTY = 0.001
 
 # API 초기화
 config = Configuration(key=API_KEY, secret=API_SECRET)
@@ -30,34 +32,22 @@ def log_debug(title, content):
 
 def get_equity():
     try:
-        account = api_instance.list_futures_accounts(SETTLE)  # ✅ 인자 추가
+        account = api_instance.get_futures_account(settle=SETTLE)
         log_debug("잔고 조회", account.to_dict())
         return float(account.available)
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
         return 0
 
-def get_position_size():
-    try:
-        pos = api_instance.get_position(SETTLE, SYMBOL)
-        log_debug("포지션 조회", pos.to_dict())
-        return float(pos.size)
-    except ApiException as e:
-        log_debug("❌ 포지션 조회 실패", f"{e.status} - {e.body}")
-        return 0
-
 def get_market_price():
     try:
-        tickers = api_instance.list_futures_tickers(SETTLE)  # ✅ 전체 시세 리스트 가져옴
-        for t in tickers:
-            if t.contract == SYMBOL:
-                return float(t.last)
-        return 0
+        ticker = api_instance.get_futures_ticker(SETTLE, SYMBOL)
+        return float(ticker.last)
     except ApiException as e:
         log_debug("❌ 시세 조회 실패", f"{e.status} - {e.body}")
         return 0
 
-def place_order(side, qty=1, reduce_only=False):
+def place_order(side, qty=1.0, reduce_only=False):
     global entry_price, entry_side
     try:
         size = qty if side == "buy" else -qty
@@ -81,57 +71,66 @@ def place_order(side, qty=1, reduce_only=False):
     except Exception as e:
         log_debug("❌ 예외 발생", str(e))
 
-def check_tp_sl_loop():
+async def price_listener():
     global entry_price, entry_side
-    while True:
-        try:
-            if entry_price and entry_side:
-                pos = api_instance.get_position(SETTLE, SYMBOL)
-                mark = float(pos.mark_price)
-                if entry_side == "buy":
-                    if mark >= entry_price * 1.01 or mark <= entry_price * 0.985:
-                        log_debug("🎯 롱 TP/SL", f"{mark=}, {entry_price=}")
-                        place_order("sell", reduce_only=True)
-                        entry_price, entry_side = None, None
-                elif entry_side == "sell":
-                    if mark <= entry_price * 0.99 or mark >= entry_price * 1.015:
-                        log_debug("🎯 숏 TP/SL", f"{mark=}, {entry_price=}")
-                        place_order("buy", reduce_only=True)
-                        entry_price, entry_side = None, None
-        except Exception as e:
-            log_debug("❌ TP/SL 오류", str(e))
-        time.sleep(3)
+    uri = "wss://fx-ws.gate.io/v4/ws/usdt"
+    async with websockets.connect(uri) as ws:
+        await ws.send(json.dumps({
+            "time": int(time.time()),
+            "channel": "futures.tickers",
+            "event": "subscribe",
+            "payload": [SYMBOL]
+        }))
+        while True:
+            msg = await ws.recv()
+            data = json.loads(msg)
+            if 'result' in data and isinstance(data['result'], dict):
+                price = float(data['result'].get("last", 0))
+                if entry_price and entry_side:
+                    if entry_side == "buy":
+                        if price >= entry_price * 1.022 or price <= entry_price * 0.994:
+                            log_debug("🎯 롱 TP/SL", f"price={price}, entry_price={entry_price}")
+                            place_order("sell", reduce_only=True)
+                            entry_price = None
+                            entry_side = None
+                    elif entry_side == "sell":
+                        if price <= entry_price * 0.978 or price >= entry_price * 1.006:
+                            log_debug("🎯 숏 TP/SL", f"price={price}, entry_price={entry_price}")
+                            place_order("buy", reduce_only=True)
+                            entry_price = None
+                            entry_side = None
+
+def start_price_listener():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(price_listener())
 
 @app.route("/", methods=["POST"])
 def webhook():
     global entry_price, entry_side
     try:
         data = request.get_json(force=True)
-        signal = data.get("signal", "").lower()
-        position = data.get("position", "").lower()
+        signal = data.get("side", "").lower()
         log_debug("📨 웹훅 수신", json.dumps(data))
 
-        if not signal or not position:
-            return jsonify({"error": "signal 또는 position 누락"}), 400
+        if signal not in ["long", "short"]:
+            return jsonify({"error": "invalid signal"}), 400
 
-        # 평청
-        if position == "long":
+        # 기존 포지션 정리
+        if entry_side == "buy":
             place_order("sell", reduce_only=True)
-            side = "buy"
-        elif position == "short":
+        elif entry_side == "sell":
             place_order("buy", reduce_only=True)
-            side = "sell"
-        else:
-            return jsonify({"error": "invalid position"}), 400
 
-        # 진입
+        # 새로운 포지션 진입
         equity = get_equity()
         price = get_market_price()
         if equity == 0 or price == 0:
             return jsonify({"error": "잔고 또는 시세 오류"}), 500
 
-        qty = max(int(equity * RISK_PCT / price), MIN_QTY)
+        qty = max(round(equity * RISK_PCT / price, 3), MIN_QTY)
         log_debug("🧮 주문 계산", f"잔고: {equity}, 가격: {price}, 수량: {qty}")
+        side = "buy" if signal == "long" else "sell"
         place_order(side, qty)
         return jsonify({"status": "주문 완료", "side": side, "qty": qty})
     except Exception as e:
@@ -143,7 +142,7 @@ def ping():
     return "pong", 200
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
-    threading.Thread(target=check_tp_sl_loop, daemon=True).start()
+    log_debug("🚀 서버 시작", "WebSocket 감시 쓰레드 실행")
+    threading.Thread(target=start_price_listener, daemon=True).start()
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
