@@ -117,9 +117,9 @@ def place_order(side, qty=1, reduce_only=False):
     global entry_price, entry_side
 
     if reduce_only:
-        qty = get_position_size()
+        qty = abs(get_position_size())
         if qty <= 0:
-            log_debug("⛔ 종료 스킵", "포지션 없음")
+            log_debug("⛔ 평청 스킵", "포지션 없음")
             return
 
     price = get_market_price()
@@ -131,23 +131,23 @@ def place_order(side, qty=1, reduce_only=False):
         log_debug("❌ 주문 금액 부족", f"{qty * price:.2f} < {MIN_ORDER_USDT}")
         return
 
-    # 주문 방향과 수량 표시
-    log_debug("📤 주문 시도", f"side: {side}, qty: {qty}, reduce_only: {reduce_only}")
+    # 숏: size < 0 / 롱: size > 0
+    size = qty if side == "buy" else -qty
+    if reduce_only:
+        size = -size
 
     body = json.dumps({
         "contract": SYMBOL,
-        "size": qty if side == "buy" else -qty,
+        "size": size,
         "price": 0,
         "tif": "ioc",
-        "reduce_only": reduce_only,
-        "close": reduce_only
+        "reduce_only": reduce_only
     })
 
     endpoint = f"/futures/{SETTLE}/orders"
     headers = get_headers("POST", endpoint, body)
     r = safe_request("POST", BASE_URL + endpoint, headers=headers, data=body)
     debug_api_response("주문 전송", r)
-
     if r and r.status_code == 200:
         log_debug("✅ 주문 성공", f"{side.upper()} {qty}개")
         if not reduce_only:
@@ -201,6 +201,7 @@ def webhook():
         if not signal or not position:
             return jsonify({"error": "signal 또는 position 누락"}), 400
 
+        # 평청 (포지션 반대방향으로 reduce_only 주문)
         if position == "long":
             place_order("sell", reduce_only=True)
             side = "buy"
@@ -210,6 +211,7 @@ def webhook():
         else:
             return jsonify({"error": "invalid position"}), 400
 
+        # 신규 진입
         equity = get_equity()
         price = get_market_price()
         if equity == 0 or price == 0:
@@ -222,18 +224,15 @@ def webhook():
 
     except Exception as e:
         import traceback
-        error_details = traceback.format_exc()
-        log_debug("❌ 웹훅 처리 예외", f"{e}\n{error_details}")
+        log_debug("❌ 웹훅 예외", traceback.format_exc())
         return jsonify({"error": "internal error"}), 500
-
 
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
 
-
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
     threading.Thread(target=check_tp_sl_loop, daemon=True).start()
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 8080))  # 환경 변수에서 포트 읽기
     app.run(host="0.0.0.0", port=port)
