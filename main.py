@@ -1,10 +1,4 @@
-import os
-import time
-import json
-import hmac
-import hashlib
-import requests
-import threading
+import os, time, json, hmac, hashlib, requests, threading
 from flask import Flask, request, jsonify
 from datetime import datetime
 
@@ -131,7 +125,6 @@ def place_order(side, qty=1, reduce_only=False):
         log_debug("❌ 주문 금액 부족", f"{qty * price:.2f} < {MIN_ORDER_USDT}")
         return
 
-    # 숏: size < 0 / 롱: size > 0
     size = qty if side == "buy" else -qty
     if reduce_only:
         size = -size
@@ -165,24 +158,22 @@ def check_tp_sl_loop():
                 price = get_market_price()
                 if not price:
                     continue
-                if entry_side == "buy":
-                    if price >= entry_price * 1.01:
-                        log_debug("🎯 롱 TP", f"{price:.2f} ≥ {entry_price * 1.01:.2f}")
-                        place_order("sell", reduce_only=True)
-                        entry_price = None
-                    elif price <= entry_price * 0.985:
-                        log_debug("🛑 롱 SL", f"{price:.2f} ≤ {entry_price * 0.985:.2f}")
-                        place_order("sell", reduce_only=True)
-                        entry_price = None
-                elif entry_side == "sell":
-                    if price <= entry_price * 0.99:
-                        log_debug("🎯 숏 TP", f"{price:.2f} ≤ {entry_price * 0.99:.2f}")
-                        place_order("buy", reduce_only=True)
-                        entry_price = None
-                    elif price >= entry_price * 1.015:
-                        log_debug("🛑 숏 SL", f"{price:.2f} ≥ {entry_price * 1.015:.2f}")
-                        place_order("buy", reduce_only=True)
-                        entry_price = None
+                if entry_side == "buy" and price >= entry_price * 1.01:
+                    log_debug("🎯 롱 TP", f"{price:.2f} ≥ {entry_price * 1.01:.2f}")
+                    place_order("sell", reduce_only=True)
+                    entry_price = None
+                elif entry_side == "buy" and price <= entry_price * 0.985:
+                    log_debug("🛑 롱 SL", f"{price:.2f} ≤ {entry_price * 0.985:.2f}")
+                    place_order("sell", reduce_only=True)
+                    entry_price = None
+                elif entry_side == "sell" and price <= entry_price * 0.99:
+                    log_debug("🎯 숏 TP", f"{price:.2f} ≤ {entry_price * 0.99:.2f}")
+                    place_order("buy", reduce_only=True)
+                    entry_price = None
+                elif entry_side == "sell" and price >= entry_price * 1.015:
+                    log_debug("🛑 숏 SL", f"{price:.2f} ≥ {entry_price * 1.015:.2f}")
+                    place_order("buy", reduce_only=True)
+                    entry_price = None
         except Exception as e:
             log_debug("❌ TP/SL 오류", str(e))
         time.sleep(3)
@@ -201,7 +192,6 @@ def webhook():
         if not signal or not position:
             return jsonify({"error": "signal 또는 position 누락"}), 400
 
-        # 평청 (포지션 반대방향으로 reduce_only 주문)
         if position == "long":
             place_order("sell", reduce_only=True)
             side = "buy"
@@ -211,7 +201,6 @@ def webhook():
         else:
             return jsonify({"error": "invalid position"}), 400
 
-        # 신규 진입
         equity = get_equity()
         price = get_market_price()
         if equity == 0 or price == 0:
@@ -227,12 +216,14 @@ def webhook():
         log_debug("❌ 웹훅 예외", traceback.format_exc())
         return jsonify({"error": "internal error"}), 500
 
+
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
 
+
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "TP/SL 감시 쓰레드 실행")
     threading.Thread(target=check_tp_sl_loop, daemon=True).start()
-    port = int(os.environ.get("PORT", 8080))  # 환경 변수에서 포트 읽기
+    port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
