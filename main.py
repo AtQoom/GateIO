@@ -73,7 +73,7 @@ def place_order(side, qty=1.0, reduce_only=False):
 
 async def price_listener():
     global entry_price, entry_side
-    uri = "wss://api.gate.io/ws/v4/"
+    uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     async with websockets.connect(uri) as ws:
         await ws.send(json.dumps({
             "time": int(time.time()),
