@@ -177,7 +177,14 @@ def webhook():
             return jsonify({"error": "잔고 또는 시세 오류"}), 500
 
         qty = max(int(equity * RISK_PCT / price), MIN_QTY)
+        qty = qty - (qty % 10)  # 👉 10개 단위로 보정
+
+        if qty < MIN_QTY:
+            log_debug("❌ 주문 생략", f"수량 부족: {qty}")
+            return jsonify({"error": "수량 부족"}), 200
+
         place_order(side, qty)
+
         return jsonify({"status": "진입 완료", "side": side, "qty": qty})
     except Exception as e:
         log_debug("❌ 웹훅 처리 실패", str(e))
