@@ -16,7 +16,7 @@ SYMBOL = "ADA_USDT"
 SETTLE = "usdt"
 RISK_PCT = 0.4
 MIN_QTY = 10
-STOP_LOSS_PCT = 0.008  # 손절 0.8%
+STOP_LOSS_PCT = 0.008
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
@@ -92,10 +92,12 @@ async def price_listener():
             msg = await ws.recv()
             data = json.loads(msg)
             if 'result' in data and isinstance(data['result'], dict):
-                price = float(data['result'].get("last", 0))
                 update_position_state()
-                if not (entry_price and entry_side):
+
+                if entry_price is None or entry_side is None:
                     continue
+
+                price = float(data['result'].get("last", 0))
 
                 if entry_side == "buy" and price <= entry_price * (1 - STOP_LOSS_PCT):
                     log_debug("🔻 롱 손절", f"{price=}, {entry_price=}")
