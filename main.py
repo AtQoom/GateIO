@@ -15,7 +15,7 @@ API_SECRET = os.environ.get("API_SECRET", "")
 SYMBOL = "ADA_USDT"
 SETTLE = "usdt"
 RISK_PCT = 1.0
-MIN_QTY = 1
+MIN_QTY = 10
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
@@ -97,6 +97,7 @@ def update_position_state():
         log_debug("❌ 포지션 감지 실패", str(e))
 
 async def price_listener():
+    global entry_price, entry_side, peak_price, floor_price  # ✅ 중요: 오류 해결용
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     async with websockets.connect(uri) as ws:
         await ws.send(json.dumps({
@@ -111,17 +112,15 @@ async def price_listener():
             if 'result' in data and isinstance(data['result'], dict):
                 price = float(data['result'].get("last", 0))
                 update_position_state()
-                if not (entry_price and entry_side):
+                if entry_price is None or entry_side is None:
                     continue
 
                 if entry_side == "buy":
-                    global peak_price
                     peak_price = max(peak_price, price)
                     profit_ratio = (peak_price / entry_price) - 1
                     trail_pct = get_trailing_pct(profit_ratio)
                     trail_price = peak_price * (1 - trail_pct)
 
-                    # 손절 or TP
                     if price <= entry_price * 0.992 or price >= entry_price * 1.022:
                         log_debug("🎯 롱 TP/SL", f"{price=}, {entry_price=}")
                         place_order("sell", reduce_only=True)
@@ -132,7 +131,6 @@ async def price_listener():
                         entry_price, entry_side = None, None
 
                 elif entry_side == "sell":
-                    global floor_price
                     floor_price = min(floor_price, price)
                     profit_ratio = (entry_price / floor_price) - 1
                     trail_pct = get_trailing_pct(profit_ratio)
