@@ -14,8 +14,7 @@ API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SYMBOL = "ADA_USDT"
 SETTLE = "usdt"
-MIN_QTY = 10  # ADA 최소 수량은 10
-STOP_LOSS_PCT = 0.008  # 손절 0.8%
+MIN_QTY = 10
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
@@ -23,6 +22,7 @@ api_instance = FuturesApi(client)
 
 entry_price = None
 entry_side = None
+stop_loss_price = None
 
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
@@ -46,8 +46,8 @@ def get_market_price():
         log_debug("❌ 시세 조회 실패", str(e))
         return 0
 
-def place_order(side, qty=MIN_QTY, reduce_only=False):
-    global entry_price, entry_side
+def place_order(side, qty=10, reduce_only=False):
+    global entry_price, entry_side, stop_loss_price
     try:
         size = qty if side == "buy" else -qty
         if reduce_only:
@@ -55,29 +55,20 @@ def place_order(side, qty=MIN_QTY, reduce_only=False):
         order = FuturesOrder(contract=SYMBOL, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         result = api_instance.create_futures_order(SETTLE, order)
         log_debug("✅ 주문 성공", result.to_dict())
+
         if not reduce_only:
             entry_price = float(result.fill_price or 0)
             entry_side = side
+            stop_loss_price = entry_price * (1 - 0.008) if side == "buy" else entry_price * (1 + 0.008)
     except Exception as e:
         log_debug("❌ 주문 실패", str(e))
 
-def update_position_state():
-    global entry_price, entry_side
-    try:
-        pos = api_instance.get_position(SETTLE, SYMBOL)
-        size = float(pos.size)
-        if size > 0:
-            entry_price = float(pos.entry_price)
-            entry_side = "buy"
-        elif size < 0:
-            entry_price = float(pos.entry_price)
-            entry_side = "sell"
-        else:
-            entry_price, entry_side = None, None
-    except Exception as e:
-        log_debug("❌ 포지션 감지 실패", str(e))
-
 async def price_listener():
+    global entry_price, entry_side, stop_loss_price
+    entry_price = None
+    entry_side = None
+    stop_loss_price = None
+
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     async with websockets.connect(uri) as ws:
         await ws.send(json.dumps({
@@ -91,17 +82,18 @@ async def price_listener():
             data = json.loads(msg)
             if 'result' in data and isinstance(data['result'], dict):
                 price = float(data['result'].get("last", 0))
-                update_position_state()
                 if entry_price is None or entry_side is None:
                     continue
-                if entry_side == "buy" and price <= entry_price * (1 - STOP_LOSS_PCT):
-                    log_debug("🛑 롱 손절", f"{price=}, {entry_price=}")
+                if entry_side == "buy" and price <= stop_loss_price:
+                    log_debug("💥 롱 손절", f"{price=}, {entry_price=}")
                     place_order("sell", qty=MIN_QTY, reduce_only=True)
-                    entry_price, entry_side = None, None
-                elif entry_side == "sell" and price >= entry_price * (1 + STOP_LOSS_PCT):
-                    log_debug("🛑 숏 손절", f"{price=}, {entry_price=}")
+                    entry_price = None
+                    entry_side = None
+                elif entry_side == "sell" and price >= stop_loss_price:
+                    log_debug("💥 숏 손절", f"{price=}, {entry_price=}")
                     place_order("buy", qty=MIN_QTY, reduce_only=True)
-                    entry_price, entry_side = None, None
+                    entry_price = None
+                    entry_side = None
 
 def start_price_listener():
     loop = asyncio.new_event_loop()
@@ -110,29 +102,35 @@ def start_price_listener():
 
 @app.route("/", methods=["POST"])
 def webhook():
-    global entry_price, entry_side
+    global entry_price, entry_side, stop_loss_price
     try:
         data = request.get_json(force=True)
-        signal = data.get("side", "").lower()
-        if signal not in ["long", "short"]:
+        side = data.get("side", "").lower()
+        action = data.get("action", "").lower()
+
+        if side not in ["buy", "sell"] or action not in ["entry", "exit"]:
             return jsonify({"error": "invalid signal"}), 400
 
-        update_position_state()
-        if entry_side == "buy":
-            place_order("sell", qty=MIN_QTY, reduce_only=True)
-        elif entry_side == "sell":
-            place_order("buy", qty=MIN_QTY, reduce_only=True)
-
-        equity = get_equity()
         price = get_market_price()
+        equity = get_equity()
         if equity == 0 or price == 0:
             return jsonify({"error": "잔고 또는 시세 오류"}), 500
 
-        qty = int(equity / price)
-        qty = max((qty // 10) * 10, MIN_QTY)
-        side = "buy" if signal == "long" else "sell"
-        place_order(side, qty)
-        return jsonify({"status": "주문 완료", "side": side, "qty": qty})
+        qty = max(round((equity / price) / MIN_QTY) * MIN_QTY, MIN_QTY)
+
+        if action == "entry":
+            if entry_side == "buy":
+                place_order("sell", qty=MIN_QTY, reduce_only=True)
+            elif entry_side == "sell":
+                place_order("buy", qty=MIN_QTY, reduce_only=True)
+            place_order(side, qty=qty)
+        elif action == "exit":
+            if side == "buy" and entry_side == "sell":
+                place_order("buy", qty=MIN_QTY, reduce_only=True)
+            elif side == "sell" and entry_side == "buy":
+                place_order("sell", qty=MIN_QTY, reduce_only=True)
+
+        return jsonify({"status": "주문 처리 완료", "side": side, "action": action})
     except Exception as e:
         log_debug("❌ 웹훅 처리 실패", str(e))
         return jsonify({"error": "서버 오류"}), 500
