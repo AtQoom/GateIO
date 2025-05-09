@@ -80,6 +80,7 @@ def update_position_state():
         log_debug("❌ 포지션 감지 실패", str(e))
 
 async def price_listener():
+    global entry_price, entry_side
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     async with websockets.connect(uri) as ws:
         await ws.send(json.dumps({
