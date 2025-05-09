@@ -14,7 +14,7 @@ API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SYMBOL = "ADA_USDT"
 SETTLE = "usdt"
-RISK_PCT = 0.4
+RISK_PCT = 0.5
 MIN_QTY = 10
 STOP_LOSS_PCT = 0.008
 
