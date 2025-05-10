@@ -17,7 +17,6 @@ SETTLE = "usdt"
 MIN_QTY = 10
 QTY_STEP = 10
 STOP_LOSS_PCT = 0.0075
-MAX_QTY_LIMIT = 180
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
@@ -54,11 +53,12 @@ def place_order(side, qty, reduce_only=False):
         size = qty if side == "buy" else -qty
         if reduce_only:
             size = -size
-        order = FuturesOrder(contract=SYMBOL, size=size, price="0", tif="ioc", reduce_only=reduce_only)
+        market_price = get_market_price()
+        order = FuturesOrder(contract=SYMBOL, size=size, price=str(market_price), tif="ioc", reduce_only=reduce_only)
         result = api_instance.create_futures_order(SETTLE, order)
         log_debug("✅ 주문 성공", result.to_dict())
         if not reduce_only:
-            entry_price = float(result.fill_price or 0)
+            entry_price = float(result.fill_price or market_price)
             entry_side = side
     except Exception as e:
         log_debug("❌ 주문 실패", str(e))
@@ -80,7 +80,6 @@ def update_position_state():
         log_debug("❌ 포지션 감지 실패", str(e))
 
 async def price_listener():
-    global entry_price, entry_side
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     async with websockets.connect(uri) as ws:
         await ws.send(json.dumps({
@@ -128,30 +127,4 @@ def webhook():
                 place_order("sell", MIN_QTY, reduce_only=True)
             elif entry_side == "sell":
                 place_order("buy", MIN_QTY, reduce_only=True)
-            entry_price, entry_side = None, None
-            return jsonify({"status": "청산 완료"})
-
-        equity = get_equity()
-        price = get_market_price()
-        if equity == 0 or price == 0:
-            return jsonify({"error": "잔고 또는 시세 오류"}), 500
-
-        max_qty = int(equity / price)
-        qty = max((max_qty // QTY_STEP) * QTY_STEP, MIN_QTY)
-        qty = min(qty, MAX_QTY_LIMIT)
-        side = "buy" if signal == "long" else "sell"
-        place_order(side, qty)
-        return jsonify({"status": "진입 완료", "side": side, "qty": qty})
-    except Exception as e:
-        log_debug("❌ 웹훅 처리 실패", str(e))
-        return jsonify({"error": "서버 오류"}), 500
-
-@app.route("/ping", methods=["GET"])
-def ping():
-    return "pong", 200
-
-if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "WebSocket 감시 쓰레드 실행")
-    threading.Thread(target=start_price_listener, daemon=True).start()
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+            entry
