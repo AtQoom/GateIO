@@ -17,6 +17,7 @@ SETTLE = "usdt"
 MIN_QTY = 10
 QTY_STEP = 10
 STOP_LOSS_PCT = 0.0075
+RISK_PCT = 1.0  # ✅ 추가: 자산의 100% 리스크 설정
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
