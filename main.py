@@ -14,6 +14,7 @@ API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SYMBOL = "ADA_USDT"
 SETTLE = "usdt"
+LEVERAGE = 1
 MIN_QTY = 10
 QTY_STEP = 10
 STOP_LOSS_PCT = 0.0075
@@ -135,7 +136,7 @@ def webhook():
         if equity == 0 or price == 0:
             return jsonify({"error": "잔고 또는 시세 오류"}), 500
 
-        max_qty = int(equity / price)
+        max_qty = int((equity * LEVERAGE) / price)
         qty = max((max_qty // QTY_STEP) * QTY_STEP, MIN_QTY)
         side = "buy" if signal == "long" else "sell"
         place_order(side, qty)
