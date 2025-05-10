@@ -10,29 +10,23 @@ from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 
 app = Flask(__name__)
 
-# === 설정값 ===
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SYMBOL = "ADA_USDT"
 SETTLE = "usdt"
-RISK_PCT = 0.1
-MIN_QTY = 10
 STOP_LOSS_PCT = 0.0075
+MIN_QTY = 10
 
-# === API 초기화 ===
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api_instance = FuturesApi(client)
 
-# === 상태변수 ===
 entry_price = None
 entry_side = None
 
-# === 로그 함수 ===
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-# === 잔고 조회 ===
 def get_equity():
     try:
         accounts = api_instance.list_futures_accounts(settle=SETTLE)
@@ -41,7 +35,6 @@ def get_equity():
         log_debug("❌ 잔고 조회 실패", str(e))
         return 0
 
-# === 현재가 조회 ===
 def get_market_price():
     try:
         tickers = api_instance.list_futures_tickers(settle=SETTLE)
@@ -53,7 +46,6 @@ def get_market_price():
         log_debug("❌ 시세 조회 실패", str(e))
         return 0
 
-# === 주문 ===
 def place_order(side, qty, reduce_only=False):
     global entry_price, entry_side
     try:
@@ -69,7 +61,6 @@ def place_order(side, qty, reduce_only=False):
     except Exception as e:
         log_debug("❌ 주문 실패", str(e))
 
-# === 포지션 상태 업데이트 ===
 def update_position_state():
     global entry_price, entry_side
     try:
@@ -86,7 +77,6 @@ def update_position_state():
     except Exception as e:
         log_debug("❌ 포지션 감지 실패", str(e))
 
-# === 실시간 가격 체크 및 손절 ===
 async def price_listener():
     global entry_price, entry_side
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
@@ -119,18 +109,14 @@ def start_price_listener():
     asyncio.set_event_loop(loop)
     loop.run_until_complete(price_listener())
 
-# === 웹훅 처리 ===
 @app.route("/", methods=["POST"])
 def webhook():
     global entry_price, entry_side
     try:
         data = request.get_json(force=True)
-        symbol = data.get("symbol", "").upper()
         signal = data.get("side", "").lower()
         action = data.get("action", "").lower()
 
-        if symbol != "ADAUSDT":
-            return jsonify({"error": "invalid symbol"}), 400
         if signal not in ["long", "short"] or action not in ["entry", "exit"]:
             return jsonify({"error": "invalid signal"}), 400
 
@@ -148,7 +134,7 @@ def webhook():
         if equity == 0 or price == 0:
             return jsonify({"error": "잔고 또는 시세 오류"}), 500
 
-        qty = max(int(equity * RISK_PCT / price), MIN_QTY)
+        qty = max(int(equity * 0.1 / price), MIN_QTY)
         side = "buy" if signal == "long" else "sell"
         place_order(side, qty)
         return jsonify({"status": "진입 완료", "side": side, "qty": qty})
