@@ -127,4 +127,29 @@ def webhook():
                 place_order("sell", MIN_QTY, reduce_only=True)
             elif entry_side == "sell":
                 place_order("buy", MIN_QTY, reduce_only=True)
-            entry
+            entry_price, entry_side = None, None
+            return jsonify({"status": "청산 완료"})
+
+        equity = get_equity()
+        price = get_market_price()
+        if equity == 0 or price == 0:
+            return jsonify({"error": "잔고 또는 시세 오류"}), 500
+
+        max_qty = int(equity / price)
+        qty = max((max_qty // QTY_STEP) * QTY_STEP, MIN_QTY)
+        side = "buy" if signal == "long" else "sell"
+        place_order(side, qty)
+        return jsonify({"status": "진입 완료", "side": side, "qty": qty})
+    except Exception as e:
+        log_debug("❌ 웹훅 처리 실패", str(e))
+        return jsonify({"error": "서버 오류"}), 500
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    return "pong", 200
+
+if __name__ == "__main__":
+    log_debug("🚀 서버 시작", "WebSocket 감시 쓰레드 실행")
+    threading.Thread(target=start_price_listener, daemon=True).start()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
