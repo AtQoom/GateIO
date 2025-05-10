@@ -48,12 +48,21 @@ def get_market_price():
         log_debug("❌ 시세 조회 실패", str(e))
         return 0
 
-def get_position_size():
+def update_position_state():
+    global entry_price, entry_side
     try:
         pos = api_instance.get_position(SETTLE, SYMBOL)
-        return abs(float(pos.size))
-    except:
-        return 0
+        size = float(pos.size)
+        if size > 0:
+            entry_price = float(pos.entry_price)
+            entry_side = "buy"
+        elif size < 0:
+            entry_price = float(pos.entry_price)
+            entry_side = "sell"
+        else:
+            entry_price, entry_side = None, None
+    except Exception as e:
+        log_debug("❌ 포지션 감지 실패", str(e))
 
 def place_order(side, qty, reduce_only=False):
     global entry_price, entry_side
@@ -70,21 +79,27 @@ def place_order(side, qty, reduce_only=False):
     except Exception as e:
         log_debug("❌ 주문 실패", str(e))
 
-def update_position_state():
+def close_position():
     global entry_price, entry_side
     try:
         pos = api_instance.get_position(SETTLE, SYMBOL)
         size = float(pos.size)
-        if size > 0:
-            entry_price = float(pos.entry_price)
-            entry_side = "buy"
-        elif size < 0:
-            entry_price = float(pos.entry_price)
-            entry_side = "sell"
-        else:
-            entry_price, entry_side = None, None
+        if size == 0:
+            log_debug("📭 포지션 없음", "청산할 포지션이 없습니다.")
+            return
+
+        order = FuturesOrder(
+            contract=SYMBOL,
+            size=0,
+            price="0",
+            tif="ioc",
+            close=True
+        )
+        result = api_instance.create_futures_order(SETTLE, order)
+        log_debug("✅ 전체 청산 성공", result.to_dict())
+        entry_price, entry_side = None, None
     except Exception as e:
-        log_debug("❌ 포지션 감지 실패", str(e))
+        log_debug("❌ 전체 청산 실패", str(e))
 
 async def price_listener():
     global entry_price, entry_side
@@ -110,11 +125,7 @@ async def price_listener():
                 )
                 if sl_hit:
                     log_debug("🛑 손절 조건 충족", f"{price=}, {entry_price=}")
-                    qty = get_position_size()
-                    if qty >= 2:
-                        qty -= 1
-                    place_order("sell" if entry_side == "buy" else "buy", qty=qty, reduce_only=True)
-                    entry_price, entry_side = None, None
+                    close_position()
 
 def start_price_listener():
     loop = asyncio.new_event_loop()
@@ -135,16 +146,7 @@ def webhook():
         update_position_state()
 
         if action == "exit":
-            qty = get_position_size()
-            if qty == 0:
-                return jsonify({"error": "포지션 없음"}), 400
-            if qty >= 2:
-                qty -= 1
-            if entry_side == "buy":
-                place_order("sell", qty, reduce_only=True)
-            elif entry_side == "sell":
-                place_order("buy", qty, reduce_only=True)
-            entry_price, entry_side = None, None
+            close_position()
             return jsonify({"status": "청산 완료"})
 
         equity = get_equity()
