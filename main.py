@@ -110,8 +110,10 @@ async def price_listener():
                 )
                 if sl_hit:
                     log_debug("🛑 손절 조건 충족", f"{price=}, {entry_price=}")
-                    place_order("sell" if entry_side == "buy" else "buy", qty=get_position_size(), reduce_only=True)
-                    entry_price, entry_side = None, None
+                    qty = get_position_size()
+                    if qty > 0:
+                        place_order("sell" if entry_side == "buy" else "buy", qty=qty, reduce_only=True)
+                        entry_price, entry_side = None, None
 
 def start_price_listener():
     loop = asyncio.new_event_loop()
