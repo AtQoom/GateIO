@@ -17,7 +17,7 @@ SETTLE = "usdt"
 MIN_QTY = 10
 QTY_STEP = 10
 STOP_LOSS_PCT = 0.0075
-RISK_PCT = 0.1  # 기존 1.0 → 0.1로 조정
+RISK_PCT = 1.0
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
@@ -94,8 +94,8 @@ async def price_listener():
             data = json.loads(msg)
             if 'result' in data and isinstance(data['result'], dict):
                 price = float(data['result'].get("last", 0))
-                update_position_state()
-                if entry_price is None or entry_side is None:
+                await asyncio.to_thread(update_position_state)
+                if entry_side is None or entry_price is None:
                     continue
                 sl_hit = (
                     (entry_side == "buy" and price <= entry_price * (1 - STOP_LOSS_PCT)) or
@@ -137,6 +137,7 @@ def webhook():
             return jsonify({"error": "잔고 또는 시세 오류"}), 500
 
         qty = max(int(equity * RISK_PCT / price), MIN_QTY)
+        qty = (qty // QTY_STEP) * QTY_STEP
         side = "buy" if signal == "long" else "sell"
         place_order(side, qty)
         return jsonify({"status": "진입 완료", "side": side, "qty": qty})
