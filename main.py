@@ -17,7 +17,7 @@ SETTLE = "usdt"
 MIN_QTY = 10
 QTY_STEP = 10
 STOP_LOSS_PCT = 0.0075
-MAX_QTY_LIMIT = 180  # Max position size for ADA
+MAX_QTY_LIMIT = 180
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
@@ -80,6 +80,7 @@ def update_position_state():
         log_debug("❌ 포지션 감지 실패", str(e))
 
 async def price_listener():
+    global entry_price, entry_side
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     async with websockets.connect(uri) as ws:
         await ws.send(json.dumps({
@@ -138,7 +139,6 @@ def webhook():
         max_qty = int(equity / price)
         qty = max((max_qty // QTY_STEP) * QTY_STEP, MIN_QTY)
         qty = min(qty, MAX_QTY_LIMIT)
-
         side = "buy" if signal == "long" else "sell"
         place_order(side, qty)
         return jsonify({"status": "진입 완료", "side": side, "qty": qty})
