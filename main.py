@@ -111,9 +111,10 @@ async def price_listener():
                 if sl_hit:
                     log_debug("🛑 손절 조건 충족", f"{price=}, {entry_price=}")
                     qty = get_position_size()
-                    if qty > 0:
-                        place_order("sell" if entry_side == "buy" else "buy", qty=qty, reduce_only=True)
-                        entry_price, entry_side = None, None
+                    if qty >= 2:
+                        qty -= 1
+                    place_order("sell" if entry_side == "buy" else "buy", qty=qty, reduce_only=True)
+                    entry_price, entry_side = None, None
 
 def start_price_listener():
     loop = asyncio.new_event_loop()
@@ -137,6 +138,8 @@ def webhook():
             qty = get_position_size()
             if qty == 0:
                 return jsonify({"error": "포지션 없음"}), 400
+            if qty >= 2:
+                qty -= 1
             if entry_side == "buy":
                 place_order("sell", qty, reduce_only=True)
             elif entry_side == "sell":
