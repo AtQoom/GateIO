@@ -135,8 +135,7 @@ def webhook():
         if equity == 0 or price == 0:
             return jsonify({"error": "잔고 또는 시세 오류"}), 500
 
-        max_qty = int(equity / price)
-        qty = max((max_qty // QTY_STEP) * QTY_STEP, MIN_QTY)
+        qty = max(int(equity * RISK_PCT / price), MIN_QTY)
         side = "buy" if signal == "long" else "sell"
         place_order(side, qty)
         return jsonify({"status": "진입 완료", "side": side, "qty": qty})
