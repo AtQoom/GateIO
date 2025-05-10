@@ -53,12 +53,11 @@ def place_order(side, qty, reduce_only=False):
         size = qty if side == "buy" else -qty
         if reduce_only:
             size = -size
-        market_price = get_market_price()
-        order = FuturesOrder(contract=SYMBOL, size=size, price=str(market_price), tif="ioc", reduce_only=reduce_only)
+        order = FuturesOrder(contract=SYMBOL, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         result = api_instance.create_futures_order(SETTLE, order)
         log_debug("✅ 주문 성공", result.to_dict())
         if not reduce_only:
-            entry_price = float(result.fill_price or market_price)
+            entry_price = float(result.fill_price or 0)
             entry_side = side
     except Exception as e:
         log_debug("❌ 주문 실패", str(e))
@@ -80,6 +79,7 @@ def update_position_state():
         log_debug("❌ 포지션 감지 실패", str(e))
 
 async def price_listener():
+    global entry_price, entry_side
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     async with websockets.connect(uri) as ws:
         await ws.send(json.dumps({
