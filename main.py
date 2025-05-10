@@ -1,4 +1,3 @@
-
 import os
 import json
 import time
@@ -47,6 +46,13 @@ def get_market_price():
         return 0
     except Exception as e:
         log_debug("❌ 시세 조회 실패", str(e))
+        return 0
+
+def get_position_size():
+    try:
+        pos = api_instance.get_position(SETTLE, SYMBOL)
+        return abs(float(pos.size))
+    except:
         return 0
 
 def place_order(side, qty, reduce_only=False):
@@ -104,7 +110,7 @@ async def price_listener():
                 )
                 if sl_hit:
                     log_debug("🛑 손절 조건 충족", f"{price=}, {entry_price=}")
-                    place_order("sell" if entry_side == "buy" else "buy", qty=MIN_QTY, reduce_only=True)
+                    place_order("sell" if entry_side == "buy" else "buy", qty=get_position_size(), reduce_only=True)
                     entry_price, entry_side = None, None
 
 def start_price_listener():
@@ -124,11 +130,15 @@ def webhook():
             return jsonify({"error": "invalid signal"}), 400
 
         update_position_state()
+
         if action == "exit":
+            qty = get_position_size()
+            if qty == 0:
+                return jsonify({"error": "포지션 없음"}), 400
             if entry_side == "buy":
-                place_order("sell", MIN_QTY, reduce_only=True)
+                place_order("sell", qty, reduce_only=True)
             elif entry_side == "sell":
-                place_order("buy", MIN_QTY, reduce_only=True)
+                place_order("buy", qty, reduce_only=True)
             entry_price, entry_side = None, None
             return jsonify({"status": "청산 완료"})
 
@@ -137,7 +147,7 @@ def webhook():
         if equity == 0 or price == 0:
             return jsonify({"error": "잔고 또는 시세 오류"}), 500
 
-        qty = max(int(equity * 0.1 / price), MIN_QTY)
+        qty = max(int(equity * RISK_PCT / price), MIN_QTY)
         side = "buy" if signal == "long" else "sell"
         place_order(side, qty)
         return jsonify({"status": "진입 완료", "side": side, "qty": qty})
