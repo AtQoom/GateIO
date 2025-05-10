@@ -16,7 +16,7 @@ SYMBOL = "ADA_USDT"
 SETTLE = "usdt"
 MIN_QTY = 10
 QTY_STEP = 10
-STOP_LOSS_PCT = 0.008
+STOP_LOSS_PCT = 0.0075
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
