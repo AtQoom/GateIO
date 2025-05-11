@@ -65,18 +65,16 @@ def update_position_state():
 
 def get_max_qty():
     try:
-        # 잔고 조회 (가용 자산)
         accounts = api_instance.list_futures_accounts(settle=SETTLE)
-        available = float(accounts.available)  # ← 이게 가용 마진임
-
-        # 포지션 정보 (레버리지, 현재가)
+        available = float(accounts.available)
         pos = api_instance.get_position(SETTLE, SYMBOL)
         leverage = float(pos.leverage)
         mark_price = float(pos.mark_price)
 
-        # 최대 수량 계산
-        max_qty = int(available * leverage / mark_price)
-        log_debug("📈 최대 진입 수량 계산", f"{max_qty=}, {leverage=}, {available=}, {mark_price=}")
+        raw_qty = available * leverage / mark_price
+        max_qty = int(raw_qty // QTY_STEP * QTY_STEP)  # 단위 맞춤 내림 처리
+
+        log_debug("📈 최대 진입 수량 계산", f"{max_qty=}, {leverage=}, {available=}, {mark_price=}, {raw_qty=}")
         return max(max_qty, MIN_QTY)
     except Exception as e:
         log_debug("❌ 최대 수량 계산 실패", str(e))
