@@ -63,6 +63,19 @@ def update_position_state():
     except Exception as e:
         log_debug("❌ 포지션 감지 실패", str(e))
 
+def get_max_qty():
+    try:
+        pos = api_instance.get_position(SETTLE, SYMBOL)
+        leverage = float(pos.leverage)
+        available = float(pos.available)
+        mark_price = float(pos.mark_price)
+        max_qty = int(available * leverage / mark_price)
+        log_debug("📈 최대 진입 수량 계산", f"{max_qty=}, {leverage=}, {available=}, {mark_price=}")
+        return max(max_qty, MIN_QTY)
+    except Exception as e:
+        log_debug("❌ 최대 수량 계산 실패", str(e))
+        return MIN_QTY
+
 def place_order(side, qty, reduce_only=False):
     global entry_price, entry_side
     try:
@@ -116,14 +129,9 @@ async def price_listener():
             if 'result' in data and isinstance(data['result'], dict):
                 price = float(data['result'].get("last", 0))
                 update_position_state()
-
-                # 🛑 안전장치: price가 0이면 무시 (초기 WebSocket 수신 전에 청산 방지)
                 if price == 0 or entry_price is None or entry_side is None:
                     continue
-
-                # 💡 디버깅용 로깅
                 log_debug("📡 가격 수신", f"{price=}, {entry_price=}, {entry_side=}")
-
                 sl_hit = (
                     (entry_side == "buy" and price <= entry_price * (1 - STOP_LOSS_PCT)) or
                     (entry_side == "sell" and price >= entry_price * (1 + STOP_LOSS_PCT))
@@ -133,7 +141,7 @@ async def price_listener():
                     close_position()
 
 def start_price_listener():
-    update_position_state()  # 🔁 서버 시작 직후 포지션 감지 먼저!
+    update_position_state()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(price_listener())
@@ -146,7 +154,6 @@ def webhook():
         signal = data.get("side", "").lower()
         action = data.get("action", "").lower()
 
-        # ✅ buy/sell -> long/short 매핑
         if signal == "buy":
             signal = "long"
         elif signal == "sell":
@@ -161,19 +168,13 @@ def webhook():
             close_position()
             return jsonify({"status": "청산 완료"})
 
-        equity = get_equity()
-        price = get_market_price()
-        if equity == 0 or price == 0:
-            return jsonify({"error": "잔고 또는 시세 오류"}), 500
-
-        qty = max(int(equity / price), MIN_QTY)
+        qty = get_max_qty()
         side = "buy" if signal == "long" else "sell"
 
-        # ✅ 진입 전에 반대 포지션 청산
         if (signal == "long" and entry_side == "sell") or (signal == "short" and entry_side == "buy"):
             log_debug("🔄 반대 포지션 감지", f"{entry_side=}, 반대 방향으로 진입 시도 → 청산")
             close_position()
-            time.sleep(1)  # 약간의 딜레이로 서버 반영 대기
+            time.sleep(1)
 
         place_order(side, qty)
         return jsonify({"status": "진입 완료", "side": side, "qty": qty})
