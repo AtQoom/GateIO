@@ -72,7 +72,7 @@ def get_max_qty():
         mark_price = float(pos.mark_price)
 
         raw_qty = available * leverage / mark_price
-        max_qty = int(raw_qty // QTY_STEP * QTY_STEP)  # 단위 맞춤 내림 처리
+        max_qty = int(raw_qty // QTY_STEP * QTY_STEP * 0.1)  # 단위 맞춤 내림 처리
 
         log_debug("📈 최대 진입 수량 계산", f"{max_qty=}, {leverage=}, {available=}, {mark_price=}, {raw_qty=}")
         return max(max_qty, MIN_QTY)
