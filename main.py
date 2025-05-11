@@ -128,9 +128,11 @@ async def price_listener():
                     close_position()
 
 def start_price_listener():
+    update_position_state()  # ✨ 서버 시작 직후 현재 포지션 감지
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(price_listener())
+
 
 @app.route("/", methods=["POST"])
 def webhook():
