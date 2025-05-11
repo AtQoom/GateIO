@@ -12,12 +12,12 @@ app = Flask(__name__)
 
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
-SYMBOL = "BGSC_USDT"
+SYMBOL = "ADA_USDT"
 SETTLE = "usdt"
-RISK_PCT = 0.001
+RISK_PCT = 0.1
 STOP_LOSS_PCT = 0.0075
-MIN_QTY = 1000
-QTY_STEP = 1000
+MIN_QTY = 10
+QTY_STEP = 10
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
