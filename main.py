@@ -169,6 +169,13 @@ def webhook():
 
         qty = max(int(equity * RISK_PCT / price), MIN_QTY)
         side = "buy" if signal == "long" else "sell"
+
+        # ✅ 진입 전에 반대 포지션 청산
+        if (signal == "long" and entry_side == "sell") or (signal == "short" and entry_side == "buy"):
+            log_debug("🔄 반대 포지션 감지", f"{entry_side=}, 반대 방향으로 진입 시도 → 청산")
+            close_position()
+            time.sleep(1)  # 약간의 딜레이로 서버 반영 대기
+
         place_order(side, qty)
         return jsonify({"status": "진입 완료", "side": side, "qty": qty})
     except Exception as e:
