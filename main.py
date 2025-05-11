@@ -117,8 +117,14 @@ async def price_listener():
             if 'result' in data and isinstance(data['result'], dict):
                 price = float(data['result'].get("last", 0))
                 update_position_state()
-                if entry_price is None or entry_side is None:
+
+                # 🛑 안전장치: price가 0이면 무시 (초기 WebSocket 수신 전에 청산 방지)
+                if price == 0 or entry_price is None or entry_side is None:
                     continue
+
+                # 💡 디버깅용 로깅
+                log_debug("📡 가격 수신", f"{price=}, {entry_price=}, {entry_side=}")
+
                 sl_hit = (
                     (entry_side == "buy" and price <= entry_price * (1 - STOP_LOSS_PCT)) or
                     (entry_side == "sell" and price >= entry_price * (1 + STOP_LOSS_PCT))
@@ -128,11 +134,10 @@ async def price_listener():
                     close_position()
 
 def start_price_listener():
-    update_position_state()  # ✨ 서버 시작 직후 현재 포지션 감지
+    update_position_state()  # 🔁 서버 시작 직후 포지션 감지 먼저!
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(price_listener())
-
 
 @app.route("/", methods=["POST"])
 def webhook():
@@ -141,6 +146,12 @@ def webhook():
         data = request.get_json(force=True)
         signal = data.get("side", "").lower()
         action = data.get("action", "").lower()
+
+        # ✅ buy/sell -> long/short 매핑
+        if signal == "buy":
+            signal = "long"
+        elif signal == "sell":
+            signal = "short"
 
         if signal not in ["long", "short"] or action not in ["entry", "exit"]:
             return jsonify({"error": "invalid signal"}), 400
