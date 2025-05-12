@@ -191,14 +191,14 @@ def webhook():
 
         update_position_state()
 
-if action == "exit":
-    if (signal == "long" and entry_side == "buy") or (signal == "short" and entry_side == "sell"):
-        log_debug("✅ 청산 조건 충족", f"{entry_side=} → {signal=}")
-        close_position()
-        return jsonify({"status": "청산 완료"})
-    else:
-        log_debug("❎ 청산 무시됨", f"{entry_side=} → {signal=} (방향 불일치)")
-        return jsonify({"status": "청산 무시됨 - 방향 불일치"})
+        if action == "exit":
+            if (signal == "long" and entry_side == "buy") or (signal == "short" and entry_side == "sell"):
+                log_debug("✅ 청산 조건 충족", f"{entry_side=} → {signal=}")
+                close_position()
+                return jsonify({"status": "청산 완료"})
+            else:
+                log_debug("❎ 청산 무시됨", f"{entry_side=} → {signal=} (방향 불일치)")
+                return jsonify({"status": "청산 무시됨 - 방향 불일치"})
 
         qty = get_max_qty()
         side = "buy" if signal == "long" else "sell"
@@ -210,6 +210,7 @@ if action == "exit":
 
         place_order(side, qty)
         return jsonify({"status": "진입 완료", "side": side, "qty": qty})
+    
     except Exception as e:
         log_debug("❌ 웹훅 처리 실패", str(e))
         return jsonify({"error": "서버 오류"}), 500
