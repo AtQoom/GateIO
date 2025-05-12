@@ -120,6 +120,8 @@ def close_position():
 async def price_listener():
     global entry_price, entry_side
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
+    recent_prices = []  # 최근 15초간 가격 저장
+
     async with websockets.connect(uri) as ws:
         await ws.send(json.dumps({
             "time": int(time.time()),
@@ -127,21 +129,42 @@ async def price_listener():
             "event": "subscribe",
             "payload": [SYMBOL]
         }))
+
         while True:
             msg = await ws.recv()
             data = json.loads(msg)
+
             if 'result' in data and isinstance(data['result'], dict):
                 price = float(data['result'].get("last", 0))
                 update_position_state()
+
                 if price == 0 or entry_price is None or entry_side is None:
                     continue
-                log_debug("📡 가격 수신", f"{price=}, {entry_price=}, {entry_side=}")
+
+                # 최근 가격 리스트 갱신 (최대 15개)
+                recent_prices.append(price)
+                if len(recent_prices) > 15:
+                    recent_prices.pop(0)
+
+                # 현재가 vs 15초 전 가격 비교
+                fast_take_profit = False
+                if len(recent_prices) >= 15:
+                    past_price = recent_prices[0]
+                    pct_change = (price / past_price - 1) if entry_side == "buy" else (past_price / price - 1)
+                    if pct_change >= 0.012:  # 1.2%
+                        fast_take_profit = True
+                        log_debug("🚀 급등락 익절 조건 충족", f"{price=}, {past_price=}, {pct_change:.4%}")
+
                 sl_hit = (
                     (entry_side == "buy" and price <= entry_price * (1 - STOP_LOSS_PCT)) or
                     (entry_side == "sell" and price >= entry_price * (1 + STOP_LOSS_PCT))
                 )
+
                 if sl_hit:
                     log_debug("🛑 손절 조건 충족", f"{price=}, {entry_price=}")
+                    close_position()
+                elif fast_take_profit:
+                    log_debug("💰 급등익절 실행", f"{entry_side=}, {price=}, {entry_price=}")
                     close_position()
 
 def start_price_listener():
