@@ -102,34 +102,48 @@ def close_position(symbol_key):
     except Exception as e:
         log_debug(f"❌ 전체 청산 실패 ({symbol_key})", str(e))
 
-async def price_listener(symbol_key):
+async def price_listener():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-    symbol = SYMBOL_CONFIG[symbol_key]["symbol"]
+    symbols = [v["symbol"] for v in SYMBOL_CONFIG.values()]
     async with websockets.connect(uri) as ws:
         await ws.send(json.dumps({
             "time": int(time.time()),
             "channel": "futures.tickers",
             "event": "subscribe",
-            "payload": [symbol]
+            "payload": symbols
         }))
         while True:
             msg = await ws.recv()
             data = json.loads(msg)
-            if 'result' in data and isinstance(data['result'], dict):
-                price = float(data['result'].get("last", 0))
-                update_position_state(symbol_key)
-                state = position_state.get(symbol_key, {})
-                entry_price = state.get("price")
-                entry_side = state.get("side")
-                if not price or not entry_price or not entry_side:
-                    continue
-                sl_hit = (
-                    (entry_side == "buy" and price <= entry_price * (1 - STOP_LOSS_PCT)) or
-                    (entry_side == "sell" and price >= entry_price * (1 + STOP_LOSS_PCT))
-                )
-                if sl_hit:
-                    log_debug(f"🛑 손절 조건 충족 ({symbol_key})", f"{price=}, {entry_price=}")
-                    close_position(symbol_key)
+
+            if 'result' not in data or not isinstance(data['result'], dict):
+                continue
+
+            symbol = data["result"]["contract"]
+            price = float(data["result"]["last"])
+
+            if symbol not in symbol_states:
+                continue
+
+            state = symbol_states[symbol]
+            update_position_state(symbol)
+
+            entry_price = state["entry_price"]
+            entry_side = state["entry_side"]
+
+            if entry_price is None or entry_side is None:
+                continue
+
+            log_debug(f"📡 {symbol} 가격 수신", f"{price=}, {entry_price=}, {entry_side=}")
+
+            sl_hit = (
+                (entry_side == "buy" and price <= entry_price * (1 - STOP_LOSS_PCT)) or
+                (entry_side == "sell" and price >= entry_price * (1 + STOP_LOSS_PCT))
+            )
+
+            if sl_hit:
+                log_debug(f"🛑 {symbol} 손절 조건 충족", f"{price=}, {entry_price=}")
+                close_position(symbol)
 
 def start_price_listener(symbol_key):
     update_position_state(symbol_key)
