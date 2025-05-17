@@ -14,7 +14,7 @@ app = Flask(__name__)
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
-MANUAL_EQUITY = float(os.environ.get("MANUAL_EQUITY", "0"))  # 직접 증거금 지정(옵션)
+MANUAL_EQUITY = float(os.environ.get("MANUAL_EQUITY", "0"))
 ALLOCATION_RATIO = 0.33  # 각 코인당 33%씩 진입
 
 BINANCE_TO_GATE_SYMBOL = {
@@ -39,55 +39,16 @@ def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
 def get_total_equity():
-    """총 계정 자본금 조회 - 여러 방식 시도, 실패 시 160 USDT 기본값"""
     try:
         if MANUAL_EQUITY > 0:
             log_debug("💰 수동 설정 증거금", f"{MANUAL_EQUITY} USDT")
             return MANUAL_EQUITY
-
-        # 1. 통합 계정 잔액 조회 (가능할 경우)
-        try:
-            wallet_balance = api_instance.get_sub_account_balances(sub_uid='0')
-            if hasattr(wallet_balance, 'total') and wallet_balance.total:
-                total = float(wallet_balance.total)
-                log_debug("💰 통합 계정 잔액", f"총액: {total} USDT")
-                if total > 1:
-                    return total
-        except Exception as e:
-            log_debug("⚠️ 통합 계정 조회 실패", str(e))
-
-        # 2. 선물 계정 잔액 조회
-        try:
-            accounts = api_instance.list_futures_accounts(settle=SETTLE)
-            total = float(accounts.total) if hasattr(accounts, 'total') else 0
-            unrealized_pnl = float(accounts.unrealised_pnl or 0) if hasattr(accounts, 'unrealised_pnl') else 0
-            total_equity = total + unrealized_pnl
-            log_debug("💰 선물 계정 잔액", f"총액: {total} USDT, 미실현 손익: {unrealized_pnl} USDT, 총 가용: {total_equity} USDT")
-            if total_equity > 1:
-                return total_equity
-        except Exception as e:
-            log_debug("⚠️ 선물 계정 조회 실패", str(e))
-
-        # 3. 포지션 마진 합산 (마지막 수단)
-        positions = []
-        for symbol in SYMBOL_CONFIG.keys():
-            try:
-                pos = api_instance.get_position(SETTLE, symbol)
-                if hasattr(pos, 'size') and float(pos.size) != 0:
-                    positions.append(pos)
-            except Exception:
-                pass
-        position_margin = 0
-        for pos in positions:
-            if hasattr(pos, 'mark_value') and pos.mark_value:
-                position_margin += float(pos.mark_value or 0) / float(pos.leverage or 1)
-        if positions and position_margin > 1:
-            log_debug("💰 포지션 마진 추정", f"{position_margin*3:.2f} USDT")
-            return position_margin * 3
-
-        # 4. 실패 시 기본값
-        log_debug("⚠️ 증거금 조회 실패, 기본값 사용", "160 USDT")
-        return 160
+        accounts = api_instance.list_futures_accounts(settle=SETTLE)
+        total = float(getattr(accounts, 'total', 0))
+        unrealized_pnl = float(getattr(accounts, 'unrealised_pnl', 0))
+        total_equity = total + unrealized_pnl
+        log_debug("💰 선물 계정 잔액", f"총액: {total} USDT, 미실현 손익: {unrealized_pnl} USDT, 총 가용: {total_equity} USDT")
+        return total_equity if total_equity > 1 else 160
     except Exception as e:
         log_debug("❌ 증거금 조회 실패", str(e))
         return 160
@@ -95,24 +56,25 @@ def get_total_equity():
 def update_position_state(symbol):
     try:
         pos = api_instance.get_position(SETTLE, symbol)
-        size = float(pos.size) if hasattr(pos, 'size') else 0
+        size = float(getattr(pos, 'size', 0))
         if size != 0:
             position_state[symbol] = {
-                "price": float(pos.entry_price) if hasattr(pos, 'entry_price') else 0,
-                "side": "buy" if size > 0 else "sell"
+                "price": float(getattr(pos, 'entry_price', 0)),
+                "side": "buy" if size > 0 else "sell",
+                "size": size
             }
             log_debug(f"📊 포지션 상태 ({symbol})", f"사이즈: {size}, 진입가: {position_state[symbol]['price']}, 방향: {position_state[symbol]['side']}")
         else:
-            position_state[symbol] = {"price": None, "side": None}
+            position_state[symbol] = {"price": None, "side": None, "size": 0}
             log_debug(f"📊 포지션 상태 ({symbol})", "포지션 없음")
     except Exception as e:
         log_debug(f"❌ 포지션 업데이트 실패 ({symbol})", str(e))
-        position_state[symbol] = {"price": None, "side": None}
+        position_state[symbol] = {"price": None, "side": None, "size": 0}
 
 def close_position(symbol):
     try:
         pos = api_instance.get_position(SETTLE, symbol)
-        size = float(pos.size) if hasattr(pos, 'size') else 0
+        size = float(getattr(pos, 'size', 0))
         if size == 0:
             log_debug(f"📭 포지션 없음 ({symbol})", "청산할 포지션이 없습니다.")
             return
@@ -121,17 +83,17 @@ def close_position(symbol):
         log_debug(f"✅ 전체 청산 성공 ({symbol})", result.to_dict())
         for _ in range(10):
             pos = api_instance.get_position(SETTLE, symbol)
-            if float(pos.size) == 0:
+            if float(getattr(pos, 'size', 0)) == 0:
                 break
             time.sleep(0.5)
-        position_state[symbol] = {"price": None, "side": None}
+        position_state[symbol] = {"price": None, "side": None, "size": 0}
     except Exception as e:
         log_debug(f"❌ 전체 청산 실패 ({symbol})", str(e))
 
 def get_current_price(symbol):
     try:
         tickers = api_instance.list_futures_tickers(settle=SETTLE, contract=symbol)
-        if tickers and len(tickers) > 0 and hasattr(tickers[0], 'last'):
+        if tickers and hasattr(tickers[0], 'last'):
             price = float(tickers[0].last)
             log_debug(f"💲 가격 조회 ({symbol})", f"현재가: {price}")
             return price
@@ -144,43 +106,58 @@ def get_current_price(symbol):
         log_debug(f"⚠️ {symbol} 가격 조회 실패", str(e))
     return 0
 
-def get_max_qty(symbol):
-    """주문 수량 계산 - 총 자본금의 1/3 할당, 레버리지 무시"""
+def get_max_qty(symbol, desired_side):
+    """기존 포지션을 고려하여 추가 진입 수량 계산"""
     try:
         config = SYMBOL_CONFIG[symbol]
         total_equity = get_total_equity()
-        allocated_amount = total_equity * ALLOCATION_RATIO
-        mark_price = get_current_price(symbol)
-        if mark_price <= 0:
+        current_price = get_current_price(symbol)
+        if current_price <= 0:
             log_debug(f"⚠️ {symbol} 가격이 0임", f"심볼 최소 수량 사용")
             return config["min_qty"]
-        raw_qty = allocated_amount / mark_price
+
+        # 목표 포지션 가치
+        target_value = total_equity * ALLOCATION_RATIO
+
+        # 현재 포지션 정보
+        pos = api_instance.get_position(SETTLE, symbol)
+        current_size = float(getattr(pos, 'size', 0))
+        current_side = "buy" if current_size > 0 else "sell" if current_size < 0 else None
+        current_value = abs(current_size) * current_price
+
+        # 같은 방향이면 추가 진입, 반대면 전체 진입
+        if current_side == desired_side:
+            additional_value = max(target_value - current_value, 0)
+            additional_qty = additional_value / current_price
+        else:
+            additional_qty = target_value / current_price
+
+        # 최소 단위, 최소 수량 적용
         step = Decimal(str(config["qty_step"]))
-        raw_qty_dec = Decimal(str(raw_qty))
+        raw_qty_dec = Decimal(str(additional_qty))
         quantized = (raw_qty_dec / step).quantize(Decimal('1'), rounding=ROUND_DOWN) * step
         qty = float(quantized)
         final_qty = max(qty, config["min_qty"])
         log_debug(f"📊 {symbol} 수량 계산", 
-                 f"총자본금: {total_equity:.2f} USDT, 할당액: {allocated_amount:.2f} USDT, "
-                 f"가격: {mark_price:.6f}, 계산수량: {qty}, 최종수량: {final_qty}")
+                 f"현재 포지션: {current_size}, 방향: {current_side}, 목표 가치: {target_value:.2f} USDT, 추가 수량: {additional_qty:.2f} → 최종: {final_qty}")
         return final_qty
     except Exception as e:
         log_debug(f"❌ {symbol} 수량 계산 실패", str(e))
-        return config["min_qty"]
+        return SYMBOL_CONFIG[symbol]["min_qty"]
 
 def place_order(symbol, side, qty, reduce_only=False):
     try:
         size = qty if side == "buy" else -qty
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         result = api_instance.create_futures_order(SETTLE, order)
-        fill_price = float(result.fill_price) if hasattr(result, 'fill_price') and result.fill_price else 0
-        fill_size = float(result.size) if hasattr(result, 'size') else 0
-        log_debug(f"✅ 주문 성공 ({symbol})", 
-                 f"수량: {fill_size}, 체결가: {fill_price}")
+        fill_price = float(getattr(result, 'fill_price', 0))
+        fill_size = float(getattr(result, 'size', 0))
+        log_debug(f"✅ 주문 성공 ({symbol})", f"수량: {fill_size}, 체결가: {fill_price}")
         if not reduce_only:
             position_state[symbol] = {
                 "price": fill_price,
-                "side": side
+                "side": side,
+                "size": size
             }
     except Exception as e:
         log_debug(f"❌ 주문 실패 ({symbol})", str(e))
@@ -284,23 +261,33 @@ def webhook():
             signal = "long"
         elif signal == "sell":
             signal = "short"
+        desired_side = "buy" if signal == "long" else "sell"
         update_position_state(symbol)
         state = position_state.get(symbol, {})
+        current_side = state.get("side")
         if action == "exit":
             close_position(symbol)
             return jsonify({"status": "청산 완료", "symbol": symbol})
-        side = "buy" if signal == "long" else "sell"
-        entry_side = state.get("side")
-        if entry_side and ((side == "buy" and entry_side == "sell") or (side == "sell" and entry_side == "buy")):
-            log_debug(f"🔁 반대 포지션 감지 ({symbol})", f"{entry_side} → {side}로 전환")
+        # 진입 로직 (기존 포지션과 같은 방향이면 추가 진입, 반대면 청산 후 진입)
+        if current_side == desired_side:
+            qty = get_max_qty(symbol, desired_side)
+            if qty > 0:
+                place_order(symbol, desired_side, qty)
+            else:
+                log_debug(f"😶 추가 진입 불필요 ({symbol})", "목표 포지션 이미 달성")
+        elif current_side and current_side != desired_side:
+            log_debug(f"🔁 반대 포지션 감지 ({symbol})", f"{current_side} → {desired_side}로 전환")
             close_position(symbol)
             time.sleep(0.5)
-        qty = get_max_qty(symbol)
-        place_order(symbol, side, qty)
+            qty = get_max_qty(symbol, desired_side)
+            place_order(symbol, desired_side, qty)
+        else:
+            qty = get_max_qty(symbol, desired_side)
+            place_order(symbol, desired_side, qty)
         return jsonify({
             "status": "진입 완료", 
             "symbol": symbol, 
-            "side": side,
+            "side": desired_side,
             "qty": qty
         })
     except Exception as e:
