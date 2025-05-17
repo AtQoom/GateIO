@@ -46,8 +46,11 @@ def get_total_equity():
     """총 계정 자본금 조회"""
     try:
         accounts = api_instance.list_futures_accounts(settle=SETTLE)
+        # accounts.total이 실제 총 equity 값
         total_equity = float(accounts.total) if hasattr(accounts, 'total') else 0
-        log_debug("💰 계정 잔액", f"총 증거금: {total_equity} USDT")
+        unrealised_pnl = float(accounts.unrealised_pnl) if hasattr(accounts, 'unrealised_pnl') else 0
+        
+        log_debug("💰 계정 잔액", f"총 증거금: {total_equity} USDT, 미실현 손익: {unrealised_pnl} USDT")
         return max(total_equity, 0)  # 음수 방지
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
@@ -60,15 +63,16 @@ def update_position_state(symbol):
         if size != 0:
             position_state[symbol] = {
                 "price": float(pos.entry_price) if hasattr(pos, 'entry_price') else 0,
-                "side": "buy" if size > 0 else "sell"
+                "side": "buy" if size > 0 else "sell",
+                "leverage": float(pos.leverage) if hasattr(pos, 'leverage') else 1
             }
-            log_debug(f"📊 포지션 상태 ({symbol})", f"사이즈: {size}, 진입가: {position_state[symbol]['price']}, 방향: {position_state[symbol]['side']}")
+            log_debug(f"📊 포지션 상태 ({symbol})", f"사이즈: {size}, 진입가: {position_state[symbol]['price']}, 방향: {position_state[symbol]['side']}, 레버리지: {position_state[symbol]['leverage']}x")
         else:
-            position_state[symbol] = {"price": None, "side": None}
+            position_state[symbol] = {"price": None, "side": None, "leverage": 1}
             log_debug(f"📊 포지션 상태 ({symbol})", "포지션 없음")
     except Exception as e:
         log_debug(f"❌ 포지션 업데이트 실패 ({symbol})", str(e))
-        position_state[symbol] = {"price": None, "side": None}
+        position_state[symbol] = {"price": None, "side": None, "leverage": 1}
 
 def close_position(symbol):
     try:
@@ -93,7 +97,7 @@ def close_position(symbol):
             except:
                 break
                 
-        position_state[symbol] = {"price": None, "side": None}
+        position_state[symbol] = {"price": None, "side": None, "leverage": 1}
     except Exception as e:
         log_debug(f"❌ 전체 청산 실패 ({symbol})", str(e))
 
@@ -102,25 +106,50 @@ def get_current_price(symbol):
     try:
         # 방법 1: 티커 조회
         tickers = api_instance.list_futures_tickers(settle=SETTLE, contract=symbol)
-        if tickers and len(tickers) > 0:
-            return float(tickers[0].last)
+        if tickers and len(tickers) > 0 and hasattr(tickers[0], 'last'):
+            price = float(tickers[0].last)
+            log_debug(f"💲 가격 조회 ({symbol})", f"현재가: {price}")
+            return price
             
-        # 방법 2: 최근 거래 조회
-        trades = api_instance.list_futures_trades(settle=SETTLE, contract=symbol)
-        if trades and len(trades) > 0:
-            return float(trades[0].price)
+        # 방법 2: 포지션 정보에서 마크 가격 조회
+        pos = api_instance.get_position(SETTLE, symbol)
+        if hasattr(pos, 'mark_price') and pos.mark_price:
+            price = float(pos.mark_price)
+            log_debug(f"💲 가격 조회 ({symbol})", f"마크가: {price}")
+            return price
     except Exception as e:
         log_debug(f"⚠️ {symbol} 가격 조회 실패", str(e))
     return 0
 
+def get_leverage(symbol):
+    """현재 설정된 레버리지 조회"""
+    try:
+        # 포지션에서 레버리지 확인
+        pos = api_instance.get_position(SETTLE, symbol)
+        leverage = float(pos.leverage) if hasattr(pos, 'leverage') else 1
+        
+        # 포지션 상태에 저장
+        if symbol in position_state:
+            position_state[symbol]["leverage"] = leverage
+        
+        log_debug(f"🔄 레버리지 조회 ({symbol})", f"{leverage}x")
+        return leverage
+    except Exception as e:
+        log_debug(f"⚠️ {symbol} 레버리지 조회 실패", str(e))
+        return 1  # 기본값
+
 def get_max_qty(symbol):
-    """주문 수량 계산 - 총 자본금의 1/3 할당"""
+    """주문 수량 계산 - 총 자본금의 1/3 할당 + 레버리지 적용"""
     try:
         config = SYMBOL_CONFIG[symbol]
         total_equity = get_total_equity()
         
-        # 총 자본금의 ALLOCATION_RATIO(33%)를 할당 (레버리지 무시)
+        # 레버리지 조회 (기본값 1x)
+        leverage = get_leverage(symbol)
+        
+        # 총 자본금의 ALLOCATION_RATIO(33%)를 할당하고 레버리지 적용
         allocated_amount = total_equity * ALLOCATION_RATIO
+        effective_amount = allocated_amount * leverage
         
         # 현재 가격 조회
         mark_price = get_current_price(symbol)
@@ -130,8 +159,8 @@ def get_max_qty(symbol):
             log_debug(f"⚠️ {symbol} 가격이 0임", f"심볼 최소 수량 사용")
             return config["min_qty"]
         
-        # 수량 계산 (할당금액/현재가격)
-        raw_qty = allocated_amount / mark_price
+        # 수량 계산 (할당금액*레버리지/현재가격)
+        raw_qty = effective_amount / mark_price
         step = Decimal(str(config["qty_step"]))
         raw_qty_dec = Decimal(str(raw_qty))
         
@@ -139,11 +168,15 @@ def get_max_qty(symbol):
         quantized = (raw_qty_dec / step).quantize(Decimal('1'), rounding=ROUND_DOWN) * step
         qty = float(quantized)
         
+        # 계산 결과가 최소 수량보다 작으면 최소 수량으로 설정
+        final_qty = max(qty, config["min_qty"])
+        
         log_debug(f"📊 {symbol} 수량 계산", 
                  f"총자본금: {total_equity:.2f} USDT, 할당액: {allocated_amount:.2f} USDT, " 
-                 f"가격: {mark_price:.6f}, 수량: {qty}")
+                 f"레버리지: {leverage}x, 유효금액: {effective_amount:.2f} USDT, "
+                 f"가격: {mark_price:.6f}, 계산수량: {qty}, 최종수량: {final_qty}")
                  
-        return max(qty, config["min_qty"])
+        return final_qty
     except Exception as e:
         log_debug(f"❌ {symbol} 수량 계산 실패", str(e))
         return config["min_qty"]
@@ -157,15 +190,18 @@ def place_order(symbol, side, qty, reduce_only=False):
         result = api_instance.create_futures_order(SETTLE, order)
         
         # 성공 로그
+        fill_price = float(result.fill_price) if hasattr(result, 'fill_price') and result.fill_price else 0
+        fill_size = float(result.size) if hasattr(result, 'size') else 0
         log_debug(f"✅ 주문 성공 ({symbol})", 
-                 f"수량: {size}, 체결가: {result.fill_price if hasattr(result, 'fill_price') else '알 수 없음'}")
+                 f"수량: {fill_size}, 체결가: {fill_price}")
         
         # 포지션 상태 업데이트
         if not reduce_only:
-            fill_price = float(result.fill_price) if hasattr(result, 'fill_price') and result.fill_price else 0
+            leverage = get_leverage(symbol)
             position_state[symbol] = {
                 "price": fill_price,
-                "side": side
+                "side": side,
+                "leverage": leverage
             }
     except Exception as e:
         log_debug(f"❌ 주문 실패 ({symbol})", str(e))
