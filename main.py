@@ -14,8 +14,7 @@ app = Flask(__name__)
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
-MANUAL_EQUITY = float(os.environ.get("MANUAL_EQUITY", "0"))
-MARGIN_BUFFER = 0.85  # 안전 계수 (실제 증거금의 85%만 사용)
+MARGIN_BUFFER = 0.8  # 사용 가능 증거금의 80%만 사용
 ALLOCATION_RATIO = 0.33  # 각 코인당 33%씩 진입
 
 BINANCE_TO_GATE_SYMBOL = {
@@ -35,81 +34,39 @@ client = ApiClient(config)
 api_instance = FuturesApi(client)
 
 position_state = {}
-last_update_time = 0
-available_margin = None
 
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
 def get_account_info():
-    """계정 정보 및 실제 사용 가능한 증거금 조회"""
-    global available_margin, last_update_time
-    
-    # 1초에 한 번만 API 호출
-    current_time = time.time()
-    if available_margin is not None and current_time - last_update_time < 1:
-        return available_margin
-
+    """실제 사용 가능한 증거금(available)의 80%만 사용"""
     try:
-        # 계정 정보 조회
         accounts = api_instance.list_futures_accounts(settle=SETTLE)
-        
-        # 핵심 값 추출
-        total_equity = float(getattr(accounts, 'total', 0))
-        total_available = float(getattr(accounts, 'available', 0))
-        unrealized_pnl = float(getattr(accounts, 'unrealised_pnl', 0))
-        
-        # 직접 지정한 증거금 사용
-        if MANUAL_EQUITY > 0:
-            log_debug("💰 수동 설정 증거금", f"{MANUAL_EQUITY} USDT")
-            available_margin = MANUAL_EQUITY * MARGIN_BUFFER
-            last_update_time = current_time
-            return available_margin
-
-        # 사용 가능한 증거금 = available * 안전계수
-        if total_available > 1:
-            log_debug("💰 계정 상태", f"총액: {total_equity} USDT, 가용: {total_available} USDT, 손익: {unrealized_pnl} USDT")
-            available_margin = total_available * MARGIN_BUFFER
-            last_update_time = current_time
-            return available_margin
-        
-        # 정보 부족 시 기본값 사용
-        default_value = 160 * MARGIN_BUFFER
-        log_debug("⚠️ 증거금 조회 실패, 기본값 사용", f"{default_value} USDT")
-        available_margin = default_value
-        last_update_time = current_time
-        return default_value
-
+        available = float(getattr(accounts, 'available', 0))
+        safe_available = available * MARGIN_BUFFER
+        log_debug("💰 사용 가능 증거금", f"{safe_available:.2f} USDT (원본: {available:.2f})")
+        return safe_available
     except Exception as e:
-        log_debug("❌ 계정 조회 실패", str(e))
-        available_margin = 160 * MARGIN_BUFFER
-        last_update_time = current_time
-        return available_margin
+        log_debug("❌ 증거금 조회 실패", str(e))
+        return 160 * MARGIN_BUFFER
 
 def update_position_state(symbol):
     try:
         pos = api_instance.get_position(SETTLE, symbol)
         size = float(getattr(pos, 'size', 0))
-        mark_price = float(getattr(pos, 'mark_price', 0))
-        leverage = float(getattr(pos, 'leverage', 1))
-        
         if size != 0:
             position_state[symbol] = {
                 "price": float(getattr(pos, 'entry_price', 0)),
                 "side": "buy" if size > 0 else "sell",
-                "size": size,
-                "value": abs(size) * mark_price,  # 포지션 가치
-                "margin": (abs(size) * mark_price) / leverage  # 사용 중인 증거금
+                "size": size
             }
-            log_debug(f"📊 포지션 상태 ({symbol})", 
-                     f"사이즈: {size}, 가격: {position_state[symbol]['price']}, "
-                     f"방향: {position_state[symbol]['side']}, 가치: {position_state[symbol]['value']:.2f} USDT")
+            log_debug(f"📊 포지션 상태 ({symbol})", f"사이즈: {size}, 진입가: {position_state[symbol]['price']}, 방향: {position_state[symbol]['side']}")
         else:
-            position_state[symbol] = {"price": None, "side": None, "size": 0, "value": 0, "margin": 0}
+            position_state[symbol] = {"price": None, "side": None, "size": 0}
             log_debug(f"📊 포지션 상태 ({symbol})", "포지션 없음")
     except Exception as e:
         log_debug(f"❌ 포지션 업데이트 실패 ({symbol})", str(e))
-        position_state[symbol] = {"price": None, "side": None, "size": 0, "value": 0, "margin": 0}
+        position_state[symbol] = {"price": None, "side": None, "size": 0}
 
 def close_position(symbol):
     try:
@@ -126,7 +83,7 @@ def close_position(symbol):
             if float(getattr(pos, 'size', 0)) == 0:
                 break
             time.sleep(0.5)
-        position_state[symbol] = {"price": None, "side": None, "size": 0, "value": 0, "margin": 0}
+        position_state[symbol] = {"price": None, "side": None, "size": 0}
     except Exception as e:
         log_debug(f"❌ 전체 청산 실패 ({symbol})", str(e))
 
@@ -135,102 +92,59 @@ def get_current_price(symbol):
         tickers = api_instance.list_futures_tickers(settle=SETTLE, contract=symbol)
         if tickers and hasattr(tickers[0], 'last'):
             price = float(tickers[0].last)
+            log_debug(f"💲 가격 조회 ({symbol})", f"현재가: {price}")
             return price
         pos = api_instance.get_position(SETTLE, symbol)
         if hasattr(pos, 'mark_price') and pos.mark_price:
             price = float(pos.mark_price)
+            log_debug(f"💲 가격 조회 ({symbol})", f"마크가: {price}")
             return price
     except Exception as e:
         log_debug(f"⚠️ {symbol} 가격 조회 실패", str(e))
     return 0
 
-def get_leverage(symbol):
-    """현재 설정된 레버리지 조회"""
-    try:
-        pos = api_instance.get_position(SETTLE, symbol)
-        leverage = float(getattr(pos, 'leverage', 5))
-        return leverage
-    except Exception as e:
-        log_debug(f"⚠️ 레버리지 조회 실패 ({symbol})", str(e))
-        return 5  # 기본값
-
-def get_used_margin():
-    """모든 포지션이 사용 중인 증거금 계산"""
-    used = 0
-    for symbol in SYMBOL_CONFIG.keys():
-        if symbol in position_state:
-            used += position_state[symbol].get("margin", 0)
-    return used
-
 def get_max_qty(symbol, desired_side):
-    """사용 가능한 증거금과 기존 포지션 고려하여 수량 계산"""
+    """실제 사용 가능 증거금과 기존 포지션 고려, 최소 단위 내림"""
     try:
         config = SYMBOL_CONFIG[symbol]
-        
-        # 사용 가능한 증거금 조회
-        account_margin = get_account_info()
-        
-        # 현재 가격
+        safe_available = get_account_info()
         current_price = get_current_price(symbol)
         if current_price <= 0:
             log_debug(f"⚠️ {symbol} 가격이 0임", f"심볼 최소 수량 사용")
             return config["min_qty"]
 
-        # 레버리지
-        leverage = get_leverage(symbol)
-        
+        # 목표 할당액
+        target_value = safe_available * ALLOCATION_RATIO
+
         # 현재 포지션 정보
-        update_position_state(symbol)
-        state = position_state.get(symbol, {})
-        current_size = state.get("size", 0)
-        current_side = state.get("side")
-        current_margin = state.get("margin", 0)
-        
-        # 사용 가능한 증거금 (마진 버퍼 적용)
-        free_margin = account_margin * ALLOCATION_RATIO
-        
-        # 같은 방향이면 추가 증거금만, 반대면 전체 새로 계산
+        pos = api_instance.get_position(SETTLE, symbol)
+        current_size = float(getattr(pos, 'size', 0))
+        current_side = "buy" if current_size > 0 else "sell" if current_size < 0 else None
+        current_value = abs(current_size) * current_price
+
         if current_side == desired_side:
-            # 현재 포지션이 목표보다 크면 추가 불필요
-            target_margin = account_margin * ALLOCATION_RATIO
-            if current_margin >= target_margin:
-                log_debug(f"🔄 {symbol} 추가진입 불필요", f"현재 마진: {current_margin:.2f}, 목표: {target_margin:.2f}")
-                return 0
-                
-            # 추가 가능한 마진
-            additional_margin = target_margin - current_margin
-            
-            # 수량 계산
-            additional_value = additional_margin * leverage  # 레버리지 적용
+            additional_value = max(target_value - current_value, 0)
             additional_qty = additional_value / current_price
         else:
-            # 새로운 포지션
-            new_margin = free_margin
-            new_value = new_margin * leverage
-            additional_qty = new_value / current_price
-        
-        # 최소 단위, 최소 수량 적용
+            additional_qty = target_value / current_price
+
+        # 최소 단위, 최소 수량 내림
         step = Decimal(str(config["qty_step"]))
         raw_qty_dec = Decimal(str(additional_qty))
         quantized = (raw_qty_dec / step).quantize(Decimal('1'), rounding=ROUND_DOWN) * step
         qty = float(quantized)
         final_qty = max(qty, config["min_qty"])
-        
-        # 로그
         log_debug(f"📊 {symbol} 수량 계산", 
-                 f"증거금: {account_margin:.2f}, 할당: {free_margin:.2f}, 레버리지: {leverage}x, "
-                 f"현재 포지션: {current_size}, 추가 수량: {final_qty}")
-        
+                 f"증거금: {safe_available:.2f}, 목표: {target_value:.2f}, 현재포지션: {current_size}, 추가수량: {final_qty}")
         return final_qty
     except Exception as e:
         log_debug(f"❌ {symbol} 수량 계산 실패", str(e))
-        return config["min_qty"]
+        return SYMBOL_CONFIG[symbol]["min_qty"]
 
-def place_order(symbol, side, qty, reduce_only=False):
+def place_order(symbol, side, qty, reduce_only=False, retry=2):
     if qty <= 0:
         log_debug(f"⚠️ 주문 무시 ({symbol})", "수량이 0 이하")
         return False
-        
     try:
         size = qty if side == "buy" else -qty
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
@@ -238,25 +152,17 @@ def place_order(symbol, side, qty, reduce_only=False):
         fill_price = float(getattr(result, 'fill_price', 0))
         fill_size = float(getattr(result, 'size', 0))
         log_debug(f"✅ 주문 성공 ({symbol})", f"수량: {fill_size}, 체결가: {fill_price}")
-        
-        # 포지션 상태 업데이트
         update_position_state(symbol)
         return True
     except Exception as e:
         error_msg = str(e)
         log_debug(f"❌ 주문 실패 ({symbol})", error_msg)
-        
-        # 증거금 부족 에러 처리
-        if "INSUFFICIENT_AVAILABLE" in error_msg:
-            log_debug(f"💡 증거금 부족 ({symbol})", "주문 수량 감소 후 재시도")
-            try:
-                # 수량 50% 감소 후 재시도
-                reduced_qty = qty * 0.5
-                if reduced_qty >= SYMBOL_CONFIG[symbol]["min_qty"]:
-                    log_debug(f"🔄 주문 재시도 ({symbol})", f"수량 감소: {qty} → {reduced_qty}")
-                    return place_order(symbol, side, reduced_qty, reduce_only)
-            except:
-                pass
+        # 증거금 부족 또는 단위 오류 시 수량 감소 후 재시도
+        if retry > 0 and ("INSUFFICIENT_AVAILABLE" in error_msg or "INVALID_PARAM_VALUE" in error_msg):
+            reduced_qty = qty * 0.5
+            if reduced_qty >= SYMBOL_CONFIG[symbol]["min_qty"]:
+                log_debug(f"🔄 주문 재시도 ({symbol})", f"수량 감소: {qty} → {reduced_qty}")
+                return place_order(symbol, side, reduced_qty, reduce_only, retry-1)
         return False
 
 async def price_listener():
@@ -365,7 +271,6 @@ def webhook():
         if action == "exit":
             close_position(symbol)
             return jsonify({"status": "청산 완료", "symbol": symbol})
-        
         # 진입 로직 (기존 포지션과 같은 방향이면 추가 진입, 반대면 청산 후 진입)
         if current_side == desired_side:
             qty = get_max_qty(symbol, desired_side)
