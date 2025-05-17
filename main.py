@@ -57,13 +57,16 @@ def get_account_info(force_refresh=False):
 def update_position_state(symbol):
     try:
         pos = api_instance.get_position(SETTLE, symbol)
-        size = Decimal(str(pos.size))
-        price = Decimal(str(pos.entry_price))
-        side = "buy" if size > 0 else "sell" if size < 0 else None
+        size = Decimal(str(getattr(pos, 'size', '0')))
         if size != 0:
-            position_state[symbol] = {"price": price, "side": side}
+            position_state[symbol] = {
+                "price": Decimal(str(getattr(pos, 'entry_price', '0'))),
+                "side": "buy" if size > 0 else "sell"
+            }
+            log_debug(f"📊 포지션 상태 ({symbol})", f"수량: {abs(size)}, 가격: {position_state[symbol]['price']}")
         else:
             position_state[symbol] = {"price": None, "side": None}
+            log_debug(f"📊 포지션 상태 ({symbol})", "포지션 없음")
     except Exception as e:
         log_debug(f"❌ 포지션 상태 업데이트 실패 ({symbol})", str(e))
         position_state[symbol] = {"price": None, "side": None}
@@ -71,7 +74,7 @@ def update_position_state(symbol):
 def get_current_price(symbol):
     try:
         tickers = api_instance.list_futures_tickers(settle=SETTLE, contract=symbol)
-        if tickers:
+        if tickers and hasattr(tickers[0], 'last'):
             return Decimal(str(tickers[0].last))
     except Exception as e:
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
@@ -103,7 +106,7 @@ def place_order(symbol, side, qty, reduce_only=False):
         size = qty if side == "buy" else -qty
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         result = api_instance.create_futures_order(SETTLE, order)
-        log_debug(f"✅ 주문 성공 ({symbol})", result.to_dict())
+        log_debug(f"✅ 주문 성공 ({symbol})", f"수량: {size}")
         update_position_state(symbol)
         return True
     except Exception as e:
@@ -115,44 +118,96 @@ def close_position(symbol):
         order = FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True)
         api_instance.create_futures_order(SETTLE, order)
         log_debug(f"✅ 포지션 청산 완료 ({symbol})", "")
+        position_state[symbol] = {"price": None, "side": None}
     except Exception as e:
         log_debug(f"❌ 포지션 청산 실패 ({symbol})", str(e))
 
 async def price_listener():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-    payload = [v for v in SYMBOL_CONFIG]
-    async with websockets.connect(uri) as ws:
-        await ws.send(json.dumps({
-            "time": int(time.time()),
-            "channel": "futures.tickers",
-            "event": "subscribe",
-            "payload": payload
-        }))
-        log_debug("📡 WebSocket 연결 성공", f"{payload=}")
-        while True:
-            try:
-                msg = await ws.recv()
-                data = json.loads(msg)
-                if "result" not in data:
-                    continue
-                result = data["result"]
-                symbol = result.get("contract")
-                price = Decimal(str(result.get("last", 0)))
-                if not symbol or price <= 0:
-                    continue
-                state = position_state.get(symbol, {})
-                entry_price = state.get("price")
-                side = state.get("side")
-                if not entry_price or not side:
-                    continue
-                sl_pct = SYMBOL_CONFIG[symbol]["sl_pct"]
-                if (side == "buy" and price <= entry_price * (1 - sl_pct)) or \
-                   (side == "sell" and price >= entry_price * (1 + sl_pct)):
-                    log_debug(f"🛑 손절 조건 충족 ({symbol})", f"현재가: {price}, 진입가: {entry_price}")
-                    close_position(symbol)
-            except Exception as e:
-                log_debug("❌ WebSocket 오류", str(e))
-                await asyncio.sleep(5)
+    symbols = list(SYMBOL_CONFIG.keys())
+    
+    while True:
+        try:
+            async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
+                await ws.send(json.dumps({
+                    "time": int(time.time()),
+                    "channel": "futures.tickers",
+                    "event": "subscribe",
+                    "payload": symbols
+                }))
+                
+                log_debug("📡 WebSocket 연결 성공", f"구독: {symbols}")
+                last_ping_time = time.time()
+                last_msg_time = time.time()
+                
+                while True:
+                    try:
+                        current_time = time.time()
+                        if current_time - last_ping_time > 30:
+                            await ws.send(json.dumps({
+                                "time": int(current_time),
+                                "channel": "futures.ping",
+                                "event": "ping",
+                                "payload": []
+                            }))
+                            last_ping_time = current_time
+                            
+                        if current_time - last_msg_time > 300:
+                            log_debug("⚠️ 오랜 시간 메시지 없음", "연결 재설정")
+                            break
+                            
+                        msg = await asyncio.wait_for(ws.recv(), timeout=30)
+                        last_msg_time = time.time()
+                        
+                        data = json.loads(msg)
+                        
+                        # 구독 확인 및 핑/퐁 처리
+                        if 'event' in data:
+                            if data['event'] == 'subscribe':
+                                log_debug("✅ WebSocket 구독완료", f"{data.get('channel')}")
+                            continue
+                        
+                        # 주요 오류 수정: result가 딕셔너리인지 확인
+                        if "result" in data and isinstance(data["result"], dict):
+                            contract = data["result"].get("contract")
+                            last_price = data["result"].get("last")
+                            
+                            if not contract or contract not in SYMBOL_CONFIG or not last_price:
+                                continue
+                                
+                            price = Decimal(str(last_price))
+                            
+                            state = position_state.get(contract, {})
+                            entry_price = state.get("price")
+                            side = state.get("side")
+                            
+                            if not entry_price or not side:
+                                continue
+                                
+                            sl_pct = SYMBOL_CONFIG[contract]["sl_pct"]
+                            
+                            if (side == "buy" and price <= entry_price * (Decimal("1") - sl_pct)) or \
+                               (side == "sell" and price >= entry_price * (Decimal("1") + sl_pct)):
+                                log_debug(f"🛑 손절 조건 충족 ({contract})", f"현재가: {price}, 진입가: {entry_price}")
+                                close_position(contract)
+                                
+                    except asyncio.TimeoutError:
+                        continue
+                    except json.JSONDecodeError:
+                        continue
+                    except Exception as e:
+                        log_debug("❌ WebSocket 메시지 처리 오류", str(e))
+                        continue
+        except Exception as e:
+            log_debug("❌ WebSocket 연결 오류", str(e))
+            await asyncio.sleep(5)
+
+def start_price_listener():
+    for symbol in SYMBOL_CONFIG:
+        update_position_state(symbol)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(price_listener())
 
 @app.route("/", methods=["POST"])
 def webhook():
@@ -163,8 +218,14 @@ def webhook():
         action = data.get("action", "").lower()
         side = data.get("side", "").lower()
 
-        if side in ["buy"]: side = "long"
-        if side in ["sell"]: side = "short"
+        if side in ["buy"]: 
+            side = "long"
+        if side in ["sell"]: 
+            side = "short"
+            
+        if symbol not in SYMBOL_CONFIG:
+            return jsonify({"error": "알 수 없는 심볼"}), 400
+            
         if side not in ["long", "short"] or action not in ["entry", "exit"]:
             return jsonify({"error": "유효하지 않은 요청"}), 400
 
@@ -199,7 +260,7 @@ def ping():
     return "pong"
 
 if __name__ == "__main__":
-    threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
+    threading.Thread(target=start_price_listener, daemon=True).start()
     log_debug("🚀 서버 시작", "WebSocket 리스너 실행됨")
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
