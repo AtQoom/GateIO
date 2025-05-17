@@ -15,23 +15,25 @@ API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
 
-# 🔧 심볼 변환: Binance → Gate
+# ✅ Binance → Gate.io 심볼 변환 테이블
 BINANCE_TO_GATE_SYMBOL = {
     "BTCUSDT": "BTC_USDT",
     "ADAUSDT": "ADA_USDT",
     "SUIUSDT": "SUI_USDT"
 }
 
+# ✅ 코인별 설정
 SYMBOL_CONFIG = {
-    "ADA_USDT": {"symbol": "ADA_USDT", "min_qty": 10, "qty_step": 10, "sl_pct": 0.0075},
-    "BTC_USDT": {"symbol": "BTC_USDT", "min_qty": 0.0001, "qty_step": 0.0001, "sl_pct": 0.004},
-    "SUI_USDT": {"symbol": "SUI_USDT", "min_qty": 1, "qty_step": 1, "sl_pct": 0.0075}
+    "ADA_USDT": {"min_qty": 10, "qty_step": 10, "sl_pct": 0.0075},
+    "BTC_USDT": {"min_qty": 0.0001, "qty_step": 0.0001, "sl_pct": 0.004},
+    "SUI_USDT": {"min_qty": 1, "qty_step": 1, "sl_pct": 0.0075}
 }
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api_instance = FuturesApi(client)
 
+# 현재 포지션 상태 저장
 position_state = {}
 
 def log_debug(title, content):
@@ -51,10 +53,10 @@ def get_available_equity():
         positions = api_instance.list_futures_positions(SETTLE)
         used_margin = sum([
             abs(float(p.size) * float(p.entry_price)) / float(p.leverage)
-            for p in positions if hasattr(p, 'size') and hasattr(p, 'entry_price') and hasattr(p, 'leverage')
+            for p in positions
+            if hasattr(p, 'size') and hasattr(p, 'entry_price') and hasattr(p, 'leverage')
         ])
-        available = max(total_equity - used_margin, 0)
-        return available / len(SYMBOL_CONFIG)
+        return max((total_equity - used_margin) / len(SYMBOL_CONFIG), 0)
     except Exception as e:
         log_debug("❌ 사용 가능 증거금 계산 실패", str(e))
         return 0
@@ -124,7 +126,7 @@ def place_order(symbol, side, qty, reduce_only=False):
 
 async def price_listener():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-    contracts = [v["symbol"] for v in SYMBOL_CONFIG.values()]
+    contracts = list(SYMBOL_CONFIG.keys())
     while True:
         try:
             async with websockets.connect(uri) as ws:
@@ -134,32 +136,35 @@ async def price_listener():
                     "event": "subscribe",
                     "payload": contracts
                 }))
-                log_debug("📡 WebSocket", f"연결 성공 - 구독 중: {contracts}")
+                log_debug("📡 WebSocket 연결 성공", f"구독 중: {contracts}")
                 while True:
                     msg = await ws.recv()
-                    data = json.loads(msg)
-                    if "result" not in data or not isinstance(data["result"], dict):
-                        continue
-                    symbol = data["result"].get("contract")
-                    if symbol not in SYMBOL_CONFIG:
-                        continue
-                    price = float(data["result"].get("last", 0))
-                    if price <= 0:
-                        continue
-                    update_position_state(symbol)
-                    state = position_state.get(symbol, {})
-                    entry_price = state.get("price")
-                    entry_side = state.get("side")
-                    if not entry_price or not entry_side:
-                        continue
-                    sl_pct = SYMBOL_CONFIG[symbol]["sl_pct"]
-                    sl_hit = (
-                        entry_side == "buy" and price <= entry_price * (1 - sl_pct) or
-                        entry_side == "sell" and price >= entry_price * (1 + sl_pct)
-                    )
-                    if sl_hit:
-                        log_debug(f"🛑 손절 조건 충족 ({symbol})", f"{price=}, {entry_price=}")
-                        close_position(symbol)
+                    try:
+                        data = json.loads(msg)
+                        if "result" not in data or not isinstance(data["result"], dict):
+                            continue
+                        symbol = data["result"].get("contract")
+                        if symbol not in SYMBOL_CONFIG:
+                            continue
+                        price = float(data["result"].get("last", 0))
+                        if price <= 0:
+                            continue
+                        update_position_state(symbol)
+                        state = position_state.get(symbol, {})
+                        entry_price = state.get("price")
+                        entry_side = state.get("side")
+                        if not entry_price or not entry_side:
+                            continue
+                        sl_pct = SYMBOL_CONFIG[symbol]["sl_pct"]
+                        sl_hit = (
+                            entry_side == "buy" and price <= entry_price * (1 - sl_pct) or
+                            entry_side == "sell" and price >= entry_price * (1 + sl_pct)
+                        )
+                        if sl_hit:
+                            log_debug(f"🛑 손절 조건 충족 ({symbol})", f"{price=}, {entry_price=}")
+                            close_position(symbol)
+                    except Exception as e:
+                        log_debug("❌ WebSocket 메시지 처리 오류", str(e))
         except Exception as e:
             log_debug("❌ WebSocket 연결 오류", str(e))
             await asyncio.sleep(5)
@@ -179,25 +184,30 @@ def webhook():
         action = data.get("action", "").lower()
         symbol_raw = data.get("symbol", "").upper()
         symbol = BINANCE_TO_GATE_SYMBOL.get(symbol_raw, symbol_raw)
+
         if symbol not in SYMBOL_CONFIG or signal not in ["long", "short"] or action not in ["entry", "exit"]:
             return jsonify({"error": "유효하지 않은 요청"}), 400
+
         update_position_state(symbol)
         state = position_state.get(symbol, {})
         if action == "exit":
             close_position(symbol)
             return jsonify({"status": "청산 완료"})
+
         side = "buy" if signal == "long" else "sell"
         entry_side = state.get("side")
-        if entry_side and ((signal == "long" and entry_side == "sell") or (signal == "short" and entry_side == "buy")):
-            log_debug(f"🔁 반대포지션 감지 ({symbol})", f"{entry_side=} → 청산 후 재진입")
+
+        if entry_side and ((side == "buy" and entry_side == "sell") or (side == "sell" and entry_side == "buy")):
+            log_debug(f"🔁 반대 포지션 감지 ({symbol})", f"{entry_side=} → 청산 후 재진입")
             close_position(symbol)
             time.sleep(0.5)
+
         qty = get_max_qty(symbol)
         place_order(symbol, side, qty)
         return jsonify({"status": "진입 완료", "symbol": symbol, "qty": qty})
     except Exception as e:
         log_debug("❌ 웹훅 처리 실패", str(e))
-        return jsonify({"error": "서버 오류"}), 500
+        return jsonify({"error": "서버 내부 오류"}), 500
 
 @app.route("/ping", methods=["GET"])
 def ping():
