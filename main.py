@@ -50,13 +50,13 @@ def get_equity():
 def get_available_equity():
     try:
         total_equity = get_equity()
-        positions = api_instance.list_futures_positions(SETTLE)
+        positions = api_instance.list_position(SETTLE)  # 수정된 부분
         used_margin = sum([
             abs(float(p.size) * float(p.entry_price)) / float(p.leverage)
-            for p in positions
-            if hasattr(p, 'size') and hasattr(p, 'entry_price') and hasattr(p, 'leverage')
+            for p in positions if hasattr(p, 'size') and hasattr(p, 'entry_price') and hasattr(p, 'leverage')
         ])
-        return max((total_equity - used_margin) / len(SYMBOL_CONFIG), 0)
+        available = max(total_equity - used_margin, 0)
+        return available / len(SYMBOL_CONFIG)
     except Exception as e:
         log_debug("❌ 사용 가능 증거금 계산 실패", str(e))
         return 0
