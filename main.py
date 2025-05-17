@@ -120,6 +120,8 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         log_debug(f"⚠️ 주문 무시 ({symbol})", "수량이 0 이하")
         return False
     try:
+        api_instance.set_futures_leverage(SETTLE, symbol, leverage=3)
+        
         size = qty if side == "buy" else -qty
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         result = api_instance.create_futures_order(SETTLE, order)
