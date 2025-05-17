@@ -43,7 +43,7 @@ def log_debug(title, content):
 
 def get_account_info(force=False):
     now = time.time()
-    if not force and account_cache["time"] > now - 1:
+    if not force and account_cache["time"] > now - 1 and account_cache["data"]:
         return account_cache["data"]
     try:
         accounts = api.list_futures_accounts(SETTLE)
@@ -76,9 +76,11 @@ def update_position_state(symbol):
 def get_price(symbol):
     try:
         tickers = api.list_futures_tickers(SETTLE, contract=symbol)
-        return Decimal(str(tickers[0].last))
-    except:
-        return Decimal("0")
+        if tickers and hasattr(tickers[0], "last"):
+            return Decimal(str(tickers[0].last))
+    except Exception as e:
+        log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
+    return Decimal("0")
 
 def get_max_qty(symbol, side):
     try:
@@ -86,6 +88,9 @@ def get_max_qty(symbol, side):
         safe = get_account_info()
         update_position_state(symbol)
         price = get_price(symbol)
+        if price <= 0:
+            return float(cfg["min_qty"])
+            
         leverage = position_state[symbol].get("leverage", Decimal("1"))
         order_value = safe * ALLOCATION_RATIO * leverage
         raw_qty = order_value / price
@@ -108,13 +113,15 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         result = api.create_futures_order(SETTLE, order)
         log_debug(f"✅ 주문 ({symbol})", f"{side.upper()} {qty} @ {result.fill_price}")
         update_position_state(symbol)
+        return True
     except Exception as e:
         log_debug(f"❌ 주문 실패 ({symbol})", str(e))
         if retry > 0:
-            reduced = max(qty * 0.6, SYMBOL_CONFIG[symbol]["min_qty"])
+            reduced = max(qty * 0.6, float(SYMBOL_CONFIG[symbol]["min_qty"]))
             reduced = (Decimal(str(reduced)) // SYMBOL_CONFIG[symbol]["qty_step"]) * SYMBOL_CONFIG[symbol]["qty_step"]
             time.sleep(1)
             place_order(symbol, side, float(reduced), reduce_only, retry - 1)
+        return False
 
 def close_position(symbol):
     try:
@@ -126,45 +133,92 @@ def close_position(symbol):
         log_debug(f"❌ 청산 실패 ({symbol})", str(e))
 
 async def price_listener():
+    """WebSocket 리스너 - 데이터 구조 처리 오류 수정"""
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     payload = list(SYMBOL_CONFIG.keys())
     while True:
         try:
             async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
+                # WebSocket 연결 및 구독
                 await ws.send(json.dumps({
                     "time": int(time.time()),
                     "channel": "futures.tickers",
                     "event": "subscribe",
                     "payload": payload
                 }))
+                
+                log_debug("📡 WebSocket", f"연결 성공 - {payload}")
+                
+                # 메시지 처리 루프
                 while True:
-                    msg = await ws.recv()
-                    data = json.loads(msg)
-                    if "result" not in data:
+                    try:
+                        msg = await ws.recv()
+                        data = json.loads(msg)
+                        
+                        # 핑/퐁 및 구독 확인 메시지 처리
+                        if 'event' in data:
+                            if data['event'] == 'subscribe':
+                                log_debug("✅ 구독 완료", data.get('channel', ''))
+                            elif data['event'] in ['ping', 'pong']:
+                                pass  # 핑/퐁은 무시
+                            continue
+                        
+                        # 결과가 없거나 유효하지 않으면 건너뛰기
+                        if "result" not in data:
+                            continue
+                        
+                        # 중요: result가 딕셔너리인지 확인 (핵심 수정 부분)
+                        result = data["result"]
+                        if not isinstance(result, dict):
+                            continue
+                            
+                        # 계약 및 가격 정보 추출
+                        contract = result.get("contract")
+                        last = result.get("last")
+                        
+                        # 유효한 데이터인지 확인
+                        if not contract or not last or contract not in SYMBOL_CONFIG:
+                            continue
+                            
+                        # 가격 처리
+                        last_price = Decimal(str(last))
+                        
+                        # 포지션 정보 확인
+                        state = position_state.get(contract, {})
+                        entry_price = state.get("price")
+                        side = state.get("side")
+                        
+                        if not entry_price or not side:
+                            continue
+                            
+                        # 손절 조건 체크
+                        sl = SYMBOL_CONFIG[contract]["sl_pct"]
+                        if (side == "buy" and last_price <= entry_price * (1 - sl)) or \
+                           (side == "sell" and last_price >= entry_price * (1 + sl)):
+                            log_debug(f"🛑 손절 발생 ({contract})", f"{last_price} vs {entry_price}")
+                            close_position(contract)
+                    except Exception as e:
+                        log_debug("❌ 메시지 처리 오류", str(e))
                         continue
-                    contract = data["result"].get("contract")
-                    last_price = Decimal(str(data["result"].get("last", 0)))
-                    if contract not in SYMBOL_CONFIG:
-                        continue
-                    state = position_state.get(contract, {})
-                    entry_price = state.get("price")
-                    side = state.get("side")
-                    if not entry_price or not side:
-                        continue
-                    sl = SYMBOL_CONFIG[contract]["sl_pct"]
-                    if (side == "buy" and last_price <= entry_price * (1 - sl)) or \
-                       (side == "sell" and last_price >= entry_price * (1 + sl)):
-                        log_debug(f"🛑 손절 발생 ({contract})", f"{last_price} vs {entry_price}")
-                        close_position(contract)
         except Exception as e:
-            log_debug("❌ WS 오류", str(e))
+            log_debug("❌ WS 연결 오류", str(e))
             await asyncio.sleep(5)
 
 def start_price_listener():
+    """WebSocket 리스너 시작 - 오류 수정"""
+    # 초기 포지션 업데이트
     for sym in SYMBOL_CONFIG:
         update_position_state(sym)
+    
+    # 이벤트 루프 생성 및 실행
     loop = asyncio.new_event_loop()
-    threading.Thread(target=loop.run_until_complete, args=(price_listener(),), daemon=True).start()
+    asyncio.set_event_loop(loop)
+    
+    # 백그라운드 스레드로 실행
+    def run_websocket():
+        loop.run_until_complete(price_listener())
+        
+    threading.Thread(target=run_websocket, daemon=True).start()
 
 @app.route("/", methods=["POST"])
 def webhook():
