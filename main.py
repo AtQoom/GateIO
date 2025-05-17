@@ -15,6 +15,9 @@ API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
 
+# 총 자본금 비중 설정 (각 코인당 33%)
+ALLOCATION_RATIO = 0.33
+
 # ✅ Binance → Gate.io 심볼 변환 테이블
 BINANCE_TO_GATE_SYMBOL = {
     "BTCUSDT": "BTC_USDT",
@@ -39,44 +42,16 @@ position_state = {}
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-def get_equity():
-    """계정 잔고 조회 - API 문서에 맞게 수정"""
+def get_total_equity():
+    """총 계정 자본금 조회"""
     try:
         accounts = api_instance.list_futures_accounts(settle=SETTLE)
-        # 'available' 대신 'total'과 'unrealised_pnl' 사용
-        total_equity = float(accounts.total) 
-        unrealised_pnl = float(accounts.unrealised_pnl or 0)
-        total = total_equity + unrealised_pnl  # 실현되지 않은 손익 포함
-        
-        log_debug("💰 계정 잔액", f"총액: {total_equity} USDT, 미실현 손익: {unrealised_pnl} USDT, 총 가용: {total} USDT")
-        return max(total, 0)  # 음수 방지
+        total_equity = float(accounts.total) if hasattr(accounts, 'total') else 0
+        log_debug("💰 계정 잔액", f"총 증거금: {total_equity} USDT")
+        return max(total_equity, 0)  # 음수 방지
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
         return 1000  # 기본값
-
-def get_positions():
-    """모든 포지션 정보 조회 - 올바른 API 메소드 사용"""
-    positions = []
-    for symbol in SYMBOL_CONFIG.keys():
-        try:
-            pos = api_instance.get_position(SETTLE, symbol)
-            if pos and hasattr(pos, 'size') and float(pos.size) != 0:
-                positions.append(pos)
-        except Exception as e:
-            log_debug(f"⚠️ {symbol} 포지션 조회 실패", str(e))
-    return positions
-
-def get_available_equity():
-    """사용 가능한 자금 계산 - 간소화된 로직"""
-    try:
-        total_equity = get_equity()
-        # 최소 10% 예비금 확보 (안전장치)
-        per_symbol = (total_equity * 0.9) / len(SYMBOL_CONFIG)
-        log_debug("💵 자금 분배", f"총액: {total_equity}, 심볼당: {per_symbol}")
-        return per_symbol
-    except Exception as e:
-        log_debug("❌ 사용 가능 증거금 계산 실패", str(e))
-        return 100  # 기본값
 
 def update_position_state(symbol):
     try:
@@ -139,41 +114,34 @@ def get_current_price(symbol):
     return 0
 
 def get_max_qty(symbol):
-    """주문 수량 계산 - 심볼별 마크 가격 정확히 조회"""
+    """주문 수량 계산 - 총 자본금의 1/3 할당"""
     try:
         config = SYMBOL_CONFIG[symbol]
-        available = get_available_equity()
+        total_equity = get_total_equity()
         
-        # 포지션 정보 조회
-        pos = api_instance.get_position(SETTLE, symbol)
-        leverage = float(pos.leverage) if hasattr(pos, 'leverage') and pos.leverage else 5.0  # 기본 레버리지
+        # 총 자본금의 ALLOCATION_RATIO(33%)를 할당 (레버리지 무시)
+        allocated_amount = total_equity * ALLOCATION_RATIO
         
-        # 가격 조회 여러 방법 시도
-        mark_price = 0
-        if hasattr(pos, 'mark_price') and pos.mark_price:
-            mark_price = float(pos.mark_price)
+        # 현재 가격 조회
+        mark_price = get_current_price(symbol)
         
-        # 가격이 0이면 다른 방법 시도
+        # 가격이 0이면 기본값 사용
         if mark_price <= 0:
-            mark_price = get_current_price(symbol)
-            
-        # 가격이 여전히 0이면 기본값 사용
-        if mark_price <= 0:
-            log_debug(f"⚠️ {symbol} 가격 0", f"심볼 최소 수량 사용")
+            log_debug(f"⚠️ {symbol} 가격이 0임", f"심볼 최소 수량 사용")
             return config["min_qty"]
         
-        # 수량 계산
-        raw_qty = (available * leverage) / mark_price
+        # 수량 계산 (할당금액/현재가격)
+        raw_qty = allocated_amount / mark_price
         step = Decimal(str(config["qty_step"]))
         raw_qty_dec = Decimal(str(raw_qty))
         
-        # 내림 처리
+        # 내림 처리 (step 단위로)
         quantized = (raw_qty_dec / step).quantize(Decimal('1'), rounding=ROUND_DOWN) * step
         qty = float(quantized)
         
         log_debug(f"📊 {symbol} 수량 계산", 
-                 f"자금: {available:.2f} USDT, 레버리지: {leverage}, 마크가격: {mark_price}, "
-                 f"원시수량: {raw_qty}, 조정수량: {qty}")
+                 f"총자본금: {total_equity:.2f} USDT, 할당액: {allocated_amount:.2f} USDT, " 
+                 f"가격: {mark_price:.6f}, 수량: {qty}")
                  
         return max(qty, config["min_qty"])
     except Exception as e:
@@ -184,15 +152,6 @@ def place_order(symbol, side, qty, reduce_only=False):
     try:
         size = qty if side == "buy" else -qty
         
-        # 현재 레버리지 확인 (너무 낮으면 경고)
-        try:
-            pos = api_instance.get_position(SETTLE, symbol)
-            leverage = float(pos.leverage) if hasattr(pos, 'leverage') else 1
-            if leverage < 2:
-                log_debug(f"⚠️ 낮은 레버리지 ({symbol})", f"현재 {leverage}배, 수익성 저하 가능")
-        except:
-            pass
-            
         # 주문 실행
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         result = api_instance.create_futures_order(SETTLE, order)
@@ -402,7 +361,7 @@ def ping():
 def status():
     """포지션/계정 상태 확인 엔드포인트"""
     try:
-        equity = get_equity()
+        equity = get_total_equity()
         
         # 각 심볼 포지션 업데이트
         for symbol in SYMBOL_CONFIG.keys():
