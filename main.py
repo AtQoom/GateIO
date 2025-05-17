@@ -14,8 +14,7 @@ app = Flask(__name__)
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
-MARGIN_BUFFER = Decimal("0.6")
-ALLOCATION_RATIO = Decimal("0.33")
+MARGIN_BUFFER = Decimal("0.55")  # 55%만 사용 (더 보수적으로)
 
 BINANCE_TO_GATE_SYMBOL = {
     "BTCUSDT": "BTC_USDT",
@@ -24,9 +23,9 @@ BINANCE_TO_GATE_SYMBOL = {
 }
 
 SYMBOL_CONFIG = {
-    "ADA_USDT": {"min_qty": Decimal("10"), "qty_step": Decimal("10"), "sl_pct": Decimal("0.0075")},
-    "BTC_USDT": {"min_qty": Decimal("0.0001"), "qty_step": Decimal("0.0001"), "sl_pct": Decimal("0.004")},
-    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "sl_pct": Decimal("0.0075")}
+    "ADA_USDT": {"min_qty": Decimal("10"), "qty_step": Decimal("10"), "sl_pct": Decimal("0.0075"), "min_order_usdt": Decimal("1")},
+    "BTC_USDT": {"min_qty": Decimal("0.0001"), "qty_step": Decimal("0.0001"), "sl_pct": Decimal("0.004"), "min_order_usdt": Decimal("1")},
+    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "sl_pct": Decimal("0.0075"), "min_order_usdt": Decimal("1")}
 }
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
@@ -82,54 +81,27 @@ def get_price(symbol):
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
     return Decimal("0")
 
-def calculate_total_used_margin():
-    """모든 포지션의 사용 증거금 총합 계산"""
-    total_used = Decimal('0')
-    for symbol in SYMBOL_CONFIG:
-        pos = api.get_position(SETTLE, symbol)
-        if hasattr(pos, 'size') and Decimal(str(pos.size)) != 0:
-            leverage = Decimal(str(pos.leverage)) if pos.leverage else Decimal('1')
-            mark_price = Decimal(str(pos.mark_price))
-            size = abs(Decimal(str(pos.size)))
-            total_used += (size * mark_price) / leverage
-    return total_used
-
 def get_max_qty(symbol, side):
-    """코인별 1/3 증거금 할당 (다른 코인 포지션 고려)"""
+    """전체 가용 증거금 기준 계산 후 33%만 주문"""
     try:
         config = SYMBOL_CONFIG[symbol]
         total_equity = get_account_info()
-        used_margin = calculate_total_used_margin()
-        available = total_equity - used_margin
-
-        # 코인당 할당액 (전체의 1/3)
-        per_symbol = available * ALLOCATION_RATIO
-
-        # 현재 포지션 증거금
-        pos = api.get_position(SETTLE, symbol)
-        leverage = Decimal(str(getattr(pos, "leverage", "1")))
-        mark_price = Decimal(str(getattr(pos, "mark_price", "0")))
-        current_size = abs(Decimal(str(getattr(pos, "size", "0"))))
-        current_margin = (current_size * mark_price) / leverage if mark_price > 0 else Decimal("0")
-
-        # 추가 가능 증거금
-        available_for_symbol = max(per_symbol - current_margin, Decimal('0'))
-
-        # 수량 계산
         price = get_price(symbol)
         if price <= 0:
-            return float(config['min_qty'])
-        raw_qty = (available_for_symbol * leverage) / price
-
-        # 최소 단위 처리
-        step = config['qty_step']
-        quantized = (Decimal(str(raw_qty)) // step) * step
-        final_qty = max(quantized, config['min_qty'])
-
-        log_debug(f"📊 {symbol} 할당", 
-                f"총증거금: {total_equity}, 사용중: {used_margin}, "
-                f"가용: {available}, 코인당: {per_symbol}, "
-                f"추가가능: {available_for_symbol}, 수량: {final_qty}")
+            return float(config["min_qty"])
+        pos = api.get_position(SETTLE, symbol)
+        leverage = Decimal(str(getattr(pos, "leverage", "1")))
+        # 전체 증거금으로 계산한 최대 수량 (100%)
+        raw_max_qty = (total_equity * leverage) / price
+        # 33%만 사용 (실제 주문 수량)
+        raw_qty = raw_max_qty * Decimal("0.33")
+        # 최소 단위 내림 처리
+        step = config["qty_step"]
+        quantized = (raw_qty // step) * step
+        final_qty = max(quantized, config["min_qty"])
+        log_debug(f"📊 {symbol} 주문 계획", 
+                f"총가용: {total_equity}, 레버리지: {leverage}, "
+                f"최대수량: {raw_max_qty}, 주문수량(33%): {final_qty}")
         return float(final_qty)
     except Exception as e:
         log_debug(f"❌ {symbol} 수량 계산 실패", str(e))
@@ -149,8 +121,10 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
     except Exception as e:
         log_debug(f"❌ 주문 실패 ({symbol})", str(e))
         if retry > 0:
-            reduced = max(qty * 0.6, float(SYMBOL_CONFIG[symbol]["min_qty"]))
-            reduced = (Decimal(str(reduced)) // SYMBOL_CONFIG[symbol]["qty_step"]) * SYMBOL_CONFIG[symbol]["qty_step"]
+            config = SYMBOL_CONFIG[symbol]
+            step = config["qty_step"]
+            reduced = max(Decimal(str(qty)) * Decimal("0.6"), config["min_qty"])
+            reduced = (reduced // step) * step
             time.sleep(1)
             place_order(symbol, side, float(reduced), reduce_only, retry - 1)
         return False
@@ -237,7 +211,6 @@ def webhook():
         update_position_state(symbol)
         state = position_state.get(symbol, {})
         current = state.get("side")
-        # 최대 3개 코인 동시 진입 허용
         if action == "exit":
             close_position(symbol)
         elif current and current != desired:
