@@ -40,41 +40,33 @@ def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
 def get_account_info(force_refresh=False):
-    current_time = time.time()
-    if not force_refresh and account_cache["time"] > current_time - 1 and account_cache["data"]:
+    now = time.time()
+    if not force_refresh and account_cache["time"] > now - 1 and account_cache["data"]:
         return account_cache["data"]
     try:
         accounts = api_instance.list_futures_accounts(settle=SETTLE)
-        available = Decimal(str(getattr(accounts, 'available', 0)))
+        available = Decimal(str(accounts.available))
         safe_available = available * MARGIN_BUFFER
-        log_debug("💰 계정 정보", f"가용: {available:.2f}, 안전가용: {safe_available:.2f} USDT")
-        account_cache["time"] = current_time
-        account_cache["data"] = safe_available
+        account_cache.update({"time": now, "data": safe_available})
+        log_debug("💰 계정 정보", f"가용: {available:.2f}, 안전가용: {safe_available:.2f}")
         return safe_available
     except Exception as e:
         log_debug("❌ 증거금 조회 실패", str(e))
-        return Decimal("100") * MARGIN_BUFFER
+        return Decimal("100")
 
 def update_position_state(symbol):
     try:
         pos = api_instance.get_position(SETTLE, symbol)
-        size = Decimal(str(getattr(pos, 'size', 0)))
-        mark_price = Decimal(str(getattr(pos, 'mark_price', 0)))
-        leverage = Decimal(str(getattr(pos, 'leverage', 1)))
+        size = Decimal(str(pos.size))
+        price = Decimal(str(pos.entry_price))
+        side = "buy" if size > 0 else "sell" if size < 0 else None
         if size != 0:
-            position_state[symbol] = {
-                "price": Decimal(str(getattr(pos, 'entry_price', 0))),
-                "side": "buy" if size > 0 else "sell",
-                "size": abs(size),
-                "leverage": leverage,
-                "value": abs(size) * mark_price,
-                "margin": (abs(size) * mark_price) / leverage
-            }
+            position_state[symbol] = {"price": price, "side": side}
         else:
-            position_state[symbol] = {"price": None, "side": None, "size": 0, "leverage": 1, "value": 0, "margin": 0}
+            position_state[symbol] = {"price": None, "side": None}
     except Exception as e:
         log_debug(f"❌ 포지션 상태 업데이트 실패 ({symbol})", str(e))
-        position_state[symbol] = {"price": None, "side": None, "size": 0, "leverage": 1, "value": 0, "margin": 0}
+        position_state[symbol] = {"price": None, "side": None}
 
 def get_current_price(symbol):
     try:
@@ -85,26 +77,22 @@ def get_current_price(symbol):
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
     return Decimal("0")
 
-def get_max_qty(symbol, side):
+def get_max_qty(symbol, desired_side):
     try:
         config = SYMBOL_CONFIG[symbol]
-        safe_available = get_account_info()
-        update_position_state(symbol)
-        state = position_state.get(symbol, {})
-        leverage = Decimal(str(state.get("leverage", 1)))
+        safe_equity = get_account_info()
         price = get_current_price(symbol)
         if price <= 0:
             return float(config["min_qty"])
 
-        target_margin = safe_available * ALLOCATION_RATIO
-        order_value = target_margin * leverage
+        leverage = Decimal("3")  # 기본 레버리지 3x 가정
+        order_value = safe_equity * ALLOCATION_RATIO * leverage
         raw_qty = order_value / price
-
         step = config["qty_step"]
         min_qty = config["min_qty"]
         quantized = (raw_qty / step).quantize(Decimal("1"), rounding=ROUND_DOWN) * step
         final_qty = max(quantized, min_qty)
-        log_debug(f"📐 수량 계산 ({symbol})", f"가격: {price}, 계산된 수량: {final_qty}")
+        log_debug(f"📐 수량 계산 ({symbol})", f"가격: {price}, 수량: {final_qty}")
         return float(final_qty)
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
@@ -122,64 +110,89 @@ def place_order(symbol, side, qty, reduce_only=False):
         log_debug(f"❌ 주문 실패 ({symbol})", str(e))
         return False
 
+def close_position(symbol):
+    try:
+        order = FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True)
+        api_instance.create_futures_order(SETTLE, order)
+        log_debug(f"✅ 포지션 청산 완료 ({symbol})", "")
+    except Exception as e:
+        log_debug(f"❌ 포지션 청산 실패 ({symbol})", str(e))
+
+async def price_listener():
+    uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
+    payload = [v for v in SYMBOL_CONFIG]
+    async with websockets.connect(uri) as ws:
+        await ws.send(json.dumps({
+            "time": int(time.time()),
+            "channel": "futures.tickers",
+            "event": "subscribe",
+            "payload": payload
+        }))
+        log_debug("📡 WebSocket 연결 성공", f"{payload=}")
+        while True:
+            try:
+                msg = await ws.recv()
+                data = json.loads(msg)
+                if "result" not in data:
+                    continue
+                result = data["result"]
+                symbol = result.get("contract")
+                price = Decimal(str(result.get("last", 0)))
+                if not symbol or price <= 0:
+                    continue
+                state = position_state.get(symbol, {})
+                entry_price = state.get("price")
+                side = state.get("side")
+                if not entry_price or not side:
+                    continue
+                sl_pct = SYMBOL_CONFIG[symbol]["sl_pct"]
+                if (side == "buy" and price <= entry_price * (1 - sl_pct)) or \
+                   (side == "sell" and price >= entry_price * (1 + sl_pct)):
+                    log_debug(f"🛑 손절 조건 충족 ({symbol})", f"현재가: {price}, 진입가: {entry_price}")
+                    close_position(symbol)
+            except Exception as e:
+                log_debug("❌ WebSocket 오류", str(e))
+                await asyncio.sleep(5)
+
 @app.route("/", methods=["POST"])
 def webhook():
     try:
         data = request.get_json(force=True)
         raw_symbol = data.get("symbol", "").upper().replace(".P", "")
         symbol = BINANCE_TO_GATE_SYMBOL.get(raw_symbol, raw_symbol)
-        signal = data.get("side", "").lower()
         action = data.get("action", "").lower()
+        side = data.get("side", "").lower()
 
-        if symbol not in SYMBOL_CONFIG:
-            return jsonify({"error": "심볼 오류"}), 400
-        if signal not in ["long", "short", "buy", "sell"]:
-            return jsonify({"error": "방향 오류"}), 400
-        if action not in ["entry", "exit"]:
-            return jsonify({"error": "행동 오류"}), 400
+        if side in ["buy"]: side = "long"
+        if side in ["sell"]: side = "short"
+        if side not in ["long", "short"] or action not in ["entry", "exit"]:
+            return jsonify({"error": "유효하지 않은 요청"}), 400
 
-        if signal == "buy":
-            signal = "long"
-        elif signal == "sell":
-            signal = "short"
-
-        desired_side = "buy" if signal == "long" else "sell"
+        desired = "buy" if side == "long" else "sell"
         update_position_state(symbol)
         state = position_state.get(symbol, {})
-        current_side = state.get("side")
+        current = state.get("side")
 
         if action == "exit":
             close_position(symbol)
             return jsonify({"status": "청산 완료"})
 
-        if current_side == desired_side:
-            qty = get_max_qty(symbol, desired_side)
-            place_order(symbol, desired_side, qty)
-        elif current_side and current_side != desired_side:
+        if current == desired:
+            qty = get_max_qty(symbol, desired)
+            place_order(symbol, desired, qty)
+        elif current and current != desired:
             close_position(symbol)
             time.sleep(1)
-            qty = get_max_qty(symbol, desired_side)
-            place_order(symbol, desired_side, qty)
+            qty = get_max_qty(symbol, desired)
+            place_order(symbol, desired, qty)
         else:
-            qty = get_max_qty(symbol, desired_side)
-            place_order(symbol, desired_side, qty)
+            qty = get_max_qty(symbol, desired)
+            place_order(symbol, desired, qty)
 
-        return jsonify({"status": "진입 완료", "symbol": symbol, "side": desired_side})
+        return jsonify({"status": "진입 완료", "symbol": symbol, "side": desired})
     except Exception as e:
-        log_debug("❌ 웹훅 오류", str(e))
+        log_debug("❌ 웹훅 처리 실패", str(e))
         return jsonify({"error": "서버 오류"}), 500
-
-def close_position(symbol):
-    try:
-        pos = api_instance.get_position(SETTLE, symbol)
-        size = float(pos.size)
-        if size == 0:
-            return
-        order = FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True)
-        api_instance.create_futures_order(SETTLE, order)
-        log_debug(f"✅ 포지션 청산 완료 ({symbol})", f"수량: {size}")
-    except Exception as e:
-        log_debug(f"❌ 포지션 청산 실패 ({symbol})", str(e))
 
 @app.route("/ping", methods=["GET"])
 def ping():
