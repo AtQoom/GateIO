@@ -102,10 +102,28 @@ def get_max_qty(symbol):
         pos = api_instance.get_position(SETTLE, symbol)
         leverage = float(pos.leverage)
         mark_price = float(pos.mark_price)
+
+        if mark_price <= 0 or leverage <= 0:
+            log_debug(f"❌ {symbol} 가격/레버리지 오류", f"{mark_price=}, {leverage=}")
+            return config["min_qty"]
+
         raw_qty = available * leverage / mark_price
         step = Decimal(str(config["qty_step"]))
-        qty = (Decimal(str(raw_qty)) / step).quantize(Decimal("1"), rounding=ROUND_DOWN) * step
-        return max(float(qty), config["min_qty"])
+        raw_qty_dec = Decimal(str(raw_qty))
+        quantized = (raw_qty_dec / step).quantize(Decimal('1'), rounding=ROUND_DOWN) * step
+        qty = float(quantized)
+
+        log_debug(f"📐 {symbol} 수량 계산 디버그", f"""
+- raw_qty: {raw_qty}
+- raw_qty_dec: {raw_qty_dec}
+- step: {step}
+- quantized: {quantized}
+- final qty: {qty}
+- leverage: {leverage}
+- mark_price: {mark_price}
+- available: {available}
+""")
+        return max(qty, config["min_qty"])
     except Exception as e:
         log_debug(f"❌ {symbol} 최대 수량 계산 실패", str(e))
         return SYMBOL_CONFIG[symbol]["min_qty"]
