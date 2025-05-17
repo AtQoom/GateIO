@@ -14,17 +14,15 @@ app = Flask(__name__)
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
-MARGIN_BUFFER = Decimal("0.6")  # 안전하게 일부만 사용
-ALLOCATION_RATIO = Decimal("0.33")  # 코인당 증거금 비율
+MARGIN_BUFFER = Decimal("0.6")
+ALLOCATION_RATIO = Decimal("0.33")
 
-# TradingView → Gate 심볼 매핑
 BINANCE_TO_GATE_SYMBOL = {
     "BTCUSDT": "BTC_USDT",
     "ADAUSDT": "ADA_USDT",
     "SUIUSDT": "SUI_USDT"
 }
 
-# 심볼별 설정
 SYMBOL_CONFIG = {
     "ADA_USDT": {"min_qty": Decimal("10"), "qty_step": Decimal("10"), "sl_pct": Decimal("0.0075")},
     "BTC_USDT": {"min_qty": Decimal("0.0001"), "qty_step": Decimal("0.0001"), "sl_pct": Decimal("0.004")},
@@ -64,14 +62,16 @@ def update_position_state(symbol):
             position_state[symbol] = {
                 "price": Decimal(str(pos.entry_price)),
                 "side": "buy" if size > 0 else "sell",
-                "leverage": Decimal(str(pos.leverage))
+                "leverage": Decimal(str(pos.leverage)),
+                "mark_price": Decimal(str(pos.mark_price)),
+                "size": size
             }
             log_debug(f"📊 포지션 ({symbol})", f"{position_state[symbol]}")
         else:
-            position_state[symbol] = {"price": None, "side": None, "leverage": Decimal("1")}
+            position_state[symbol] = {"price": None, "side": None, "leverage": Decimal("1"), "mark_price": Decimal("0"), "size": Decimal("0")}
     except Exception as e:
         log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
-        position_state[symbol] = {"price": None, "side": None, "leverage": Decimal("1")}
+        position_state[symbol] = {"price": None, "side": None, "leverage": Decimal("1"), "mark_price": Decimal("0"), "size": Decimal("0")}
 
 def get_price(symbol):
     try:
@@ -82,25 +82,57 @@ def get_price(symbol):
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
     return Decimal("0")
 
+def calculate_total_used_margin():
+    """모든 포지션의 사용 증거금 총합 계산"""
+    total_used = Decimal('0')
+    for symbol in SYMBOL_CONFIG:
+        pos = api.get_position(SETTLE, symbol)
+        if hasattr(pos, 'size') and Decimal(str(pos.size)) != 0:
+            leverage = Decimal(str(pos.leverage)) if pos.leverage else Decimal('1')
+            mark_price = Decimal(str(pos.mark_price))
+            size = abs(Decimal(str(pos.size)))
+            total_used += (size * mark_price) / leverage
+    return total_used
+
 def get_max_qty(symbol, side):
+    """코인별 1/3 증거금 할당 (다른 코인 포지션 고려)"""
     try:
-        cfg = SYMBOL_CONFIG[symbol]
-        safe = get_account_info()
-        update_position_state(symbol)
+        config = SYMBOL_CONFIG[symbol]
+        total_equity = get_account_info()
+        used_margin = calculate_total_used_margin()
+        available = total_equity - used_margin
+
+        # 코인당 할당액 (전체의 1/3)
+        per_symbol = available * ALLOCATION_RATIO
+
+        # 현재 포지션 증거금
+        pos = api.get_position(SETTLE, symbol)
+        leverage = Decimal(str(getattr(pos, "leverage", "1")))
+        mark_price = Decimal(str(getattr(pos, "mark_price", "0")))
+        current_size = abs(Decimal(str(getattr(pos, "size", "0"))))
+        current_margin = (current_size * mark_price) / leverage if mark_price > 0 else Decimal("0")
+
+        # 추가 가능 증거금
+        available_for_symbol = max(per_symbol - current_margin, Decimal('0'))
+
+        # 수량 계산
         price = get_price(symbol)
         if price <= 0:
-            return float(cfg["min_qty"])
-            
-        leverage = position_state[symbol].get("leverage", Decimal("1"))
-        order_value = safe * ALLOCATION_RATIO * leverage
-        raw_qty = order_value / price
-        step = cfg["qty_step"]
-        qty = (Decimal(str(raw_qty)) // step) * step
-        qty = max(qty, cfg["min_qty"])
-        log_debug(f"📐 주문수량 ({symbol})", f"{qty} @ {price} (레버리지: {leverage})")
-        return float(qty)
+            return float(config['min_qty'])
+        raw_qty = (available_for_symbol * leverage) / price
+
+        # 최소 단위 처리
+        step = config['qty_step']
+        quantized = (Decimal(str(raw_qty)) // step) * step
+        final_qty = max(quantized, config['min_qty'])
+
+        log_debug(f"📊 {symbol} 할당", 
+                f"총증거금: {total_equity}, 사용중: {used_margin}, "
+                f"가용: {available}, 코인당: {per_symbol}, "
+                f"추가가능: {available_for_symbol}, 수량: {final_qty}")
+        return float(final_qty)
     except Exception as e:
-        log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
+        log_debug(f"❌ {symbol} 수량 계산 실패", str(e))
         return float(SYMBOL_CONFIG[symbol]["min_qty"])
 
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
@@ -127,71 +159,49 @@ def close_position(symbol):
     try:
         order = FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True)
         api.create_futures_order(SETTLE, order)
-        position_state[symbol] = {"price": None, "side": None, "leverage": Decimal("1")}
+        position_state[symbol] = {"price": None, "side": None, "leverage": Decimal("1"), "mark_price": Decimal("0"), "size": Decimal("0")}
         log_debug(f"✅ 청산 완료", symbol)
     except Exception as e:
         log_debug(f"❌ 청산 실패 ({symbol})", str(e))
 
 async def price_listener():
-    """WebSocket 리스너 - 데이터 구조 처리 오류 수정"""
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     payload = list(SYMBOL_CONFIG.keys())
     while True:
         try:
             async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
-                # WebSocket 연결 및 구독
                 await ws.send(json.dumps({
                     "time": int(time.time()),
                     "channel": "futures.tickers",
                     "event": "subscribe",
                     "payload": payload
                 }))
-                
                 log_debug("📡 WebSocket", f"연결 성공 - {payload}")
-                
-                # 메시지 처리 루프
                 while True:
                     try:
                         msg = await ws.recv()
                         data = json.loads(msg)
-                        
-                        # 핑/퐁 및 구독 확인 메시지 처리
                         if 'event' in data:
                             if data['event'] == 'subscribe':
                                 log_debug("✅ 구독 완료", data.get('channel', ''))
                             elif data['event'] in ['ping', 'pong']:
-                                pass  # 핑/퐁은 무시
+                                pass
                             continue
-                        
-                        # 결과가 없거나 유효하지 않으면 건너뛰기
                         if "result" not in data:
                             continue
-                        
-                        # 중요: result가 딕셔너리인지 확인 (핵심 수정 부분)
                         result = data["result"]
                         if not isinstance(result, dict):
                             continue
-                            
-                        # 계약 및 가격 정보 추출
                         contract = result.get("contract")
                         last = result.get("last")
-                        
-                        # 유효한 데이터인지 확인
                         if not contract or not last or contract not in SYMBOL_CONFIG:
                             continue
-                            
-                        # 가격 처리
                         last_price = Decimal(str(last))
-                        
-                        # 포지션 정보 확인
                         state = position_state.get(contract, {})
                         entry_price = state.get("price")
                         side = state.get("side")
-                        
                         if not entry_price or not side:
                             continue
-                            
-                        # 손절 조건 체크
                         sl = SYMBOL_CONFIG[contract]["sl_pct"]
                         if (side == "buy" and last_price <= entry_price * (1 - sl)) or \
                            (side == "sell" and last_price >= entry_price * (1 + sl)):
@@ -205,20 +215,11 @@ async def price_listener():
             await asyncio.sleep(5)
 
 def start_price_listener():
-    """WebSocket 리스너 시작 - 오류 수정"""
-    # 초기 포지션 업데이트
     for sym in SYMBOL_CONFIG:
         update_position_state(sym)
-    
-    # 이벤트 루프 생성 및 실행
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
-    # 백그라운드 스레드로 실행
-    def run_websocket():
-        loop.run_until_complete(price_listener())
-        
-    threading.Thread(target=run_websocket, daemon=True).start()
+    loop.run_until_complete(price_listener())
 
 @app.route("/", methods=["POST"])
 def webhook():
@@ -228,18 +229,15 @@ def webhook():
         symbol = BINANCE_TO_GATE_SYMBOL.get(raw, raw)
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
-
         if side in ["buy"]: side = "long"
         if side in ["sell"]: side = "short"
         desired = "buy" if side == "long" else "sell"
-
         if symbol not in SYMBOL_CONFIG or side not in ["long", "short"] or action not in ["entry", "exit"]:
             return jsonify({"error": "잘못된 요청"}), 400
-
         update_position_state(symbol)
         state = position_state.get(symbol, {})
         current = state.get("side")
-
+        # 최대 3개 코인 동시 진입 허용
         if action == "exit":
             close_position(symbol)
         elif current and current != desired:
@@ -250,9 +248,7 @@ def webhook():
         else:
             qty = get_max_qty(symbol, desired)
             place_order(symbol, desired, qty)
-
         return jsonify({"status": "처리 완료", "symbol": symbol, "side": desired})
-
     except Exception as e:
         log_debug("❌ 웹훅 오류", str(e))
         return jsonify({"error": "서버 오류"}), 500
@@ -262,7 +258,7 @@ def ping():
     return "pong", 200
 
 if __name__ == "__main__":
-    start_price_listener()
+    threading.Thread(target=start_price_listener, daemon=True).start()
     log_debug("🚀 서버 시작", "WebSocket 리스너 실행됨")
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
