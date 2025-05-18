@@ -24,11 +24,11 @@ BINANCE_TO_GATE_SYMBOL = {
     "SUIUSDT": "SUI_USDT"
 }
 
-# 심볼별 설정
+# 심볼별 설정 - BTC는 0.0001 단위
 SYMBOL_CONFIG = {
-    "ADA_USDT": {"min_qty": Decimal("10"), "qty_step": Decimal("10"), "sl_pct": Decimal("0.0075")},
-    "BTC_USDT": {"min_qty": Decimal("0.0001"), "qty_step": Decimal("0.0001"), "sl_pct": Decimal("0.004")},
-    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "sl_pct": Decimal("0.0075")}
+    "ADA_USDT": {"min_qty": Decimal("10"), "qty_step": Decimal("10"), "sl_pct": Decimal("0.0075"), "min_order_usdt": Decimal("5")},
+    "BTC_USDT": {"min_qty": Decimal("0.0001"), "qty_step": Decimal("0.0001"), "sl_pct": Decimal("0.004"), "min_order_usdt": Decimal("5")},
+    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "sl_pct": Decimal("0.0075"), "min_order_usdt": Decimal("5")}
 }
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
@@ -125,17 +125,25 @@ def get_max_qty(symbol, side):
             log_debug(f"❌ 가격 0 이하 ({symbol})", "최소 수량만 반환")
             return float(cfg["min_qty"])
         
-        # 중요: 레버리지 명시적 조회
+        # 레버리지 명시적 조회
         leverage = get_current_leverage(symbol)
         
         # 계산: 가용증거금 * 레버리지 / 가격
-        order_value = safe * leverage  # 할당비율 없이 전체 가용 증거금 사용
+        order_value = safe * leverage
         raw_qty = order_value / price
         
         # 최소 단위 내림 처리
         step = cfg["qty_step"]
-        qty = (raw_qty // step) * step
-        qty = max(qty, cfg["min_qty"])
+        
+        # 정확한 소수점 처리
+        qty_decimal = (raw_qty // step) * step
+        qty = max(qty_decimal, cfg["min_qty"])
+        
+        # 최소 주문 금액 체크
+        min_order_usdt = cfg.get("min_order_usdt", Decimal("5"))
+        if qty * price < min_order_usdt:
+            qty = cfg["min_qty"]
+            log_debug(f"⚠️ 최소 주문 금액 미달 ({symbol})", f"{qty * price} USDT < {min_order_usdt} USDT, 최소 수량 사용")
         
         # 상세 디버그
         log_debug(f"📐 최대수량 계산 ({symbol})", 
@@ -145,22 +153,36 @@ def get_max_qty(symbol, side):
         return float(qty)
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
-        return float(SYMBOL_CONFIG[symbol]["min_qty"])
+        return float(cfg["min_qty"])
 
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
-    """수량의 33%만 실제로 주문"""
+    """수량의 33%만 실제로 주문하며, 특히 BTC에 대한 추가 검증 수행"""
     try:
         if qty <= 0:
             log_debug("⛔ 수량 0 이하", symbol)
             return False
             
-        # 여기서 수량의 33%만 사용 (핵심 수정 부분)
+        # 여기서 수량의 33%만 사용
         cfg = SYMBOL_CONFIG[symbol]
         step = cfg["qty_step"]
         
         # 33% 계산 및 최소 단위 처리
         reduced_qty = Decimal(str(qty)) * POSITION_RATIO
-        reduced_qty = (reduced_qty // step) * step
+        
+        # BTC는 추가 검증
+        if symbol == "BTC_USDT":
+            # BTC는 0.0001 단위로 강제 조정
+            reduced_qty = (reduced_qty // Decimal("0.0001")) * Decimal("0.0001")
+            if reduced_qty < Decimal("0.0001"):
+                reduced_qty = Decimal("0.0001")
+            # 4자리 소수점까지 표시
+            str_qty = f"{float(reduced_qty):.4f}"
+            log_debug(f"🔍 BTC 수량 변환", f"원래: {reduced_qty} → 변환: {str_qty}")
+            reduced_qty = Decimal(str_qty)
+        else:
+            # 다른 코인은 기존 로직
+            reduced_qty = (reduced_qty // step) * step
+            
         reduced_qty = max(reduced_qty, cfg["min_qty"])
         
         size = float(reduced_qty) if side == "buy" else -float(reduced_qty)
@@ -182,6 +204,14 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         error_msg = str(e)
         log_debug(f"❌ 주문 실패 ({symbol})", error_msg)
         
+        # INVALID_PARAM_VALUE 오류 시 BTC 특별 처리
+        if retry > 0 and symbol == "BTC_USDT" and "INVALID_PARAM_VALUE" in error_msg:
+            # BTC는 0.0001 단위로 조정
+            retry_qty = Decimal("0.0001")
+            log_debug(f"🔄 BTC 최소단위 재시도", f"수량: {retry_qty}")
+            time.sleep(1)
+            return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
+            
         # 증거금 부족 오류시 수량 더 감소 후 재시도
         if retry > 0 and ("INSUFFICIENT_AVAILABLE" in error_msg or "Bad Request" in error_msg):
             cfg = SYMBOL_CONFIG[symbol]
@@ -267,7 +297,7 @@ async def price_listener():
                         if "result" not in data:
                             continue
                         
-                        # 결과가 딕셔너리인지 확인 (핵심 오류 수정)
+                        # 결과가 딕셔너리인지 확인
                         result = data["result"]
                         if not isinstance(result, dict):
                             continue
@@ -322,6 +352,8 @@ def webhook():
             return jsonify({"error": "JSON 형식만 허용됩니다"}), 400
             
         data = request.get_json()
+        log_debug("📥 웹훅 원본 데이터", json.dumps(data))  # 원본 데이터 전체 로깅
+        
         raw = data.get("symbol", "").upper().replace(".P", "")
         symbol = BINANCE_TO_GATE_SYMBOL.get(raw, raw)
         side = data.get("side", "").lower()
@@ -406,6 +438,6 @@ def status():
 
 if __name__ == "__main__":
     threading.Thread(target=start_price_listener, daemon=True).start()
-    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.0.5")
+    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.0.7")
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
