@@ -7,7 +7,7 @@ import websockets
 from decimal import Decimal
 from datetime import datetime
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, PositionLeverage
 
 app = Flask(__name__)
 
@@ -15,12 +15,7 @@ API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
 MARGIN_BUFFER = Decimal("0.9")
-
-SYMBOL_LEVERAGE = {
-    "BTC_USDT": Decimal("10"),
-    "ADA_USDT": Decimal("10"),
-    "SUI_USDT": Decimal("10"),
-}
+POSITION_RATIO = Decimal("0.33")
 
 BINANCE_TO_GATE_SYMBOL = {
     "BTCUSDT": "BTC_USDT",
@@ -29,9 +24,36 @@ BINANCE_TO_GATE_SYMBOL = {
 }
 
 SYMBOL_CONFIG = {
-    "ADA_USDT": {"min_qty": Decimal("10"), "qty_step": Decimal("10"), "sl_pct": Decimal("0.0075"), "min_order_usdt": Decimal("5")},
-    "BTC_USDT": {"min_qty": Decimal("0.0001"), "qty_step": Decimal("0.0001"), "sl_pct": Decimal("0.004"), "min_order_usdt": Decimal("5")},
-    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "sl_pct": Decimal("0.0075"), "min_order_usdt": Decimal("5")}
+    "ADA_USDT": {
+        "min_qty": Decimal("10"),
+        "qty_step": Decimal("10"),
+        "sl_pct": Decimal("0.0075"),
+        "tp_pct": Decimal("0.008"),
+        "sl_rsi": Decimal("0.004"),
+        "tp_rsi": Decimal("0.008"),
+        "leverage": 3,
+        "min_order_usdt": Decimal("5")
+    },
+    "BTC_USDT": {
+        "min_qty": Decimal("0.0001"),
+        "qty_step": Decimal("0.0001"),
+        "sl_pct": Decimal("0.004"),
+        "tp_pct": Decimal("0.006"),
+        "sl_rsi": Decimal("0.002"),
+        "tp_rsi": Decimal("0.006"),
+        "leverage": 2,
+        "min_order_usdt": Decimal("5")
+    },
+    "SUI_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "sl_pct": Decimal("0.0075"),
+        "tp_pct": Decimal("0.008"),
+        "sl_rsi": Decimal("0.004"),
+        "tp_rsi": Decimal("0.008"),
+        "leverage": 3,
+        "min_order_usdt": Decimal("5")
+    }
 }
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
@@ -44,15 +66,6 @@ account_cache = {"time": 0, "data": None}
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-def set_leverage(symbol, leverage):
-    try:
-        # PositionLeverage 대신 dict로 직접 body 전달
-        body = {"leverage": str(int(leverage)), "mode": "cross"}
-        api.set_position_leverage(SETTLE, symbol, body)
-        log_debug(f"🔧 레버리지 설정 ({symbol})", f"{leverage}x")
-    except Exception as e:
-        log_debug(f"❌ 레버리지 설정 실패 ({symbol})", str(e))
-
 def get_account_info(force=False):
     now = time.time()
     if not force and account_cache["time"] > now - 1 and account_cache["data"]:
@@ -60,11 +73,9 @@ def get_account_info(force=False):
     try:
         accounts = api.list_futures_accounts(SETTLE)
         available = Decimal(str(accounts.available))
-        total = Decimal(str(accounts.total))
-        unrealised_pnl = Decimal(str(getattr(accounts, 'unrealised_pnl', '0')))
         safe = available * MARGIN_BUFFER
         account_cache.update({"time": now, "data": safe})
-        log_debug("💰 계정 정보", f"가용: {available}, 총액: {total}, 미실현손익: {unrealised_pnl}, 안전가용: {safe}")
+        log_debug("💰 계정 정보", f"가용: {available}, 안전가용: {safe}")
         return safe
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
@@ -80,7 +91,6 @@ def update_position_state(symbol):
             mark_price = Decimal(str(getattr(pos, "mark_price", "0")))
             position_value = abs(size) * mark_price
             margin = position_value / leverage
-
             position_state[symbol] = {
                 "price": entry_price,
                 "side": "buy" if size > 0 else "sell",
@@ -116,20 +126,17 @@ def get_price(symbol):
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
     return Decimal("0")
 
-def get_current_leverage(symbol):
-    target_leverage = SYMBOL_LEVERAGE.get(symbol, Decimal("3"))
+def set_leverage(symbol):
     try:
-        pos = api.get_position(SETTLE, symbol)
-        raw_leverage = getattr(pos, "leverage", None)
-        if raw_leverage is None or Decimal(str(raw_leverage)) <= 0:
-            log_debug(f"⚠️ 포지션없음 디폴트 레버리지 사용 ({symbol})", f"{target_leverage}x")
-            return target_leverage
-        leverage = Decimal(str(raw_leverage))
-        log_debug(f"⚙️ 레버리지 조회 ({symbol})", f"{leverage}x")
-        return leverage
+        lev = SYMBOL_CONFIG[symbol].get("leverage", 2)
+        leverage_data = PositionLeverage(
+            leverage=str(int(lev)),
+            mode="cross"  # 또는 "isolated"
+        )
+        api.update_position_leverage(SETTLE, symbol, leverage_data)
+        log_debug(f"⚡ 레버리지 설정 완료 ({symbol})", f"{lev}x")
     except Exception as e:
-        log_debug(f"❌ 레버리지 조회 실패 ({symbol})", str(e))
-        return target_leverage
+        log_debug(f"❌ 레버리지 설정 실패 ({symbol})", str(e))
 
 def get_max_qty(symbol, side):
     try:
@@ -139,7 +146,7 @@ def get_max_qty(symbol, side):
         if price <= 0:
             log_debug(f"❌ 가격 0 이하 ({symbol})", "최소 수량만 반환")
             return float(cfg["min_qty"])
-        leverage = get_current_leverage(symbol)
+        leverage = Decimal(str(cfg.get("leverage", 2)))
         order_value = safe * leverage
         raw_qty = order_value / price
         step = cfg["qty_step"]
@@ -162,9 +169,10 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         if qty <= 0:
             log_debug("⛔ 수량 0 이하", symbol)
             return False
+        set_leverage(symbol)  # 코인별 레버리지 설정
         cfg = SYMBOL_CONFIG[symbol]
         step = cfg["qty_step"]
-        reduced_qty = Decimal(str(qty))
+        reduced_qty = Decimal(str(qty)) * POSITION_RATIO
         if symbol == "BTC_USDT":
             reduced_qty = (reduced_qty // Decimal("0.0001")) * Decimal("0.0001")
             if reduced_qty < Decimal("0.0001"):
@@ -175,14 +183,14 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         else:
             reduced_qty = (reduced_qty // step) * step
         reduced_qty = max(reduced_qty, cfg["min_qty"])
-        size = float(reduced_qty) if side == "buy" else -float(reduced_qty)
+        # Gate.io는 size를 문자열로 보내는 것이 안전함
+        size = str(reduced_qty) if side == "buy" else str(-reduced_qty)
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         result = api.create_futures_order(SETTLE, order)
         fill_price = result.fill_price if hasattr(result, 'fill_price') else "알 수 없음"
-        fill_size = result.size if hasattr(result, 'size') else "알 수 없음"
         log_debug(f"✅ 주문 ({symbol})", 
-                f"{side.upper()} {float(reduced_qty)} @ {fill_price} "
-                f"(최종: {float(reduced_qty)})")
+                f"{side.upper()} {reduced_qty} @ {fill_price} "
+                f"(원래: {qty}의 33% = {Decimal(str(qty)) * POSITION_RATIO}, 최종: {reduced_qty})")
         time.sleep(0.5)
         update_position_state(symbol)
         return True
@@ -195,19 +203,17 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
             time.sleep(1)
             return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
         if retry > 0 and ("INSUFFICIENT_AVAILABLE" in error_msg or "Bad Request" in error_msg):
-            cfg = SYMBOL_CONFIG[symbol]
-            step = cfg["qty_step"]
             retry_qty = Decimal(str(qty)) * Decimal("0.2")
             retry_qty = (retry_qty // step) * step
             retry_qty = max(retry_qty, cfg["min_qty"])
-            log_debug(f"🔄 주문 재시도 ({symbol})", f"수량 감소: {qty} → {float(retry_qty)}")
+            log_debug(f"🔄 주문 재시도 ({symbol})", f"수량 감소: {qty} → {retry_qty}")
             time.sleep(1)
             return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
         return False
 
 def close_position(symbol):
     try:
-        order = FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True)
+        order = FuturesOrder(contract=symbol, size="0", price="0", tif="ioc", close=True)
         api.create_futures_order(SETTLE, order)
         log_debug(f"✅ 청산 완료", symbol)
         time.sleep(0.5)
@@ -271,10 +277,20 @@ async def price_listener():
                         if not entry_price or not side:
                             continue
                         sl = SYMBOL_CONFIG[contract]["sl_pct"]
+                        tp = SYMBOL_CONFIG[contract].get("tp_pct", None)
+                        # SL
                         if (side == "buy" and last_price <= entry_price * (1 - sl)) or \
                            (side == "sell" and last_price >= entry_price * (1 + sl)):
                             log_debug(f"🛑 손절 발생 ({contract})", f"현재가: {last_price}, 진입가: {entry_price}, 손절폭: {sl}")
                             close_position(contract)
+                            continue
+                        # TP (익절)
+                        if tp:
+                            if (side == "buy" and last_price >= entry_price * (1 + tp)) or \
+                               (side == "sell" and last_price <= entry_price * (1 - tp)):
+                                log_debug(f"🎯 익절 발생 ({contract})", f"현재가: {last_price}, 진입가: {entry_price}, 익절폭: {tp}")
+                                close_position(contract)
+                                continue
                     except asyncio.TimeoutError:
                         pass
                     except Exception as e:
@@ -286,8 +302,6 @@ async def price_listener():
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
 def start_price_listener():
-    for sym, lev in SYMBOL_LEVERAGE.items():
-        set_leverage(sym, lev)
     for sym in SYMBOL_CONFIG:
         update_position_state(sym)
     loop = asyncio.new_event_loop()
@@ -320,7 +334,6 @@ def webhook():
         if action not in ["entry", "exit"]:
             log_debug("⚠️ 잘못된 액션", action)
             return jsonify({"error": "entry 또는 exit만 지원합니다"}), 400
-        set_leverage(symbol, int(SYMBOL_LEVERAGE[symbol]))
         update_position_state(symbol)
         state = position_state.get(symbol, {})
         current = state.get("side")
@@ -370,6 +383,6 @@ def status():
 
 if __name__ == "__main__":
     threading.Thread(target=start_price_listener, daemon=True).start()
-    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.0.9")
+    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.1.0")
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
