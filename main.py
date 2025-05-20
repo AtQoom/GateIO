@@ -9,9 +9,6 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 
-# PositionLeverage는 models에서 import
-from gate_api.models import PositionLeverage
-
 app = Flask(__name__)
 
 API_KEY = os.environ.get("API_KEY", "")
@@ -20,9 +17,9 @@ SETTLE = "usdt"
 MARGIN_BUFFER = Decimal("0.9")
 
 SYMBOL_LEVERAGE = {
-    "BTC_USDT": Decimal("3"),
-    "ADA_USDT": Decimal("5"),
-    "SUI_USDT": Decimal("8"),
+    "BTC_USDT": Decimal("10"),
+    "ADA_USDT": Decimal("10"),
+    "SUI_USDT": Decimal("10"),
 }
 
 BINANCE_TO_GATE_SYMBOL = {
@@ -49,9 +46,9 @@ def log_debug(title, content):
 
 def set_leverage(symbol, leverage):
     try:
-        # models에서 import된 PositionLeverage 사용
-        leverage_data = PositionLeverage(leverage=int(leverage), mode="cross")
-        api.set_position_leverage(SETTLE, symbol, leverage_data)
+        # PositionLeverage 대신 dict로 직접 body 전달
+        body = {"leverage": str(int(leverage)), "mode": "cross"}
+        api.set_position_leverage(SETTLE, symbol, body)
         log_debug(f"🔧 레버리지 설정 ({symbol})", f"{leverage}x")
     except Exception as e:
         log_debug(f"❌ 레버리지 설정 실패 ({symbol})", str(e))
@@ -373,6 +370,6 @@ def status():
 
 if __name__ == "__main__":
     threading.Thread(target=start_price_listener, daemon=True).start()
-    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.0.8")
+    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.0.9")
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
