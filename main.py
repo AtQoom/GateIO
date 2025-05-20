@@ -14,7 +14,7 @@ app = Flask(__name__)
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
-MARGIN_BUFFER = Decimal("0.6")  # 안전하게 일부만 사용
+MARGIN_BUFFER = Decimal("0.9")  # 안전하게 일부만 사용
 POSITION_RATIO = Decimal("0.33")  # 포지션 비율 (33%)
 
 # TradingView → Gate 심볼 매핑
