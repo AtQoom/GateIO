@@ -32,7 +32,8 @@ SYMBOL_CONFIG = {
         "sl_rsi": Decimal("0.004"),
         "tp_rsi": Decimal("0.008"),
         "leverage": 3,
-        "min_order_usdt": Decimal("5")
+        "min_order_usdt": Decimal("5"),
+        "margin_mode": "cross"
     },
     "BTC_USDT": {
         "min_qty": Decimal("0.0001"),
@@ -42,7 +43,8 @@ SYMBOL_CONFIG = {
         "sl_rsi": Decimal("0.002"),
         "tp_rsi": Decimal("0.006"),
         "leverage": 2,
-        "min_order_usdt": Decimal("5")
+        "min_order_usdt": Decimal("5"),
+        "margin_mode": "cross"
     },
     "SUI_USDT": {
         "min_qty": Decimal("1"),
@@ -52,7 +54,8 @@ SYMBOL_CONFIG = {
         "sl_rsi": Decimal("0.004"),
         "tp_rsi": Decimal("0.008"),
         "leverage": 3,
-        "min_order_usdt": Decimal("5")
+        "min_order_usdt": Decimal("5"),
+        "margin_mode": "cross"
     }
 }
 
@@ -65,6 +68,34 @@ account_cache = {"time": 0, "data": None}
 
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
+
+def set_margin_mode(symbol):
+    """마진 모드 설정 (cross/isolated)"""
+    try:
+        mode = SYMBOL_CONFIG[symbol].get("margin_mode", "cross")
+        api.update_position_margin_mode(SETTLE, symbol, {"mode": mode})
+        log_debug(f"⚙️ 마진 모드 설정 ({symbol})", f"{mode}")
+    except Exception as e:
+        log_debug(f"❌ 마진 모드 설정 실패 ({symbol})", str(e))
+
+def set_leverage(symbol):
+    """레버리지 설정"""
+    try:
+        lev = SYMBOL_CONFIG[symbol].get("leverage", 2)
+        api.update_position_leverage(SETTLE, symbol, {"leverage": str(int(lev))})
+        log_debug(f"⚡ 레버리지 설정 완료 ({symbol})", f"{lev}x")
+    except Exception as e:
+        log_debug(f"❌ 레버리지 설정 실패 ({symbol})", str(e))
+
+def init_settings():
+    """서버 시작 시 모드 + 레버리지 초기화"""
+    for symbol in SYMBOL_CONFIG:
+        try:
+            set_margin_mode(symbol)
+            time.sleep(0.5)
+            set_leverage(symbol)
+        except Exception as e:
+            log_debug(f"❌ 초기 설정 실패 ({symbol})", str(e))
 
 def get_account_info(force=False):
     now = time.time()
@@ -381,7 +412,8 @@ def status():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
+    init_settings()  # 초기 모드/레버리지 설정
     threading.Thread(target=start_price_listener, daemon=True).start()
-    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.1.3")
+    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.1.4")
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
