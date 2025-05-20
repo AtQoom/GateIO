@@ -4,10 +4,10 @@ import time
 import asyncio
 import threading
 import websockets
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 from datetime import datetime
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
+from gate_api import ApiClient, Configuration, FuturesApi, PositionLeverage, FuturesOrder
 
 app = Flask(__name__)
 
@@ -19,8 +19,8 @@ MARGIN_BUFFER = Decimal("0.9")
 # 심볼별 기본 레버리지 설정
 SYMBOL_LEVERAGE = {
     "BTC_USDT": Decimal("10"),
-    "ADA_USDT": Decimal("5"),
-    "SUI_USDT": Decimal("5"),
+    "ADA_USDT": Decimal("10"),
+    "SUI_USDT": Decimal("10"),
 }
 
 BINANCE_TO_GATE_SYMBOL = {
@@ -47,7 +47,9 @@ def log_debug(title, content):
 
 def set_leverage(symbol, leverage):
     try:
-        api.set_futures_leverage(SETTLE, symbol, int(leverage))
+        # Gate.io 공식 SDK set_position_leverage 사용 (dual_mode는 False, long/short 모두 동일 적용)
+        leverage_data = PositionLeverage(leverage=leverage, mode="cross")
+        api.set_position_leverage(SETTLE, symbol, leverage_data)
         log_debug(f"🔧 레버리지 설정 ({symbol})", f"{leverage}x")
     except Exception as e:
         log_debug(f"❌ 레버리지 설정 실패 ({symbol})", str(e))
@@ -285,10 +287,8 @@ async def price_listener():
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
 def start_price_listener():
-    # 앱 최초 기동시 심볼별 레버리지 설정
     for sym, lev in SYMBOL_LEVERAGE.items():
         set_leverage(sym, lev)
-    # 포지션 상태도 미리 갱신
     for sym in SYMBOL_CONFIG:
         update_position_state(sym)
     loop = asyncio.new_event_loop()
@@ -321,8 +321,8 @@ def webhook():
         if action not in ["entry", "exit"]:
             log_debug("⚠️ 잘못된 액션", action)
             return jsonify({"error": "entry 또는 exit만 지원합니다"}), 400
-        # 진입시 레버리지 재설정 보장 (API로 즉시 설정)
-        set_leverage(symbol, SYMBOL_LEVERAGE[symbol])
+        # 진입시 레버리지 재설정
+        set_leverage(symbol, int(SYMBOL_LEVERAGE[symbol]))
         update_position_state(symbol)
         state = position_state.get(symbol, {})
         current = state.get("side")
@@ -372,6 +372,6 @@ def status():
 
 if __name__ == "__main__":
     threading.Thread(target=start_price_listener, daemon=True).start()
-    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.0.7")
+    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.0.8")
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
