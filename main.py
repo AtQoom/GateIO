@@ -7,7 +7,8 @@ import websockets
 from decimal import Decimal
 from datetime import datetime
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, PositionLeverage
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
+from gate_api.models import PositionLeverage  # 수정된 임포트
 
 app = Flask(__name__)
 
@@ -86,7 +87,6 @@ def update_position_state(symbol):
         pos = api.get_position(SETTLE, symbol)
         size = Decimal(str(getattr(pos, "size", "0")))
         leverage = Decimal(str(getattr(pos, "leverage", "1")))
-        # 레버리지 0이면 강제 세팅
         if leverage == 0:
             log_debug(f"⚠️ 레버리지 0 감지, 강제 설정 ({symbol})", "")
             set_leverage(symbol)
@@ -136,7 +136,7 @@ def set_leverage(symbol):
         lev = SYMBOL_CONFIG[symbol].get("leverage", 2)
         leverage_data = PositionLeverage(
             leverage=str(int(lev)),
-            mode="cross"  # 또는 "isolated"
+            mode="cross"
         )
         api.update_position_leverage(SETTLE, symbol, leverage_data)
         log_debug(f"⚡ 레버리지 설정 완료 ({symbol})", f"{lev}x")
@@ -174,7 +174,7 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         if qty <= 0:
             log_debug("⛔ 수량 0 이하", symbol)
             return False
-        set_leverage(symbol)  # 코인별 레버리지 설정
+        set_leverage(symbol)
         cfg = SYMBOL_CONFIG[symbol]
         step = cfg["qty_step"]
         reduced_qty = Decimal(str(qty)) * POSITION_RATIO
@@ -282,13 +282,11 @@ async def price_listener():
                             continue
                         sl = SYMBOL_CONFIG[contract]["sl_pct"]
                         tp = SYMBOL_CONFIG[contract].get("tp_pct", None)
-                        # SL
                         if (side == "buy" and last_price <= entry_price * (1 - sl)) or \
                            (side == "sell" and last_price >= entry_price * (1 + sl)):
                             log_debug(f"🛑 손절 발생 ({contract})", f"현재가: {last_price}, 진입가: {entry_price}, 손절폭: {sl}")
                             close_position(contract)
                             continue
-                        # TP (익절)
                         if tp:
                             if (side == "buy" and last_price >= entry_price * (1 + tp)) or \
                                (side == "sell" and last_price <= entry_price * (1 - tp)):
@@ -308,7 +306,6 @@ async def price_listener():
 def start_price_listener():
     for sym in SYMBOL_CONFIG:
         update_position_state(sym)
-        # 레버리지 0 방지: 포지션 없을 때도 강제 세팅
         set_leverage(sym)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -389,6 +386,6 @@ def status():
 
 if __name__ == "__main__":
     threading.Thread(target=start_price_listener, daemon=True).start()
-    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.1.1")
+    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.1.2")
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
