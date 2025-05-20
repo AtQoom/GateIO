@@ -1,11 +1,14 @@
 import os
 import json
 import time
+import hmac
+import hashlib
 import threading
 from decimal import Decimal
 from datetime import datetime
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, exceptions
+import requests
+from gate_api import ApiClient, Configuration, FuturesApi
 
 # ============ Flask 초기화 ============
 app = Flask(__name__)
@@ -34,6 +37,9 @@ SYMBOL_CONFIG = {
     "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "sl_pct": Decimal("0.0075"), "min_order_usdt": Decimal("5")}
 }
 
+API_URL_BASE = "https://api.gateio.ws"
+API_PREFIX = "/api/v4"
+
 # ============ Gate.io API 초기화 ============
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
@@ -45,6 +51,32 @@ account_cache = {"time": 0, "data": None}
 # ============ 유틸 함수 ============
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
+
+def sign(payload, secret):
+    return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
+
+# REST 기반 레버리지 설정 함수
+def set_leverage(contract, leverage, mode="cross"):
+    try:
+        url = f"{API_URL_BASE}{API_PREFIX}/futures/{SETTLE}/positions/{contract}/leverage"
+        body = {"leverage": str(leverage), "mode": mode}
+        t = str(int(time.time()))
+        body_str = json.dumps(body)
+        payload = t + 'POST' + f"/api/v4/futures/{SETTLE}/positions/{contract}/leverage" + body_str
+        sign_header = sign(payload, API_SECRET)
+        headers = {
+            "KEY": API_KEY,
+            "Timestamp": t,
+            "SIGN": sign_header,
+            "Content-Type": "application/json"
+        }
+        resp = requests.post(url, headers=headers, data=body_str)
+        if resp.status_code in (200, 201):
+            log_debug(f"✅ 레버리지 설정 성공 ({contract})", f"{leverage}x ({mode})")
+        else:
+            log_debug(f"❌ 레버리지 설정 실패 ({contract})", f"status:{resp.status_code}, {resp.text}")
+    except Exception as e:
+        log_debug(f"❌ REST 레버리지 설정 중 에러 ({contract})", str(e))
 
 def update_position_state(symbol):
     try:
@@ -79,30 +111,12 @@ def update_position_state(symbol):
             "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0")
         }
 
-# ============ 레버리지 설정 함수(Gate.io API 호출) ============
-def set_leverage(symbol, leverage, mode="cross"):
-    try:
-        body = {
-            "leverage": str(leverage),
-            "mode": mode
-        }
-        api.set_position_leverage(
-            settle=SETTLE,
-            contract=symbol,
-            position_leverage=body
-        )
-        log_debug(f"✅ 레버리지 설정 성공 ({symbol})", f"{leverage}x ({mode})")
-    except exceptions.ApiException as e:
-        log_debug(f"❌ 레버리지 설정 실패 ({symbol})", str(e))
-    except Exception as e:
-        log_debug(f"❌ 레버리지 설정 중 알 수 없는 오류 ({symbol})", str(e))
-
 # ============ 서버 시작 시 실행되는 쓰레드 ============
 def start_price_listener():
-    # 레버리지 반드시 사전에 세팅
+    # 레버리지를 REST API로 미리 세팅
     for sym, lev in SYMBOL_LEVERAGE.items():
         set_leverage(sym, lev)
-    # 포지션 상태 미리 갱신
+    # 포지션 정보 초기화
     for sym in SYMBOL_CONFIG:
         update_position_state(sym)
     log_debug("🚀 초기화", "레버리지/포지션 정보 초기 세팅 완료")
@@ -115,7 +129,7 @@ def ping():
 @app.route("/status", methods=["GET"])
 def status():
     try:
-        equity = Decimal("0")  # 실제 잔고를 가져오려면 get_account_info 함수 필요
+        equity = Decimal("0")  # 실제 자산 조회는 별도 구현 필요
         positions = {}
         for symbol in SYMBOL_CONFIG:
             update_position_state(symbol)
