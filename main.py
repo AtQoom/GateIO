@@ -3,14 +3,15 @@ import json
 import time
 import asyncio
 import threading
-import websockets
 from decimal import Decimal
 from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 
+# ============ Flask 초기화 ============
 app = Flask(__name__)
 
+# ============ 환경변수 및 상수 ============
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
@@ -41,100 +42,54 @@ api = FuturesApi(client)
 position_state = {}
 account_cache = {"time": 0, "data": None}
 
+# ============ 유틸 함수 ============
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-# 계속 이어짐 (2/2)
+def update_position_state(symbol):
+    try:
+        pos = api.get_position(SETTLE, symbol)
+        size = Decimal(str(getattr(pos, "size", "0")))
+        if size != 0:
+            entry_price = Decimal(str(getattr(pos, "entry_price", "0")))
+            leverage = Decimal(str(getattr(pos, "leverage", "1")))
+            mark_price = Decimal(str(getattr(pos, "mark_price", "0")))
+            position_value = abs(size) * mark_price
+            margin = position_value / leverage
+            position_state[symbol] = {
+                "price": entry_price,
+                "side": "buy" if size > 0 else "sell",
+                "leverage": leverage,
+                "size": abs(size),
+                "value": position_value,
+                "margin": margin
+            }
+            log_debug(f"📊 포지션 ({symbol})", f"수량: {abs(size)}, 진입가: {entry_price}, 방향: {'롱' if size > 0 else '숏'}, "
+                      f"레버리지: {leverage}x, 포지션가치: {position_value}, 증거금: {margin}")
+        else:
+            position_state[symbol] = {
+                "price": None, "side": None, "leverage": Decimal("1"),
+                "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0")
+            }
+            log_debug(f"📊 포지션 ({symbol})", "포지션 없음")
+    except Exception as e:
+        log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
+        position_state[symbol] = {
+            "price": None, "side": None, "leverage": Decimal("1"),
+            "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0")
+        }
 
-async def price_listener():
-    uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-    payload = list(SYMBOL_CONFIG.keys())
-    while True:
-        try:
-            async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
-                await ws.send(json.dumps({
-                    "time": int(time.time()),
-                    "channel": "futures.tickers",
-                    "event": "subscribe",
-                    "payload": payload
-                }))
-                log_debug("📡 WebSocket", f"연결 성공 - {payload}")
-                while True:
-                    msg = await ws.recv()
-                    data = json.loads(msg)
+def set_leverage(symbol, leverage):
+    log_debug(f"⚠️ 레버리지 설정 미지원 ({symbol})", f"{leverage}x (Gate.io SDK 버전 제한)")
 
-                    # "result"는 list일 수 있음 → 방어 처리
-                    result = data.get("result", None)
-                    if not isinstance(result, dict):
-                        log_debug("⚠️ 잘못된 result 형식", f"{type(result)}")
-                        continue
-
-                    contract = result.get("contract")
-                    last = result.get("last")
-
-                    if not contract or contract not in SYMBOL_CONFIG:
-                        continue
-
-                    last_price = Decimal(str(last))
-                    state = position_state.get(contract, {})
-                    entry_price = state.get("price")
-                    side = state.get("side")
-                    if not entry_price or not side:
-                        continue
-
-                    sl = SYMBOL_CONFIG[contract]["sl_pct"]
-                    if (side == "buy" and last_price <= entry_price * (1 - sl)) or \
-                       (side == "sell" and last_price >= entry_price * (1 + sl)):
-                        log_debug(f"🛑 손절 발생 ({contract})", f"현재가: {last_price}, 진입가: {entry_price}, 손절폭: {sl}")
-                        close_position(contract)
-
-        except Exception as e:
-            log_debug("❌ WS 오류", str(e))
-            await asyncio.sleep(5)
-
+# ============ 서버 시작 시 실행되는 쓰레드 ============
 def start_price_listener():
     for sym, lev in SYMBOL_LEVERAGE.items():
-        log_debug(f"⚠️ 레버리지 설정 미지원 ({sym})", f"{lev}x (Gate.io SDK 버전 제한)")
+        set_leverage(sym, lev)
     for sym in SYMBOL_CONFIG:
         update_position_state(sym)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(price_listener())
 
-@app.route("/", methods=["POST"])
-def webhook():
-    try:
-        data = request.get_json()
-        log_debug("📥 웹훅 수신", json.dumps(data))
-
-        raw_symbol = data.get("symbol", "").upper().replace(".P", "")
-        symbol = BINANCE_TO_GATE_SYMBOL.get(raw_symbol, raw_symbol)
-        side = data.get("side", "").lower()
-        action = data.get("action", "").lower()
-
-        if side == "buy": side = "long"
-        elif side == "sell": side = "short"
-        else: return jsonify({"error": "Invalid side"}), 400
-
-        desired = "buy" if side == "long" else "sell"
-
-        if action == "exit":
-            close_position(symbol)
-            return jsonify({"status": "closed", "symbol": symbol})
-
-        update_position_state(symbol)
-        state = position_state.get(symbol, {})
-        if state.get("side") and state.get("side") != desired:
-            close_position(symbol)
-            time.sleep(1)
-
-        qty = get_max_qty(symbol, desired)
-        place_order(symbol, desired, qty)
-        return jsonify({"status": "entry", "symbol": symbol, "side": desired})
-    except Exception as e:
-        log_debug("❌ 웹훅 오류", str(e))
-        return jsonify({"error": str(e)}), 500
-
+# ============ 기본 API 엔드포인트 ============
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
@@ -142,20 +97,24 @@ def ping():
 @app.route("/status", methods=["GET"])
 def status():
     try:
-        equity = get_account_info(force=True)
-        for sym in SYMBOL_CONFIG:
-            update_position_state(sym)
+        equity = Decimal("0")  # 기본 응답: 실제 자산 조회하려면 get_account_info 필요
+        positions = {}
+        for symbol in SYMBOL_CONFIG:
+            update_position_state(symbol)
+            positions[symbol] = position_state.get(symbol, {})
         return jsonify({
             "status": "running",
+            "timestamp": datetime.now().isoformat(),
             "equity": float(equity),
-            "positions": {
-                k: {sk: float(sv) if isinstance(sv, Decimal) else sv for sk, sv in v.items()}
-                for k, v in position_state.items()
-            }
+            "positions": {k: {sk: (float(sv) if isinstance(sv, Decimal) else sv) 
+                              for sk, sv in v.items()} 
+                          for k, v in positions.items()}
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        log_debug("❌ 상태 조회 실패", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
 
+# ============ 서버 실행 ============
 if __name__ == "__main__":
     threading.Thread(target=start_price_listener, daemon=True).start()
     log_debug("🚀 서버 시작", "WebSocket 리스너 실행됨")
