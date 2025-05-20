@@ -1,3 +1,4 @@
+requests
+gate-api==6.97.2
 flask
-gate-api>=6.90.0
 websockets
