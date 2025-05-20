@@ -130,6 +130,11 @@ async def price_listener():
                     if "result" not in data:
                         continue
                     result = data["result"]
+                    
+                    if not isinstance(result, dict):
+                        log_debug("⚠️ 잘못된 result 형식", str(type(result)))
+                        continue  # 리스트나 다른 형식은 무시
+                    
                     contract = result.get("contract")
                     last = Decimal(str(result.get("last", "0")))
                     state = position_state.get(contract, {})
