@@ -7,7 +7,10 @@ import websockets
 from decimal import Decimal
 from datetime import datetime
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, PositionLeverage, FuturesOrder
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
+
+# PositionLeverage는 models에서 import
+from gate_api.models import PositionLeverage
 
 app = Flask(__name__)
 
@@ -16,11 +19,10 @@ API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
 MARGIN_BUFFER = Decimal("0.9")
 
-# 심볼별 기본 레버리지 설정
 SYMBOL_LEVERAGE = {
-    "BTC_USDT": Decimal("10"),
-    "ADA_USDT": Decimal("10"),
-    "SUI_USDT": Decimal("10"),
+    "BTC_USDT": Decimal("3"),
+    "ADA_USDT": Decimal("5"),
+    "SUI_USDT": Decimal("8"),
 }
 
 BINANCE_TO_GATE_SYMBOL = {
@@ -47,8 +49,8 @@ def log_debug(title, content):
 
 def set_leverage(symbol, leverage):
     try:
-        # Gate.io 공식 SDK set_position_leverage 사용 (dual_mode는 False, long/short 모두 동일 적용)
-        leverage_data = PositionLeverage(leverage=leverage, mode="cross")
+        # models에서 import된 PositionLeverage 사용
+        leverage_data = PositionLeverage(leverage=int(leverage), mode="cross")
         api.set_position_leverage(SETTLE, symbol, leverage_data)
         log_debug(f"🔧 레버리지 설정 ({symbol})", f"{leverage}x")
     except Exception as e:
@@ -321,7 +323,6 @@ def webhook():
         if action not in ["entry", "exit"]:
             log_debug("⚠️ 잘못된 액션", action)
             return jsonify({"error": "entry 또는 exit만 지원합니다"}), 400
-        # 진입시 레버리지 재설정
         set_leverage(symbol, int(SYMBOL_LEVERAGE[symbol]))
         update_position_state(symbol)
         state = position_state.get(symbol, {})
