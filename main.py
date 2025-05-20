@@ -1,12 +1,11 @@
 import os
 import json
 import time
-import asyncio
 import threading
 from decimal import Decimal
 from datetime import datetime
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
+from gate_api import ApiClient, Configuration, FuturesApi, exceptions
 
 # ============ Flask 초기화 ============
 app = Flask(__name__)
@@ -35,6 +34,7 @@ SYMBOL_CONFIG = {
     "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "sl_pct": Decimal("0.0075"), "min_order_usdt": Decimal("5")}
 }
 
+# ============ Gate.io API 초기화 ============
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
@@ -79,15 +79,33 @@ def update_position_state(symbol):
             "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0")
         }
 
-def set_leverage(symbol, leverage):
-    log_debug(f"⚠️ 레버리지 설정 미지원 ({symbol})", f"{leverage}x (Gate.io SDK 버전 제한)")
+# ============ 레버리지 설정 함수(Gate.io API 호출) ============
+def set_leverage(symbol, leverage, mode="cross"):
+    try:
+        body = {
+            "leverage": str(leverage),
+            "mode": mode
+        }
+        api.set_position_leverage(
+            settle=SETTLE,
+            contract=symbol,
+            position_leverage=body
+        )
+        log_debug(f"✅ 레버리지 설정 성공 ({symbol})", f"{leverage}x ({mode})")
+    except exceptions.ApiException as e:
+        log_debug(f"❌ 레버리지 설정 실패 ({symbol})", str(e))
+    except Exception as e:
+        log_debug(f"❌ 레버리지 설정 중 알 수 없는 오류 ({symbol})", str(e))
 
 # ============ 서버 시작 시 실행되는 쓰레드 ============
 def start_price_listener():
+    # 레버리지 반드시 사전에 세팅
     for sym, lev in SYMBOL_LEVERAGE.items():
         set_leverage(sym, lev)
+    # 포지션 상태 미리 갱신
     for sym in SYMBOL_CONFIG:
         update_position_state(sym)
+    log_debug("🚀 초기화", "레버리지/포지션 정보 초기 세팅 완료")
 
 # ============ 기본 API 엔드포인트 ============
 @app.route("/ping", methods=["GET"])
@@ -97,7 +115,7 @@ def ping():
 @app.route("/status", methods=["GET"])
 def status():
     try:
-        equity = Decimal("0")  # 기본 응답: 실제 자산 조회하려면 get_account_info 필요
+        equity = Decimal("0")  # 실제 잔고를 가져오려면 get_account_info 함수 필요
         positions = {}
         for symbol in SYMBOL_CONFIG:
             update_position_state(symbol)
@@ -117,6 +135,6 @@ def status():
 # ============ 서버 실행 ============
 if __name__ == "__main__":
     threading.Thread(target=start_price_listener, daemon=True).start()
-    log_debug("🚀 서버 시작", "WebSocket 리스너 실행됨")
+    log_debug("🚀 서버 시작", "초기화 스레드 실행됨, 웹서버 가동")
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
