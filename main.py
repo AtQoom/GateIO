@@ -70,16 +70,17 @@ def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
 def set_margin_mode(symbol):
-    """마진 모드 설정 (cross/isolated)"""
+    """Cross/Isolated 마진 모드 설정 (듀얼모드)"""
     try:
         mode = SYMBOL_CONFIG[symbol].get("margin_mode", "cross")
-        api.update_position_margin_mode(SETTLE, symbol, {"mode": mode})
-        log_debug(f"⚙️ 마진 모드 설정 ({symbol})", f"{mode}")
+        # cross: "both", isolated: "single"
+        api.set_dual_mode(SETTLE, {"mode": "both" if mode == "cross" else "single"})
+        log_debug(f"⚙️ 듀얼 모드 설정 ({symbol})", f"{mode}")
     except Exception as e:
-        log_debug(f"❌ 마진 모드 설정 실패 ({symbol})", str(e))
+        log_debug(f"❌ 듀얼 모드 설정 실패 ({symbol})", str(e))
 
 def set_leverage(symbol):
-    """레버리지 설정"""
+    """레버리지 설정 (Gate.io 공식)"""
     try:
         lev = SYMBOL_CONFIG[symbol].get("leverage", 2)
         api.update_position_leverage(SETTLE, symbol, {"leverage": str(int(lev))})
@@ -88,14 +89,11 @@ def set_leverage(symbol):
         log_debug(f"❌ 레버리지 설정 실패 ({symbol})", str(e))
 
 def init_settings():
-    """서버 시작 시 모드 + 레버리지 초기화"""
     for symbol in SYMBOL_CONFIG:
-        try:
-            set_margin_mode(symbol)
-            time.sleep(0.5)
-            set_leverage(symbol)
-        except Exception as e:
-            log_debug(f"❌ 초기 설정 실패 ({symbol})", str(e))
+        set_margin_mode(symbol)
+        time.sleep(0.5)
+        set_leverage(symbol)
+        time.sleep(0.5)
 
 def get_account_info(force=False):
     now = time.time()
@@ -160,15 +158,6 @@ def get_price(symbol):
     except Exception as e:
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
     return Decimal("0")
-
-def set_leverage(symbol):
-    try:
-        lev = SYMBOL_CONFIG[symbol].get("leverage", 2)
-        # PositionLeverage 대신 dict 사용
-        api.update_position_leverage(SETTLE, symbol, {'leverage': str(int(lev)), 'mode': 'cross'})
-        log_debug(f"⚡ 레버리지 설정 완료 ({symbol})", f"{lev}x")
-    except Exception as e:
-        log_debug(f"❌ 레버리지 설정 실패 ({symbol})", str(e))
 
 def get_max_qty(symbol, side):
     try:
@@ -333,7 +322,10 @@ async def price_listener():
 def start_price_listener():
     for sym in SYMBOL_CONFIG:
         update_position_state(sym)
+        set_margin_mode(sym)
+        time.sleep(0.5)
         set_leverage(sym)
+        time.sleep(0.5)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(price_listener())
@@ -412,8 +404,7 @@ def status():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
-    init_settings()  # 초기 모드/레버리지 설정
     threading.Thread(target=start_price_listener, daemon=True).start()
-    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.1.4")
+    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.1.5")
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
