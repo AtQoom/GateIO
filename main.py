@@ -8,7 +8,6 @@ from decimal import Decimal
 from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
-from gate_api.models import PositionLeverage  # 수정된 임포트
 
 app = Flask(__name__)
 
@@ -134,11 +133,8 @@ def get_price(symbol):
 def set_leverage(symbol):
     try:
         lev = SYMBOL_CONFIG[symbol].get("leverage", 2)
-        leverage_data = PositionLeverage(
-            leverage=str(int(lev)),
-            mode="cross"
-        )
-        api.update_position_leverage(SETTLE, symbol, leverage_data)
+        # PositionLeverage 대신 dict 사용
+        api.update_position_leverage(SETTLE, symbol, {'leverage': str(int(lev)), 'mode': 'cross'})
         log_debug(f"⚡ 레버리지 설정 완료 ({symbol})", f"{lev}x")
     except Exception as e:
         log_debug(f"❌ 레버리지 설정 실패 ({symbol})", str(e))
@@ -386,6 +382,6 @@ def status():
 
 if __name__ == "__main__":
     threading.Thread(target=start_price_listener, daemon=True).start()
-    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.1.2")
+    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.1.3")
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
