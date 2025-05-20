@@ -3,7 +3,6 @@ import json
 import time
 import asyncio
 import threading
-import requests  # ✅ 누락된 모듈 추가됨
 import websockets
 from decimal import Decimal
 from datetime import datetime
@@ -45,78 +44,14 @@ account_cache = {"time": 0, "data": None}
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-def set_leverage(symbol, leverage):
-    log_debug(f"⚠️ 레버리지 설정 미지원 ({symbol})", f"{leverage}x (Gate.io SDK 버전 제한)")
-
-def get_account_info(force=False):
-    now = time.time()
-    if not force and account_cache["time"] > now - 1 and account_cache["data"]:
-        return account_cache["data"]
-    try:
-        accounts = api.list_futures_accounts(SETTLE)
-        available = Decimal(str(accounts.available))
-        total = Decimal(str(accounts.total))
-        unrealised_pnl = Decimal(str(getattr(accounts, 'unrealised_pnl', '0')))
-        safe = available * MARGIN_BUFFER
-        account_cache.update({"time": now, "data": safe})
-        log_debug("💰 계정 정보", f"가용: {available}, 총액: {total}, 미실현손익: {unrealised_pnl}, 안전가용: {safe}")
-        return safe
-    except Exception as e:
-        log_debug("❌ 잔고 조회 실패", str(e))
-        return Decimal("100")
-
-def update_position_state(symbol):
-    try:
-        pos = api.get_position(SETTLE, symbol)
-        size = Decimal(str(getattr(pos, "size", "0")))
-        if size != 0:
-            entry_price = Decimal(str(getattr(pos, "entry_price", "0")))
-            leverage = Decimal(str(getattr(pos, "leverage", "1")))
-            mark_price = Decimal(str(getattr(pos, "mark_price", "0")))
-            position_value = abs(size) * mark_price
-            margin = position_value / leverage
-
-            position_state[symbol] = {
-                "price": entry_price,
-                "side": "buy" if size > 0 else "sell",
-                "leverage": leverage,
-                "size": abs(size),
-                "value": position_value,
-                "margin": margin
-            }
-            log_debug(f"📊 포지션 ({symbol})",
-                      f"수량: {abs(size)}, 진입가: {entry_price}, 방향: {'롱' if size > 0 else '숏'}, "
-                      f"레버리지: {leverage}x, 포지션가치: {position_value}, 증거금: {margin}")
-        else:
-            position_state[symbol] = {
-                "price": None, "side": None, "leverage": Decimal("1"),
-                "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0")
-            }
-            log_debug(f"📊 포지션 ({symbol})", "포지션 없음")
-    except Exception as e:
-        log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
-        position_state[symbol] = {
-            "price": None, "side": None, "leverage": Decimal("1"),
-            "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0")
-        }
-
-def close_position(symbol):
-    try:
-        order = FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True)
-        api.create_futures_order(SETTLE, order)
-        log_debug(f"✅ 청산 완료", symbol)
-        time.sleep(0.5)
-        update_position_state(symbol)
-        account_cache["time"] = 0
-    except Exception as e:
-        log_debug(f"❌ 청산 실패 ({symbol})", str(e))
+# 계속 이어짐 (2/2)
 
 async def price_listener():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     payload = list(SYMBOL_CONFIG.keys())
     while True:
         try:
-            async with websockets.connect(uri) as ws:
+            async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
                 await ws.send(json.dumps({
                     "time": int(time.time()),
                     "channel": "futures.tickers",
@@ -127,33 +62,39 @@ async def price_listener():
                 while True:
                     msg = await ws.recv()
                     data = json.loads(msg)
-                    if "result" not in data:
-                        continue
-                    result = data["result"]
-                    
+
+                    # "result"는 list일 수 있음 → 방어 처리
+                    result = data.get("result", None)
                     if not isinstance(result, dict):
-                        log_debug("⚠️ 잘못된 result 형식", str(type(result)))
-                        continue  # 리스트나 다른 형식은 무시
-                    
+                        log_debug("⚠️ 잘못된 result 형식", f"{type(result)}")
+                        continue
+
                     contract = result.get("contract")
-                    last = Decimal(str(result.get("last", "0")))
+                    last = result.get("last")
+
+                    if not contract or contract not in SYMBOL_CONFIG:
+                        continue
+
+                    last_price = Decimal(str(last))
                     state = position_state.get(contract, {})
                     entry_price = state.get("price")
                     side = state.get("side")
                     if not entry_price or not side:
                         continue
+
                     sl = SYMBOL_CONFIG[contract]["sl_pct"]
-                    if (side == "buy" and last <= entry_price * (1 - sl)) or \
-                       (side == "sell" and last >= entry_price * (1 + sl)):
-                        log_debug(f"🛑 손절 발생 ({contract})", f"현재가: {last}, 진입가: {entry_price}")
+                    if (side == "buy" and last_price <= entry_price * (1 - sl)) or \
+                       (side == "sell" and last_price >= entry_price * (1 + sl)):
+                        log_debug(f"🛑 손절 발생 ({contract})", f"현재가: {last_price}, 진입가: {entry_price}, 손절폭: {sl}")
                         close_position(contract)
+
         except Exception as e:
             log_debug("❌ WS 오류", str(e))
             await asyncio.sleep(5)
 
 def start_price_listener():
     for sym, lev in SYMBOL_LEVERAGE.items():
-        set_leverage(sym, lev)
+        log_debug(f"⚠️ 레버리지 설정 미지원 ({sym})", f"{lev}x (Gate.io SDK 버전 제한)")
     for sym in SYMBOL_CONFIG:
         update_position_state(sym)
     loop = asyncio.new_event_loop()
@@ -164,28 +105,56 @@ def start_price_listener():
 def webhook():
     try:
         data = request.get_json()
-        raw = data.get("symbol", "").upper().replace(".P", "")
-        symbol = BINANCE_TO_GATE_SYMBOL.get(raw, raw)
+        log_debug("📥 웹훅 수신", json.dumps(data))
+
+        raw_symbol = data.get("symbol", "").upper().replace(".P", "")
+        symbol = BINANCE_TO_GATE_SYMBOL.get(raw_symbol, raw_symbol)
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
-        log_debug("📩 웹훅 수신", f"심볼: {symbol}, 방향: {side}, 액션: {action}")
-        if side in ["buy"]: side = "long"
-        if side in ["sell"]: side = "short"
+
+        if side == "buy": side = "long"
+        elif side == "sell": side = "short"
+        else: return jsonify({"error": "Invalid side"}), 400
+
         desired = "buy" if side == "long" else "sell"
+
         if action == "exit":
             close_position(symbol)
-            return jsonify({"status": "closed"})
+            return jsonify({"status": "closed", "symbol": symbol})
+
         update_position_state(symbol)
-        current = position_state.get(symbol, {}).get("side")
-        if current and current != desired:
+        state = position_state.get(symbol, {})
+        if state.get("side") and state.get("side") != desired:
             close_position(symbol)
             time.sleep(1)
+
         qty = get_max_qty(symbol, desired)
         place_order(symbol, desired, qty)
         return jsonify({"status": "entry", "symbol": symbol, "side": desired})
     except Exception as e:
         log_debug("❌ 웹훅 오류", str(e))
-        return jsonify({"status": "error"}), 500
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    return "pong", 200
+
+@app.route("/status", methods=["GET"])
+def status():
+    try:
+        equity = get_account_info(force=True)
+        for sym in SYMBOL_CONFIG:
+            update_position_state(sym)
+        return jsonify({
+            "status": "running",
+            "equity": float(equity),
+            "positions": {
+                k: {sk: float(sv) if isinstance(sv, Decimal) else sv for sk, sv in v.items()}
+                for k, v in position_state.items()
+            }
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     threading.Thread(target=start_price_listener, daemon=True).start()
