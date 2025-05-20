@@ -27,19 +27,19 @@ SYMBOL_CONFIG = {
         "min_qty": Decimal("10"), 
         "qty_step": Decimal("10"),
         "sl_pct": Decimal("0.0075"),
-        "leverage": 10  # 웹/앱에서 미리 3x로 설정 권장
+        "leverage": 10
     },
     "BTC_USDT": {
         "min_qty": Decimal("0.0001"), 
         "qty_step": Decimal("0.0001"),
         "sl_pct": Decimal("0.004"),
-        "leverage": 10  # 웹/앱에서 미리 2x로 설정 권장
+        "leverage": 10
     },
     "SUI_USDT": {
         "min_qty": Decimal("1"), 
         "qty_step": Decimal("1"),
         "sl_pct": Decimal("0.0075"),
-        "leverage": 10  # 웹/앱에서 미리 3x로 설정 권장
+        "leverage": 10
     }
 }
 
@@ -72,8 +72,16 @@ def update_position_state(symbol):
     try:
         pos = api.get_position(SETTLE, symbol)
         size = Decimal(str(getattr(pos, "size", "0")))
-        leverage = Decimal(str(getattr(pos, "leverage", "10")))  # 현재 레버리지 로깅
-        if size != 0:
+        leverage = Decimal(str(getattr(pos, "leverage", "1")))
+        # 포지션 없을 때 레버리지 0이면, 웹/앱 설정값으로 대체
+        if size == 0 and leverage == 0:
+            leverage = SYMBOL_CONFIG[symbol].get("leverage", 10)
+            position_state[symbol] = {
+                "price": None, "side": None, "leverage": leverage,
+                "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0")
+            }
+            log_debug(f"📊 포지션 ({symbol})", f"포지션 없음 (설정 레버리지: {leverage}x, 웹/앱에서 미리 세팅 권장)")
+        elif size != 0:
             entry_price = Decimal(str(getattr(pos, "entry_price", "0")))
             mark_price = Decimal(str(getattr(pos, "mark_price", "0")))
             position_value = abs(size) * mark_price
@@ -97,54 +105,76 @@ def update_position_state(symbol):
     except Exception as e:
         log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
 
-def set_leverage(symbol):
-    """웹/앱에서 미리 설정했다고 가정하고 API 시도 (디버그 강화)"""
+def get_price(symbol):
     try:
-        target_lev = SYMBOL_CONFIG[symbol].get("leverage", 2)
-        current_pos = api.get_position(SETTLE, symbol)
-        current_lev = Decimal(str(getattr(current_pos, "leverage", "1")))
-        
-        log_debug(f"🔧 레버리지 변경 시도 ({symbol})", 
-                f"현재: {current_lev}x → 목표: {target_lev}x")
-        
-        api.update_position_leverage(SETTLE, symbol, {"leverage": str(int(target_lev))})
-        updated_pos = api.get_position(SETTLE, symbol)
-        updated_lev = Decimal(str(getattr(updated_pos, "leverage", "1")))
-        
-        log_debug(f"✅ 레버리지 변경 결과 ({symbol})", 
-                f"성공: {updated_lev}x (목표: {target_lev}x)")
+        tickers = api.list_futures_tickers(SETTLE, contract=symbol)
+        if tickers and hasattr(tickers[0], "last"):
+            price = Decimal(str(tickers[0].last))
+            log_debug(f"💲 가격 조회 ({symbol})", f"{price}")
+            return price
     except Exception as e:
-        log_debug(f"❌ 레버리지 변경 실패 ({symbol})", 
-                f"에러: {str(e)} → 웹/앱에서 수동 설정 필요")
+        log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
+    return Decimal("0")
 
-def place_order(symbol, side, qty):
+def get_max_qty(symbol, side):
     try:
-        # 레버리지 사전 설정 (웹/앱에서 미리 설정했다는 가정)
-        set_leverage(symbol)
-        
-        # 주문 실행
+        cfg = SYMBOL_CONFIG[symbol]
+        safe = get_account_info()
+        price = get_price(symbol)
+        if price <= 0:
+            log_debug(f"❌ 가격 0 이하 ({symbol})", "최소 수량만 반환")
+            return float(cfg["min_qty"])
+        lev = Decimal(str(cfg.get("leverage", 2)))
+        order_value = safe * lev
+        raw_qty = order_value / price
+        step = cfg["qty_step"]
+        qty_decimal = (raw_qty // step) * step
+        qty = max(qty_decimal, cfg["min_qty"])
+        log_debug(f"📐 최대수량 계산 ({symbol})", 
+                f"가용증거금: {safe}, 레버리지: {lev}x, 가격: {price}, "
+                f"주문가치: {order_value}, 최대수량: {qty}")
+        return float(qty)
+    except Exception as e:
+        log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
+        return float(cfg["min_qty"])
+
+def place_order(symbol, side, qty, reduce_only=False, retry=3):
+    try:
+        if qty <= 0:
+            log_debug("⛔ 수량 0 이하", symbol)
+            return False
         cfg = SYMBOL_CONFIG[symbol]
         step = cfg["qty_step"]
         order_qty = (Decimal(str(qty)) // step) * step
         order_qty = max(order_qty, cfg["min_qty"])
-        
-        # BTC 소수점 처리
         if symbol == "BTC_USDT":
             order_qty = (order_qty // Decimal("0.0001")) * Decimal("0.0001")
             order_qty = max(order_qty, Decimal("0.0001"))
-        
         size = float(order_qty) if side == "buy" else -float(order_qty)
-        order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc")
+        order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         result = api.create_futures_order(SETTLE, order)
-        
-        # 주문 후 레버리지 재확인
-        pos = api.get_position(SETTLE, symbol)
-        final_lev = Decimal(str(getattr(pos, "leverage", "1")))
-        log_debug(f"📌 최종 적용 레버리지 ({symbol})", f"{final_lev}x")
-        
+        fill_price = result.fill_price if hasattr(result, 'fill_price') else "알 수 없음"
+        log_debug(f"✅ 주문 ({symbol})", f"{side.upper()} {float(order_qty)} @ {fill_price}")
+        time.sleep(0.5)
+        update_position_state(symbol)
         return True
     except Exception as e:
-        log_debug(f"❌ 주문 실패 ({symbol})", str(e))
+        error_msg = str(e)
+        log_debug(f"❌ 주문 실패 ({symbol})", error_msg)
+        if retry > 0 and symbol == "BTC_USDT" and "INVALID_PARAM_VALUE" in error_msg:
+            retry_qty = Decimal("0.0001")
+            log_debug(f"🔄 BTC 최소단위 재시도", f"수량: {retry_qty}")
+            time.sleep(1)
+            return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
+        if retry > 0 and ("INSUFFICIENT_AVAILABLE" in error_msg or "Bad Request" in error_msg):
+            cfg = SYMBOL_CONFIG[symbol]
+            step = cfg["qty_step"]
+            retry_qty = Decimal(str(qty)) * Decimal("0.2")
+            retry_qty = (retry_qty // step) * step
+            retry_qty = max(retry_qty, cfg["min_qty"])
+            log_debug(f"🔄 주문 재시도 ({symbol})", f"수량 감소: {qty} → {float(retry_qty)}")
+            time.sleep(1)
+            return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
         return False
 
 def close_position(symbol):
@@ -240,7 +270,6 @@ def webhook():
         if not request.is_json:
             log_debug("⚠️ 잘못된 요청", "JSON 형식이 아님")
             return jsonify({"error": "JSON 형식만 허용됩니다"}), 400
-            
         data = request.get_json()
         log_debug("📥 웹훅 원본 데이터", json.dumps(data))
         raw = data.get("symbol", "").upper().replace(".P", "")
