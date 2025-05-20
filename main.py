@@ -23,9 +23,24 @@ BINANCE_TO_GATE_SYMBOL = {
 }
 
 SYMBOL_CONFIG = {
-    "ADA_USDT": {"min_qty": Decimal("10"), "qty_step": Decimal("10"), "sl_pct": Decimal("0.0075"), "min_order_usdt": Decimal("5"), "leverage": 5},
-    "BTC_USDT": {"min_qty": Decimal("0.0001"), "qty_step": Decimal("0.0001"), "sl_pct": Decimal("0.004"), "min_order_usdt": Decimal("5"), "leverage": 5},
-    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "sl_pct": Decimal("0.0075"), "min_order_usdt": Decimal("5"), "leverage": 5}
+    "ADA_USDT": {
+        "min_qty": Decimal("10"), 
+        "qty_step": Decimal("10"),
+        "sl_pct": Decimal("0.0075"),
+        "leverage": 10  # 웹/앱에서 미리 3x로 설정 권장
+    },
+    "BTC_USDT": {
+        "min_qty": Decimal("0.0001"), 
+        "qty_step": Decimal("0.0001"),
+        "sl_pct": Decimal("0.004"),
+        "leverage": 10  # 웹/앱에서 미리 2x로 설정 권장
+    },
+    "SUI_USDT": {
+        "min_qty": Decimal("1"), 
+        "qty_step": Decimal("1"),
+        "sl_pct": Decimal("0.0075"),
+        "leverage": 10  # 웹/앱에서 미리 3x로 설정 권장
+    }
 }
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
@@ -38,14 +53,6 @@ account_cache = {"time": 0, "data": None}
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-def set_leverage(symbol):
-    try:
-        lev = SYMBOL_CONFIG[symbol].get("leverage", 2)
-        api.update_position_leverage(SETTLE, symbol, {"leverage": str(int(lev))})
-        log_debug(f"⚡ 레버리지 설정 ({symbol})", f"{lev}x")
-    except Exception as e:
-        log_debug(f"❌ 레버리지 설정 실패 ({symbol})", str(e))
-
 def get_account_info(force=False):
     now = time.time()
     if not force and account_cache["time"] > now - 1 and account_cache["data"]:
@@ -53,11 +60,9 @@ def get_account_info(force=False):
     try:
         accounts = api.list_futures_accounts(SETTLE)
         available = Decimal(str(accounts.available))
-        total = Decimal(str(accounts.total))
-        unrealised_pnl = Decimal(str(getattr(accounts, 'unrealised_pnl', '0')))
         safe = available * MARGIN_BUFFER
         account_cache.update({"time": now, "data": safe})
-        log_debug("💰 계정 정보", f"가용: {available}, 총액: {total}, 미실현손익: {unrealised_pnl}, 안전가용: {safe}")
+        log_debug("💰 계정 정보", f"가용: {available}, 안전가용: {safe}")
         return safe
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
@@ -67,13 +72,12 @@ def update_position_state(symbol):
     try:
         pos = api.get_position(SETTLE, symbol)
         size = Decimal(str(getattr(pos, "size", "0")))
+        leverage = Decimal(str(getattr(pos, "leverage", "10")))  # 현재 레버리지 로깅
         if size != 0:
             entry_price = Decimal(str(getattr(pos, "entry_price", "0")))
-            leverage = Decimal(str(getattr(pos, "leverage", "1")))
             mark_price = Decimal(str(getattr(pos, "mark_price", "0")))
             position_value = abs(size) * mark_price
             margin = position_value / leverage
-
             position_state[symbol] = {
                 "price": entry_price,
                 "side": "buy" if size > 0 else "sell",
@@ -83,104 +87,64 @@ def update_position_state(symbol):
                 "margin": margin
             }
             log_debug(f"📊 포지션 ({symbol})", 
-                    f"수량: {abs(size)}, 진입가: {entry_price}, 방향: {'롱' if size > 0 else '숏'}, "
-                    f"레버리지: {leverage}x, 포지션가치: {position_value}, 증거금: {margin}")
+                    f"수량: {abs(size)}, 진입가: {entry_price}, 레버리지: {leverage}x")
         else:
             position_state[symbol] = {
-                "price": None, "side": None, "leverage": Decimal("1"),
+                "price": None, "side": None, "leverage": leverage,
                 "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0")
             }
-            log_debug(f"📊 포지션 ({symbol})", "포지션 없음")
+            log_debug(f"📊 포지션 ({symbol})", f"포지션 없음 (현재 레버리지: {leverage}x)")
     except Exception as e:
         log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
-        position_state[symbol] = {
-            "price": None, "side": None, "leverage": Decimal("1"),
-            "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0")
-        }
 
-def get_price(symbol):
+def set_leverage(symbol):
+    """웹/앱에서 미리 설정했다고 가정하고 API 시도 (디버그 강화)"""
     try:
-        tickers = api.list_futures_tickers(SETTLE, contract=symbol)
-        if tickers and hasattr(tickers[0], "last"):
-            price = Decimal(str(tickers[0].last))
-            log_debug(f"💲 가격 조회 ({symbol})", f"{price}")
-            return price
+        target_lev = SYMBOL_CONFIG[symbol].get("leverage", 2)
+        current_pos = api.get_position(SETTLE, symbol)
+        current_lev = Decimal(str(getattr(current_pos, "leverage", "1")))
+        
+        log_debug(f"🔧 레버리지 변경 시도 ({symbol})", 
+                f"현재: {current_lev}x → 목표: {target_lev}x")
+        
+        api.update_position_leverage(SETTLE, symbol, {"leverage": str(int(target_lev))})
+        updated_pos = api.get_position(SETTLE, symbol)
+        updated_lev = Decimal(str(getattr(updated_pos, "leverage", "1")))
+        
+        log_debug(f"✅ 레버리지 변경 결과 ({symbol})", 
+                f"성공: {updated_lev}x (목표: {target_lev}x)")
     except Exception as e:
-        log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
-    return Decimal("0")
+        log_debug(f"❌ 레버리지 변경 실패 ({symbol})", 
+                f"에러: {str(e)} → 웹/앱에서 수동 설정 필요")
 
-def get_max_qty(symbol, side):
+def place_order(symbol, side, qty):
     try:
-        cfg = SYMBOL_CONFIG[symbol]
-        safe = get_account_info()
-        price = get_price(symbol)
-        if price <= 0:
-            log_debug(f"❌ 가격 0 이하 ({symbol})", "최소 수량만 반환")
-            return float(cfg["min_qty"])
-        # 진입 전 원하는 레버리지로 미리 세팅
+        # 레버리지 사전 설정 (웹/앱에서 미리 설정했다는 가정)
         set_leverage(symbol)
-        lev = Decimal(str(cfg.get("leverage", 2)))
-        order_value = safe * lev
-        raw_qty = order_value / price
-        step = cfg["qty_step"]
-        qty_decimal = (raw_qty // step) * step
-        qty = max(qty_decimal, cfg["min_qty"])
-        min_order_usdt = cfg.get("min_order_usdt", Decimal("5"))
-        if qty * price < min_order_usdt:
-            qty = cfg["min_qty"]
-            log_debug(f"⚠️ 최소 주문 금액 미달 ({symbol})", f"{qty * price} USDT < {min_order_usdt} USDT, 최소 수량 사용")
-        log_debug(f"📐 최대수량 계산 ({symbol})", 
-                f"가용증거금: {safe}, 레버리지: {lev}x, 가격: {price}, "
-                f"주문가치: {order_value}, 최대수량: {qty}")
-        return float(qty)
-    except Exception as e:
-        log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
-        return float(cfg["min_qty"])
-
-def place_order(symbol, side, qty, reduce_only=False, retry=3):
-    try:
-        if qty <= 0:
-            log_debug("⛔ 수량 0 이하", symbol)
-            return False
+        
+        # 주문 실행
         cfg = SYMBOL_CONFIG[symbol]
         step = cfg["qty_step"]
-        # 100% 진입 (POSITION_RATIO 제거)
         order_qty = (Decimal(str(qty)) // step) * step
         order_qty = max(order_qty, cfg["min_qty"])
+        
+        # BTC 소수점 처리
         if symbol == "BTC_USDT":
             order_qty = (order_qty // Decimal("0.0001")) * Decimal("0.0001")
-            if order_qty < Decimal("0.0001"):
-                order_qty = Decimal("0.0001")
-            str_qty = f"{float(order_qty):.4f}"
-            log_debug(f"🔍 BTC 수량 변환", f"최종: {str_qty}")
-            order_qty = Decimal(str_qty)
+            order_qty = max(order_qty, Decimal("0.0001"))
+        
         size = float(order_qty) if side == "buy" else -float(order_qty)
-        order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
+        order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc")
         result = api.create_futures_order(SETTLE, order)
-        fill_price = result.fill_price if hasattr(result, 'fill_price') else "알 수 없음"
-        fill_size = result.size if hasattr(result, 'size') else "알 수 없음"
-        log_debug(f"✅ 주문 ({symbol})", 
-                f"{side.upper()} {float(order_qty)} @ {fill_price}")
-        time.sleep(0.5)
-        update_position_state(symbol)
+        
+        # 주문 후 레버리지 재확인
+        pos = api.get_position(SETTLE, symbol)
+        final_lev = Decimal(str(getattr(pos, "leverage", "1")))
+        log_debug(f"📌 최종 적용 레버리지 ({symbol})", f"{final_lev}x")
+        
         return True
     except Exception as e:
-        error_msg = str(e)
-        log_debug(f"❌ 주문 실패 ({symbol})", error_msg)
-        if retry > 0 and symbol == "BTC_USDT" and "INVALID_PARAM_VALUE" in error_msg:
-            retry_qty = Decimal("0.0001")
-            log_debug(f"🔄 BTC 최소단위 재시도", f"수량: {retry_qty}")
-            time.sleep(1)
-            return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
-        if retry > 0 and ("INSUFFICIENT_AVAILABLE" in error_msg or "Bad Request" in error_msg):
-            cfg = SYMBOL_CONFIG[symbol]
-            step = cfg["qty_step"]
-            retry_qty = Decimal(str(qty)) * Decimal("0.2")
-            retry_qty = (retry_qty // step) * step
-            retry_qty = max(retry_qty, cfg["min_qty"])
-            log_debug(f"🔄 주문 재시도 ({symbol})", f"수량 감소: {qty} → {float(retry_qty)}")
-            time.sleep(1)
-            return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
+        log_debug(f"❌ 주문 실패 ({symbol})", str(e))
         return False
 
 def close_position(symbol):
@@ -346,6 +310,6 @@ def status():
 
 if __name__ == "__main__":
     threading.Thread(target=start_price_listener, daemon=True).start()
-    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.0.8")
+    log_debug("🚀 서버 시작", "웹/앱에서 레버리지 미리 설정 후 사용 권장")
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
