@@ -6,29 +6,20 @@ import hashlib
 import threading
 from decimal import Decimal
 from datetime import datetime
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 import requests
 from gate_api import ApiClient, Configuration, FuturesApi
 
-# ============ Flask 초기화 ============
 app = Flask(__name__)
 
-# ============ 환경변수 및 상수 ============
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
-MARGIN_BUFFER = Decimal("0.9")
 
 SYMBOL_LEVERAGE = {
     "BTC_USDT": Decimal("10"),
     "ADA_USDT": Decimal("10"),
     "SUI_USDT": Decimal("10"),
-}
-
-BINANCE_TO_GATE_SYMBOL = {
-    "BTCUSDT": "BTC_USDT",
-    "ADAUSDT": "ADA_USDT",
-    "SUIUSDT": "SUI_USDT"
 }
 
 SYMBOL_CONFIG = {
@@ -40,30 +31,28 @@ SYMBOL_CONFIG = {
 API_URL_BASE = "https://api.gateio.ws"
 API_PREFIX = "/api/v4"
 
-# ============ Gate.io API 초기화 ============
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
 
 position_state = {}
-account_cache = {"time": 0, "data": None}
 
-# ============ 유틸 함수 ============
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
+# Gate.io 공식 샘플 방식과 같이 json.dumps의 옵션(separators) 엄격 적용
 def sign(payload, secret):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha512).hexdigest()
 
-# REST 기반 레버리지 설정 함수
 def set_leverage(contract, leverage, mode="cross"):
     try:
-        url = f"{API_URL_BASE}{API_PREFIX}/futures/{SETTLE}/positions/{contract}/leverage"
+        url_path = f"/api/v4/futures/{SETTLE}/positions/{contract}/leverage"
+        url = f"{API_URL_BASE}{url_path}"
         body = {"leverage": str(leverage), "mode": mode}
+        body_str = json.dumps(body, separators=(',', ':'))  # ←★ 공백 없이
         t = str(int(time.time()))
-        body_str = json.dumps(body)
-        payload = t + 'POST' + f"/api/v4/futures/{SETTLE}/positions/{contract}/leverage" + body_str
-        sign_header = sign(payload, API_SECRET)
+        to_sign = t + 'POST' + url_path + body_str
+        sign_header = sign(to_sign, API_SECRET)
         headers = {
             "KEY": API_KEY,
             "Timestamp": t,
@@ -111,17 +100,13 @@ def update_position_state(symbol):
             "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0")
         }
 
-# ============ 서버 시작 시 실행되는 쓰레드 ============
 def start_price_listener():
-    # 레버리지를 REST API로 미리 세팅
     for sym, lev in SYMBOL_LEVERAGE.items():
         set_leverage(sym, lev)
-    # 포지션 정보 초기화
     for sym in SYMBOL_CONFIG:
         update_position_state(sym)
     log_debug("🚀 초기화", "레버리지/포지션 정보 초기 세팅 완료")
 
-# ============ 기본 API 엔드포인트 ============
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
@@ -129,7 +114,7 @@ def ping():
 @app.route("/status", methods=["GET"])
 def status():
     try:
-        equity = Decimal("0")  # 실제 자산 조회는 별도 구현 필요
+        equity = Decimal("0")  # 실제 자산 조회는 별도로 구현 필요
         positions = {}
         for symbol in SYMBOL_CONFIG:
             update_position_state(symbol)
@@ -146,7 +131,6 @@ def status():
         log_debug("❌ 상태 조회 실패", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# ============ 서버 실행 ============
 if __name__ == "__main__":
     threading.Thread(target=start_price_listener, daemon=True).start()
     log_debug("🚀 서버 시작", "초기화 스레드 실행됨, 웹서버 가동")
