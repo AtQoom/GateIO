@@ -29,33 +29,24 @@ SYMBOL_CONFIG = {
         "qty_step": Decimal("10"),
         "sl_pct": Decimal("0.0075"),
         "tp_pct": Decimal("0.008"),
-        "sl_rsi": Decimal("0.004"),
-        "tp_rsi": Decimal("0.008"),
         "leverage": 3,
-        "min_order_usdt": Decimal("5"),
-        "margin_mode": "cross"
+        "min_order_usdt": Decimal("5")
     },
     "BTC_USDT": {
         "min_qty": Decimal("0.0001"),
         "qty_step": Decimal("0.0001"),
         "sl_pct": Decimal("0.004"),
         "tp_pct": Decimal("0.006"),
-        "sl_rsi": Decimal("0.002"),
-        "tp_rsi": Decimal("0.006"),
         "leverage": 2,
-        "min_order_usdt": Decimal("5"),
-        "margin_mode": "cross"
+        "min_order_usdt": Decimal("5")
     },
     "SUI_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "sl_pct": Decimal("0.0075"),
         "tp_pct": Decimal("0.008"),
-        "sl_rsi": Decimal("0.004"),
-        "tp_rsi": Decimal("0.008"),
         "leverage": 3,
-        "min_order_usdt": Decimal("5"),
-        "margin_mode": "cross"
+        "min_order_usdt": Decimal("5")
     }
 }
 
@@ -69,31 +60,21 @@ account_cache = {"time": 0, "data": None}
 def log_debug(title, content):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{title}] {content}")
 
-def set_margin_mode(symbol):
-    """Cross/Isolated 마진 모드 설정 (듀얼모드)"""
+def set_dual_mode_cross():
+    """계정 전체를 교차(Cross) 모드로 설정"""
     try:
-        mode = SYMBOL_CONFIG[symbol].get("margin_mode", "cross")
-        # cross: "both", isolated: "single"
-        api.set_dual_mode(SETTLE, {"mode": "both" if mode == "cross" else "single"})
-        log_debug(f"⚙️ 듀얼 모드 설정 ({symbol})", f"{mode}")
+        api.set_dual_mode(SETTLE, {"dual_mode": True})
+        log_debug("⚙️ 듀얼모드(교차) 전체 계정 적용", "dual_mode=True")
     except Exception as e:
-        log_debug(f"❌ 듀얼 모드 설정 실패 ({symbol})", str(e))
+        log_debug("❌ 듀얼모드 설정 실패", str(e))
 
-def set_leverage(symbol):
-    """레버리지 설정 (Gate.io 공식)"""
+def set_leverage_after_entry(symbol, leverage):
+    """포지션 진입 직후에만 레버리지 설정"""
     try:
-        lev = SYMBOL_CONFIG[symbol].get("leverage", 2)
-        api.update_position_leverage(SETTLE, symbol, {"leverage": str(int(lev))})
-        log_debug(f"⚡ 레버리지 설정 완료 ({symbol})", f"{lev}x")
+        api.update_position_leverage(SETTLE, symbol, {"leverage": str(int(leverage))})
+        log_debug(f"⚡ 레버리지 설정 완료 ({symbol})", f"{leverage}x")
     except Exception as e:
         log_debug(f"❌ 레버리지 설정 실패 ({symbol})", str(e))
-
-def init_settings():
-    for symbol in SYMBOL_CONFIG:
-        set_margin_mode(symbol)
-        time.sleep(0.5)
-        set_leverage(symbol)
-        time.sleep(0.5)
 
 def get_account_info(force=False):
     now = time.time()
@@ -115,10 +96,6 @@ def update_position_state(symbol):
         pos = api.get_position(SETTLE, symbol)
         size = Decimal(str(getattr(pos, "size", "0")))
         leverage = Decimal(str(getattr(pos, "leverage", "1")))
-        if leverage == 0:
-            log_debug(f"⚠️ 레버리지 0 감지, 강제 설정 ({symbol})", "")
-            set_leverage(symbol)
-            leverage = Decimal(str(SYMBOL_CONFIG[symbol].get("leverage", 2)))
         if size != 0:
             entry_price = Decimal(str(getattr(pos, "entry_price", "0")))
             mark_price = Decimal(str(getattr(pos, "mark_price", "0")))
@@ -190,7 +167,6 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         if qty <= 0:
             log_debug("⛔ 수량 0 이하", symbol)
             return False
-        set_leverage(symbol)
         cfg = SYMBOL_CONFIG[symbol]
         step = cfg["qty_step"]
         reduced_qty = Decimal(str(qty)) * POSITION_RATIO
@@ -212,6 +188,8 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
                 f"{side.upper()} {reduced_qty} @ {fill_price} "
                 f"(원래: {qty}의 33% = {Decimal(str(qty)) * POSITION_RATIO}, 최종: {reduced_qty})")
         time.sleep(0.5)
+        # 주문 직후에만 레버리지 설정 시도
+        set_leverage_after_entry(symbol, cfg.get("leverage", 2))
         update_position_state(symbol)
         return True
     except Exception as e:
@@ -320,12 +298,9 @@ async def price_listener():
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
 def start_price_listener():
+    set_dual_mode_cross()  # 서버 시작 시 계정 전체를 교차로 한 번만 설정
     for sym in SYMBOL_CONFIG:
         update_position_state(sym)
-        set_margin_mode(sym)
-        time.sleep(0.5)
-        set_leverage(sym)
-        time.sleep(0.5)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(price_listener())
@@ -405,6 +380,6 @@ def status():
 
 if __name__ == "__main__":
     threading.Thread(target=start_price_listener, daemon=True).start()
-    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.1.5")
+    log_debug("🚀 서버 시작", f"WebSocket 리스너 실행됨 - 버전: 1.2.0")
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
