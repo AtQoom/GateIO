@@ -134,11 +134,11 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
             return False
         cfg = SYMBOL_CONFIG[symbol]
         step = cfg["qty_step"]
-        order_qty = (Decimal(str(qty)) // step) * step
+        order_qty = Decimal(str(qty)).quantize(step, rounding=ROUND_DOWN)
         order_qty = max(order_qty, cfg["min_qty"])
         if symbol == "BTC_USDT":
-            order_qty = (order_qty // Decimal("0.0001")) * Decimal("0.0001")
-            order_qty = max(order_qty, Decimal("0.0001"))
+            btc_step = Decimal("0.0001")
+            order_qty = order_qty.quantize(btc_step, rounding=ROUND_DOWN)
         size = float(order_qty) if side == "buy" else -float(order_qty)
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         result = api.create_futures_order(SETTLE, order)
