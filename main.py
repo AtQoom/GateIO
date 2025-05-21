@@ -14,7 +14,6 @@ app = Flask(__name__)
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
-MARGIN_BUFFER = Decimal("0.9")
 
 BINANCE_TO_GATE_SYMBOL = {
     "BTCUSDT": "BTC_USDT",
@@ -24,19 +23,19 @@ BINANCE_TO_GATE_SYMBOL = {
 
 SYMBOL_CONFIG = {
     "ADA_USDT": {
-        "min_qty": Decimal("10"), 
+        "min_qty": Decimal("10"),
         "qty_step": Decimal("10"),
         "sl_pct": Decimal("0.0075"),
         "leverage": 10
     },
     "BTC_USDT": {
-        "min_qty": Decimal("0.0001"), 
+        "min_qty": Decimal("0.0001"),
         "qty_step": Decimal("0.0001"),
         "sl_pct": Decimal("0.004"),
         "leverage": 10
     },
     "SUI_USDT": {
-        "min_qty": Decimal("1"), 
+        "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "sl_pct": Decimal("0.0075"),
         "leverage": 10
@@ -60,10 +59,9 @@ def get_account_info(force=False):
     try:
         accounts = api.list_futures_accounts(SETTLE)
         available = Decimal(str(accounts.available))
-        safe = available * MARGIN_BUFFER
-        account_cache.update({"time": now, "data": safe})
-        log_debug("💰 계정 정보", f"가용: {available}, 안전가용: {safe}")
-        return safe
+        account_cache.update({"time": now, "data": available})
+        log_debug("💰 계정 정보", f"가용: {available}")
+        return available
     except Exception as e:
         log_debug("❌ 잔고 조회 실패", str(e))
         return Decimal("100")
@@ -73,15 +71,9 @@ def update_position_state(symbol):
         pos = api.get_position(SETTLE, symbol)
         size = Decimal(str(getattr(pos, "size", "0")))
         leverage = Decimal(str(getattr(pos, "leverage", "1")))
-        # 포지션 없을 때 레버리지 0이면, 웹/앱 설정값으로 대체
         if size == 0 and leverage == 0:
             leverage = SYMBOL_CONFIG[symbol].get("leverage", 10)
-            position_state[symbol] = {
-                "price": None, "side": None, "leverage": leverage,
-                "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0")
-            }
-            log_debug(f"📊 포지션 ({symbol})", f"포지션 없음 (설정 레버리지: {leverage}x, 웹/앱에서 미리 세팅 권장)")
-        elif size != 0:
+        if size != 0:
             entry_price = Decimal(str(getattr(pos, "entry_price", "0")))
             mark_price = Decimal(str(getattr(pos, "mark_price", "0")))
             position_value = abs(size) * mark_price
@@ -94,14 +86,11 @@ def update_position_state(symbol):
                 "value": position_value,
                 "margin": margin
             }
-            log_debug(f"📊 포지션 ({symbol})", 
-                    f"수량: {abs(size)}, 진입가: {entry_price}, 레버리지: {leverage}x")
         else:
             position_state[symbol] = {
                 "price": None, "side": None, "leverage": leverage,
                 "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0")
             }
-            log_debug(f"📊 포지션 ({symbol})", f"포지션 없음 (현재 레버리지: {leverage}x)")
     except Exception as e:
         log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
 
@@ -119,7 +108,7 @@ def get_price(symbol):
 def get_max_qty(symbol, side):
     try:
         cfg = SYMBOL_CONFIG[symbol]
-        safe = get_account_info()
+        safe = get_account_info(force=True)  # 🔁 무조건 최신 정보로
         price = get_price(symbol)
         if price <= 0:
             log_debug(f"❌ 가격 0 이하 ({symbol})", "최소 수량만 반환")
@@ -224,13 +213,12 @@ async def price_listener():
                         last_msg_time = time.time()
                         data = json.loads(msg)
                         if 'event' in data:
-                            if data['event'] == 'subscribe':
-                                log_debug("✅ 구독 완료", data.get('channel', ''))
                             continue
                         if "result" not in data:
                             continue
                         result = data["result"]
                         if not isinstance(result, dict):
+                            log_debug("⚠️ 잘못된 result 형식", str(type(result)))
                             continue
                         contract = result.get("contract")
                         last = result.get("last")
@@ -248,7 +236,7 @@ async def price_listener():
                             log_debug(f"🛑 손절 발생 ({contract})", f"현재가: {last_price}, 진입가: {entry_price}, 손절폭: {sl}")
                             close_position(contract)
                     except asyncio.TimeoutError:
-                        pass
+                        continue
                     except Exception as e:
                         log_debug("❌ 메시지 처리 오류", str(e))
                         continue
@@ -329,9 +317,13 @@ def status():
             "status": "running",
             "timestamp": datetime.now().isoformat(),
             "equity": float(equity),
-            "positions": {k: {sk: (float(sv) if isinstance(sv, Decimal) else sv) 
-                            for sk, sv in v.items()} 
-                        for k, v in positions.items()}
+            "positions": {
+                k: {
+                    sk: (float(sv) if isinstance(sv, Decimal) else sv)
+                    for sk, sv in v.items()
+                }
+                for k, v in positions.items()
+            }
         })
     except Exception as e:
         log_debug("❌ 상태 조회 실패", str(e))
