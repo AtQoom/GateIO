@@ -256,9 +256,14 @@ def start_price_listener():
 def webhook():
     try:
         if not request.is_json:
-            log_debug("⚠️ 잘못된 요청", "JSON 형식이 아님")
-            return jsonify({"error": "JSON 형식만 허용됩니다"}), 400
-        data = request.get_json()
+            try:
+                data = json.loads(request.data)
+            except Exception as e:
+                log_debug("⚠️ 잘못된 요청", f"JSON 파싱 실패: {e}")
+                return jsonify({"error": "JSON 형식 오류"}), 400
+            else:
+                data = request.get_json()
+
         log_debug("📥 웹훅 원본 데이터", json.dumps(data))
         raw = data.get("symbol", "").upper().replace(".P", "")
         symbol = BINANCE_TO_GATE_SYMBOL.get(raw, raw)
