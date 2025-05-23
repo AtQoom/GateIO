@@ -255,60 +255,63 @@ def start_price_listener():
 @app.route("/", methods=["POST"])
 def webhook():
     try:
-        if not request.is_json:
-            try:
-                data = json.loads(request.data)
-            except Exception as e:
-                log_debug("⚠️ 잘못된 요청", f"JSON 파싱 실패: {e}")
-                return jsonify({"error": "JSON 형식 오류"}), 400
-            else:
-                data = request.get_json()
+        # 🔐 JSON 파싱 안전하게 시도
+        try:
+            data = request.get_json(force=True)
+            if not data:
+                raise ValueError("Empty JSON body received.")
+        except Exception as e:
+            log_debug("⚠️ JSON 파싱 실패", str(e))
+            return jsonify({"error": "유효하지 않은 JSON 요청입니다."}), 400
 
+        # 🔍 원본 데이터 로깅
         log_debug("📥 웹훅 원본 데이터", json.dumps(data))
+
+        # 🧩 필수 파라미터 확인
         raw = data.get("symbol", "").upper().replace(".P", "")
         symbol = BINANCE_TO_GATE_SYMBOL.get(raw, raw)
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
         strategy = data.get("strategy", "unknown")
-        log_debug("📩 웹훅 수신", f"심볼: {symbol}, 신호: {side}, 액션: {action}, 전략: {strategy}")
-        if side in ["buy"]: side = "long"
-        if side in ["sell"]: side = "short"
-        desired = "buy" if side == "long" else "sell"
+
+        # 🔎 기본 검증
         if symbol not in SYMBOL_CONFIG:
-            log_debug("⚠️ 알 수 없는 심볼", symbol)
-            return jsonify({"error": "지원하지 않는 심볼입니다"}), 400
+            return jsonify({"error": f"지원하지 않는 심볼: {symbol}"}), 400
         if side not in ["long", "short"]:
-            log_debug("⚠️ 잘못된 방향", side)
-            return jsonify({"error": "long 또는 short만 지원합니다"}), 400
+            return jsonify({"error": "side는 long 또는 short만 허용됩니다."}), 400
         if action not in ["entry", "exit"]:
-            log_debug("⚠️ 잘못된 액션", action)
-            return jsonify({"error": "entry 또는 exit만 지원합니다"}), 400
+            return jsonify({"error": "action은 entry 또는 exit만 허용됩니다."}), 400
+
+        # 🧠 포지션 상태 업데이트
         update_position_state(symbol)
         state = position_state.get(symbol, {})
         current = state.get("side")
+        desired = "buy" if side == "long" else "sell"
+
+        # 🔄 포지션 반대 시 청산
         if action == "exit":
             close_position(symbol)
             return jsonify({"status": "success", "message": "청산 완료", "symbol": symbol})
+
         if current and current != desired:
-            log_debug(f"🔄 반대 포지션 감지 ({symbol})", f"{current} → {desired}로 전환")
+            log_debug("🔄 반대 포지션 청산", f"{current} → {desired}")
             close_position(symbol)
             time.sleep(1)
+
+        # 📈 주문 수행
         get_account_info(force=True)
         qty = get_max_qty(symbol, desired)
         place_order(symbol, desired, qty)
+
         return jsonify({
-            "status": "success", 
-            "message": "진입 완료", 
+            "status": "success",
+            "message": "진입 완료",
             "symbol": symbol,
             "side": desired
         })
     except Exception as e:
         log_debug("❌ 웹훅 처리 실패", str(e))
-        return jsonify({"status": "error", "message": "서버 오류"}), 500
-
-@app.route("/ping", methods=["GET"])
-def ping():
-    return "pong", 200
+        return jsonify({"status": "error", "message": "서버 내부 오류"}), 500
 
 @app.route("/status", methods=["GET"])
 def status():
