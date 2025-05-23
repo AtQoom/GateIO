@@ -252,6 +252,8 @@ def start_price_listener():
     asyncio.set_event_loop(loop)
     loop.run_until_complete(price_listener())
 
+# (생략: import 및 설정 부분 동일)
+
 @app.route("/", methods=["POST"])
 def webhook():
     try:
@@ -288,11 +290,20 @@ def webhook():
         current = state.get("side")
         desired = "buy" if side == "long" else "sell"
 
-        # 🔄 포지션 반대 시 청산
+        # 🔄 청산 처리
         if action == "exit":
-            close_position(symbol)
-            return jsonify({"status": "success", "message": "청산 완료", "symbol": symbol})
+            try:
+                close_position(symbol)
+                return jsonify({"status": "success", "message": f"{symbol} 청산 요청 완료"})
+            except Exception as e:
+                if "POSITION_EMPTY" in str(e):
+                    log_debug("ℹ️ 포지션 없음 - 청산 생략", symbol)
+                    return jsonify({"status": "success", "message": f"{symbol} 포지션 없음"}), 200
+                else:
+                    log_debug(f"❌ 청산 실패 ({symbol})", str(e))
+                    return jsonify({"status": "error", "message": "청산 중 오류 발생"}), 400
 
+        # 🔁 반대 포지션 청산 후 진입
         if current and current != desired:
             log_debug("🔄 반대 포지션 청산", f"{current} → {desired}")
             close_position(symbol)
@@ -301,17 +312,21 @@ def webhook():
         # 📈 주문 수행
         get_account_info(force=True)
         qty = get_max_qty(symbol, desired)
-        place_order(symbol, desired, qty)
+        success = place_order(symbol, desired, qty)
 
-        return jsonify({
-            "status": "success",
-            "message": "진입 완료",
-            "symbol": symbol,
-            "side": desired
-        })
+        if success:
+            return jsonify({
+                "status": "success",
+                "message": "진입 완료",
+                "symbol": symbol,
+                "side": desired
+            })
+        else:
+            return jsonify({"status": "error", "message": "주문 실패"}), 500
+
     except Exception as e:
         log_debug("❌ 웹훅 처리 실패", str(e))
-        return jsonify({"status": "error", "message": "서버 내부 오류"}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/status", methods=["GET"])
 def status():
