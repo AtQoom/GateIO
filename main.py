@@ -4,7 +4,7 @@ import time
 import asyncio
 import threading
 import websockets
-from decimal import ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
