@@ -26,19 +26,19 @@ SYMBOL_CONFIG = {
         "min_qty": Decimal("10"),
         "qty_step": Decimal("10"),
         "sl_pct": Decimal("0.0075"),
-        "leverage": 10
+        "leverage": 3
     },
     "BTC_USDT": {
         "min_qty": Decimal("0.0001"),
         "qty_step": Decimal("0.0001"),
         "sl_pct": Decimal("0.004"),
-        "leverage": 10
+        "leverage": 5
     },
     "SUI_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "sl_pct": Decimal("0.0075"),
-        "leverage": 10
+        "leverage": 3
     }
 }
 
