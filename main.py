@@ -118,26 +118,31 @@ def get_price(symbol):
 def get_max_qty(symbol, side):
     try:
         cfg = SYMBOL_CONFIG[symbol]
-        safe = get_account_info(force=True)  # Decimal
-        price = get_price(symbol)  # Decimal
+        safe = Decimal(str(get_account_info(force=True)))  # 반드시 Decimal
+        price = get_price(symbol)  # Decimal 반환 보장
+        step = cfg["qty_step"]
+        lev = cfg["leverage"]
+        
         if price <= 0:
             return float(cfg["min_qty"])
         
-        # 모든 변수를 Decimal로 처리
-        order_value = safe * Decimal("0.95") 
+        # 1. 레버리지 적용 주문 금액
+        order_value = safe * lev
+        
+        # 2. 주문 수량 계산 (Decimal 유지)
         raw_qty = order_value / price
         
-        step = cfg["qty_step"]
-        qty = (raw_qty // step) * step  # Decimal 연산만 가능
-        qty = max(qty, cfg["min_qty"])
+        # 3. 주문 단위 조정 (핵심 수정)
+        adjusted_qty = (raw_qty // step) * step  # 10단위로 내림
+        adjusted_qty = max(adjusted_qty, cfg["min_qty"])
         
         log_debug(f"📊 수량 계산 ({symbol})", 
-                f"잔고:{safe}, 가격:{price}, 최종:{qty}")
-        return float(qty)
+                f"잔고:{safe}, 레버리지:{lev}, 가격:{price}, 최종:{adjusted_qty}")
+        return float(adjusted_qty)
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
         return float(cfg["min_qty"])
-
+        
 # 주문 실행
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
     try:
@@ -145,29 +150,27 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         step = cfg["qty_step"]
         min_qty = cfg["min_qty"]
         
-        # 주문 수량 검증
-        if (qty % step != 0) or (qty < min_qty):
-            log_debug(f"⛔ 잘못된 수량 ({symbol})", f"{qty} (최소 {min_qty}, 단위 {step})")
+        # 주문 수량을 Decimal로 변환
+        qty_dec = Decimal(str(qty)).quantize(step, rounding=ROUND_DOWN)
+        
+        # 주문 단위 검증 (Decimal 연산)
+        if (qty_dec % step != Decimal('0')) or (qty_dec < min_qty):
+            log_debug(f"⛔ 잘못된 수량 ({symbol})", f"{qty_dec} (단위: {step})")
             return False
             
-        order_qty = Decimal(str(qty)).quantize(step, rounding=ROUND_DOWN)
-        order_qty = max(order_qty, min_qty)
-        size = float(order_qty) if side == "buy" else -float(order_qty)
+        size = float(qty_dec) if side == "buy" else -float(qty_dec)
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
-        result = api.create_futures_order(SETTLE, order)
-        log_debug(f"✅ 주문 ({symbol})", f"{side.upper()} {float(order_qty)}")
-        time.sleep(0.5)
-        update_position_state(symbol)
+        api.create_futures_order(SETTLE, order)
+        log_debug(f"✅ 주문 ({symbol})", f"{side.upper()} {float(qty_dec)}")
         return True
     except Exception as e:
-        err = str(e)
-        log_debug(f"❌ 주문 실패 ({symbol})", err)
-        if retry > 0 and "INVALID_PARAM" in err:
-            # 재시도: 수량을 50% 줄이고 step에 맞게 조정
-            retry_qty = (Decimal(str(qty)) * Decimal("0.5") // step) * step
+        error_msg = str(e)
+        log_debug(f"❌ 주문 실패 ({symbol})", error_msg)
+        if retry > 0 and "INVALID_PARAM" in error_msg:
+            # 재시도: 10단위로 조정
+            retry_qty = (qty_dec * Decimal('0.5') // step) * step
             retry_qty = max(retry_qty, min_qty)
-            log_debug(f"🔄 재시도 ({symbol})", f"{qty} → {float(retry_qty)}")
-            time.sleep(1)
+            log_debug(f"🔄 재시도 ({symbol})", f"{qty_dec} → {retry_qty}")
             return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
         return False
 
