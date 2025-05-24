@@ -136,46 +136,79 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         return False
 
 def close_position(symbol):
+    """포지션 청산 및 성공 여부 반환"""
     try:
-        api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
-        log_debug("🚪 청산", f"{symbol}")
-        time.sleep(0.5)
-        update_position_state(symbol)
+        # 청산 주문 실행
+        api.create_futures_order(SETTLE, FuturesOrder(
+            contract=symbol, 
+            size=0, 
+            price="0", 
+            tif="ioc", 
+            close=True
+        ))
+        log_debug("🚪 청산 시도", f"{symbol}")
+        
+        # 상태 업데이트 대기
+        for _ in range(5):
+            time.sleep(0.5)
+            update_position_state(symbol)
+            pos = api.get_position(SETTLE, symbol)
+            if Decimal(str(pos.size)) == 0:
+                log_debug("✅ 청산 확인", f"{symbol}")
+                return True
+        log_debug("❌ 청산 타임아웃", f"{symbol}")
+        return False
     except Exception as e:
-        log_debug("❌ 청산 실패", str(e))
+        log_debug("❌ 청산 실패", f"{symbol}: {str(e)}")
+        return False
 
 @app.route("/", methods=["POST"])
 def webhook():
     try:
-        data = request.get_json(force=True)
-        log_debug("📥 웹훅", json.dumps(data))
-        raw = data.get("symbol", "").upper().replace(".P", "")
-        symbol = BINANCE_TO_GATE_SYMBOL.get(raw, raw)
-        side = data.get("side", "").lower()
-        action = data.get("action", "").lower()
+        # ...[기존 파싱 코드 유지]...
 
-        if symbol not in SYMBOL_CONFIG or side not in ["long", "short"] or action not in ["entry", "exit"]:
-            return jsonify({"error": "잘못된 요청"}), 400
-
+        # 1. 포지션 상태 확인
         update_position_state(symbol)
-        desired = "buy" if side == "long" else "sell"
-        current = position_state.get(symbol, {}).get("side")
+        current_state = position_state.get(symbol, {})
+        current_side = current_state.get("side")
+        desired_side = "buy" if side == "long" else "sell"
 
+        # 2. 청산 요청 처리
         if action == "exit":
-            close_position(symbol)
-            return jsonify({"status": "success", "message": "청산 완료"})
+            if close_position(symbol):
+                return jsonify({"status": "success", "message": "청산 완료"})
+            else:
+                return jsonify({"status": "error", "message": "청산 실패"}), 500
 
-        if current and current != desired:
-            close_position(symbol)
-            time.sleep(1)
+        # 3. 진입 요청 처리
+        # 3-1. 이미 같은 방향 포지션 보유
+        if current_side == desired_side:
+            log_debug("⏩ 동일 방향", "추가 진입 생략")
+            return jsonify({"status": "success", "message": "이미 포지션 있음"})
+        
+        # 3-2. 반대 포지션 보유 시 청산
+        if current_side is not None:
+            if not close_position(symbol):
+                return jsonify({"status": "error", "message": "반대 포지션 청산 실패"}), 500
+            # 청산 확인
+            for _ in range(5):
+                update_position_state(symbol)
+                if position_state[symbol]["size"] == 0:
+                    break
+                time.sleep(0.5)
+            else:
+                return jsonify({"status": "error", "message": "포지션 청산 확인 실패"}), 500
 
-        qty = get_max_qty(symbol, desired)
-        success = place_order(symbol, desired, qty)
-        return jsonify({"status": "success" if success else "fail", "qty": qty})
+        # 4. 신규 진입
+        qty = get_max_qty(symbol, desired_side)
+        if place_order(symbol, desired_side, qty):
+            return jsonify({"status": "success", "qty": qty})
+        else:
+            return jsonify({"status": "error", "message": "주문 실패"}), 500
 
     except Exception as e:
-        log_debug("❌ 웹훅 오류", str(e))
-        return jsonify({"status": "error", "message": str(e)}), 500
+        log_debug("🔥 웹훅 처리 실패", f"{symbol}: {str(e)}")
+        return jsonify({"status": "error", "message": "서버 오류"}), 500
 
 @app.route("/status", methods=["GET"])
 def status():
