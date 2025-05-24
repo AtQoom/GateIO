@@ -267,32 +267,40 @@ async def price_listener():
                         msg = await asyncio.wait_for(ws.recv(), timeout=30)
                         data = json.loads(msg)
                         
-                        if "result" in data and isinstance(data["result"], dict):
-                            contract = data["result"]["contract"]
-                            price = Decimal(str(data["result"]["last"]))
-                            pos = position_state.get(contract, {})
+                        # 1. contract와 last 필드 안전하게 추출
+                        result = data.get("result", {})
+                        contract = result.get("contract")
+                        last = result.get("last")
+                        
+                        if not contract or not last:
+                            continue  # 필수 필드 없으면 스킵
                             
-                            if pos.get("side") and pos.get("price"):
-                                cfg = SYMBOL_CONFIG[contract]
-                                entry = pos["price"]
-                                
-                                # SL/TP 조건 계산
-                                if pos["side"] == "buy":
-                                    sl_price = entry * (1 - cfg["sl_pct"])
-                                    tp_price = entry * (1 + cfg["tp_pct"])
-                                    if price <= sl_price or price >= tp_price:
-                                        log_debug(f"🛑 트리거 ({contract})", f"현재가: {price}, SL: {sl_price}, TP: {tp_price}")
-                                        close_position(contract)
-                                elif pos["side"] == "sell":
-                                    sl_price = entry * (1 + cfg["sl_pct"])
-                                    tp_price = entry * (1 - cfg["tp_pct"])
-                                    if price >= sl_price or price <= tp_price:
-                                        log_debug(f"🛑 트리거 ({contract})", f"현재가: {price}, SL: {sl_price}, TP: {tp_price}")
-                                        close_position(contract)
+                        price = Decimal(str(last))
+                        pos = position_state.get(contract, {})
+                        
+                        if pos.get("side") and pos.get("price"):
+                            cfg = SYMBOL_CONFIG.get(contract, {})
+                            entry = pos["price"]
+                            
+                            # 2. SL/TP 조건 계산
+                            if pos["side"] == "buy":
+                                sl_price = entry * (1 - cfg.get("sl_pct", 0))
+                                tp_price = entry * (1 + cfg.get("tp_pct", 0))
+                                if price <= sl_price or price >= tp_price:
+                                    log_debug(f"🛑 트리거 ({contract})", f"현재가: {price}, SL: {sl_price}, TP: {tp_price}")
+                                    close_position(contract)
+                            elif pos["side"] == "sell":
+                                sl_price = entry * (1 + cfg.get("sl_pct", 0))
+                                tp_price = entry * (1 - cfg.get("tp_pct", 0))
+                                if price >= sl_price or price <= tp_price:
+                                    log_debug(f"🛑 트리거 ({contract})", f"현재가: {price}, SL: {sl_price}, TP: {tp_price}")
+                                    close_position(contract)
                                         
-                    except (asyncio.TimeoutError, websockets.ConnectionClosed):
-                        log_debug("⚠️ 웹소켓", "연결 재시도 중...")
+                    except (asyncio.TimeoutError, websockets.ConnectionClosed) as e:
+                        log_debug("⚠️ 웹소켓", f"연결 재시도: {str(e)}")
                         break
+                    except Exception as e:
+                        log_debug("❌ 웹소켓 처리 오류", str(e))
                         
         except Exception as e:
             log_debug("❌ 웹소켓 연결 실패", f"{str(e)} - {reconnect_delay}초 후 재시도")
