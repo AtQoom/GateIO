@@ -131,16 +131,22 @@ def get_max_qty(symbol, side):
         if price <= 0:
             return float(min_qty)
         
-        # 1. 레버리지 적용 주문 금액 (0.1% 안전 마진)
-        order_value = safe * lev * Decimal("0.999")
+        # 1. 안전 마진 (1% 감소)
+        safe_margin = safe * Decimal("0.99")
         
-        # 2. 주문 수량 계산 (계약 단위 고려)
-        raw_qty = (order_value / price) / step  # 핵심 수정: step으로 나눔
+        # 2. 계약 단위 반영 (ADA: 1계약=10개)
+        contract_size = step  # ADA_USDT: 10
+        
+        # 3. 주문 가능 금액 계산
+        order_value = safe_margin * lev
+        
+        # 4. 실제 수량 계산 (계약 단위로 변환)
+        raw_qty = (order_value / price) / contract_size  # 1430 ADA → 143계약
         qty = (raw_qty // 1) * 1  # 1계약 단위로 내림
-        qty = max(qty, min_qty / step)  # 최소 계약 수량
+        qty = max(qty, min_qty / contract_size)  # 최소 계약 수량
         
         log_debug(f"📊 수량 계산 ({symbol})", 
-                f"잔고:{safe}, 레버리지:{lev}, 가격:{price}, 최종:{qty * step} ADA")
+                f"잔고:{safe}, 레버리지:{lev}, 가격:{price}, 최종:{qty * contract_size} ADA")
         return float(qty)
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
