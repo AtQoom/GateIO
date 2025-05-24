@@ -118,30 +118,28 @@ def get_price(symbol):
 def get_max_qty(symbol, side):
     try:
         cfg = SYMBOL_CONFIG[symbol]
-        safe = Decimal(str(get_account_info(force=True)))  # 반드시 Decimal
-        price = get_price(symbol)  # Decimal 반환 보장
-        step = cfg["qty_step"]
+        safe = Decimal(str(get_account_info(force=True)))  # Decimal
+        price = get_price(symbol)  # Decimal
         lev = cfg["leverage"]
+        step = cfg["qty_step"]
+        min_qty = cfg["min_qty"]
         
         if price <= 0:
-            return float(cfg["min_qty"])
+            return float(min_qty)
         
-        # 1. 레버리지 적용 주문 금액
-        order_value = safe * lev
+        # 1. 주문 수량 계산 (레버리지를 곱하지 않고, safe만 사용)
+        raw_qty = (safe * lev) / price  # 핵심 수정: safe × 레버리지
         
-        # 2. 주문 수량 계산 (Decimal 유지)
-        raw_qty = order_value / price
-        
-        # 3. 주문 단위 조정 (핵심 수정)
-        adjusted_qty = (raw_qty // step) * step  # 10단위로 내림
-        adjusted_qty = max(adjusted_qty, cfg["min_qty"])
+        # 2. 주문 단위 조정
+        qty = (raw_qty // step) * step
+        qty = max(qty, min_qty)
         
         log_debug(f"📊 수량 계산 ({symbol})", 
-                f"잔고:{safe}, 레버리지:{lev}, 가격:{price}, 최종:{adjusted_qty}")
-        return float(adjusted_qty)
+                f"잔고:{safe}, 레버리지:{lev}, 가격:{price}, 최종:{qty}")
+        return float(qty)
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
-        return float(cfg["min_qty"])
+        return float(min_qty)
         
 # 주문 실행
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
