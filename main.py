@@ -127,43 +127,38 @@ def get_max_qty(symbol, side):
         lev = cfg["leverage"]
         step = cfg["qty_step"]
         min_qty = cfg["min_qty"]
-        
+
         if price <= 0:
             return float(min_qty)
-        
-        # 1. 레버리지 적용 주문 금액
+
+        # 1. 주문 가능 금액 계산 (레버리지 적용)
         order_value = safe * lev * Decimal("0.999")  # 0.1% 안전 마진
-        
-        # 2. 주문 수량 계산
+
+        # 2. 주문 수량 계산 (10의 배수)
         raw_qty = order_value / price
-        
-        # 3. 주문 단위 조정 (핵심 수정)
-        qty = (raw_qty // step) * step  # 10단위로 내림
-        qty = qty / step  # 1430 → 143 (단위 10 적용)
-        
-        # 4. 최소 수량 확인
+        qty = (raw_qty // step) * step  # 10의 배수로 내림
         qty = max(qty, min_qty)
-        
+
         log_debug(f"📊 수량 계산 ({symbol})", 
-                f"잔고:{safe}, 레버리지:{lev}, 가격:{price}, 최종:{qty}")
+                  f"잔고:{safe}, 레버리지:{lev}, 가격:{price}, 최종:{qty}")
         return float(qty)
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
         return float(min_qty)
-
+        
 # 주문 실행 (단위 검증 강화)
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
     try:
         cfg = SYMBOL_CONFIG[symbol]
         step = cfg["qty_step"]
         min_qty = cfg["min_qty"]
-        
-        # 주문 수량 검증
+
+        # 주문 단위 검증 (10의 배수)
         qty_dec = Decimal(str(qty)).quantize(step, rounding=ROUND_DOWN)
         if qty_dec % step != Decimal('0') or qty_dec < min_qty:
             log_debug(f"⛔ 잘못된 수량 ({symbol})", f"{qty_dec} (단위: {step})")
             return False
-            
+
         size = float(qty_dec) if side == "buy" else -float(qty_dec)
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         api.create_futures_order(SETTLE, order)
@@ -178,7 +173,7 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
             log_debug(f"🔄 재시도 ({symbol})", f"{qty} → {retry_qty}")
             return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
         return False
-
+        
 # 포지션 청산
 def close_position(symbol):
     try:
