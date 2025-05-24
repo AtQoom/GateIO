@@ -122,15 +122,19 @@ def get_max_qty(symbol, side):
         if price <= 0:
             return float(cfg["min_qty"])
         lev = Decimal(cfg["leverage"])
-        # 안전 계수 (예: 98%)
-        safety_factor = Decimal("0.98")
-        max_qty = (safe * lev * safety_factor) / price
-        # 주문 단위 반영
+        
+        # 최대 주문 금액 (안전 계수 95%)
+        order_value = safe * lev * Decimal("0.95")
+        raw_qty = order_value / price
+        
+        # 주문 단위 및 최소 수량 강제 적용
         step = cfg["qty_step"]
-        qty = (max_qty // step) * step
+        qty = (raw_qty // step) * step
         qty = max(qty, cfg["min_qty"])
-        log_debug(f"📊 주문수량 ({symbol})", f"잔고:{safe}, 레버리지:{lev}, 가격:{price}, 최종:{qty}")
-        return float(qty)
+        
+        # 실제 주문 가능 수량 재확인 (Decimal 연산)
+        final_qty = Decimal(str(qty)).quantize(step, rounding=ROUND_DOWN)
+        return float(final_qty)
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
         return float(cfg["min_qty"])
@@ -140,21 +144,30 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
     try:
         cfg = SYMBOL_CONFIG[symbol]
         step = cfg["qty_step"]
+        min_qty = cfg["min_qty"]
+        
+        # 주문 수량 검증
+        if (qty % step != 0) or (qty < min_qty):
+            log_debug(f"⛔ 잘못된 수량 ({symbol})", f"{qty} (최소 {min_qty}, 단위 {step})")
+            return False
+            
         order_qty = Decimal(str(qty)).quantize(step, rounding=ROUND_DOWN)
-        order_qty = max(order_qty, cfg["min_qty"])
+        order_qty = max(order_qty, min_qty)
         size = float(order_qty) if side == "buy" else -float(order_qty)
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         result = api.create_futures_order(SETTLE, order)
-        log_debug(f"✅ 주문 ({symbol})", f"{side.upper()} {order_qty}")
+        log_debug(f"✅ 주문 ({symbol})", f"{side.upper()} {float(order_qty)}")
         time.sleep(0.5)
         update_position_state(symbol)
         return True
     except Exception as e:
-        error_msg = str(e)
-        log_debug(f"❌ 주문 실패 ({symbol})", error_msg)
-        if retry > 0 and any(err in error_msg for err in ["INVALID_PARAM", "INSUFFICIENT_AVAILABLE"]):
-            retry_qty = max(Decimal(str(qty)) * Decimal("0.5"), cfg["min_qty"])
-            log_debug(f"🔄 재시도 ({symbol})", f"수량: {qty} → {retry_qty}")
+        err = str(e)
+        log_debug(f"❌ 주문 실패 ({symbol})", err)
+        if retry > 0 and "INVALID_PARAM" in err:
+            # 재시도: 수량을 50% 줄이고 step에 맞게 조정
+            retry_qty = (Decimal(str(qty)) * Decimal("0.5") // step) * step
+            retry_qty = max(retry_qty, min_qty)
+            log_debug(f"🔄 재시도 ({symbol})", f"{qty} → {float(retry_qty)}")
             time.sleep(1)
             return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
         return False
