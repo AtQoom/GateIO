@@ -124,28 +124,28 @@ def get_max_qty(symbol, side):
         cfg = SYMBOL_CONFIG[symbol]
         safe = get_account_info(force=True)
         price = get_price(symbol)
-        leverage = cfg["leverage"]
+        lev = cfg["leverage"]
         step = cfg["qty_step"]
         min_qty = cfg["min_qty"]
         
         if price <= 0:
             return float(min_qty)
         
-        # 0.1% 안전 마진 적용
-        safe_margin = safe * Decimal("0.999")
+        # 1. 레버리지 적용 주문 금액
+        order_value = safe * lev * Decimal("0.999")  # 0.1% 안전 마진
         
-        # 최대 주문 금액 계산 (레버리지 적용)
-        max_order_value = safe_margin * leverage
+        # 2. 주문 수량 계산
+        raw_qty = order_value / price
         
-        # 최대 수량 계산 및 단위 조정
-        raw_qty = max_order_value / price
+        # 3. 주문 단위 조정 (핵심 수정)
         qty = (raw_qty // step) * step  # 10단위로 내림
+        qty = qty / step  # 1430 → 143 (단위 10 적용)
         
-        # 최소 수량 확인
+        # 4. 최소 수량 확인
         qty = max(qty, min_qty)
         
         log_debug(f"📊 수량 계산 ({symbol})", 
-                f"잔고:{safe}, 레버리지:{leverage}, 가격:{price}, 최종:{qty}")
+                f"잔고:{safe}, 레버리지:{lev}, 가격:{price}, 최종:{qty}")
         return float(qty)
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
