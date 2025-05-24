@@ -107,28 +107,28 @@ def update_position_state(symbol):
 def get_price(symbol):
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
-        price = Decimal(str(ticker[0].last))
+        price = Decimal(str(ticker[0].last))  # 반드시 Decimal로 변환
+        log_debug(f"💲 가격 ({symbol})", f"{price}")
         return price
     except Exception as e:
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
         return Decimal("0")
-
+        
 # 최대 주문 수량 계산
 def get_max_qty(symbol, side):
     try:
         cfg = SYMBOL_CONFIG[symbol]
-        safe = get_account_info(force=True)
-        price = get_price(symbol)
+        safe = get_account_info(force=True)  # Decimal
+        price = get_price(symbol)  # Decimal
         if price <= 0:
             return float(cfg["min_qty"])
         
-        # 레버리지 제거 (거래소에서 이미 적용됨)
-        order_value = safe * Decimal("0.95")  # 95%만 사용
+        # 모든 변수를 Decimal로 처리
+        order_value = safe * Decimal("0.95") 
         raw_qty = order_value / price
         
-        # 주문 단위 강제 적용
         step = cfg["qty_step"]
-        qty = (raw_qty // step) * step
+        qty = (raw_qty // step) * step  # Decimal 연산만 가능
         qty = max(qty, cfg["min_qty"])
         
         log_debug(f"📊 수량 계산 ({symbol})", 
