@@ -29,21 +29,21 @@ SYMBOL_CONFIG = {
         "min_qty": Decimal("10"),
         "qty_step": Decimal("10"),
         "sl_pct": Decimal("0.0075"),
-        "tp_pct": Decimal("0.008"),  # TP 추가
+        "tp_pct": Decimal("0.008"),
         "leverage": 3
     },
     "BTC_USDT": {
         "min_qty": Decimal("0.0001"),
         "qty_step": Decimal("0.0001"),
         "sl_pct": Decimal("0.004"),
-        "tp_pct": Decimal("0.006"),  # TP 추가
+        "tp_pct": Decimal("0.006"),
         "leverage": 5
     },
     "SUI_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "sl_pct": Decimal("0.0075"),
-        "tp_pct": Decimal("0.008"),  # TP 추가
+        "tp_pct": Decimal("0.008"),
         "leverage": 3
     }
 }
@@ -103,12 +103,11 @@ def update_position_state(symbol):
     except Exception as e:
         log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
 
-# 가격 조회 (예외 처리 강화)
+# 가격 조회
 def get_price(symbol):
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
         price = Decimal(str(ticker[0].last))
-        log_debug(f"💲 가격 ({symbol})", f"{price}")
         return price
     except Exception as e:
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
@@ -133,7 +132,7 @@ def get_max_qty(symbol, side):
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
         return float(cfg["min_qty"])
 
-# 주문 실행 (재시도 로직 강화)
+# 주문 실행
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
     try:
         cfg = SYMBOL_CONFIG[symbol]
@@ -143,7 +142,7 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         size = float(order_qty) if side == "buy" else -float(order_qty)
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         result = api.create_futures_order(SETTLE, order)
-        log_debug(f"✅ 주문 ({symbol})", f"{side.upper()} {order_qty} @ {result.fill_price}")
+        log_debug(f"✅ 주문 ({symbol})", f"{side.upper()} {order_qty}")
         time.sleep(0.5)
         update_position_state(symbol)
         return True
@@ -170,7 +169,7 @@ def close_position(symbol):
         log_debug(f"❌ 청산 실패 ({symbol})", str(e))
         return False
 
-# 웹훅 처리 (입력 검증 강화)
+# 웹훅 처리
 @app.route("/", methods=["POST"])
 def webhook():
     symbol = None
@@ -181,13 +180,11 @@ def webhook():
         data = request.get_json()
         log_debug("📥 웹훅", json.dumps(data))
         
-        # 심볼 검증
         raw = data.get("symbol", "").upper().replace(".P", "")
         symbol = BINANCE_TO_GATE_SYMBOL.get(raw)
         if not symbol or symbol not in SYMBOL_CONFIG:
             return jsonify({"error": "Invalid symbol"}), 400
             
-        # 입력값 검증
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
         if side not in ["long", "short"] or action not in ["entry", "exit"]:
@@ -199,21 +196,18 @@ def webhook():
         current = position_state.get(symbol, {}).get("side")
         desired = "buy" if side == "long" else "sell"
 
-        # 청산 처리
         if action == "exit":
             if close_position(symbol):
                 return jsonify({"status": "success", "message": "Position closed"})
             else:
                 return jsonify({"status": "error", "message": "Close failed"}), 500
 
-        # 반대 포지션 청산
         if current and current != desired:
             if not close_position(symbol):
                 return jsonify({"status": "error", "message": "Reverse close failed"}), 500
             time.sleep(1)
             update_position_state(symbol)
 
-        # 신규 진입
         qty = get_max_qty(symbol, desired)
         success = place_order(symbol, desired, qty)
         return jsonify({"status": "success" if success else "error", "qty": qty})
@@ -243,7 +237,7 @@ def status():
         log_debug("❌ 상태 조회 실패", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# 웹소켓 리스너 (재연결 로직 추가)
+# 웹소켓 리스너 (오류 수정)
 async def price_listener():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     symbols = list(SYMBOL_CONFIG.keys())
@@ -260,47 +254,68 @@ async def price_listener():
                     "event": "subscribe",
                     "payload": symbols
                 }))
-                reconnect_delay = 5  # 성공 시 딜레이 초기화
+                reconnect_delay = 5
                 
                 while True:
                     try:
                         msg = await asyncio.wait_for(ws.recv(), timeout=30)
                         data = json.loads(msg)
                         
-                        # 1. contract와 last 필드 안전하게 추출
-                        result = data.get("result", {})
+                        # 데이터 타입 확인 (핵심 수정)
+                        if not isinstance(data, dict):
+                            continue
+                            
+                        # event 필드가 있으면 구독 확인 메시지
+                        if "event" in data:
+                            if data["event"] == "subscribe":
+                                log_debug("✅ 웹소켓 구독", data.get("channel", ""))
+                            continue
+                        
+                        # result 필드 안전하게 처리
+                        result = data.get("result")
+                        if not isinstance(result, dict):
+                            continue
+                            
                         contract = result.get("contract")
                         last = result.get("last")
                         
-                        if not contract or not last:
-                            continue  # 필수 필드 없으면 스킵
+                        if not contract or not last or contract not in SYMBOL_CONFIG:
+                            continue
                             
                         price = Decimal(str(last))
                         pos = position_state.get(contract, {})
                         
                         if pos.get("side") and pos.get("price"):
-                            cfg = SYMBOL_CONFIG.get(contract, {})
+                            cfg = SYMBOL_CONFIG[contract]
                             entry = pos["price"]
                             
-                            # 2. SL/TP 조건 계산
+                            # SL/TP 조건 계산
                             if pos["side"] == "buy":
-                                sl_price = entry * (1 - cfg.get("sl_pct", 0))
-                                tp_price = entry * (1 + cfg.get("tp_pct", 0))
-                                if price <= sl_price or price >= tp_price:
-                                    log_debug(f"🛑 트리거 ({contract})", f"현재가: {price}, SL: {sl_price}, TP: {tp_price}")
+                                sl_price = entry * (1 - cfg["sl_pct"])
+                                tp_price = entry * (1 + cfg["tp_pct"])
+                                if price <= sl_price:
+                                    log_debug(f"🛑 손절 ({contract})", f"현재가: {price}, SL: {sl_price}")
+                                    close_position(contract)
+                                elif price >= tp_price:
+                                    log_debug(f"🎯 익절 ({contract})", f"현재가: {price}, TP: {tp_price}")
                                     close_position(contract)
                             elif pos["side"] == "sell":
-                                sl_price = entry * (1 + cfg.get("sl_pct", 0))
-                                tp_price = entry * (1 - cfg.get("tp_pct", 0))
-                                if price >= sl_price or price <= tp_price:
-                                    log_debug(f"🛑 트리거 ({contract})", f"현재가: {price}, SL: {sl_price}, TP: {tp_price}")
+                                sl_price = entry * (1 + cfg["sl_pct"])
+                                tp_price = entry * (1 - cfg["tp_pct"])
+                                if price >= sl_price:
+                                    log_debug(f"🛑 손절 ({contract})", f"현재가: {price}, SL: {sl_price}")
+                                    close_position(contract)
+                                elif price <= tp_price:
+                                    log_debug(f"🎯 익절 ({contract})", f"현재가: {price}, TP: {tp_price}")
                                     close_position(contract)
                                         
-                    except (asyncio.TimeoutError, websockets.ConnectionClosed) as e:
-                        log_debug("⚠️ 웹소켓", f"연결 재시도: {str(e)}")
+                    except (asyncio.TimeoutError, websockets.ConnectionClosed):
+                        log_debug("⚠️ 웹소켓", "연결 재시도 중...")
                         break
                     except Exception as e:
-                        log_debug("❌ 웹소켓 처리 오류", str(e))
+                        log_debug("❌ 웹소켓 메시지 처리 실패", str(e))
+                        # 개별 메시지 오류는 연결을 끊지 않음
+                        continue
                         
         except Exception as e:
             log_debug("❌ 웹소켓 연결 실패", f"{str(e)} - {reconnect_delay}초 후 재시도")
