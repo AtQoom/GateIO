@@ -122,27 +122,14 @@ def get_max_qty(symbol, side):
         if price <= 0:
             return float(cfg["min_qty"])
         lev = Decimal(cfg["leverage"])
-        
-        # 1. 안전 계수 적용 (60%)
-        safety_factor = Decimal("0.6")  # 60%만 사용
-        safe_margin = safe * safety_factor
-        
-        # 2. 레버리지 반영 (실제 필요 마진 = 주문금액 / (레버리지 / 2))
-        effective_lev = lev / Decimal("2")  # 유지 증거금 고려
-        order_value = safe_margin * effective_lev
-        
-        # 3. 최대 가능 수량 계산
-        raw_qty = order_value / price
-        
-        # 4. 주문 단위 적용
+        # 안전 계수 (예: 98%)
+        safety_factor = Decimal("0.98")
+        max_qty = (safe * lev * safety_factor) / price
+        # 주문 단위 반영
         step = cfg["qty_step"]
-        qty = (raw_qty // step) * step
+        qty = (max_qty // step) * step
         qty = max(qty, cfg["min_qty"])
-        
-        log_debug(f"📊 수량 계산 ({symbol})", 
-                f"가용: {safe}, 안전가용: {safe_margin}, 유효레버리지: {effective_lev}x, "
-                f"주문가치: {order_value}, 최종수량: {qty}")
-        
+        log_debug(f"📊 주문수량 ({symbol})", f"잔고:{safe}, 레버리지:{lev}, 가격:{price}, 최종:{qty}")
         return float(qty)
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
