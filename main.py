@@ -181,6 +181,13 @@ def close_position(symbol):
         log_debug(f"❌ 청산 실패 ({symbol})", str(e))
         return False
 
+# 🔥 UptimeRobot 핑 엔드포인트 추가
+@app.route("/ping", methods=["GET", "HEAD"])
+def ping():
+    """UptimeRobot 서버 상태 확인용 엔드포인트"""
+    log_debug("🏓 핑", "UptimeRobot 상태 체크")
+    return "pong", 200
+
 @app.route("/", methods=["POST"])
 def webhook():
     symbol = None
