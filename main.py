@@ -17,7 +17,7 @@ SETTLE = "usdt"
 
 BINANCE_TO_GATE_SYMBOL = {
     "BTCUSDT": "BTC_USDT",
-    "ADAUSDT": "ADA_USDT", 
+    "ADAUSDT": "ADA_USDT",
     "SUIUSDT": "SUI_USDT"
 }
 
@@ -77,9 +77,14 @@ def update_position_state(symbol):
         pos = api.get_position(SETTLE, symbol)
         current_leverage = Decimal(str(pos.leverage))
         target_leverage = SYMBOL_CONFIG[symbol]["leverage"]
+        # 🔥 교차/격리 모드 강제 설정
+        if hasattr(pos, "margin_mode") and pos.margin_mode != "cross":
+            api.update_position_margin_mode(SETTLE, symbol, "cross")
+            log_debug(f"⚙️ 마진모드 변경 ({symbol})", f"{pos.margin_mode} → cross")
+        # 레버리지 강제 설정 (교차 명시)
         if current_leverage != target_leverage:
-            api.update_position_leverage(SETTLE, symbol, target_leverage)
-            log_debug(f"⚙️ 레버리지 변경 ({symbol})", f"{current_leverage} → {target_leverage}x")
+            api.update_position_leverage(SETTLE, symbol, target_leverage, "cross")
+            log_debug(f"⚙️ 레버리지 변경 ({symbol})", f"{current_leverage} → {target_leverage}x (교차)")
         size = Decimal(str(pos.size))
         if size != 0:
             entry = Decimal(str(pos.entry_price))
@@ -89,13 +94,14 @@ def update_position_state(symbol):
             position_state[symbol] = {
                 "price": entry, "side": "buy" if size > 0 else "sell",
                 "leverage": target_leverage, "size": abs(size),
-                "value": value, "margin": margin
+                "value": value, "margin": margin,
+                "mode": getattr(pos, "margin_mode", "cross")
             }
-            log_debug(f"📊 포지션 상태 ({symbol})", f"진입가: {entry}, 사이즈: {abs(size)}, 사이드: {'롱' if size > 0 else '숏'}")
+            log_debug(f"📊 포지션 상태 ({symbol})", f"진입가: {entry}, 사이즈: {abs(size)}, 모드: {position_state[symbol]['mode']}")
         else:
             position_state[symbol] = {
                 "price": None, "side": None, "leverage": target_leverage,
-                "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0")
+                "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
             }
     except Exception as e:
         log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
@@ -104,6 +110,7 @@ def get_price(symbol):
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
         price = Decimal(str(ticker[0].last))
+        log_debug(f"💲 가격 ({symbol})", f"{price}")
         return price
     except Exception as e:
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
@@ -174,11 +181,6 @@ def close_position(symbol):
         log_debug(f"❌ 청산 실패 ({symbol})", str(e))
         return False
 
-# 🔧 핵심 수정: /ping 엔드포인트 추가
-@app.route("/ping", methods=["GET", "HEAD"])
-def ping():
-    return "pong", 200
-
 @app.route("/", methods=["POST"])
 def webhook():
     symbol = None
@@ -245,7 +247,6 @@ def status():
         log_debug("❌ 상태 조회 실패", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# 🔧 핵심 수정: 웹소켓 SL/TP 로직 강화
 async def price_listener():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     symbols = list(SYMBOL_CONFIG.keys())
@@ -284,6 +285,8 @@ async def price_listener():
                         last = result.get("last")
 
                         if contract and last and contract in SYMBOL_CONFIG:
+                            # 🔥 포지션 상태 실시간 갱신
+                            update_position_state(contract)
                             price = Decimal(str(last))
                             pos = position_state.get(contract, {})
                             entry = pos.get("price")
@@ -291,26 +294,30 @@ async def price_listener():
                             if entry and pos.get("side"):
                                 cfg = SYMBOL_CONFIG[contract]
                                 side = pos["side"]
-                                
-                                # SL/TP 가격 계산
+
+                                # SL/TP 계산
                                 if side == "buy":
                                     sl_price = entry * (1 - cfg["sl_pct"])
                                     tp_price = entry * (1 + cfg["tp_pct"])
                                     if price <= sl_price:
                                         log_debug(f"🛑 손절 트리거 ({contract})", f"현재가: {price}, 손절가: {sl_price}")
                                         close_position(contract)
+                                        update_position_state(contract)
                                     elif price >= tp_price:
                                         log_debug(f"🎯 익절 트리거 ({contract})", f"현재가: {price}, 익절가: {tp_price}")
                                         close_position(contract)
-                                else:  # sell
+                                        update_position_state(contract)
+                                else:
                                     sl_price = entry * (1 + cfg["sl_pct"])
                                     tp_price = entry * (1 - cfg["tp_pct"])
                                     if price >= sl_price:
                                         log_debug(f"🛑 손절 트리거 ({contract})", f"현재가: {price}, 손절가: {sl_price}")
                                         close_position(contract)
+                                        update_position_state(contract)
                                     elif price <= tp_price:
                                         log_debug(f"🎯 익절 트리거 ({contract})", f"현재가: {price}, 익절가: {tp_price}")
                                         close_position(contract)
+                                        update_position_state(contract)
 
                     except (asyncio.TimeoutError, websockets.ConnectionClosed):
                         log_debug("⚠️ 웹소켓", "연결 재시도 중...")
