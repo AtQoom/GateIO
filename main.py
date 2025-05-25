@@ -17,22 +17,21 @@ SETTLE = "usdt"
 
 BINANCE_TO_GATE_SYMBOL = {
     "BTCUSDT": "BTC_USDT",
-    "ADAUSDT": "ADA_USDT",
+    "ADAUSDT": "ADA_USDT", 
     "SUIUSDT": "SUI_USDT"
 }
 
-# 계약 단위(1계약당 실제 코인 수량) 추가
 SYMBOL_CONFIG = {
     "ADA_USDT": {
-        "min_qty": Decimal("1"),        # 1계약 = 10 ADA
-        "qty_step": Decimal("1"),       # 1계약 단위
-        "contract_size": Decimal("10"), # 1계약=10 ADA
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("10"),
         "sl_pct": Decimal("0.0075"),
         "tp_pct": Decimal("0.008"),
         "leverage": 3
     },
     "BTC_USDT": {
-        "min_qty": Decimal("1"),        # 1계약 = 0.0001 BTC
+        "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("0.0001"),
         "sl_pct": Decimal("0.004"),
@@ -40,7 +39,7 @@ SYMBOL_CONFIG = {
         "leverage": 5
     },
     "SUI_USDT": {
-        "min_qty": Decimal("1"),        # 1계약 = 1 SUI
+        "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("1"),
         "sl_pct": Decimal("0.0075"),
@@ -92,6 +91,7 @@ def update_position_state(symbol):
                 "leverage": target_leverage, "size": abs(size),
                 "value": value, "margin": margin
             }
+            log_debug(f"📊 포지션 상태 ({symbol})", f"진입가: {entry}, 사이즈: {abs(size)}, 사이드: {'롱' if size > 0 else '숏'}")
         else:
             position_state[symbol] = {
                 "price": None, "side": None, "leverage": target_leverage,
@@ -104,7 +104,6 @@ def get_price(symbol):
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
         price = Decimal(str(ticker[0].last))
-        log_debug(f"💲 가격 ({symbol})", f"{price}")
         return price
     except Exception as e:
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
@@ -123,11 +122,8 @@ def get_max_qty(symbol, side):
         if price <= 0:
             return float(min_qty)
 
-        # 1% 안전 마진
         safe_margin = safe * Decimal("0.99")
         order_value = safe_margin * lev
-
-        # 계약 단위로 주문 수량 산출 (ex. ADA: 1계약=10ADA)
         raw_qty = order_value / (price * contract_size)
         qty = (raw_qty // step) * step
         qty = max(qty, min_qty)
@@ -154,6 +150,8 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         api.create_futures_order(SETTLE, order)
         log_debug(f"✅ 주문 ({symbol})", f"{side.upper()} {float(qty_dec)} (계약)")
+        time.sleep(0.5)
+        update_position_state(symbol)
         return True
     except Exception as e:
         error_msg = str(e)
@@ -175,6 +173,11 @@ def close_position(symbol):
     except Exception as e:
         log_debug(f"❌ 청산 실패 ({symbol})", str(e))
         return False
+
+# 🔧 핵심 수정: /ping 엔드포인트 추가
+@app.route("/ping", methods=["GET", "HEAD"])
+def ping():
+    return "pong", 200
 
 @app.route("/", methods=["POST"])
 def webhook():
@@ -242,6 +245,7 @@ def status():
         log_debug("❌ 상태 조회 실패", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# 🔧 핵심 수정: 웹소켓 SL/TP 로직 강화
 async def price_listener():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     symbols = list(SYMBOL_CONFIG.keys())
@@ -286,16 +290,26 @@ async def price_listener():
 
                             if entry and pos.get("side"):
                                 cfg = SYMBOL_CONFIG[contract]
-                                contract_size = cfg["contract_size"]
-                                if pos["side"] == "buy":
-                                    sl = entry * (1 - cfg["sl_pct"])
-                                    tp = entry * (1 + cfg["tp_pct"])
-                                    if price <= sl or price >= tp:
+                                side = pos["side"]
+                                
+                                # SL/TP 가격 계산
+                                if side == "buy":
+                                    sl_price = entry * (1 - cfg["sl_pct"])
+                                    tp_price = entry * (1 + cfg["tp_pct"])
+                                    if price <= sl_price:
+                                        log_debug(f"🛑 손절 트리거 ({contract})", f"현재가: {price}, 손절가: {sl_price}")
                                         close_position(contract)
-                                else:
-                                    sl = entry * (1 + cfg["sl_pct"])
-                                    tp = entry * (1 - cfg["tp_pct"])
-                                    if price >= sl or price <= tp:
+                                    elif price >= tp_price:
+                                        log_debug(f"🎯 익절 트리거 ({contract})", f"현재가: {price}, 익절가: {tp_price}")
+                                        close_position(contract)
+                                else:  # sell
+                                    sl_price = entry * (1 + cfg["sl_pct"])
+                                    tp_price = entry * (1 - cfg["tp_pct"])
+                                    if price >= sl_price:
+                                        log_debug(f"🛑 손절 트리거 ({contract})", f"현재가: {price}, 손절가: {sl_price}")
+                                        close_position(contract)
+                                    elif price <= tp_price:
+                                        log_debug(f"🎯 익절 트리거 ({contract})", f"현재가: {price}, 익절가: {tp_price}")
                                         close_position(contract)
 
                     except (asyncio.TimeoutError, websockets.ConnectionClosed):
