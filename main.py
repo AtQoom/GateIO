@@ -34,9 +34,9 @@ SYMBOL_CONFIG = {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("0.0001"),
-        "sl_pct": Decimal("0.004"),
+        "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 5
+        "leverage": 3
     },
     "SUI_USDT": {
         "min_qty": Decimal("1"),
