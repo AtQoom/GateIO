@@ -18,7 +18,8 @@ SETTLE = "usdt"
 BINANCE_TO_GATE_SYMBOL = {
     "BTCUSDT": "BTC_USDT",
     "ADAUSDT": "ADA_USDT",
-    "SUIUSDT": "SUI_USDT"
+    "SUIUSDT": "SUI_USDT",
+    "LINKUSDT": "LINK_USDT"  # 🔥 LINK 추가
 }
 
 SYMBOL_CONFIG = {
@@ -39,6 +40,14 @@ SYMBOL_CONFIG = {
         "leverage": 3
     },
     "SUI_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("1"),
+        "sl_pct": Decimal("0.0075"),
+        "tp_pct": Decimal("0.008"),
+        "leverage": 3
+    },
+    "LINK_USDT": {  # 🔥 LINK 전략 설정
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("1"),
@@ -77,11 +86,9 @@ def update_position_state(symbol):
         pos = api.get_position(SETTLE, symbol)
         current_leverage = Decimal(str(pos.leverage))
         target_leverage = SYMBOL_CONFIG[symbol]["leverage"]
-        # 🔥 교차/격리 모드 강제 설정
         if hasattr(pos, "margin_mode") and pos.margin_mode != "cross":
             api.update_position_margin_mode(SETTLE, symbol, "cross")
             log_debug(f"⚙️ 마진모드 변경 ({symbol})", f"{pos.margin_mode} → cross")
-        # 레버리지 강제 설정 (교차 명시)
         if current_leverage != target_leverage:
             api.update_position_leverage(SETTLE, symbol, target_leverage, "cross")
             log_debug(f"⚙️ 레버리지 변경 ({symbol})", f"{current_leverage} → {target_leverage}x (교차)")
@@ -181,10 +188,8 @@ def close_position(symbol):
         log_debug(f"❌ 청산 실패 ({symbol})", str(e))
         return False
 
-# 🔥 UptimeRobot 핑 엔드포인트 추가
 @app.route("/ping", methods=["GET", "HEAD"])
 def ping():
-    """UptimeRobot 서버 상태 확인용 엔드포인트"""
     log_debug("🏓 핑", "UptimeRobot 상태 체크")
     return "pong", 200
 
@@ -256,7 +261,7 @@ def status():
 
 async def price_listener():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-    symbols = list(SYMBOL_CONFIG.keys())
+    symbols = list(SYMBOL_CONFIG.keys())  # 모든 심볼(LINK 포함)
     reconnect_delay = 5
     max_delay = 60
 
@@ -292,7 +297,6 @@ async def price_listener():
                         last = result.get("last")
 
                         if contract and last and contract in SYMBOL_CONFIG:
-                            # 🔥 포지션 상태 실시간 갱신
                             update_position_state(contract)
                             price = Decimal(str(last))
                             pos = position_state.get(contract, {})
@@ -302,7 +306,6 @@ async def price_listener():
                                 cfg = SYMBOL_CONFIG[contract]
                                 side = pos["side"]
 
-                                # SL/TP 계산
                                 if side == "buy":
                                     sl_price = entry * (1 - cfg["sl_pct"])
                                     tp_price = entry * (1 + cfg["tp_pct"])
