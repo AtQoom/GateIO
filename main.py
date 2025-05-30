@@ -124,11 +124,13 @@ def update_position_state(symbol):
             pos = api.get_position(SETTLE, symbol)
             current_leverage = Decimal(str(pos.leverage))
             target_leverage = SYMBOL_CONFIG[symbol]["leverage"]
+            # 마진모드 강제 교차
             if hasattr(pos, "margin_mode") and pos.margin_mode != "cross":
                 api.update_position_margin_mode(SETTLE, symbol, "cross")
                 log_debug(f"⚙️ 마진모드 변경 ({symbol})", f"{pos.margin_mode} → cross")
+            # Gate.io 공식문서 기준, update_position_leverage는 (settle, contract, leverage) 3개 인자만 필요
             if current_leverage != target_leverage:
-                api.update_position_leverage(SETTLE, symbol, target_leverage, "cross")
+                api.update_position_leverage(SETTLE, symbol, target_leverage)
                 log_debug(f"⚙️ 레버리지 변경 ({symbol})", f"{current_leverage} → {target_leverage}x (교차)")
             size = Decimal(str(pos.size))
             if size != 0:
@@ -191,6 +193,11 @@ def close_position(symbol):
         except Exception as e:
             log_debug(f"❌ 청산 실패 ({symbol})", str(e))
             return False
+
+@app.route("/ping", methods=["GET", "HEAD"])
+def ping():
+    # 업타임로봇 등 외부 모니터링용
+    return "pong", 200
 
 @app.route("/", methods=["POST"])
 def webhook():
