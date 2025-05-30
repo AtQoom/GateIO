@@ -19,7 +19,7 @@ BINANCE_TO_GATE_SYMBOL = {
     "BTCUSDT": "BTC_USDT",
     "ADAUSDT": "ADA_USDT",
     "SUIUSDT": "SUI_USDT",
-    "LINKUSDT": "LINK_USDT"  # 🔥 LINK 추가
+    "LINKUSDT": "LINK_USDT"
 }
 
 SYMBOL_CONFIG = {
@@ -47,7 +47,7 @@ SYMBOL_CONFIG = {
         "tp_pct": Decimal("0.008"),
         "leverage": 3
     },
-    "LINK_USDT": {  # 🔥 LINK 전략 설정
+    "LINK_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("1"),
@@ -80,38 +80,6 @@ def get_account_info(force=False):
     except Exception as e:
         log_debug("❌ 계정 조회 실패", str(e))
         return Decimal("0")
-
-def update_position_state(symbol):
-    try:
-        pos = api.get_position(SETTLE, symbol)
-        current_leverage = Decimal(str(pos.leverage))
-        target_leverage = SYMBOL_CONFIG[symbol]["leverage"]
-        if hasattr(pos, "margin_mode") and pos.margin_mode != "cross":
-            api.update_position_margin_mode(SETTLE, symbol, "cross")
-            log_debug(f"⚙️ 마진모드 변경 ({symbol})", f"{pos.margin_mode} → cross")
-        if current_leverage != target_leverage:
-            api.update_position_leverage(SETTLE, symbol, target_leverage, "cross")
-            log_debug(f"⚙️ 레버리지 변경 ({symbol})", f"{current_leverage} → {target_leverage}x (교차)")
-        size = Decimal(str(pos.size))
-        if size != 0:
-            entry = Decimal(str(pos.entry_price))
-            mark = Decimal(str(pos.mark_price))
-            value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
-            margin = value / target_leverage
-            position_state[symbol] = {
-                "price": entry, "side": "buy" if size > 0 else "sell",
-                "leverage": target_leverage, "size": abs(size),
-                "value": value, "margin": margin,
-                "mode": getattr(pos, "margin_mode", "cross")
-            }
-            log_debug(f"📊 포지션 상태 ({symbol})", f"진입가: {entry}, 사이즈: {abs(size)}, 모드: {position_state[symbol]['mode']}")
-        else:
-            position_state[symbol] = {
-                "price": None, "side": None, "leverage": target_leverage,
-                "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
-            }
-    except Exception as e:
-        log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
 
 def get_price(symbol):
     try:
@@ -148,6 +116,38 @@ def get_max_qty(symbol, side):
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
         return float(SYMBOL_CONFIG[symbol]["min_qty"])
+
+def update_position_state(symbol):
+    try:
+        pos = api.get_position(SETTLE, symbol)
+        current_leverage = Decimal(str(pos.leverage))
+        target_leverage = SYMBOL_CONFIG[symbol]["leverage"]
+        if hasattr(pos, "margin_mode") and pos.margin_mode != "cross":
+            api.update_position_margin_mode(SETTLE, symbol, "cross")
+            log_debug(f"⚙️ 마진모드 변경 ({symbol})", f"{pos.margin_mode} → cross")
+        if current_leverage != target_leverage:
+            api.update_position_leverage(SETTLE, symbol, target_leverage, "cross")
+            log_debug(f"⚙️ 레버리지 변경 ({symbol})", f"{current_leverage} → {target_leverage}x (교차)")
+        size = Decimal(str(pos.size))
+        if size != 0:
+            entry = Decimal(str(pos.entry_price))
+            mark = Decimal(str(pos.mark_price))
+            value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
+            margin = value / target_leverage
+            position_state[symbol] = {
+                "price": entry, "side": "buy" if size > 0 else "sell",
+                "leverage": target_leverage, "size": abs(size),
+                "value": value, "margin": margin,
+                "mode": getattr(pos, "margin_mode", "cross")
+            }
+            log_debug(f"📊 포지션 상태 ({symbol})", f"진입가: {entry}, 사이즈: {abs(size)}, 모드: {position_state[symbol]['mode']}")
+        else:
+            position_state[symbol] = {
+                "price": None, "side": None, "leverage": target_leverage,
+                "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
+            }
+    except Exception as e:
+        log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
 
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
     try:
@@ -261,7 +261,7 @@ def status():
 
 async def price_listener():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-    symbols = list(SYMBOL_CONFIG.keys())  # 모든 심볼(LINK 포함)
+    symbols = list(SYMBOL_CONFIG.keys())
     reconnect_delay = 5
     max_delay = 60
 
