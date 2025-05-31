@@ -29,7 +29,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("10"),
         "sl_pct": Decimal("0.0075"),
         "tp_pct": Decimal("0.008"),
-        "leverage": 3
+        "leverage": 3  # 수량 계산용 레버리지 (실제 레버리지와 무관)
     },
     "BTC_USDT": {
         "min_qty": Decimal("1"),
@@ -97,7 +97,7 @@ def get_max_qty(symbol, side):
         cfg = SYMBOL_CONFIG[symbol]
         safe = get_account_info(force=True)
         price = get_price(symbol)
-        lev = cfg["leverage"]
+        lev = cfg["leverage"]  # 수량 계산용 레버리지 (3x)
         step = cfg["qty_step"]
         min_qty = cfg["min_qty"]
         contract_size = cfg["contract_size"]
@@ -122,32 +122,26 @@ def update_position_state(symbol):
     with position_lock:
         try:
             pos = api.get_position(SETTLE, symbol)
-            current_leverage = Decimal(str(pos.leverage))
-            target_leverage = SYMBOL_CONFIG[symbol]["leverage"]
-            # 마진모드 강제 교차
+            # 강제 교차 마진 모드 설정
             if hasattr(pos, "margin_mode") and pos.margin_mode != "cross":
                 api.update_position_margin_mode(SETTLE, symbol, "cross")
                 log_debug(f"⚙️ 마진모드 변경 ({symbol})", f"{pos.margin_mode} → cross")
-            # Gate.io 공식문서 기준, update_position_leverage는 (settle, contract, leverage) 3개 인자만 필요
-            if current_leverage != target_leverage:
-                api.update_position_leverage(SETTLE, symbol, target_leverage)
-                log_debug(f"⚙️ 레버리지 변경 ({symbol})", f"{current_leverage} → {target_leverage}x (교차)")
+            # 레버리지 변경 코드 삭제 (교차 모드에서는 레버리지 0 고정)
             size = Decimal(str(pos.size))
             if size != 0:
                 entry = Decimal(str(pos.entry_price))
                 mark = Decimal(str(pos.mark_price))
                 value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
-                margin = value / target_leverage
+                margin = value / SYMBOL_CONFIG[symbol]["leverage"]  # 수량 계산용 레버리지 사용
                 position_state[symbol] = {
                     "price": entry, "side": "buy" if size > 0 else "sell",
-                    "leverage": target_leverage, "size": abs(size),
-                    "value": value, "margin": margin,
-                    "mode": getattr(pos, "margin_mode", "cross")
+                    "size": abs(size), "value": value, "margin": margin,
+                    "mode": "cross"  # 강제 교차 모드
                 }
-                log_debug(f"📊 포지션 상태 ({symbol})", f"진입가: {entry}, 사이즈: {abs(size)}, 모드: {position_state[symbol]['mode']}")
+                log_debug(f"📊 포지션 상태 ({symbol})", f"진입가: {entry}, 사이즈: {abs(size)}, 모드: cross")
             else:
                 position_state[symbol] = {
-                    "price": None, "side": None, "leverage": target_leverage,
+                    "price": None, "side": None,
                     "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
                 }
         except Exception as e:
@@ -196,7 +190,6 @@ def close_position(symbol):
 
 @app.route("/ping", methods=["GET", "HEAD"])
 def ping():
-    # 업타임로봇 등 외부 모니터링용
     return "pong", 200
 
 @app.route("/", methods=["POST"])
