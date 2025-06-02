@@ -29,7 +29,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("10"),
         "sl_pct": Decimal("0.0075"),
         "tp_pct": Decimal("0.008"),
-        "leverage": 3  # 수량 계산용 레버리지 (실제 레버리지와 무관)
+        "leverage": 3
     },
     "BTC_USDT": {
         "min_qty": Decimal("1"),
@@ -97,7 +97,7 @@ def get_max_qty(symbol, side):
         cfg = SYMBOL_CONFIG[symbol]
         safe = get_account_info(force=True)
         price = get_price(symbol)
-        lev = cfg["leverage"]  # 수량 계산용 레버리지 (3x)
+        lev = cfg["leverage"]
         step = cfg["qty_step"]
         min_qty = cfg["min_qty"]
         contract_size = cfg["contract_size"]
@@ -122,23 +122,21 @@ def update_position_state(symbol):
     with position_lock:
         try:
             pos = api.get_position(SETTLE, symbol)
-            # 강제 교차 마진 모드 설정
             if hasattr(pos, "margin_mode") and pos.margin_mode != "cross":
                 api.update_position_margin_mode(SETTLE, symbol, "cross")
                 log_debug(f"⚙️ 마진모드 변경 ({symbol})", f"{pos.margin_mode} → cross")
-            # 레버리지 변경 코드 삭제 (교차 모드에서는 레버리지 0 고정)
             size = Decimal(str(pos.size))
             if size != 0:
                 entry = Decimal(str(pos.entry_price))
                 mark = Decimal(str(pos.mark_price))
                 value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
-                margin = value / SYMBOL_CONFIG[symbol]["leverage"]  # 수량 계산용 레버리지 사용
+                margin = value / SYMBOL_CONFIG[symbol]["leverage"]
                 position_state[symbol] = {
                     "price": entry, "side": "buy" if size > 0 else "sell",
                     "size": abs(size), "value": value, "margin": margin,
-                    "mode": "cross"  # 강제 교차 모드
+                    "mode": "cross"
                 }
-                log_debug(f"📊 포지션 상태 ({symbol})", f"진입가: {entry}, 사이즈: {abs(size)}, 모드: cross")
+                log_debug(f"📊 포지션 상태 ({symbol})", f"진입가: {entry}, 사이즈: {abs(size)}")
             else:
                 position_state[symbol] = {
                     "price": None, "side": None,
@@ -168,7 +166,7 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
             return True
         except Exception as e:
             error_msg = str(e)
-            log_debug(f"❌ 주문 실패 ({symbol})", error_msg)
+            log_debug(f"❌ 주문 실패 ({symbol})", f"{error_msg}")  # 오류 메시지 상세화
             if retry > 0 and "INVALID_PARAM" in error_msg:
                 retry_qty = (Decimal(str(qty)) * Decimal("0.5") // step) * step
                 retry_qty = max(retry_qty, min_qty)
@@ -196,31 +194,47 @@ def ping():
 def webhook():
     symbol = None
     try:
-        if not request.is_json:
-            return jsonify({"error": "JSON required"}), 400
         data = request.get_json()
-        log_debug("📥 웹훅", json.dumps(data))
+        log_debug("📥 웹훅 수신", json.dumps(data))
+        
         raw = data.get("symbol", "").upper().replace(".P", "")
         symbol = BINANCE_TO_GATE_SYMBOL.get(raw)
         if not symbol or symbol not in SYMBOL_CONFIG:
             return jsonify({"error": "Invalid symbol"}), 400
+        
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
         if side not in ["long", "short"] or action not in ["entry", "exit"]:
             return jsonify({"error": "Invalid side/action"}), 400
+        
         update_position_state(symbol)
-        desired = "buy" if side == "long" else "sell"
-        current = position_state.get(symbol, {}).get("side")
+        current_side = position_state.get(symbol, {}).get("side")
+        desired_side = "buy" if side == "long" else "sell"
+        
+        # 청산 로직
         if action == "exit":
-            return jsonify({"status": "success" if close_position(symbol) else "error"})
-        if current and current != desired:
+            success = close_position(symbol)
+            log_debug(f"🔁 청산 시도 ({symbol})", f"결과: {success}")
+            return jsonify({"status": "success" if success else "error"})
+        
+        # 역포지션 체크
+        if current_side and current_side != desired_side:
+            log_debug("🔄 역포지션 처리 필요", f"현재: {current_side}, 목표: {desired_side}")
             if not close_position(symbol):
-                return jsonify({"status": "error", "message": "reverse close failed"})
+                return jsonify({"status": "error", "message": "역포지션 청산 실패"})
             time.sleep(1)
             update_position_state(symbol)
-        qty = get_max_qty(symbol, desired)
-        success = place_order(symbol, desired, qty)
+        
+        # 수량 계산
+        qty = get_max_qty(symbol, desired_side)
+        log_debug(f"🧮 계산된 수량 ({symbol})", f"{qty}")
+        
+        # 주문 실행
+        success = place_order(symbol, desired_side, qty)
+        log_debug(f"📨 주문 결과 ({symbol})", f"성공: {success}")
+        
         return jsonify({"status": "success" if success else "error", "qty": qty})
+    
     except Exception as e:
         log_debug(f"❌ 웹훅 처리 실패 ({symbol or 'unknown'})", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -234,8 +248,12 @@ def status():
             update_position_state(sym)
             pos = position_state.get(sym, {})
             positions[sym] = {k: float(v) if isinstance(v, Decimal) else v for k, v in pos.items()}
-        return jsonify({"status": "running", "timestamp": datetime.now().isoformat(),
-                        "equity": float(equity), "positions": positions})
+        return jsonify({
+            "status": "running",
+            "timestamp": datetime.now().isoformat(),
+            "equity": float(equity),
+            "positions": positions
+        })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -268,13 +286,9 @@ async def price_listener():
                 while True:
                     try:
                         msg = await asyncio.wait_for(ws.recv(), timeout=30)
-                        try:
-                            data = json.loads(msg)
-                        except json.JSONDecodeError:
-                            log_debug("❌ JSON 파싱 실패", msg)
-                            continue
+                        data = json.loads(msg)
                         if not isinstance(data, dict): continue
-                        if "result" not in data or not isinstance(data["result"], dict): continue
+                        if "result" not in data: continue
                         result = data["result"]
                         contract = result.get("contract")
                         last = result.get("last")
@@ -313,7 +327,6 @@ async def price_listener():
                         break
                     except Exception as e:
                         log_debug("❌ 웹소켓 메시지 처리 실패", str(e))
-                        continue
         except Exception as e:
             log_debug("❌ 웹소켓 연결 실패", str(e))
             await asyncio.sleep(reconnect_delay)
