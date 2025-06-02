@@ -62,7 +62,7 @@ client = ApiClient(config)
 api = FuturesApi(client)
 
 position_state = {}
-position_lock = threading.Lock()
+position_lock = threading.RLock()  # 🔥 RLock으로 변경 (재진입 가능)
 account_cache = {"time": 0, "data": None}
 
 def log_debug(tag, msg):
@@ -119,77 +119,97 @@ def get_max_qty(symbol, side):
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
         return float(SYMBOL_CONFIG[symbol]["min_qty"])
 
-def update_position_state(symbol):
-    with position_lock:
-        try:
-            pos = api.get_position(SETTLE, symbol)
-            if hasattr(pos, "margin_mode") and pos.margin_mode != "cross":
-                api.update_position_margin_mode(SETTLE, symbol, "cross")
-                log_debug(f"⚙️ 마진모드 변경 ({symbol})", f"{pos.margin_mode} → cross")
-            size = Decimal(str(pos.size))
-            if size != 0:
-                entry = Decimal(str(pos.entry_price))
-                mark = Decimal(str(pos.mark_price))
-                value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
-                margin = value / SYMBOL_CONFIG[symbol]["leverage"]
-                position_state[symbol] = {
-                    "price": entry, "side": "buy" if size > 0 else "sell",
-                    "size": abs(size), "value": value, "margin": margin,
-                    "mode": "cross"
-                }
-                log_debug(f"📊 포지션 상태 ({symbol})", f"진입가: {entry}, 사이즈: {abs(size)}, 방향: {position_state[symbol]['side']}")
-            else:
-                position_state[symbol] = {
-                    "price": None, "side": None,
-                    "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
-                }
-                log_debug(f"📊 포지션 없음 ({symbol})", "사이즈 0")
-        except Exception as e:
-            log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
+def update_position_state(symbol, timeout=5):  # 🔥 타임아웃 추가
+    acquired = position_lock.acquire(timeout=timeout)
+    if not acquired:
+        log_debug(f"⚠️ 락 획득 실패 ({symbol})", f"타임아웃 {timeout}초")
+        return False
+    
+    try:
+        pos = api.get_position(SETTLE, symbol)
+        if hasattr(pos, "margin_mode") and pos.margin_mode != "cross":
+            api.update_position_margin_mode(SETTLE, symbol, "cross")
+            log_debug(f"⚙️ 마진모드 변경 ({symbol})", f"{pos.margin_mode} → cross")
+        size = Decimal(str(pos.size))
+        if size != 0:
+            entry = Decimal(str(pos.entry_price))
+            mark = Decimal(str(pos.mark_price))
+            value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
+            margin = value / SYMBOL_CONFIG[symbol]["leverage"]
+            position_state[symbol] = {
+                "price": entry, "side": "buy" if size > 0 else "sell",
+                "size": abs(size), "value": value, "margin": margin,
+                "mode": "cross"
+            }
+            log_debug(f"📊 포지션 상태 ({symbol})", f"진입가: {entry}, 사이즈: {abs(size)}, 방향: {position_state[symbol]['side']}")
+        else:
+            position_state[symbol] = {
+                "price": None, "side": None,
+                "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
+            }
+            log_debug(f"📊 포지션 없음 ({symbol})", "사이즈 0")
+        return True
+    except Exception as e:
+        log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
+        return False
+    finally:
+        position_lock.release()
 
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
-    with position_lock:
-        try:
-            cfg = SYMBOL_CONFIG[symbol]
-            step = cfg["qty_step"]
-            min_qty = cfg["min_qty"]
+    acquired = position_lock.acquire(timeout=5)
+    if not acquired:
+        log_debug(f"⚠️ 주문 락 실패 ({symbol})", "타임아웃")
+        return False
+    
+    try:
+        cfg = SYMBOL_CONFIG[symbol]
+        step = cfg["qty_step"]
+        min_qty = cfg["min_qty"]
 
-            qty_dec = Decimal(str(qty)).quantize(step, rounding=ROUND_DOWN)
-            if qty_dec < min_qty:
-                log_debug(f"⛔ 잘못된 수량 ({symbol})", f"{qty_dec} < 최소 {min_qty}")
-                return False
-
-            size = float(qty_dec) if side == "buy" else -float(qty_dec)
-            order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
-            
-            log_debug(f"📤 주문 시도 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약, reduce_only={reduce_only}")
-            api.create_futures_order(SETTLE, order)
-            log_debug(f"✅ 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약")
-            time.sleep(0.5)
-            update_position_state(symbol)
-            return True
-        except Exception as e:
-            error_msg = str(e)
-            log_debug(f"❌ 주문 실패 ({symbol})", f"{error_msg}")
-            if retry > 0 and ("INVALID_PARAM" in error_msg or "POSITION_EMPTY" in error_msg):
-                retry_qty = (Decimal(str(qty)) * Decimal("0.5") // step) * step
-                retry_qty = max(retry_qty, min_qty)
-                log_debug(f"🔄 재시도 ({symbol})", f"{qty} → {retry_qty}")
-                return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
+        qty_dec = Decimal(str(qty)).quantize(step, rounding=ROUND_DOWN)
+        if qty_dec < min_qty:
+            log_debug(f"⛔ 잘못된 수량 ({symbol})", f"{qty_dec} < 최소 {min_qty}")
             return False
+
+        size = float(qty_dec) if side == "buy" else -float(qty_dec)
+        order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
+        
+        log_debug(f"📤 주문 시도 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약, reduce_only={reduce_only}")
+        api.create_futures_order(SETTLE, order)
+        log_debug(f"✅ 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약")
+        time.sleep(0.5)
+        update_position_state(symbol)
+        return True
+    except Exception as e:
+        error_msg = str(e)
+        log_debug(f"❌ 주문 실패 ({symbol})", f"{error_msg}")
+        if retry > 0 and ("INVALID_PARAM" in error_msg or "POSITION_EMPTY" in error_msg):
+            retry_qty = (Decimal(str(qty)) * Decimal("0.5") // step) * step
+            retry_qty = max(retry_qty, min_qty)
+            log_debug(f"🔄 재시도 ({symbol})", f"{qty} → {retry_qty}")
+            return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
+        return False
+    finally:
+        position_lock.release()
 
 def close_position(symbol):
-    with position_lock:
-        try:
-            log_debug(f"🔄 청산 시도 ({symbol})", "size=0 주문")
-            api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
-            log_debug(f"✅ 청산 완료 ({symbol})", "")
-            time.sleep(0.5)
-            update_position_state(symbol)
-            return True
-        except Exception as e:
-            log_debug(f"❌ 청산 실패 ({symbol})", str(e))
-            return False
+    acquired = position_lock.acquire(timeout=5)
+    if not acquired:
+        log_debug(f"⚠️ 청산 락 실패 ({symbol})", "타임아웃")
+        return False
+    
+    try:
+        log_debug(f"🔄 청산 시도 ({symbol})", "size=0 주문")
+        api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
+        log_debug(f"✅ 청산 완료 ({symbol})", "")
+        time.sleep(0.5)
+        update_position_state(symbol)
+        return True
+    except Exception as e:
+        log_debug(f"❌ 청산 실패 ({symbol})", str(e))
+        return False
+    finally:
+        position_lock.release()
 
 @app.route("/ping", methods=["GET", "HEAD"])
 def ping():
@@ -199,6 +219,8 @@ def ping():
 def webhook():
     symbol = None
     try:
+        log_debug("🔄 웹훅 시작", "처리 시작")  # 🔥 추가 로그
+        
         if not request.is_json:
             log_debug("❌ 웹훅 오류", "JSON이 아님")
             return jsonify({"error": "JSON required"}), 400
@@ -216,12 +238,19 @@ def webhook():
         
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
+        log_debug("🔍 파라미터 확인", f"side={side}, action={action}")  # 🔥 추가 로그
+        
         if side not in ["long", "short"] or action not in ["entry", "exit"]:
             log_debug("❌ 웹훅 오류", f"잘못된 파라미터: {side}/{action}")
             return jsonify({"error": "Invalid side/action"}), 400
         
+        log_debug("✅ 파라미터 검증 통과", f"side={side}, action={action}")  # 🔥 추가 로그
+        
         # 포지션 상태 갱신
-        update_position_state(symbol)
+        if not update_position_state(symbol):
+            log_debug("❌ 포지션 상태 갱신 실패", f"타임아웃 또는 오류")
+            return jsonify({"status": "error", "message": "포지션 상태 조회 실패"}), 500
+            
         current_side = position_state.get(symbol, {}).get("side")
         desired_side = "buy" if side == "long" else "sell"
         
@@ -240,7 +269,8 @@ def webhook():
                 log_debug("❌ 역포지션 청산 실패", "")
                 return jsonify({"status": "error", "message": "역포지션 청산 실패"})
             time.sleep(1)
-            update_position_state(symbol)
+            if not update_position_state(symbol):
+                log_debug("❌ 역포지션 후 상태 갱신 실패", "")
         
         # 수량 계산
         qty = get_max_qty(symbol, desired_side)
@@ -266,9 +296,9 @@ def status():
         equity = get_account_info(force=True)
         positions = {}
         for sym in SYMBOL_CONFIG:
-            update_position_state(sym)
-            pos = position_state.get(sym, {})
-            positions[sym] = {k: float(v) if isinstance(v, Decimal) else v for k, v in pos.items()}
+            if update_position_state(sym):
+                pos = position_state.get(sym, {})
+                positions[sym] = {k: float(v) if isinstance(v, Decimal) else v for k, v in pos.items()}
         return jsonify({
             "status": "running",
             "timestamp": datetime.now().isoformat(),
@@ -315,26 +345,21 @@ async def price_listener():
                         except json.JSONDecodeError:
                             continue
                         
-                        # 🔥 웹소켓 메시지 파싱 개선
                         if not isinstance(data, dict):
                             continue
                         
-                        # subscribe 응답 처리
                         if data.get("event") == "subscribe":
                             log_debug("✅ 웹소켓 구독", f"채널: {data.get('channel')}")
                             continue
                         
-                        # result 필드 확인
                         result = data.get("result")
                         if not result:
                             continue
                         
-                        # result가 리스트인 경우 처리
                         if isinstance(result, list):
                             for item in result:
                                 if isinstance(item, dict):
                                     process_ticker_data(item)
-                        # result가 딕셔너리인 경우 처리
                         elif isinstance(result, dict):
                             process_ticker_data(result)
                             
@@ -364,7 +389,10 @@ def process_ticker_data(ticker):
         except (InvalidOperation, ValueError):
             return
         
-        update_position_state(contract)
+        # 🔥 타임아웃 있는 포지션 상태 갱신
+        if not update_position_state(contract, timeout=1):
+            return
+            
         pos = position_state.get(contract, {})
         entry = pos.get("price")
         
@@ -403,7 +431,7 @@ def backup_position_loop():
     while True:
         try:
             for sym in SYMBOL_CONFIG:
-                update_position_state(sym)
+                update_position_state(sym, timeout=1)
             time.sleep(60)
         except Exception as e:
             log_debug("❌ 백업 루프 오류", str(e))
