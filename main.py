@@ -73,7 +73,7 @@ def log_debug(tag, msg):
 
 def get_account_info(force=False):
     now = time.time()
-    if not force and account_cache["time"] > now - 5 and account_cache["data"]:
+    if not force and account_cache["time"] > now - 10 and account_cache["data"]:  # 5초 → 10초
         return account_cache["data"]
     try:
         acc = api.list_futures_accounts(SETTLE)
@@ -266,7 +266,9 @@ def status():
         for sym in SYMBOL_CONFIG:
             if update_position_state(sym, timeout=1):
                 pos = position_state.get(sym, {})
-                positions[sym] = {k: float(v) if isinstance(v, Decimal) else v for k, v in pos.items()}
+                # 포지션이 있을 때만 포함
+                if pos.get("side"):
+                    positions[sym] = {k: float(v) if isinstance(v, Decimal) else v for k, v in pos.items()}
         return jsonify({
             "status": "running",
             "timestamp": datetime.now().isoformat(),
@@ -345,6 +347,7 @@ def process_ticker_data(ticker):
             price = Decimal(str(last))
         except (InvalidOperation, ValueError):
             return
+        # 포지션이 있을 때만 상태 갱신
         if not update_position_state(contract, timeout=1):
             return
         pos = position_state.get(contract, {})
@@ -377,11 +380,15 @@ def backup_position_loop():
     while True:
         try:
             for sym in SYMBOL_CONFIG:
-                update_position_state(sym, timeout=1)
-            time.sleep(60)
+                # 포지션이 있을 때만 상태 갱신/로그
+                if update_position_state(sym, timeout=1):
+                    pos = position_state.get(sym, {})
+                    if pos.get("side"):
+                        log_debug(f"📊 백업 포지션 ({sym})", f"방향: {pos['side']}, 사이즈: {pos['size']}")
+            time.sleep(300)  # 5분 주기
         except Exception as e:
             log_debug("❌ 백업 루프 오류", str(e))
-            time.sleep(60)
+            time.sleep(300)
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
