@@ -40,19 +40,19 @@ SYMBOL_CONFIG = {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("10"),
-        "leverage": 3
+        "leverage": 2
     },
     "SUI_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("1"),
-        "leverage": 3
+        "leverage": 2
     },
     "LINK_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("1"),
-        "leverage": 3
+        "leverage": 2
     }
 }
 
