@@ -17,20 +17,14 @@ SETTLE = "usdt"
 
 BINANCE_TO_GATE_SYMBOL = {
     "BTCUSDT": "BTC_USDT",
+    "ETHUSDT": "ETH_USDT",   # 🔥 이더 추가
     "ADAUSDT": "ADA_USDT",
     "SUIUSDT": "SUI_USDT",
     "LINKUSDT": "LINK_USDT"
 }
 
+# 모든 코인 TP/SL 조건 통일 (BTC/ETH/알트 동일)
 SYMBOL_CONFIG = {
-    "ADA_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("10"),
-        "sl_pct": Decimal("0.0075"),
-        "tp_pct": Decimal("0.008"),
-        "leverage": 3
-    },
     "BTC_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
@@ -39,20 +33,36 @@ SYMBOL_CONFIG = {
         "tp_pct": Decimal("0.006"),
         "leverage": 3
     },
+    "ETH_USDT": {   # 🔥 이더 추가
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("0.001"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "leverage": 3
+    },
+    "ADA_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("10"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "leverage": 3
+    },
     "SUI_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("1"),
-        "sl_pct": Decimal("0.0075"),
-        "tp_pct": Decimal("0.008"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
         "leverage": 3
     },
     "LINK_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("1"),
-        "sl_pct": Decimal("0.0075"),
-        "tp_pct": Decimal("0.008"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
         "leverage": 3
     }
 }
@@ -66,14 +76,13 @@ position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
 
 def log_debug(tag, msg):
-    # "포지션 없음" 로그는 출력하지 않음 (리소스 절약)
     if "포지션 없음" in msg:
         return
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{tag}] {msg}")
 
 def get_account_info(force=False):
     now = time.time()
-    if not force and account_cache["time"] > now - 10 and account_cache["data"]:  # 5초 → 10초
+    if not force and account_cache["time"] > now - 10 and account_cache["data"]:
         return account_cache["data"]
     try:
         acc = api.list_futures_accounts(SETTLE)
@@ -266,7 +275,6 @@ def status():
         for sym in SYMBOL_CONFIG:
             if update_position_state(sym, timeout=1):
                 pos = position_state.get(sym, {})
-                # 포지션이 있을 때만 포함
                 if pos.get("side"):
                     positions[sym] = {k: float(v) if isinstance(v, Decimal) else v for k, v in pos.items()}
         return jsonify({
@@ -347,7 +355,6 @@ def process_ticker_data(ticker):
             price = Decimal(str(last))
         except (InvalidOperation, ValueError):
             return
-        # 포지션이 있을 때만 상태 갱신
         if not update_position_state(contract, timeout=1):
             return
         pos = position_state.get(contract, {})
@@ -380,12 +387,11 @@ def backup_position_loop():
     while True:
         try:
             for sym in SYMBOL_CONFIG:
-                # 포지션이 있을 때만 상태 갱신/로그
                 if update_position_state(sym, timeout=1):
                     pos = position_state.get(sym, {})
                     if pos.get("side"):
                         log_debug(f"📊 백업 포지션 ({sym})", f"방향: {pos['side']}, 사이즈: {pos['size']}")
-            time.sleep(300)  # 5분 주기
+            time.sleep(300)
         except Exception as e:
             log_debug("❌ 백업 루프 오류", str(e))
             time.sleep(300)
