@@ -11,32 +11,34 @@ from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 
 app = Flask(__name__)
 
+# ===== 환경변수 설정 =====
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
 
+# ===== Binance-Gate.io 심볼 매핑 =====
 BINANCE_TO_GATE_SYMBOL = {
     "BTCUSDT": "BTC_USDT",
-    "ETHUSDT": "ETH_USDT",   # 🔥 이더 추가
-    "ADAUSDT": "ADA_USDT",
+    "ETHUSDT": "ETH_USDT",
+    "ADAUSDT": "ADA_USDT", 
     "SUIUSDT": "SUI_USDT",
     "LINKUSDT": "LINK_USDT"
 }
 
-# 모든 코인 TP/SL 조건 통일 (BTC/ETH/알트 동일)
+# ===== 전략 설정 (모든 코인 동일) =====
 SYMBOL_CONFIG = {
     "BTC_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("0.0001"),
-        "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
+        "contract_size": Decimal("0.0001"),  # 1계약 = 0.0001 BTC
+        "sl_pct": Decimal("0.0035"),        # 0.35%
+        "tp_pct": Decimal("0.006"),         # 0.6%
         "leverage": 3
     },
-    "ETH_USDT": {   # 🔥 이더 추가
+    "ETH_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("0.001"),
+        "contract_size": Decimal("0.001"),  # 1계약 = 0.001 ETH
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
         "leverage": 3
@@ -44,7 +46,7 @@ SYMBOL_CONFIG = {
     "ADA_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("10"),
+        "contract_size": Decimal("10"),     # 1계약 = 10 ADA
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
         "leverage": 3
@@ -52,7 +54,7 @@ SYMBOL_CONFIG = {
     "SUI_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("1"),
+        "contract_size": Decimal("1"),      # 1계약 = 1 SUI
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
         "leverage": 3
@@ -60,13 +62,14 @@ SYMBOL_CONFIG = {
     "LINK_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("1"),
+        "contract_size": Decimal("1"),      # 1계약 = 1 LINK
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
         "leverage": 3
     }
 }
 
+# ===== 초기화 =====
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
@@ -75,21 +78,22 @@ position_state = {}
 position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
 
+# ===== 유틸리티 함수 =====
 def log_debug(tag, msg):
-    if "포지션 없음" in msg:
-        return
+    if "포지션 없음" in msg: return
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{tag}] {msg}")
 
 def get_account_info(force=False):
+    """총 잔고(잔고 + 미실현손익) 반환"""
     now = time.time()
-    if not force and account_cache["time"] > now - 10 and account_cache["data"]:
+    if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
         acc = api.list_futures_accounts(SETTLE)
-        avail = Decimal(str(acc.available))
-        account_cache.update({"time": now, "data": avail})
-        log_debug("💰 계정", f"가용 잔고: {avail}")
-        return avail
+        total = Decimal(str(acc.total))  # 총 잔고
+        account_cache.update({"time": now, "data": total})
+        log_debug("💰 계정", f"총 잔고: {total}")
+        return total
     except Exception as e:
         log_debug("❌ 계정 조회 실패", str(e))
         return Decimal("0")
@@ -97,7 +101,7 @@ def get_account_info(force=False):
 def get_price(symbol):
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
-        price = Decimal(str(ticker[0].last))
+        price = Decimal(str(ticker[0].last))  # 수정: ticker[0].last
         log_debug(f"💲 가격 ({symbol})", f"{price}")
         return price
     except Exception as e:
@@ -105,31 +109,31 @@ def get_price(symbol):
         return Decimal("0")
 
 def get_max_qty(symbol, side):
+    """총 잔고 × 3배 기준 수량 계산"""
     try:
         cfg = SYMBOL_CONFIG[symbol]
-        safe = get_account_info(force=True)
+        total = get_account_info(force=True)
         price = get_price(symbol)
-        lev = cfg["leverage"]
-        step = cfg["qty_step"]
-        min_qty = cfg["min_qty"]
-        contract_size = cfg["contract_size"]
-
+        
         if price <= 0:
-            log_debug(f"⚠️ 가격 0 ({symbol})", f"최소 수량 반환: {min_qty}")
-            return float(min_qty)
+            return float(cfg["min_qty"])
 
-        safe_margin = safe * Decimal("0.99")
-        order_value = safe_margin * lev
+        # 총 잔고 × 3배 계산
+        safe_margin = total * Decimal("0.99")  # 1% 여유
+        order_value = safe_margin * 3  # 3배 고정
+        contract_size = cfg["contract_size"]
         raw_qty = order_value / (price * contract_size)
-        qty = (raw_qty // step) * step
-        qty = max(qty, min_qty)
+        
+        # 수량 정규화
+        qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
+        qty = max(qty, cfg["min_qty"])
 
         log_debug(f"📊 수량 계산 ({symbol})", 
-            f"잔고:{safe}, 레버리지:{lev}, 가격:{price}, 계약단위:{contract_size}, 최종:{qty} (계약)")
+            f"총잔고:{total}, 가격:{price}, 계약단위:{contract_size}, 최종:{qty}")
         return float(qty)
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
-        return float(SYMBOL_CONFIG[symbol]["min_qty"])
+        return float(cfg["min_qty"])
 
 def update_position_state(symbol, timeout=5):
     acquired = position_lock.acquire(timeout=timeout)
