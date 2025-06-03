@@ -363,7 +363,28 @@ def process_ticker_data(ticker):
             return
         pos = position_state.get(contract, {})
         entry = pos.get("price")
-        # 🔴 서버 자동 TP/SL 제거 (청산은 알림으로만 처리)
+        if entry and pos.get("side"):
+            cfg = SYMBOL_CONFIG[contract]
+            side = pos["side"]
+            # TP/SL 계산 (Predict 전략 기준)
+            if side == "buy":
+                sl = entry * (1 - cfg["sl_pct"])
+                tp = entry * (1 + cfg["tp_pct"])
+                if price <= sl:
+                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가: {price} <= SL: {sl}")
+                    close_position(contract)
+                elif price >= tp:
+                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가: {price} >= TP: {tp}")
+                    close_position(contract)
+            else:
+                sl = entry * (1 + cfg["sl_pct"])
+                tp = entry * (1 - cfg["tp_pct"])
+                if price >= sl:
+                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가: {price} >= SL: {sl}")
+                    close_position(contract)
+                elif price <= tp:
+                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가: {price} <= TP: {tp}")
+                    close_position(contract)
     except Exception as e:
         log_debug("❌ 티커 처리 실패", str(e))
 
