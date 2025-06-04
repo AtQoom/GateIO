@@ -91,7 +91,7 @@ api = FuturesApi(client)
 position_state = {}
 position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
-actual_entry_prices = {}  # 🔴 실제 체결가 추적
+actual_entry_prices = {}
 
 def log_debug(tag, msg, exc_info=False):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{tag}] {msg}")
@@ -147,6 +147,34 @@ def get_price(symbol):
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e), exc_info=True)
         return Decimal("0")
 
+def get_real_time_price(symbol):
+    """🔴 실시간 정확한 가격 조회 (API 직접 호출)"""
+    try:
+        ticker = api.list_futures_tickers(SETTLE, contract=symbol)
+        if not ticker or len(ticker) == 0:
+            return None
+            
+        ticker_data = ticker[0]
+        
+        # 🔴 mark_price 우선, 없으면 last 사용
+        mark_price = getattr(ticker_data, 'mark_price', None)
+        last_price = getattr(ticker_data, 'last', None)
+        
+        if mark_price:
+            price = Decimal(str(mark_price).upper().replace("E", "e")).normalize()
+            log_debug(f"📊 실시간 가격 ({symbol})", f"mark_price: {price}")
+        elif last_price:
+            price = Decimal(str(last_price).upper().replace("E", "e")).normalize()
+            log_debug(f"📊 실시간 가격 ({symbol})", f"last_price: {price}")
+        else:
+            return None
+            
+        return price
+        
+    except Exception as e:
+        log_debug(f"❌ 실시간 가격 조회 실패 ({symbol})", str(e))
+        return None
+
 def get_max_qty(symbol, side):
     try:
         cfg = SYMBOL_CONFIG[symbol]
@@ -179,18 +207,25 @@ def get_max_qty(symbol, side):
         return float(cfg["min_qty"])
 
 def get_actual_fill_price(symbol):
-    """🔴 최근 체결 내역에서 실제 진입가 조회"""
+    """🔴 개선된 실제 체결가 조회"""
     try:
-        # 최근 거래 내역 조회
+        # 🔴 최근 10개 거래 내역 조회하여 내 거래만 필터링
         trades = api.list_my_trades(SETTLE, contract=symbol, limit=10)
         if not trades:
+            log_debug(f"⚠️ 거래 내역 없음 ({symbol})", "")
             return None
             
-        # 가장 최근 거래의 체결가 반환
-        latest_trade = trades[0]
-        fill_price = Decimal(str(latest_trade.price))
-        log_debug(f"🔍 실제 체결가 ({symbol})", f"체결가: {fill_price}")
-        return fill_price
+        # 🔴 가장 최근 거래 (5초 이내)
+        current_time = time.time()
+        for trade in trades:
+            trade_time = int(trade.create_time)
+            if current_time - trade_time <= 5:  # 5초 이내 거래만
+                fill_price = Decimal(str(trade.price))
+                log_debug(f"🔍 실제 체결가 ({symbol})", f"체결가: {fill_price}, 시간차: {current_time - trade_time}초")
+                return fill_price
+                
+        log_debug(f"⚠️ 최근 체결가 없음 ({symbol})", "5초 이내 거래 없음")
+        return None
         
     except Exception as e:
         log_debug(f"❌ 체결가 조회 실패 ({symbol})", str(e))
@@ -211,7 +246,6 @@ def update_position_state(symbol, timeout=5):
                     "size": Decimal("0"), "value": Decimal("0"),
                     "margin": Decimal("0"), "mode": "cross"
                 }
-                # 🔴 포지션 없으면 실제 진입가도 삭제
                 if symbol in actual_entry_prices:
                     del actual_entry_prices[symbol]
                 return True
@@ -228,7 +262,6 @@ def update_position_state(symbol, timeout=5):
             api_entry_price = Decimal(str(pos.entry_price))
             mark = Decimal(str(pos.mark_price))
             
-            # 🔴 실제 체결가가 있으면 우선 사용, 없으면 API 진입가 사용
             actual_price = actual_entry_prices.get(symbol)
             entry_price = actual_price if actual_price else api_entry_price
             
@@ -248,7 +281,6 @@ def update_position_state(symbol, timeout=5):
                 "price": None, "side": None,
                 "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
             }
-            # 🔴 포지션 없으면 실제 진입가도 삭제
             if symbol in actual_entry_prices:
                 del actual_entry_prices[symbol]
         return True
@@ -279,9 +311,8 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         api.create_futures_order(SETTLE, order)
         log_debug(f"✅ 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약")
         
-        time.sleep(2)  # 체결 완료 대기
+        time.sleep(2)
         
-        # 🔴 실제 체결가 조회 및 저장
         actual_price = get_actual_fill_price(symbol)
         if actual_price:
             actual_entry_prices[symbol] = actual_price
@@ -311,7 +342,6 @@ def close_position(symbol):
         api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
         log_debug(f"✅ 청산 완료 ({symbol})", "")
         
-        # 🔴 실제 진입가 삭제
         if symbol in actual_entry_prices:
             del actual_entry_prices[symbol]
             
@@ -500,8 +530,13 @@ def process_ticker_data(ticker):
         
         if not contract or not last or contract not in SYMBOL_CONFIG:
             return
-            
-        price = Decimal(str(last).replace("E", "e")).normalize()
+        
+        # 🔴 웹소켓 가격 대신 API 직접 조회로 정확한 가격 얻기
+        real_price = get_real_time_price(contract)
+        if not real_price:
+            # fallback: 웹소켓 가격 사용
+            real_price = Decimal(str(last).replace("E", "e")).normalize()
+            log_debug(f"📊 가격 소스 ({contract})", f"웹소켓 last: {real_price}")
         
         acquired = position_lock.acquire(timeout=1)
         if not acquired:
@@ -521,24 +556,30 @@ def process_ticker_data(ticker):
                 
             cfg = SYMBOL_CONFIG[contract]
             
-            # 🔴 5분 유예시간 제거 - 즉시 TP/SL 체크
+            # 🔴 상세한 TP/SL 로그
             if side == "buy":
                 sl = entry * (1 - cfg["sl_pct"])
                 tp = entry * (1 + cfg["tp_pct"])
-                if price <= sl:
-                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} <= SL:{sl} (진입가:{entry})")
+                log_debug(f"📊 TP/SL 체크 ({contract})", 
+                    f"롱 - 진입가:{entry}, 현재가:{real_price}, SL:{sl}, TP:{tp}, "
+                    f"SL차이:{((real_price/sl-1)*100):.4f}%, TP차이:{((real_price/tp-1)*100):.4f}%")
+                if real_price <= sl:
+                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{real_price} <= SL:{sl} (진입가:{entry})")
                     close_position(contract)
-                elif price >= tp:
-                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} >= TP:{tp} (진입가:{entry})")
+                elif real_price >= tp:
+                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{real_price} >= TP:{tp} (진입가:{entry})")
                     close_position(contract)
             else:  # sell
                 sl = entry * (1 + cfg["sl_pct"])
                 tp = entry * (1 - cfg["tp_pct"])
-                if price >= sl:
-                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} >= SL:{sl} (진입가:{entry})")
+                log_debug(f"📊 TP/SL 체크 ({contract})", 
+                    f"숏 - 진입가:{entry}, 현재가:{real_price}, SL:{sl}, TP:{tp}, "
+                    f"SL차이:{((real_price/sl-1)*100):.4f}%, TP차이:{((real_price/tp-1)*100):.4f}%")
+                if real_price >= sl:
+                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{real_price} >= SL:{sl} (진입가:{entry})")
                     close_position(contract)
-                elif price <= tp:
-                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} <= TP:{tp} (진입가:{entry})")
+                elif real_price <= tp:
+                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{real_price} <= TP:{tp} (진입가:{entry})")
                     close_position(contract)
         finally:
             position_lock.release()
