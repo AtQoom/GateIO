@@ -102,30 +102,40 @@ def log_debug(tag, msg, exc_info=False):
         print(traceback.format_exc())
 
 def get_account_info(force=False):
-    """총 담보금(잔고+미실현손익) 반환"""
+    """총 담보금(잔고+미실현손익) 반환 - 디버깅 강화"""
     now = time.time()
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
         acc = api.list_futures_accounts(SETTLE)
-        total_str = str(acc.total).upper().replace("E", "e")
-        total_equity = Decimal(total_str)
-        account_cache.update({"time": now, "data": total_equity})
-        log_debug("💰 계정", f"총 담보금: {total_equity.normalize()}")
-        return total_equity
+        
+        # 🔴 API 응답 전체 로깅
+        log_debug("🔍 API 응답", f"전체 계정 정보: {acc}")
+        
+        # 🔴 각 필드별 상세 로깅
+        total_str = str(acc.total) if hasattr(acc, 'total') else "0"
+        available_str = str(acc.available) if hasattr(acc, 'available') else "0"
+        unrealised_pnl_str = str(acc.unrealised_pnl) if hasattr(acc, 'unrealised_pnl') else "0"
+        
+        log_debug("💰 계정 필드별", f"total: {total_str}, available: {available_str}, unrealised_pnl: {unrealised_pnl_str}")
+        
+        # 과학적 표기법 처리
+        total_equity = Decimal(total_str.upper().replace("E", "e"))
+        available_equity = Decimal(available_str.upper().replace("E", "e"))
+        
+        # 🔴 total이 비정상적으로 작으면 available 사용
+        if total_equity < Decimal("1"):
+            log_debug("⚠️ 담보금 부족", f"total:{total_equity} < 1, available:{available_equity} 사용")
+            final_equity = available_equity
+        else:
+            final_equity = total_equity
+        
+        account_cache.update({"time": now, "data": final_equity})
+        log_debug("💰 최종 선택", f"선택된 담보금: {final_equity}")
+        return final_equity
+        
     except Exception as e:
         log_debug("❌ 계정 조회 실패", str(e), exc_info=True)
-        return Decimal("0")
-
-def get_price(symbol):
-    try:
-        ticker = api.list_futures_tickers(SETTLE, contract=symbol)
-        price_str = str(ticker[0].last).upper().replace("E", "e")
-        price = Decimal(price_str).normalize()
-        log_debug(f"💲 가격 ({symbol})", f"{price}")
-        return price
-    except Exception as e:
-        log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e), exc_info=True)
         return Decimal("0")
 
 def get_max_qty(symbol, side):
