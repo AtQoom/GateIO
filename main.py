@@ -99,7 +99,6 @@ def log_debug(tag, msg, exc_info=False):
         print(traceback.format_exc())
 
 def get_account_info(force=False):
-    """총 담보금(잔고+미실현손익) 반환 - total이 비정상적으로 작으면 available로 대체, 여전히 작으면 100 USDT 사용(테스트용)"""
     now = time.time()
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
@@ -131,7 +130,7 @@ def get_account_info(force=False):
 
     except Exception as e:
         log_debug("❌ 계정 조회 실패", str(e), exc_info=True)
-        return Decimal("100")  # 테스트용 fallback값
+        return Decimal("100")
 
 def get_price(symbol):
     try:
@@ -148,7 +147,6 @@ def get_price(symbol):
         return Decimal("0")
 
 def get_max_qty(symbol, side):
-    """수량 계산 (디버깅 강화)"""
     try:
         cfg = SYMBOL_CONFIG[symbol]
         total_equity = get_account_info(force=True)
@@ -182,6 +180,7 @@ def get_max_qty(symbol, side):
 def update_position_state(symbol, timeout=5):
     acquired = position_lock.acquire(timeout=timeout)
     if not acquired:
+        log_debug(f"⚠️ 락 획득 실패 ({symbol})", f"타임아웃 {timeout}초")
         return False
     try:
         try:
@@ -195,36 +194,41 @@ def update_position_state(symbol, timeout=5):
                 }
                 return True
             else:
+                log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
                 return False
+
+        if hasattr(pos, "margin_mode") and pos.margin_mode != "cross":
+            api.update_position_margin_mode(SETTLE, symbol, "cross")
+            log_debug(f"⚙️ 마진모드 변경 ({symbol})", f"{pos.margin_mode} → cross")
 
         size = Decimal(str(pos.size))
         if size != 0:
             entry = Decimal(str(pos.entry_price))
             mark = Decimal(str(pos.mark_price))
-            contract_size = SYMBOL_CONFIG[symbol]["contract_size"]
-            leverage = SYMBOL_CONFIG[symbol]["leverage"]
-
+            value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
+            margin = value / SYMBOL_CONFIG[symbol]["leverage"]
             position_state[symbol] = {
-                "price": entry,
-                "side": "buy" if size > 0 else "sell",
-                "size": abs(size),
-                "value": abs(size) * mark * contract_size,
-                "margin": (abs(size) * mark * contract_size) / leverage,
+                "price": entry, "side": "buy" if size > 0 else "sell",
+                "size": abs(size), "value": value, "margin": margin,
                 "mode": "cross"
             }
+            log_debug(f"📊 포지션 상태 ({symbol})", f"진입가: {entry}, 사이즈: {abs(size)}, 방향: {position_state[symbol]['side']}")
         else:
             position_state[symbol] = {
                 "price": None, "side": None,
-                "size": Decimal("0"), "value": Decimal("0"),
-                "margin": Decimal("0"), "mode": "cross"
+                "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
             }
         return True
+    except Exception as e:
+        log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e), exc_info=True)
+        return False
     finally:
         position_lock.release()
 
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
     acquired = position_lock.acquire(timeout=5)
     if not acquired:
+        log_debug(f"⚠️ 주문 락 실패 ({symbol})", "타임아웃")
         return False
     try:
         cfg = SYMBOL_CONFIG[symbol]
@@ -233,22 +237,25 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
 
         qty_dec = Decimal(str(qty)).quantize(step, rounding=ROUND_DOWN)
         if qty_dec < min_qty:
+            log_debug(f"⛔ 잘못된 수량 ({symbol})", f"{qty_dec} < 최소 {min_qty}")
             return False
 
         size = float(qty_dec) if side == "buy" else -float(qty_dec)
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
+        log_debug(f"📤 주문 시도 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약, reduce_only={reduce_only}")
         api.create_futures_order(SETTLE, order)
-        time.sleep(0.5)
+        log_debug(f"✅ 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약")
+        time.sleep(1)  # 주문 처리 대기 시간 증가
         update_position_state(symbol)
-        log_debug("📥 진입", f"{symbol} {side} {qty_dec} 계약")
         return True
     except Exception as e:
         error_msg = str(e)
+        log_debug(f"❌ 주문 실패 ({symbol})", f"{error_msg}")
         if retry > 0 and ("INVALID_PARAM" in error_msg or "POSITION_EMPTY" in error_msg):
             retry_qty = (Decimal(str(qty)) * Decimal("0.5") // step) * step
             retry_qty = max(retry_qty, min_qty)
+            log_debug(f"🔄 재시도 ({symbol})", f"{qty} → {retry_qty}")
             return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
-        log_debug("❌ 진입 실패", f"{symbol} {side} {qty} - {error_msg}")
         return False
     finally:
         position_lock.release()
@@ -256,15 +263,17 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
 def close_position(symbol):
     acquired = position_lock.acquire(timeout=5)
     if not acquired:
+        log_debug(f"⚠️ 청산 락 실패 ({symbol})", "타임아웃")
         return False
     try:
+        log_debug(f"🔄 청산 시도 ({symbol})", "size=0 주문")
         api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
-        time.sleep(0.5)
+        log_debug(f"✅ 청산 완료 ({symbol})", "")
+        time.sleep(1)  # 청산 처리 대기 시간 증가
         update_position_state(symbol)
-        log_debug("📤 청산", f"{symbol} 포지션 청산")
         return True
     except Exception as e:
-        log_debug("❌ 청산 실패", f"{symbol} - {str(e)}")
+        log_debug(f"❌ 청산 실패 ({symbol})", str(e))
         return False
     finally:
         position_lock.release()
@@ -277,49 +286,52 @@ def ping():
 def webhook():
     symbol = None
     try:
+        log_debug("🔄 웹훅 시작", "요청 수신")
+        if not request.is_json:
+            return jsonify({"error": "JSON required"}), 400
         data = request.get_json()
+        log_debug("📥 웹훅 데이터", json.dumps(data))
         raw = data.get("symbol", "").upper().replace(".P", "")
         symbol = BINANCE_TO_GATE_SYMBOL.get(raw)
         if not symbol or symbol not in SYMBOL_CONFIG:
             return jsonify({"error": "Invalid symbol"}), 400
-
+        side = data.get("side", "").lower()
         action = data.get("action", "").lower()
         reason = data.get("reason", "")
 
         if action == "exit" and reason == "reverse_signal":
             success = close_position(symbol)
+            log_debug(f"🔁 반대 신호 청산 ({symbol})", f"성공: {success}")
             return jsonify({"status": "success" if success else "error"})
 
-        side = data.get("side", "").lower()
         if side not in ["long", "short"] or action not in ["entry", "exit"]:
             return jsonify({"error": "Invalid side/action"}), 400
-
         if not update_position_state(symbol, timeout=1):
-            return jsonify({"status": "error", "message": "Position update failed"}), 500
-
-        if action == "exit":
-            success = close_position(symbol)
-            return jsonify({"status": "success" if success else "error"})
-
+            return jsonify({"status": "error", "message": "포지션 조회 실패"}), 500
         current_side = position_state.get(symbol, {}).get("side")
         desired_side = "buy" if side == "long" else "sell"
-
+        if action == "exit":
+            success = close_position(symbol)
+            log_debug(f"🔁 일반 청산 ({symbol})", f"성공: {success}")
+            return jsonify({"status": "success" if success else "error"})
         if current_side and current_side != desired_side:
+            log_debug("🔄 역포지션 처리", f"현재: {current_side} → 목표: {desired_side}")
             if not close_position(symbol):
-                return jsonify({"status": "error", "message": "Reverse position close failed"}), 500
-            time.sleep(1)
+                log_debug("❌ 역포지션 청산 실패", "")
+                return jsonify({"status": "error", "message": "역포지션 청산 실패"})
+            time.sleep(2)  # 역포지션 청산 후 대기 시간 증가
             if not update_position_state(symbol):
-                return jsonify({"status": "error", "message": "Position update failed after close"}), 500
-
+                log_debug("❌ 역포지션 후 상태 갱신 실패", "")
         qty = get_max_qty(symbol, desired_side)
+        log_debug(f"🧮 수량 계산 완료 ({symbol})", f"{qty} 계약")
         if qty <= 0:
-            return jsonify({"status": "error", "message": "Invalid quantity"}), 400
-
+            log_debug("❌ 수량 오류", f"계산된 수량: {qty}")
+            return jsonify({"status": "error", "message": "수량 계산 오류"})
         success = place_order(symbol, desired_side, qty)
+        log_debug(f"📨 최종 결과 ({symbol})", f"주문 성공: {success}")
         return jsonify({"status": "success" if success else "error", "qty": qty})
-
     except Exception as e:
-        log_debug("❌ 웹훅 전체 실패", str(e), exc_info=True)
+        log_debug(f"❌ 웹훅 전체 실패 ({symbol or 'unknown'})", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/status", methods=["GET"])
@@ -339,7 +351,7 @@ def status():
             "positions": positions
         })
     except Exception as e:
-        log_debug("❌ 상태 조회 실패", str(e), exc_info=True)
+        log_debug("❌ 상태 조회 실패", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/debug", methods=["GET"])
@@ -362,7 +374,9 @@ async def send_ping(ws):
     while True:
         try:
             await ws.ping()
-        except:
+            log_debug("📡 웹소켓 핑", "핑 전송 성공")
+        except Exception as e:
+            log_debug("❌ 핑 실패", str(e))
             break
         await asyncio.sleep(10)
 
@@ -371,43 +385,65 @@ async def price_listener():
     symbols = list(SYMBOL_CONFIG.keys())
     reconnect_delay = 5
     max_delay = 60
+    
+    log_debug("📡 웹소켓", f"시작 - URI: {uri}, 심볼: {symbols}")
+    
     while True:
         try:
-            async with websockets.connect(uri, ping_interval=30) as ws:
-                await ws.send(json.dumps({
+            log_debug("📡 웹소켓", f"연결 시도: {uri}")
+            async with websockets.connect(uri, ping_interval=30, ping_timeout=10) as ws:
+                log_debug("📡 웹소켓", f"연결 성공: {uri}")
+                
+                subscribe_msg = {
                     "time": int(time.time()),
                     "channel": "futures.tickers",
                     "event": "subscribe",
                     "payload": symbols
-                }))
-                asyncio.create_task(send_ping(ws))
+                }
+                
+                await ws.send(json.dumps(subscribe_msg))
+                log_debug("📡 웹소켓", f"구독 요청 전송: {subscribe_msg}")
+                
+                ping_task = asyncio.create_task(send_ping(ws))
                 reconnect_delay = 5
+                
                 while True:
                     try:
                         msg = await asyncio.wait_for(ws.recv(), timeout=30)
                         try:
                             data = json.loads(msg)
                         except json.JSONDecodeError:
+                            log_debug("⚠️ 웹소켓", f"JSON 파싱 실패: {msg}")
                             continue
+                            
                         if not isinstance(data, dict):
                             continue
+                            
                         if data.get("event") == "subscribe":
+                            log_debug("✅ 웹소켓 구독", f"채널: {data.get('channel')}")
                             continue
+                            
                         result = data.get("result")
                         if not result:
                             continue
+                            
                         if isinstance(result, list):
                             for item in result:
                                 if isinstance(item, dict):
                                     process_ticker_data(item)
                         elif isinstance(result, dict):
                             process_ticker_data(result)
-                    except (asyncio.TimeoutError, websockets.ConnectionClosed):
+                            
+                    except (asyncio.TimeoutError, websockets.ConnectionClosed) as e:
+                        log_debug("⚠️ 웹소켓", f"연결 끊김: {str(e)}, 재연결 시도")
+                        ping_task.cancel()
                         break
-                    except:
+                    except Exception as e:
+                        log_debug("❌ 웹소켓 메시지 처리", f"오류: {str(e)}")
                         continue
+                        
         except Exception as e:
-            log_debug("❌ 웹소켓 연결 실패", str(e), exc_info=True)
+            log_debug("❌ 웹소켓 연결 실패", f"오류: {str(e)}")
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
@@ -415,39 +451,58 @@ def process_ticker_data(ticker):
     try:
         contract = ticker.get("contract")
         last = ticker.get("last")
+        
         if not contract or not last or contract not in SYMBOL_CONFIG:
             return
+            
+        price = Decimal(str(last).replace("E", "e")).normalize()
+        
+        acquired = position_lock.acquire(timeout=1)
+        if not acquired:
+            return
+            
         try:
-            price = Decimal(str(last).replace("E", "e")).normalize()
-        except (InvalidOperation, ValueError):
-            return
-        if not update_position_state(contract, timeout=1):
-            return
-        pos = position_state.get(contract, {})
-        entry = pos.get("price")
-        if entry and pos.get("side"):
+            if not update_position_state(contract, timeout=1):
+                return
+                
+            pos = position_state.get(contract, {})
+            entry = pos.get("price")
+            size = pos.get("size", 0)
+            side = pos.get("side")
+            
+            if not entry or size <= 0 or side not in ["buy", "sell"]:
+                return
+                
             cfg = SYMBOL_CONFIG[contract]
-            side = pos["side"]
+            
+            # TP/SL 계산 및 로깅 개선
             if side == "buy":
                 sl = entry * (1 - cfg["sl_pct"])
                 tp = entry * (1 + cfg["tp_pct"])
+                log_debug(f"📊 TP/SL 체크 ({contract})", 
+                    f"롱 포지션 - 진입가:{entry}, 현재가:{price}, SL:{sl}, TP:{tp}")
                 if price <= sl:
-                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가: {price} <= SL: {sl}")
+                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} <= SL:{sl} (진입가:{entry})")
                     close_position(contract)
                 elif price >= tp:
-                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가: {price} >= TP: {tp}")
+                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} >= TP:{tp} (진입가:{entry})")
                     close_position(contract)
-            else:
+            else:  # sell
                 sl = entry * (1 + cfg["sl_pct"])
                 tp = entry * (1 - cfg["tp_pct"])
+                log_debug(f"📊 TP/SL 체크 ({contract})", 
+                    f"숏 포지션 - 진입가:{entry}, 현재가:{price}, SL:{sl}, TP:{tp}")
                 if price >= sl:
-                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가: {price} >= SL: {sl}")
+                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} >= SL:{sl} (진입가:{entry})")
                     close_position(contract)
                 elif price <= tp:
-                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가: {price} <= TP: {tp}")
+                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} <= TP:{tp} (진입가:{entry})")
                     close_position(contract)
+        finally:
+            position_lock.release()
+            
     except Exception as e:
-        log_debug("❌ 티커 처리 실패", str(e))
+        log_debug("❌ 티커 처리 실패", f"계약:{contract}, 오류:{str(e)}")
 
 def backup_position_loop():
     while True:
@@ -462,4 +517,6 @@ def backup_position_loop():
 if __name__ == "__main__":
     threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
     threading.Thread(target=backup_position_loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    port = int(os.environ.get("PORT", 8080))
+    log_debug("🚀 서버 시작", f"Railway에서 {port} 포트로 시작")
+    app.run(host="0.0.0.0", port=port)
