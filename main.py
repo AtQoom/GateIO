@@ -320,7 +320,9 @@ async def send_ping(ws):
     while True:
         try:
             await ws.ping()
-        except:
+            log_debug("📡 웹소켓 핑", "핑 전송 성공")
+        except Exception as e:
+            log_debug("❌ 핑 실패", str(e))
             break
         await asyncio.sleep(10)
 
@@ -329,28 +331,68 @@ async def price_listener():
     symbols = list(SYMBOL_CONFIG.keys())
     reconnect_delay = 5
     max_delay = 60
+    
+    log_debug("📡 웹소켓", f"시작 - URI: {uri}, 심볼: {symbols}")
+    
     while True:
         try:
-            async with websockets.connect(uri, ping_interval=30) as ws:
-                await ws.send(json.dumps({
+            log_debug("📡 웹소켓", f"연결 시도: {uri}")
+            async with websockets.connect(uri, ping_interval=30, ping_timeout=10) as ws:
+                log_debug("📡 웹소켓", f"연결 성공: {uri}")
+                
+                # 🔴 수정된 구독 메시지
+                subscribe_msg = {
                     "time": int(time.time()),
                     "channel": "futures.tickers",
-                    "event": "subscribe",
+                    "event": "subscribe", 
                     "payload": symbols
-                }))
-                asyncio.create_task(send_ping(ws))
+                }
+                
+                await ws.send(json.dumps(subscribe_msg))
+                log_debug("📡 웹소켓", f"구독 요청 전송: {subscribe_msg}")
+                
+                # 핑 태스크 시작
+                ping_task = asyncio.create_task(send_ping(ws))
                 reconnect_delay = 5
+                
                 while True:
                     try:
                         msg = await asyncio.wait_for(ws.recv(), timeout=30)
-                        data = json.loads(msg)
-                        if "result" in data:
-                            process_ticker_data(data["result"])
-                    except (asyncio.TimeoutError, websockets.ConnectionClosed):
+                        try:
+                            data = json.loads(msg)
+                            log_debug("📡 웹소켓 수신", f"메시지: {data}")
+                        except json.JSONDecodeError:
+                            log_debug("⚠️ 웹소켓", f"JSON 파싱 실패: {msg}")
+                            continue
+                            
+                        if not isinstance(data, dict):
+                            continue
+                            
+                        if data.get("event") == "subscribe":
+                            log_debug("✅ 웹소켓 구독", f"채널: {data.get('channel')}")
+                            continue
+                            
+                        result = data.get("result")
+                        if not result:
+                            continue
+                            
+                        if isinstance(result, list):
+                            for item in result:
+                                if isinstance(item, dict):
+                                    process_ticker_data(item)
+                        elif isinstance(result, dict):
+                            process_ticker_data(result)
+                            
+                    except (asyncio.TimeoutError, websockets.ConnectionClosed) as e:
+                        log_debug("⚠️ 웹소켓", f"연결 끊김: {str(e)}, 재연결 시도")
+                        ping_task.cancel()
                         break
-                    except:
+                    except Exception as e:
+                        log_debug("❌ 웹소켓 메시지 처리", f"오류: {str(e)}")
                         continue
+                        
         except Exception as e:
+            log_debug("❌ 웹소켓 연결 실패", f"오류: {str(e)}")
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
@@ -358,13 +400,20 @@ def process_ticker_data(ticker):
     try:
         contract = ticker.get("contract")
         last = ticker.get("last")
-        if not contract or contract not in SYMBOL_CONFIG:
+        
+        log_debug("📊 티커 수신", f"계약: {contract}, 가격: {last}")
+        
+        if not contract or not last or contract not in SYMBOL_CONFIG:
             return
             
         price = Decimal(str(last).replace("E", "e")).normalize()
         
-        with position_lock:
-            if not update_position_state(contract):
+        acquired = position_lock.acquire(timeout=1)
+        if not acquired:
+            return
+            
+        try:
+            if not update_position_state(contract, timeout=1):
                 return
                 
             pos = position_state.get(contract, {})
@@ -377,18 +426,34 @@ def process_ticker_data(ticker):
                 
             cfg = SYMBOL_CONFIG[contract]
             
+            # TP/SL 계산 및 로깅
             if side == "buy":
                 sl = entry * (1 - cfg["sl_pct"])
                 tp = entry * (1 + cfg["tp_pct"])
-                if price <= sl or price >= tp:
+                log_debug(f"📊 TP/SL 체크 ({contract})", 
+                    f"롱 포지션 - 현재가:{price}, 진입가:{entry}, SL:{sl}, TP:{tp}")
+                if price <= sl:
+                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} <= SL:{sl}")
+                    close_position(contract)
+                elif price >= tp:
+                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} >= TP:{tp}")
                     close_position(contract)
             else:
                 sl = entry * (1 + cfg["sl_pct"])
                 tp = entry * (1 - cfg["tp_pct"])
-                if price >= sl or price <= tp:
+                log_debug(f"📊 TP/SL 체크 ({contract})", 
+                    f"숏 포지션 - 현재가:{price}, 진입가:{entry}, SL:{sl}, TP:{tp}")
+                if price >= sl:
+                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} >= SL:{sl}")
                     close_position(contract)
-    except:
-        pass
+                elif price <= tp:
+                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} <= TP:{tp}")
+                    close_position(contract)
+        finally:
+            position_lock.release()
+            
+    except Exception as e:
+        log_debug("❌ 티커 처리 실패", f"계약:{contract}, 오류:{str(e)}")
 
 def backup_position_loop():
     while True:
