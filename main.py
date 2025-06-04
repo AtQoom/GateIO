@@ -15,7 +15,6 @@ API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
 
-# 심볼 매핑 (Binance → Gate.io)
 BINANCE_TO_GATE_SYMBOL = {
     "BTCUSDT": "BTC_USDT",
     "ETHUSDT": "ETH_USDT",
@@ -26,7 +25,6 @@ BINANCE_TO_GATE_SYMBOL = {
     "PEPEUSDT": "PEPE_USDT"
 }
 
-# 계약 사양 설정 (모든 코인 레버리지 2배)
 SYMBOL_CONFIG = {
     "BTC_USDT": {
         "min_qty": Decimal("1"),
@@ -95,7 +93,13 @@ position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
 
 def log_debug(tag, msg, exc_info=False):
-    if "포지션 없음" in msg: return
+    # 불필요한 로그 필터링
+    blocked_phrases = [
+        "포지션 없음", "티커 수신", "가격 (", "Position update failed",
+        "계약:", "마크가:", "사이즈:", "진입가:", "총 담보금:"
+    ]
+    if any(phrase in msg for phrase in blocked_phrases):
+        return
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{tag}] {msg}")
     if exc_info:
         import traceback
@@ -110,7 +114,6 @@ def get_account_info(force=False):
         total_str = str(acc.total).upper().replace("E", "e")
         total_equity = Decimal(total_str)
         account_cache.update({"time": now, "data": total_equity})
-        log_debug("💰 계정", f"총 담보금: {total_equity.normalize()}")
         return total_equity
     except Exception as e:
         log_debug("❌ 계정 조회 실패", str(e), exc_info=True)
@@ -121,7 +124,6 @@ def get_price(symbol):
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
         price_str = str(ticker[0].last).upper().replace("E", "e")
         price = Decimal(price_str).normalize()
-        log_debug(f"💲 가격 ({symbol})", f"{price}")
         return price
     except Exception as e:
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e), exc_info=True)
@@ -139,7 +141,6 @@ def get_max_qty(symbol, side):
         position_value = total_equity * 2
         contract_size = cfg["contract_size"]
         raw_qty = (position_value / (price * contract_size)).quantize(Decimal('1e-8'), rounding=ROUND_DOWN)
-        
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         qty = max(qty, cfg["min_qty"])
         return float(qty)
@@ -208,6 +209,7 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         api.create_futures_order(SETTLE, order)
         time.sleep(0.5)
         update_position_state(symbol)
+        log_debug("📥 진입", f"{symbol} {side} {qty_dec} 계약")
         return True
     except Exception as e:
         error_msg = str(e)
@@ -215,6 +217,7 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
             retry_qty = (Decimal(str(qty)) * Decimal("0.5") // step) * step
             retry_qty = max(retry_qty, min_qty)
             return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
+        log_debug("❌ 진입 실패", f"{symbol} {side} {qty} - {error_msg}")
         return False
     finally:
         position_lock.release()
@@ -227,8 +230,10 @@ def close_position(symbol):
         api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
         time.sleep(0.5)
         update_position_state(symbol)
+        log_debug("📤 청산", f"{symbol} 포지션 청산")
         return True
     except Exception as e:
+        log_debug("❌ 청산 실패", f"{symbol} - {str(e)}")
         return False
     finally:
         position_lock.release()
@@ -283,6 +288,7 @@ def webhook():
         return jsonify({"status": "success" if success else "error", "qty": qty})
         
     except Exception as e:
+        log_debug("❌ 웹훅 전체 실패", str(e), exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/status", methods=["GET"])
@@ -302,6 +308,7 @@ def status():
             "positions": positions
         })
     except Exception as e:
+        log_debug("❌ 상태 조회 실패", str(e), exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/debug", methods=["GET"])
@@ -320,9 +327,7 @@ async def send_ping(ws):
     while True:
         try:
             await ws.ping()
-            log_debug("📡 웹소켓 핑", "핑 전송 성공")
-        except Exception as e:
-            log_debug("❌ 핑 실패", str(e))
+        except:
             break
         await asyncio.sleep(10)
 
@@ -331,68 +336,29 @@ async def price_listener():
     symbols = list(SYMBOL_CONFIG.keys())
     reconnect_delay = 5
     max_delay = 60
-    
-    log_debug("📡 웹소켓", f"시작 - URI: {uri}, 심볼: {symbols}")
-    
     while True:
         try:
-            log_debug("📡 웹소켓", f"연결 시도: {uri}")
-            async with websockets.connect(uri, ping_interval=30, ping_timeout=10) as ws:
-                log_debug("📡 웹소켓", f"연결 성공: {uri}")
-                
-                # 🔴 수정된 구독 메시지
-                subscribe_msg = {
+            async with websockets.connect(uri, ping_interval=30) as ws:
+                await ws.send(json.dumps({
                     "time": int(time.time()),
                     "channel": "futures.tickers",
-                    "event": "subscribe", 
+                    "event": "subscribe",
                     "payload": symbols
-                }
-                
-                await ws.send(json.dumps(subscribe_msg))
-                log_debug("📡 웹소켓", f"구독 요청 전송: {subscribe_msg}")
-                
-                # 핑 태스크 시작
-                ping_task = asyncio.create_task(send_ping(ws))
+                }))
+                asyncio.create_task(send_ping(ws))
                 reconnect_delay = 5
-                
                 while True:
                     try:
                         msg = await asyncio.wait_for(ws.recv(), timeout=30)
-                        try:
-                            data = json.loads(msg)
-                            log_debug("📡 웹소켓 수신", f"메시지: {data}")
-                        except json.JSONDecodeError:
-                            log_debug("⚠️ 웹소켓", f"JSON 파싱 실패: {msg}")
-                            continue
-                            
-                        if not isinstance(data, dict):
-                            continue
-                            
-                        if data.get("event") == "subscribe":
-                            log_debug("✅ 웹소켓 구독", f"채널: {data.get('channel')}")
-                            continue
-                            
-                        result = data.get("result")
-                        if not result:
-                            continue
-                            
-                        if isinstance(result, list):
-                            for item in result:
-                                if isinstance(item, dict):
-                                    process_ticker_data(item)
-                        elif isinstance(result, dict):
-                            process_ticker_data(result)
-                            
-                    except (asyncio.TimeoutError, websockets.ConnectionClosed) as e:
-                        log_debug("⚠️ 웹소켓", f"연결 끊김: {str(e)}, 재연결 시도")
-                        ping_task.cancel()
+                        data = json.loads(msg)
+                        if "result" in data:
+                            process_ticker_data(data["result"])
+                    except (asyncio.TimeoutError, websockets.ConnectionClosed):
                         break
-                    except Exception as e:
-                        log_debug("❌ 웹소켓 메시지 처리", f"오류: {str(e)}")
+                    except:
                         continue
-                        
         except Exception as e:
-            log_debug("❌ 웹소켓 연결 실패", f"오류: {str(e)}")
+            log_debug("❌ 웹소켓 연결 실패", str(e), exc_info=True)
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
@@ -400,38 +366,22 @@ def process_ticker_data(ticker):
     try:
         contract = ticker.get("contract")
         last = ticker.get("last")
-        
-        log_debug("📊 티커 수신", f"계약: {contract}, 가격: {last}")
-        
-        if not contract or not last or contract not in SYMBOL_CONFIG:
+        if not contract or contract not in SYMBOL_CONFIG:
             return
-            
         price = Decimal(str(last).replace("E", "e")).normalize()
-        
-        acquired = position_lock.acquire(timeout=1)
-        if not acquired:
-            return
-            
-        try:
-            if not update_position_state(contract, timeout=1):
+        with position_lock:
+            if not update_position_state(contract):
                 return
-                
             pos = position_state.get(contract, {})
             entry = pos.get("price")
             size = pos.get("size", 0)
             side = pos.get("side")
-            
             if not entry or size <= 0 or side not in ["buy", "sell"]:
                 return
-                
             cfg = SYMBOL_CONFIG[contract]
-            
-            # TP/SL 계산 및 로깅
             if side == "buy":
                 sl = entry * (1 - cfg["sl_pct"])
                 tp = entry * (1 + cfg["tp_pct"])
-                log_debug(f"📊 TP/SL 체크 ({contract})", 
-                    f"롱 포지션 - 현재가:{price}, 진입가:{entry}, SL:{sl}, TP:{tp}")
                 if price <= sl:
                     log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} <= SL:{sl}")
                     close_position(contract)
@@ -441,19 +391,14 @@ def process_ticker_data(ticker):
             else:
                 sl = entry * (1 + cfg["sl_pct"])
                 tp = entry * (1 - cfg["tp_pct"])
-                log_debug(f"📊 TP/SL 체크 ({contract})", 
-                    f"숏 포지션 - 현재가:{price}, 진입가:{entry}, SL:{sl}, TP:{tp}")
                 if price >= sl:
                     log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} >= SL:{sl}")
                     close_position(contract)
                 elif price <= tp:
                     log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} <= TP:{tp}")
                     close_position(contract)
-        finally:
-            position_lock.release()
-            
     except Exception as e:
-        log_debug("❌ 티커 처리 실패", f"계약:{contract}, 오류:{str(e)}")
+        log_debug("❌ 티커 처리 실패", str(e), exc_info=True)
 
 def backup_position_loop():
     while True:
