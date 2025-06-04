@@ -88,54 +88,64 @@ def log_debug(tag, msg):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{tag}] {msg}")
 
 def get_account_info(force=False):
-    """총 담보금(Total Equity, 잔고+미실현손익) 반환"""
+    """총 담보금(잔고 + 미실현손익) 반환"""
     now = time.time()
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
         acc = api.list_futures_accounts(SETTLE)
-        total_equity = Decimal(str(acc.total))  # 총 담보금
+        # 과학적 표기법 문자열 처리 (예: "1E-8" → 0.00000001)
+        total_str = str(acc.total).upper().replace("E", "e")
+        total_equity = Decimal(total_str)
         account_cache.update({"time": now, "data": total_equity})
-        log_debug("💰 계정", f"총 담보금: {total_equity}")
+        log_debug("💰 계정", f"총 담보금: {total_equity.normalize()}")
         return total_equity
     except Exception as e:
-        log_debug("❌ 계정 조회 실패", str(e))
+        log_debug("❌ 계정 조회 실패", f"오류: {str(e)}\n응답: {acc}", exc_info=True)
         return Decimal("0")
 
 def get_price(symbol):
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
-        price = Decimal(str(ticker[0].last))
+        if not ticker or len(ticker) == 0:
+            log_debug(f"❌ 티커 데이터 없음 ({symbol})", "")
+            return Decimal("0")
+        price_str = str(ticker[0].last)
+        # 과학적 표기법 처리 (예: "1.5E-5" → 0.000015)
+        price = Decimal(price_str).normalize()
         log_debug(f"💲 가격 ({symbol})", f"{price}")
         return price
     except Exception as e:
-        log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
+        log_debug(f"❌ 가격 조회 실패 ({symbol})", f"오류: {str(e)}\n티커: {ticker}", exc_info=True)
         return Decimal("0")
 
 def get_max_qty(symbol, side):
-    """BTC/ETH: 총 담보금 × 3배, 나머지: ×2배"""
+    """BTC/ETH: 총 담보금 ×3, 나머지 ×2"""
     try:
         cfg = SYMBOL_CONFIG[symbol]
         total_equity = get_account_info(force=True)
         price = get_price(symbol)
-        leverage = cfg["leverage"]  # BTC/ETH=3, 나머지=2
+        leverage = cfg["leverage"]
+        contract_size = cfg["contract_size"]
 
-        if price <= 0 or total_equity <= 0:
-            log_debug(f"⚠️ 계산 불가 ({symbol})", f"가격:{price}, 총담보금:{total_equity}")
+        # 유효성 검사 강화
+        if total_equity <= 0 or price <= 0 or contract_size <= 0:
+            log_debug(f"⚠️ 계산 불가 ({symbol})", 
+                f"담보금:{total_equity}, 가격:{price}, 계약단위:{contract_size}")
             return float(cfg["min_qty"])
 
+        # 수량 계산 (정밀도 보정)
         position_value = total_equity * leverage
-        contract_size = cfg["contract_size"]
-        raw_qty = position_value / (price * contract_size)
+        raw_qty = (position_value / (price * contract_size)).quantize(Decimal('1e-8'), rounding=ROUND_DOWN)
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         qty = max(qty, cfg["min_qty"])
 
         log_debug(f"📊 수량 계산 ({symbol})", 
-            f"총담보금:{total_equity}, 레버리지:{leverage}, 가격:{price}, "
-            f"계약단위:{contract_size}, 포지션가치:{position_value}, 최종수량:{qty}")
+            f"담보금:{total_equity}, 레버리지:{leverage}, 가격:{price}, "
+            f"계약단위:{contract_size}, 포지션가치:{position_value}, 원시수량:{raw_qty}, 최종수량:{qty}")
         return float(qty)
     except Exception as e:
-        log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
+        log_debug(f"❌ 수량 계산 실패 ({symbol})", f"오류: {str(e)}", exc_info=True)
         return float(cfg["min_qty"])
 
 def update_position_state(symbol, timeout=5):
