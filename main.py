@@ -15,15 +15,18 @@ API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
 
+# 🔴 PEPEUSDT 추가
 BINANCE_TO_GATE_SYMBOL = {
     "BTCUSDT": "BTC_USDT",
     "ETHUSDT": "ETH_USDT",
     "ADAUSDT": "ADA_USDT",
     "SUIUSDT": "SUI_USDT",
     "LINKUSDT": "LINK_USDT",
-    "SOLUSDT": "SOL_USDT"
+    "SOLUSDT": "SOL_USDT",
+    "PEPEUSDT": "PEPE_USDT"  # Gate.io 실제 심볼 확인 필요
 }
 
+# 🔴 모든 코인 레버리지 2배 통일 + PEPE 추가
 SYMBOL_CONFIG = {
     "BTC_USDT": {
         "min_qty": Decimal("1"),
@@ -31,7 +34,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("0.0001"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 3
+        "leverage": 2  # 🔴 3→2로 변경
     },
     "ETH_USDT": {
         "min_qty": Decimal("1"),
@@ -39,7 +42,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("0.001"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 3
+        "leverage": 2  # 🔴 3→2로 변경
     },
     "ADA_USDT": {
         "min_qty": Decimal("1"),
@@ -72,6 +75,14 @@ SYMBOL_CONFIG = {
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
         "leverage": 2
+    },
+    "PEPE_USDT": {  # 🔴 PEPE 추가 (계약 단위 확인 필수)
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("10000"),  # 예시 값. Gate.io 실제 값으로 변경
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "leverage": 2
     }
 }
 
@@ -91,77 +102,56 @@ def log_debug(tag, msg, exc_info=False):
         print(traceback.format_exc())
 
 def get_account_info(force=False):
-    """총 담보금(잔고+미실현손익) 또는 가용잔고 반환 (API 문제시 자동 대체)"""
+    """총 담보금(잔고+미실현손익) 반환"""
     now = time.time()
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
         acc = api.list_futures_accounts(SETTLE)
-        log_debug("🔍 API 전체 응답", f"계정 정보: {acc}")
-        total_str = str(acc.total) if hasattr(acc, 'total') else "0"
-        available_str = str(acc.available) if hasattr(acc, 'available') else "0"
-        unrealised_pnl_str = str(acc.unrealised_pnl) if hasattr(acc, 'unrealised_pnl') else "0"
-        log_debug("💰 계정 상세", f"total: {total_str}, available: {available_str}, unrealised_pnl: {unrealised_pnl_str}")
-
-        # 과학적 표기법 처리
-        total_equity = Decimal(total_str.replace("E", "e"))
-        available_equity = Decimal(available_str.replace("E", "e"))
-        # 1 USDT 미만이거나 total이 0에 가까우면 available 사용
-        final_equity = available_equity if total_equity < Decimal("1") else total_equity
-
-        log_debug("💰 최종 선택", f"total:{total_equity}, available:{available_equity}, 선택:{final_equity}")
-        account_cache.update({"time": now, "data": final_equity})
-        return final_equity
-
+        total_str = str(acc.total).upper().replace("E", "e")
+        total_equity = Decimal(total_str)
+        account_cache.update({"time": now, "data": total_equity})
+        log_debug("💰 계정", f"총 담보금: {total_equity.normalize()}")
+        return total_equity
     except Exception as e:
-        log_debug("❌ 계정 조회 실패", f"오류: {str(e)}", exc_info=True)
+        log_debug("❌ 계정 조회 실패", str(e), exc_info=True)
         return Decimal("0")
 
 def get_price(symbol):
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
-        if not ticker or len(ticker) == 0:
-            log_debug(f"❌ 티커 데이터 없음 ({symbol})", "")
-            return Decimal("0")
-        price_str = str(ticker[0].last)
-        price = Decimal(price_str.replace("E", "e")).normalize()
+        price_str = str(ticker[0].last).upper().replace("E", "e")
+        price = Decimal(price_str).normalize()
         log_debug(f"💲 가격 ({symbol})", f"{price}")
         return price
     except Exception as e:
-        log_debug(f"❌ 가격 조회 실패 ({symbol})", f"오류: {str(e)}", exc_info=True)
+        log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e), exc_info=True)
         return Decimal("0")
 
 def get_max_qty(symbol, side):
-    """BTC/ETH: 총 담보금 ×3, 나머지 ×2 (최소 1 USDT 이상만 진입)"""
+    """전체 잔고 × 2배 계산 (모든 코인 동일)"""
     try:
         cfg = SYMBOL_CONFIG[symbol]
         total_equity = get_account_info(force=True)
         price = get_price(symbol)
-        leverage = cfg["leverage"]
-        contract_size = cfg["contract_size"]
-
-        if total_equity < Decimal("1") or price <= 0 or contract_size <= 0:
-            log_debug(f"⚠️ 계산 불가 ({symbol})", 
-                f"담보금:{total_equity}, 가격:{price}, 계약단위:{contract_size}")
+        
+        if total_equity <= 0 or price <= 0:
+            log_debug(f"⚠️ 계산 불가 ({symbol})", f"담보금:{total_equity}, 가격:{price}")
             return float(cfg["min_qty"])
 
-        position_value = total_equity * leverage
-        log_debug(f"📊 계산 1단계 ({symbol})", f"담보금:{total_equity} × 레버리지:{leverage} = 포지션가치:{position_value}")
-
-        price_x_contract = price * contract_size
-        log_debug(f"📊 계산 2단계 ({symbol})", f"가격:{price} × 계약단위:{contract_size} = {price_x_contract}")
-
-        raw_qty = (position_value / price_x_contract).quantize(Decimal('1e-8'), rounding=ROUND_DOWN)
-        log_debug(f"📊 계산 3단계 ({symbol})", f"포지션가치:{position_value} ÷ {price_x_contract} = 원시수량:{raw_qty}")
-
+        # 모든 코인 2배 적용
+        position_value = total_equity * 2  # 🔴 leverage=2 고정
+        contract_size = cfg["contract_size"]
+        raw_qty = (position_value / (price * contract_size)).quantize(Decimal('1e-8'), rounding=ROUND_DOWN)
+        
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         qty = max(qty, cfg["min_qty"])
 
-        log_debug(f"📊 최종 결과 ({symbol})", f"원시수량:{raw_qty} → 정규화:{qty}")
+        log_debug(f"📊 수량 계산 ({symbol})", 
+            f"담보금:{total_equity}, 가격:{price}, 계약단위:{contract_size}, 최종수량:{qty}")
         return float(qty)
-
     except Exception as e:
-        log_debug(f"❌ 수량 계산 실패 ({symbol})", f"오류: {str(e)}", exc_info=True)
+        log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e), exc_info=True)
         return float(cfg["min_qty"])
 
 def update_position_state(symbol, timeout=5):
