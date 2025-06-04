@@ -91,6 +91,7 @@ api = FuturesApi(client)
 position_state = {}
 position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
+actual_entry_prices = {}  # 🔴 실제 체결가 추적
 
 def log_debug(tag, msg, exc_info=False):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{tag}] {msg}")
@@ -177,6 +178,24 @@ def get_max_qty(symbol, side):
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e), exc_info=True)
         return float(cfg["min_qty"])
 
+def get_actual_fill_price(symbol):
+    """🔴 최근 체결 내역에서 실제 진입가 조회"""
+    try:
+        # 최근 거래 내역 조회
+        trades = api.list_my_trades(SETTLE, contract=symbol, limit=10)
+        if not trades:
+            return None
+            
+        # 가장 최근 거래의 체결가 반환
+        latest_trade = trades[0]
+        fill_price = Decimal(str(latest_trade.price))
+        log_debug(f"🔍 실제 체결가 ({symbol})", f"체결가: {fill_price}")
+        return fill_price
+        
+    except Exception as e:
+        log_debug(f"❌ 체결가 조회 실패 ({symbol})", str(e))
+        return None
+
 def update_position_state(symbol, timeout=5):
     acquired = position_lock.acquire(timeout=timeout)
     if not acquired:
@@ -192,6 +211,9 @@ def update_position_state(symbol, timeout=5):
                     "size": Decimal("0"), "value": Decimal("0"),
                     "margin": Decimal("0"), "mode": "cross"
                 }
+                # 🔴 포지션 없으면 실제 진입가도 삭제
+                if symbol in actual_entry_prices:
+                    del actual_entry_prices[symbol]
                 return True
             else:
                 log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
@@ -203,21 +225,32 @@ def update_position_state(symbol, timeout=5):
 
         size = Decimal(str(pos.size))
         if size != 0:
-            entry = Decimal(str(pos.entry_price))
+            api_entry_price = Decimal(str(pos.entry_price))
             mark = Decimal(str(pos.mark_price))
+            
+            # 🔴 실제 체결가가 있으면 우선 사용, 없으면 API 진입가 사용
+            actual_price = actual_entry_prices.get(symbol)
+            entry_price = actual_price if actual_price else api_entry_price
+            
             value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
             margin = value / SYMBOL_CONFIG[symbol]["leverage"]
             position_state[symbol] = {
-                "price": entry, "side": "buy" if size > 0 else "sell",
+                "price": entry_price, "side": "buy" if size > 0 else "sell",
                 "size": abs(size), "value": value, "margin": margin,
                 "mode": "cross"
             }
-            log_debug(f"📊 포지션 상태 ({symbol})", f"진입가: {entry}, 사이즈: {abs(size)}, 방향: {position_state[symbol]['side']}")
+            
+            log_debug(f"📊 포지션 상태 ({symbol})", 
+                f"API진입가: {api_entry_price}, 실제진입가: {actual_price}, 사용진입가: {entry_price}, "
+                f"사이즈: {abs(size)}, 방향: {position_state[symbol]['side']}")
         else:
             position_state[symbol] = {
                 "price": None, "side": None,
                 "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
             }
+            # 🔴 포지션 없으면 실제 진입가도 삭제
+            if symbol in actual_entry_prices:
+                del actual_entry_prices[symbol]
         return True
     except Exception as e:
         log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e), exc_info=True)
@@ -245,7 +278,15 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         log_debug(f"📤 주문 시도 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약, reduce_only={reduce_only}")
         api.create_futures_order(SETTLE, order)
         log_debug(f"✅ 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약")
-        time.sleep(1)  # 주문 처리 대기 시간 증가
+        
+        time.sleep(2)  # 체결 완료 대기
+        
+        # 🔴 실제 체결가 조회 및 저장
+        actual_price = get_actual_fill_price(symbol)
+        if actual_price:
+            actual_entry_prices[symbol] = actual_price
+            log_debug(f"💾 실제 진입가 저장 ({symbol})", f"체결가: {actual_price}")
+        
         update_position_state(symbol)
         return True
     except Exception as e:
@@ -269,7 +310,12 @@ def close_position(symbol):
         log_debug(f"🔄 청산 시도 ({symbol})", "size=0 주문")
         api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
         log_debug(f"✅ 청산 완료 ({symbol})", "")
-        time.sleep(1)  # 청산 처리 대기 시간 증가
+        
+        # 🔴 실제 진입가 삭제
+        if symbol in actual_entry_prices:
+            del actual_entry_prices[symbol]
+            
+        time.sleep(1)
         update_position_state(symbol)
         return True
     except Exception as e:
@@ -319,7 +365,7 @@ def webhook():
             if not close_position(symbol):
                 log_debug("❌ 역포지션 청산 실패", "")
                 return jsonify({"status": "error", "message": "역포지션 청산 실패"})
-            time.sleep(2)  # 역포지션 청산 후 대기 시간 증가
+            time.sleep(3)
             if not update_position_state(symbol):
                 log_debug("❌ 역포지션 후 상태 갱신 실패", "")
         qty = get_max_qty(symbol, desired_side)
@@ -348,7 +394,8 @@ def status():
             "status": "running",
             "timestamp": datetime.now().isoformat(),
             "equity": float(equity),
-            "positions": positions
+            "positions": positions,
+            "actual_entry_prices": {k: float(v) for k, v in actual_entry_prices.items()}
         })
     except Exception as e:
         log_debug("❌ 상태 조회 실패", str(e))
@@ -378,7 +425,7 @@ async def send_ping(ws):
         except Exception as e:
             log_debug("❌ 핑 실패", str(e))
             break
-        await asyncio.sleep(10)
+        await asyncio.sleep(30)
 
 async def price_listener():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
@@ -391,7 +438,7 @@ async def price_listener():
     while True:
         try:
             log_debug("📡 웹소켓", f"연결 시도: {uri}")
-            async with websockets.connect(uri, ping_interval=30, ping_timeout=10) as ws:
+            async with websockets.connect(uri, ping_interval=30, ping_timeout=15) as ws:
                 log_debug("📡 웹소켓", f"연결 성공: {uri}")
                 
                 subscribe_msg = {
@@ -409,11 +456,10 @@ async def price_listener():
                 
                 while True:
                     try:
-                        msg = await asyncio.wait_for(ws.recv(), timeout=30)
+                        msg = await asyncio.wait_for(ws.recv(), timeout=45)
                         try:
                             data = json.loads(msg)
                         except json.JSONDecodeError:
-                            log_debug("⚠️ 웹소켓", f"JSON 파싱 실패: {msg}")
                             continue
                             
                         if not isinstance(data, dict):
@@ -475,12 +521,10 @@ def process_ticker_data(ticker):
                 
             cfg = SYMBOL_CONFIG[contract]
             
-            # TP/SL 계산 및 로깅 개선
+            # 🔴 5분 유예시간 제거 - 즉시 TP/SL 체크
             if side == "buy":
                 sl = entry * (1 - cfg["sl_pct"])
                 tp = entry * (1 + cfg["tp_pct"])
-                log_debug(f"📊 TP/SL 체크 ({contract})", 
-                    f"롱 포지션 - 진입가:{entry}, 현재가:{price}, SL:{sl}, TP:{tp}")
                 if price <= sl:
                     log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} <= SL:{sl} (진입가:{entry})")
                     close_position(contract)
@@ -490,8 +534,6 @@ def process_ticker_data(ticker):
             else:  # sell
                 sl = entry * (1 + cfg["sl_pct"])
                 tp = entry * (1 - cfg["tp_pct"])
-                log_debug(f"📊 TP/SL 체크 ({contract})", 
-                    f"숏 포지션 - 진입가:{entry}, 현재가:{price}, SL:{sl}, TP:{tp}")
                 if price >= sl:
                     log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} >= SL:{sl} (진입가:{entry})")
                     close_position(contract)
