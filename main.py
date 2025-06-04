@@ -21,7 +21,7 @@ BINANCE_TO_GATE_SYMBOL = {
     "ADAUSDT": "ADA_USDT",
     "SUIUSDT": "SUI_USDT",
     "LINKUSDT": "LINK_USDT",
-    "SOLUSDT": "SOL_USDT"  # 🔴 SOL 추가
+    "SOLUSDT": "SOL_USDT"
 }
 
 SYMBOL_CONFIG = {
@@ -31,7 +31,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("0.0001"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 3  # 🔴 3배
+        "leverage": 3  # 3배
     },
     "ETH_USDT": {
         "min_qty": Decimal("1"),
@@ -39,7 +39,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("0.001"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 3  # 🔴 3배
+        "leverage": 3  # 3배
     },
     "ADA_USDT": {
         "min_qty": Decimal("1"),
@@ -47,7 +47,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("10"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 2  # 🔴 2배
+        "leverage": 2  # 2배
     },
     "SUI_USDT": {
         "min_qty": Decimal("1"),
@@ -55,7 +55,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("1"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 2  # 🔴 2배
+        "leverage": 2  # 2배
     },
     "LINK_USDT": {
         "min_qty": Decimal("1"),
@@ -63,15 +63,15 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("1"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 2  # 🔴 2배
+        "leverage": 2  # 2배
     },
-    "SOL_USDT": {  # 🔴 SOL 설정 추가
+    "SOL_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("0.1"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 2  # 🔴 2배
+        "leverage": 2  # 2배
     }
 }
 
@@ -88,12 +88,13 @@ def log_debug(tag, msg):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{tag}] {msg}")
 
 def get_account_info(force=False):
+    """총 담보금(Total Equity, 잔고+미실현손익) 반환"""
     now = time.time()
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
         acc = api.list_futures_accounts(SETTLE)
-        total_equity = Decimal(str(acc.total))
+        total_equity = Decimal(str(acc.total))  # 총 담보금
         account_cache.update({"time": now, "data": total_equity})
         log_debug("💰 계정", f"총 담보금: {total_equity}")
         return total_equity
@@ -112,24 +113,26 @@ def get_price(symbol):
         return Decimal("0")
 
 def get_max_qty(symbol, side):
+    """BTC/ETH: 총 담보금 × 3배, 나머지: ×2배"""
     try:
         cfg = SYMBOL_CONFIG[symbol]
         total_equity = get_account_info(force=True)
         price = get_price(symbol)
-        leverage = cfg["leverage"]  # 🔴 심볼별 레버리지 적용
-        
+        leverage = cfg["leverage"]  # BTC/ETH=3, 나머지=2
+
         if price <= 0 or total_equity <= 0:
+            log_debug(f"⚠️ 계산 불가 ({symbol})", f"가격:{price}, 총담보금:{total_equity}")
             return float(cfg["min_qty"])
 
         position_value = total_equity * leverage
         contract_size = cfg["contract_size"]
         raw_qty = position_value / (price * contract_size)
-        
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         qty = max(qty, cfg["min_qty"])
 
         log_debug(f"📊 수량 계산 ({symbol})", 
-            f"담보금:{total_equity}, 레버리지:{leverage}, 가격:{price}, 계약단위:{contract_size}, 최종수량:{qty}")
+            f"총담보금:{total_equity}, 레버리지:{leverage}, 가격:{price}, "
+            f"계약단위:{contract_size}, 포지션가치:{position_value}, 최종수량:{qty}")
         return float(qty)
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e))
@@ -366,7 +369,7 @@ def process_ticker_data(ticker):
         if entry and pos.get("side"):
             cfg = SYMBOL_CONFIG[contract]
             side = pos["side"]
-            # TP/SL 계산 (Predict 전략 기준)
+            # TP/SL 계산
             if side == "buy":
                 sl = entry * (1 - cfg["sl_pct"])
                 tp = entry * (1 + cfg["tp_pct"])
