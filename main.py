@@ -23,7 +23,7 @@ BINANCE_TO_GATE_SYMBOL = {
     "SUIUSDT": "SUI_USDT",
     "LINKUSDT": "LINK_USDT",
     "SOLUSDT": "SOL_USDT",
-    "PEPEUSDT": "PEPE_USDT"  # Gate.io 실제 심볼 확인 필요
+    "PEPEUSDT": "PEPE_USDT"
 }
 
 # 🔴 모든 코인 레버리지 2배 통일 + PEPE 추가
@@ -34,7 +34,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("0.0001"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 2  # 🔴 3→2로 변경
+        "leverage": 2
     },
     "ETH_USDT": {
         "min_qty": Decimal("1"),
@@ -42,7 +42,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("0.001"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 2  # 🔴 3→2로 변경
+        "leverage": 2
     },
     "ADA_USDT": {
         "min_qty": Decimal("1"),
@@ -76,10 +76,10 @@ SYMBOL_CONFIG = {
         "tp_pct": Decimal("0.006"),
         "leverage": 2
     },
-    "PEPE_USDT": {  # 🔴 PEPE 추가 (계약 단위 확인 필수)
+    "PEPE_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("10000"),  # 예시 값. Gate.io 실제 값으로 변경
+        "contract_size": Decimal("10000"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
         "leverage": 2
@@ -140,7 +140,7 @@ def get_max_qty(symbol, side):
             return float(cfg["min_qty"])
 
         # 모든 코인 2배 적용
-        position_value = total_equity * 2  # 🔴 leverage=2 고정
+        position_value = total_equity * 2
         contract_size = cfg["contract_size"]
         raw_qty = (position_value / (price * contract_size)).quantize(Decimal('1e-8'), rounding=ROUND_DOWN)
         
@@ -155,15 +155,31 @@ def get_max_qty(symbol, side):
         return float(cfg["min_qty"])
 
 def update_position_state(symbol, timeout=5):
+    """🔴 POSITION_NOT_FOUND 오류 수정"""
     acquired = position_lock.acquire(timeout=timeout)
     if not acquired:
         log_debug(f"⚠️ 락 획득 실패 ({symbol})", f"타임아웃 {timeout}초")
         return False
     try:
-        pos = api.get_position(SETTLE, symbol)
+        try:
+            pos = api.get_position(SETTLE, symbol)
+        except Exception as e:
+            # 🔴 POSITION_NOT_FOUND는 정상 처리 (포지션 없음)
+            if "POSITION_NOT_FOUND" in str(e):
+                position_state[symbol] = {
+                    "price": None, "side": None,
+                    "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
+                }
+                return True  # 정상 처리
+            else:
+                log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
+                return False
+        
+        # 포지션이 존재하는 경우 처리
         if hasattr(pos, "margin_mode") and pos.margin_mode != "cross":
             api.update_position_margin_mode(SETTLE, symbol, "cross")
             log_debug(f"⚙️ 마진모드 변경 ({symbol})", f"{pos.margin_mode} → cross")
+        
         size = Decimal(str(pos.size))
         if size != 0:
             entry = Decimal(str(pos.entry_price))
@@ -183,7 +199,7 @@ def update_position_state(symbol, timeout=5):
             }
         return True
     except Exception as e:
-        log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e), exc_info=True)
+        log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
         return False
     finally:
         position_lock.release()
@@ -213,7 +229,7 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         return True
     except Exception as e:
         error_msg = str(e)
-        log_debug(f"❌ 주문 실패 ({symbol})", f"{error_msg}", exc_info=True)
+        log_debug(f"❌ 주문 실패 ({symbol})", f"{error_msg}")
         if retry > 0 and ("INVALID_PARAM" in error_msg or "POSITION_EMPTY" in error_msg):
             retry_qty = (Decimal(str(qty)) * Decimal("0.5") // step) * step
             retry_qty = max(retry_qty, min_qty)
@@ -236,7 +252,7 @@ def close_position(symbol):
         update_position_state(symbol)
         return True
     except Exception as e:
-        log_debug(f"❌ 청산 실패 ({symbol})", str(e), exc_info=True)
+        log_debug(f"❌ 청산 실패 ({symbol})", str(e))
         return False
     finally:
         position_lock.release()
@@ -260,7 +276,7 @@ def webhook():
             return jsonify({"error": "Invalid symbol"}), 400
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
-        reason = data.get("reason", "")  # 🔴 'reverse_signal' 확인
+        reason = data.get("reason", "")
 
         # 🔴 반대 신호 청산 처리
         if action == "exit" and reason == "reverse_signal":
@@ -316,7 +332,7 @@ def status():
             "positions": positions
         })
     except Exception as e:
-        log_debug("❌ 상태 조회 실패", str(e), exc_info=True)
+        log_debug("❌ 상태 조회 실패", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/debug", methods=["GET"])
@@ -336,7 +352,7 @@ async def send_ping(ws):
         try:
             await ws.ping()
         except Exception as e:
-            log_debug("❌ 핑 실패", str(e), exc_info=True)
+            log_debug("❌ 핑 실패", str(e))
             break
         await asyncio.sleep(10)
 
@@ -382,10 +398,10 @@ async def price_listener():
                         log_debug("⚠️ 웹소켓", "연결 끊김, 재연결 시도")
                         break
                     except Exception as e:
-                        log_debug("❌ 웹소켓 메시지 처리 실패", str(e), exc_info=True)
+                        log_debug("❌ 웹소켓 메시지 처리 실패", str(e))
                         continue
         except Exception as e:
-            log_debug("❌ 웹소켓 연결 실패", str(e), exc_info=True)
+            log_debug("❌ 웹소켓 연결 실패", str(e))
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
@@ -426,7 +442,7 @@ def process_ticker_data(ticker):
                     log_debug(f"🎯 TP 트리거 ({contract})", f"현재가: {price} <= TP: {tp}")
                     close_position(contract)
     except Exception as e:
-        log_debug("❌ 티커 처리 실패", str(e), exc_info=True)
+        log_debug("❌ 티커 처리 실패", str(e))
 
 def backup_position_loop():
     while True:
@@ -435,7 +451,7 @@ def backup_position_loop():
                 update_position_state(sym, timeout=1)
             time.sleep(300)
         except Exception as e:
-            log_debug("❌ 백업 루프 오류", str(e), exc_info=True)
+            log_debug("❌ 백업 루프 오류", str(e))
             time.sleep(300)
 
 if __name__ == "__main__":
