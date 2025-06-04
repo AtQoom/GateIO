@@ -31,7 +31,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("0.0001"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 3  # 3배
+        "leverage": 3
     },
     "ETH_USDT": {
         "min_qty": Decimal("1"),
@@ -39,7 +39,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("0.001"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 3  # 3배
+        "leverage": 3
     },
     "ADA_USDT": {
         "min_qty": Decimal("1"),
@@ -47,7 +47,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("10"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 2  # 2배
+        "leverage": 2
     },
     "SUI_USDT": {
         "min_qty": Decimal("1"),
@@ -55,7 +55,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("1"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 2  # 2배
+        "leverage": 2
     },
     "LINK_USDT": {
         "min_qty": Decimal("1"),
@@ -63,7 +63,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("1"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 2  # 2배
+        "leverage": 2
     },
     "SOL_USDT": {
         "min_qty": Decimal("1"),
@@ -71,7 +71,7 @@ SYMBOL_CONFIG = {
         "contract_size": Decimal("0.1"),
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
-        "leverage": 2  # 2배
+        "leverage": 2
     }
 }
 
@@ -83,25 +83,38 @@ position_state = {}
 position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
 
-def log_debug(tag, msg):
+def log_debug(tag, msg, exc_info=False):
     if "포지션 없음" in msg: return
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{tag}] {msg}")
+    if exc_info:
+        import traceback
+        print(traceback.format_exc())
 
 def get_account_info(force=False):
-    """총 담보금(잔고 + 미실현손익) 반환"""
+    """총 담보금(잔고+미실현손익) 또는 가용잔고 반환 (API 문제시 자동 대체)"""
     now = time.time()
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
         acc = api.list_futures_accounts(SETTLE)
-        # 과학적 표기법 문자열 처리 (예: "1E-8" → 0.00000001)
-        total_str = str(acc.total).upper().replace("E", "e")
-        total_equity = Decimal(total_str)
-        account_cache.update({"time": now, "data": total_equity})
-        log_debug("💰 계정", f"총 담보금: {total_equity.normalize()}")
-        return total_equity
+        log_debug("🔍 API 전체 응답", f"계정 정보: {acc}")
+        total_str = str(acc.total) if hasattr(acc, 'total') else "0"
+        available_str = str(acc.available) if hasattr(acc, 'available') else "0"
+        unrealised_pnl_str = str(acc.unrealised_pnl) if hasattr(acc, 'unrealised_pnl') else "0"
+        log_debug("💰 계정 상세", f"total: {total_str}, available: {available_str}, unrealised_pnl: {unrealised_pnl_str}")
+
+        # 과학적 표기법 처리
+        total_equity = Decimal(total_str.replace("E", "e"))
+        available_equity = Decimal(available_str.replace("E", "e"))
+        # 1 USDT 미만이거나 total이 0에 가까우면 available 사용
+        final_equity = available_equity if total_equity < Decimal("1") else total_equity
+
+        log_debug("💰 최종 선택", f"total:{total_equity}, available:{available_equity}, 선택:{final_equity}")
+        account_cache.update({"time": now, "data": final_equity})
+        return final_equity
+
     except Exception as e:
-        log_debug("❌ 계정 조회 실패", f"오류: {str(e)}\n응답: {acc}", exc_info=True)
+        log_debug("❌ 계정 조회 실패", f"오류: {str(e)}", exc_info=True)
         return Decimal("0")
 
 def get_price(symbol):
@@ -111,16 +124,15 @@ def get_price(symbol):
             log_debug(f"❌ 티커 데이터 없음 ({symbol})", "")
             return Decimal("0")
         price_str = str(ticker[0].last)
-        # 과학적 표기법 처리 (예: "1.5E-5" → 0.000015)
-        price = Decimal(price_str).normalize()
+        price = Decimal(price_str.replace("E", "e")).normalize()
         log_debug(f"💲 가격 ({symbol})", f"{price}")
         return price
     except Exception as e:
-        log_debug(f"❌ 가격 조회 실패 ({symbol})", f"오류: {str(e)}\n티커: {ticker}", exc_info=True)
+        log_debug(f"❌ 가격 조회 실패 ({symbol})", f"오류: {str(e)}", exc_info=True)
         return Decimal("0")
 
 def get_max_qty(symbol, side):
-    """BTC/ETH: 총 담보금 ×3, 나머지 ×2"""
+    """BTC/ETH: 총 담보금 ×3, 나머지 ×2 (최소 1 USDT 이상만 진입)"""
     try:
         cfg = SYMBOL_CONFIG[symbol]
         total_equity = get_account_info(force=True)
@@ -128,22 +140,26 @@ def get_max_qty(symbol, side):
         leverage = cfg["leverage"]
         contract_size = cfg["contract_size"]
 
-        # 유효성 검사 강화
-        if total_equity <= 0 or price <= 0 or contract_size <= 0:
+        if total_equity < Decimal("1") or price <= 0 or contract_size <= 0:
             log_debug(f"⚠️ 계산 불가 ({symbol})", 
                 f"담보금:{total_equity}, 가격:{price}, 계약단위:{contract_size}")
             return float(cfg["min_qty"])
 
-        # 수량 계산 (정밀도 보정)
         position_value = total_equity * leverage
-        raw_qty = (position_value / (price * contract_size)).quantize(Decimal('1e-8'), rounding=ROUND_DOWN)
+        log_debug(f"📊 계산 1단계 ({symbol})", f"담보금:{total_equity} × 레버리지:{leverage} = 포지션가치:{position_value}")
+
+        price_x_contract = price * contract_size
+        log_debug(f"📊 계산 2단계 ({symbol})", f"가격:{price} × 계약단위:{contract_size} = {price_x_contract}")
+
+        raw_qty = (position_value / price_x_contract).quantize(Decimal('1e-8'), rounding=ROUND_DOWN)
+        log_debug(f"📊 계산 3단계 ({symbol})", f"포지션가치:{position_value} ÷ {price_x_contract} = 원시수량:{raw_qty}")
+
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         qty = max(qty, cfg["min_qty"])
 
-        log_debug(f"📊 수량 계산 ({symbol})", 
-            f"담보금:{total_equity}, 레버리지:{leverage}, 가격:{price}, "
-            f"계약단위:{contract_size}, 포지션가치:{position_value}, 원시수량:{raw_qty}, 최종수량:{qty}")
+        log_debug(f"📊 최종 결과 ({symbol})", f"원시수량:{raw_qty} → 정규화:{qty}")
         return float(qty)
+
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", f"오류: {str(e)}", exc_info=True)
         return float(cfg["min_qty"])
@@ -177,7 +193,7 @@ def update_position_state(symbol, timeout=5):
             }
         return True
     except Exception as e:
-        log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
+        log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e), exc_info=True)
         return False
     finally:
         position_lock.release()
@@ -207,7 +223,7 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         return True
     except Exception as e:
         error_msg = str(e)
-        log_debug(f"❌ 주문 실패 ({symbol})", f"{error_msg}")
+        log_debug(f"❌ 주문 실패 ({symbol})", f"{error_msg}", exc_info=True)
         if retry > 0 and ("INVALID_PARAM" in error_msg or "POSITION_EMPTY" in error_msg):
             retry_qty = (Decimal(str(qty)) * Decimal("0.5") // step) * step
             retry_qty = max(retry_qty, min_qty)
@@ -230,7 +246,7 @@ def close_position(symbol):
         update_position_state(symbol)
         return True
     except Exception as e:
-        log_debug(f"❌ 청산 실패 ({symbol})", str(e))
+        log_debug(f"❌ 청산 실패 ({symbol})", str(e), exc_info=True)
         return False
     finally:
         position_lock.release()
@@ -281,7 +297,7 @@ def webhook():
         log_debug(f"📨 최종 결과 ({symbol})", f"주문 성공: {success}")
         return jsonify({"status": "success" if success else "error", "qty": qty})
     except Exception as e:
-        log_debug(f"❌ 웹훅 전체 실패 ({symbol or 'unknown'})", str(e))
+        log_debug(f"❌ 웹훅 전체 실패 ({symbol or 'unknown'})", str(e), exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/status", methods=["GET"])
@@ -301,15 +317,27 @@ def status():
             "positions": positions
         })
     except Exception as e:
-        log_debug("❌ 상태 조회 실패", str(e))
+        log_debug("❌ 상태 조회 실패", str(e), exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route("/debug", methods=["GET"])
+def debug_account():
+    try:
+        acc = api.list_futures_accounts(SETTLE)
+        return jsonify({
+            "raw_response": str(acc),
+            "total": str(acc.total) if hasattr(acc, 'total') else "없음",
+            "available": str(acc.available) if hasattr(acc, 'available') else "없음"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 async def send_ping(ws):
     while True:
         try:
             await ws.ping()
         except Exception as e:
-            log_debug("❌ 핑 실패", str(e))
+            log_debug("❌ 핑 실패", str(e), exc_info=True)
             break
         await asyncio.sleep(10)
 
@@ -355,10 +383,10 @@ async def price_listener():
                         log_debug("⚠️ 웹소켓", "연결 끊김, 재연결 시도")
                         break
                     except Exception as e:
-                        log_debug("❌ 웹소켓 메시지 처리 실패", str(e))
+                        log_debug("❌ 웹소켓 메시지 처리 실패", str(e), exc_info=True)
                         continue
         except Exception as e:
-            log_debug("❌ 웹소켓 연결 실패", str(e))
+            log_debug("❌ 웹소켓 연결 실패", str(e), exc_info=True)
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
@@ -369,7 +397,7 @@ def process_ticker_data(ticker):
         if not contract or not last or contract not in SYMBOL_CONFIG:
             return
         try:
-            price = Decimal(str(last))
+            price = Decimal(str(last).replace("E", "e")).normalize()
         except (InvalidOperation, ValueError):
             return
         if not update_position_state(contract, timeout=1):
@@ -399,7 +427,7 @@ def process_ticker_data(ticker):
                     log_debug(f"🎯 TP 트리거 ({contract})", f"현재가: {price} <= TP: {tp}")
                     close_position(contract)
     except Exception as e:
-        log_debug("❌ 티커 처리 실패", str(e))
+        log_debug("❌ 티커 처리 실패", str(e), exc_info=True)
 
 def backup_position_loop():
     while True:
@@ -408,7 +436,7 @@ def backup_position_loop():
                 update_position_state(sym, timeout=1)
             time.sleep(300)
         except Exception as e:
-            log_debug("❌ 백업 루프 오류", str(e))
+            log_debug("❌ 백업 루프 오류", str(e), exc_info=True)
             time.sleep(300)
 
 if __name__ == "__main__":
