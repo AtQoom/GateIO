@@ -270,6 +270,15 @@ def webhook():
             return jsonify({"error": "Invalid symbol"}), 400
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
+        reason = data.get("reason", "")  # 🔴 'reverse_signal' 확인
+
+        # 🔴 반대 신호 청산 처리
+        if action == "exit" and reason == "reverse_signal":
+            success = close_position(symbol)
+            log_debug(f"🔁 반대 신호 청산 ({symbol})", f"성공: {success}")
+            return jsonify({"status": "success" if success else "error"})
+
+        # 기존 청산/진입 로직
         if side not in ["long", "short"] or action not in ["entry", "exit"]:
             return jsonify({"error": "Invalid side/action"}), 400
         if not update_position_state(symbol, timeout=1):
@@ -278,7 +287,7 @@ def webhook():
         desired_side = "buy" if side == "long" else "sell"
         if action == "exit":
             success = close_position(symbol)
-            log_debug(f"🔁 청산 결과 ({symbol})", f"성공: {success}")
+            log_debug(f"🔁 일반 청산 ({symbol})", f"성공: {success}")
             return jsonify({"status": "success" if success else "error"})
         if current_side and current_side != desired_side:
             log_debug("🔄 역포지션 처리", f"현재: {current_side} → 목표: {desired_side}")
@@ -297,7 +306,7 @@ def webhook():
         log_debug(f"📨 최종 결과 ({symbol})", f"주문 성공: {success}")
         return jsonify({"status": "success" if success else "error", "qty": qty})
     except Exception as e:
-        log_debug(f"❌ 웹훅 전체 실패 ({symbol or 'unknown'})", str(e), exc_info=True)
+        log_debug(f"❌ 웹훅 전체 실패 ({symbol or 'unknown'})", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/status", methods=["GET"])
