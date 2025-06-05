@@ -68,56 +68,49 @@ SYMBOL_CONFIG = {
         "qty_step": Decimal("1"),
         "contract_size": Decimal("0.0001"),
         "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
-        "leverage": 2
+        "tp_pct": Decimal("0.006")
     },
     "ETH_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("0.001"),
         "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
-        "leverage": 2
+        "tp_pct": Decimal("0.006")
     },
     "ADA_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("10"),
         "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
-        "leverage": 2
+        "tp_pct": Decimal("0.006")
     },
     "SUI_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("1"),
         "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
-        "leverage": 2
+        "tp_pct": Decimal("0.006")
     },
     "LINK_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("1"),
         "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
-        "leverage": 2
+        "tp_pct": Decimal("0.006")
     },
     "SOL_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("0.1"),
         "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
-        "leverage": 2
+        "tp_pct": Decimal("0.006")
     },
     "PEPE_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("10000"),
         "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
-        "leverage": 2
+        "tp_pct": Decimal("0.006")
     }
 }
 
@@ -173,16 +166,12 @@ def sync_position(symbol):
         try:
             pos = api.get_position(SETTLE, symbol)
             if pos.size == 0:
-                # 기존 포지션이 있었을 때만 청산 메시지 출력
                 if symbol in position_state:
                     logger.info(f"[포지션] 청산됨 [{symbol}]")
                     position_state.pop(symbol, None)
                     actual_entry_prices.pop(symbol, None)
-                else:
-                    logger.debug(f"[포지션] 없음 [{symbol}]")
                 return True
-            
-            entry_price = actual_entry_prices.get(symbol, Decimal(str(pos.entry_price)))
+            entry_price = Decimal(str(pos.entry_price))
             position_state[symbol] = {
                 "size": abs(pos.size),
                 "side": "long" if pos.size > 0 else "short",
@@ -195,49 +184,47 @@ def sync_position(symbol):
             return False
 
 def execute_order(symbol, side, qty, retry=3):
-    for attempt in range(1, retry+1):
+    for attempt in range(retry):
         try:
             cfg = SYMBOL_CONFIG[symbol]
-            qty_dec = qty.quantize(cfg["qty_step"], rounding=ROUND_DOWN)
+            step = cfg["qty_step"]
+            min_qty = cfg["min_qty"]
+            qty_dec = qty.quantize(step, rounding=ROUND_DOWN)
+            if qty_dec < min_qty:
+                logger.error(f"잘못된 수량 [{symbol}]: {qty_dec} < {min_qty}")
+                return False
             size = float(qty_dec) if side == "buy" else -float(qty_dec)
-            logger.info(f"[주문] 시도 [{symbol} {side} {qty_dec}] ({attempt}/{retry})")
-            order = FuturesOrder(
-                contract=symbol,
-                size=size,
-                price="0",
-                tif="ioc"
-            )
-            response = api.create_futures_order(SETTLE, order)
-            logger.info(f"[주문] 성공 | ID:{response.id} | {symbol} {side} {qty_dec}")
+            order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc")
+            logger.info(f"[주문] 시도 [{symbol} {side} {qty_dec}] ({attempt+1}/{retry})")
+            api.create_futures_order(SETTLE, order)
+            logger.info(f"[주문] 성공 [{symbol} {side} {qty_dec}]")
             sync_position(symbol)
             return True
         except Exception as e:
             error = str(e)
             logger.error(f"[주문] 실패 [{symbol} {side} {qty_dec}]: {error}")
             if "INSUFFICIENT_AVAILABLE" in error:
-                logger.warning("[주문] 잔고 부족으로 재시도 중단")
                 break
             time.sleep(0.5)
-    logger.critical(f"[주문] 최종 실패 [{symbol} {side} {qty_dec}]")
     return False
 
 # ---------------------------- 웹훅 처리 ----------------------------
 @app.route("/", methods=["POST"])
-def handle_webhook():
-    start_time = time.time()
+def webhook():
     try:
         data = request.get_json()
-        logger.debug(f"[웹훅] 수신: {json.dumps(data, indent=2)}")
-        raw_symbol = data.get("symbol", "").upper().replace(".P", "")
-        symbol = SYMBOL_MAP.get(raw_symbol)
-        if not symbol:
-            logger.error(f"[웹훅] 잘못된 심볼: {raw_symbol}")
+        logger.debug(f"[웹훅] 수신: {json.dumps(data)}")
+        raw = data.get("symbol", "").upper().replace(".P", "")
+        symbol = SYMBOL_MAP.get(raw)
+        if not symbol or symbol not in SYMBOL_CONFIG:
             return jsonify({"error": "Invalid symbol"}), 400
-        if data.get("action") == "exit" and data.get("reason") == "reverse_signal":
+        action = data.get("action", "").lower()
+        if action == "ping":
+            return jsonify({"status": "pong"})
+        if action == "exit" and data.get("reason") == "reverse_signal":
             logger.warning(f"[청산] 반대 신호 감지 [{symbol}]")
             success = execute_order(symbol, "close", Decimal("0"))
             return jsonify({"status": "success" if success else "error"})
-        action = data.get("action", "").lower()
         if action not in ["entry", "exit"]:
             logger.error(f"[웹훅] 잘못된 액션: {action}")
             return jsonify({"error": "Invalid action"}), 400
@@ -258,8 +245,10 @@ def handle_webhook():
     except Exception as e:
         logger.error(f"[웹훅] 처리 실패: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
-    finally:
-        logger.info(f"[성능] 처리 시간: {time.time() - start_time:.3f}초")
+
+@app.route("/ping", methods=["GET", "HEAD"])
+def ping():
+    return "pong", 200
 
 # ---------------------------- 실시간 모니터링 ----------------------------
 async def price_monitor():
@@ -287,23 +276,18 @@ async def price_monitor():
 
 def process_ticker(ticker_data):
     try:
-        # 리스트면 여러 심볼, 딕셔너리면 단일 심볼
         if isinstance(ticker_data, list):
             for item in ticker_data:
                 process_ticker(item)
             return
-        
-        # 필수 필드 체크
         if not isinstance(ticker_data, dict):
             return
         if "contract" not in ticker_data or "last" not in ticker_data:
             logger.debug(f"[티커] 무효 데이터: {ticker_data}")
             return
-        
         symbol = ticker_data["contract"]
         price = Decimal(str(ticker_data["last"])).quantize(Decimal('1e-8'))
         logger.debug(f"[티커] 업데이트 [{symbol}]: {price}")
-        
         with position_lock:
             pos = position_state.get(symbol)
             if not pos or pos["size"] == 0:
