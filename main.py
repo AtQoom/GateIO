@@ -68,9 +68,57 @@ SYMBOL_CONFIG = {
         "qty_step": Decimal("1"),
         "contract_size": Decimal("0.0001"),
         "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006")
+        "tp_pct": Decimal("0.006"),
+        "leverage": 2
     },
-    # ... 다른 코인 설정 ...
+    "ETH_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("0.001"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "leverage": 2
+    },
+    "ADA_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("10"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "leverage": 2
+    },
+    "SUI_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("1"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "leverage": 2
+    },
+    "LINK_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("1"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "leverage": 2
+    },
+    "SOL_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("0.1"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "leverage": 2
+    },
+    "PEPE_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("10000"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "leverage": 2
+    }
 }
 
 position_state = {}
