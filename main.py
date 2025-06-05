@@ -129,14 +129,16 @@ def get_account_info(force=False):
         available_str = str(acc.available) if hasattr(acc, 'available') else "0"
         total_equity = Decimal(total_str.upper().replace("E", "e"))
         available_equity = Decimal(available_str.upper().replace("E", "e"))
+        
+        # 🔴 실제 사용 가능한 잔고만 사용 (테스트용 fallback 제거)
         final_equity = available_equity if total_equity < Decimal("1") else total_equity
-        if final_equity < Decimal("10"):
-            final_equity = Decimal("100")
+        log_debug("💰 계정 정보", f"total: {total_equity}, available: {available_equity}, 사용: {final_equity}")
+        
         account_cache.update({"time": now, "data": final_equity})
         return final_equity
     except Exception as e:
         log_debug("❌ 계정 조회 실패", str(e), exc_info=True)
-        return Decimal("100")
+        return Decimal("0")
 
 def get_price(symbol):
     try:
@@ -170,28 +172,41 @@ def get_real_time_price(symbol):
         return None
 
 def get_max_qty(symbol, side):
+    """🔴 수정된 수량 계산 함수"""
     try:
         cfg = SYMBOL_CONFIG[symbol]
         total_equity = get_account_info(force=True)
         price = get_price(symbol)
-        if price <= 0:
+        
+        if price <= 0 or total_equity <= 0:
+            log_debug(f"❌ 계산 불가 ({symbol})", f"가격: {price}, 잔고: {total_equity}")
             return float(cfg["min_qty"])
+        
         leverage_multiplier = 2
         position_value = total_equity * leverage_multiplier
         contract_size = cfg["contract_size"]
-        raw_qty = (position_value / price / contract_size).quantize(Decimal('1e-8'), rounding=ROUND_DOWN)
+        
+        # 🔴 올바른 계산 공식: position_value / (price * contract_size)
+        raw_qty = (position_value / (price * contract_size)).quantize(Decimal('1e-8'), rounding=ROUND_DOWN)
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         qty = max(qty, cfg["min_qty"])
+        
+        # 🔴 상세 로그
+        log_debug(f"📊 수량 계산 ({symbol})", 
+            f"잔고:{total_equity} × 레버:{leverage_multiplier} = 포지션가치:{position_value}")
+        log_debug(f"📊 수량 계산 ({symbol})", 
+            f"가격:{price} × 계약단위:{contract_size} = {price * contract_size}")
+        log_debug(f"📊 수량 계산 ({symbol})", 
+            f"최종수량: {position_value} ÷ {price * contract_size} = {qty}")
+        
         return float(qty)
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e), exc_info=True)
         return float(cfg["min_qty"])
 
 def get_actual_fill_price(symbol):
-    """체결가 추적: 오류 발생시 None 반환"""
+    """체결가 추적: 실제 Gate.io API 사용하도록 수정 필요"""
     try:
-        # Gate.io 공식 문서에 맞는 체결 내역 함수로 교체 필요!
-        # 예시: api.list_futures_trades(SETTLE, contract=symbol, limit=10)
         return None
     except Exception as e:
         log_debug("❌ 체결가 조회 실패", str(e))
@@ -257,11 +272,13 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         if qty_dec < min_qty:
             log_debug(f"⛔ 잘못된 수량 ({symbol})", f"{qty_dec} < 최소 {min_qty}")
             return False
+        
         size = float(qty_dec) if side == "buy" else -float(qty_dec)
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         log_debug(f"📤 주문 시도 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약, reduce_only={reduce_only}")
         api.create_futures_order(SETTLE, order)
         log_debug(f"✅ 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약")
+        
         time.sleep(2)
         actual_price = get_actual_fill_price(symbol)
         if actual_price:
@@ -272,7 +289,7 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
     except Exception as e:
         error_msg = str(e)
         log_debug(f"❌ 주문 실패 ({symbol})", f"{error_msg}")
-        if retry > 0 and ("INVALID_PARAM" in error_msg or "POSITION_EMPTY" in error_msg):
+        if retry > 0 and ("INVALID_PARAM" in error_msg or "POSITION_EMPTY" in error_msg or "INSUFFICIENT_AVAILABLE" in error_msg):
             retry_qty = (Decimal(str(qty)) * Decimal("0.5") // step) * step
             retry_qty = max(retry_qty, min_qty)
             log_debug(f"🔄 재시도 ({symbol})", f"{qty} → {retry_qty}")
