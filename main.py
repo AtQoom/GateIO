@@ -39,7 +39,7 @@ class PatchedApiClient(ApiClient):
 
 # ---------------------------- 서버 초기화 ----------------------------
 app = Flask(__name__)
-API_KEY = os.environ.get("API_KEY")        # Railway 환경변수명에 맞춤
+API_KEY = os.environ.get("API_KEY")
 API_SECRET = os.environ.get("API_SECRET")
 SETTLE = "usdt"
 
@@ -125,9 +125,15 @@ def sync_position(symbol):
         try:
             pos = api.get_position(SETTLE, symbol)
             if pos.size == 0:
-                position_state.pop(symbol, None)
-                logger.info(f"[포지션] 청산됨 [{symbol}]")
+                # 기존 포지션이 있었을 때만 청산 메시지 출력
+                if symbol in position_state:
+                    logger.info(f"[포지션] 청산됨 [{symbol}]")
+                    position_state.pop(symbol, None)
+                    actual_entry_prices.pop(symbol, None)
+                else:
+                    logger.debug(f"[포지션] 없음 [{symbol}]")
                 return True
+            
             entry_price = actual_entry_prices.get(symbol, Decimal(str(pos.entry_price)))
             position_state[symbol] = {
                 "size": abs(pos.size),
@@ -238,9 +244,18 @@ def process_ticker(ticker_data):
             for item in ticker_data:
                 process_ticker(item)
             return
-        symbol = ticker_data.get("contract")
+        
+        # 필수 필드 체크
+        if not isinstance(ticker_data, dict):
+            return
+        if "contract" not in ticker_data or "last" not in ticker_data:
+            logger.debug(f"[티커] 무효 데이터: {ticker_data}")
+            return
+        
+        symbol = ticker_data["contract"]
         price = Decimal(str(ticker_data["last"])).quantize(Decimal('1e-8'))
         logger.debug(f"[티커] 업데이트 [{symbol}]: {price}")
+        
         with position_lock:
             pos = position_state.get(symbol)
             if not pos or pos["size"] == 0:
