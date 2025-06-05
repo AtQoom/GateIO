@@ -39,12 +39,12 @@ class PatchedApiClient(ApiClient):
 
 # ---------------------------- 서버 초기화 ----------------------------
 app = Flask(__name__)
-API_KEY = os.environ.get("GATE_API_KEY")
-API_SECRET = os.environ.get("GATE_API_SECRET")
+API_KEY = os.environ.get("API_KEY")        # 변경: GATE_API_KEY → API_KEY
+API_SECRET = os.environ.get("API_SECRET")  # 변경: GATE_API_SECRET → API_SECRET
 SETTLE = "usdt"
 
 if not API_KEY or not API_SECRET:
-    logger.critical("환경변수 GATE_API_KEY/GATE_API_SECRET 미설정")
+    logger.critical("환경변수 API_KEY/API_SECRET 미설정")
     raise RuntimeError("API 키를 설정해야 합니다.")
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
