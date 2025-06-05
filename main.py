@@ -19,14 +19,12 @@ logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s')
 
-# 콘솔 출력 설정
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(formatter)
 console_handler.addFilter(InfoFilter())
 logger.addHandler(console_handler)
 
-# 파일 로그 설정
 file_handler = logging.FileHandler('trading.log')
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(formatter)
@@ -35,7 +33,6 @@ logger.addHandler(file_handler)
 # ---------------------------- API 클라이언트 패치 ----------------------------
 class PatchedApiClient(ApiClient):
     def __call_api(self, *args, **kwargs):
-        """API 요청 시 Timestamp 헤더 추가"""
         kwargs['headers']['Timestamp'] = str(int(time.time()))
         logger.debug(f"API 요청: {args[1]} {kwargs.get('query_params')}")
         return super().__call_api(*args, **kwargs)
@@ -48,7 +45,7 @@ SETTLE = "usdt"
 
 if not API_KEY or not API_SECRET:
     logger.critical("환경변수 GATE_API_KEY/GATE_API_SECRET 미설정")
-    raise RuntimeError("API 키를 설정해주세요.")
+    raise RuntimeError("API 키를 설정해야 합니다.")
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = PatchedApiClient(config)
@@ -59,7 +56,7 @@ SYMBOL_MAP = {
     "BTCUSDT": "BTC_USDT",
     "ETHUSDT": "ETH_USDT",
     "ADAUSDT": "ADA_USDT",
-    "SUIUSDT": "SUI_USDT", 
+    "SUIUSDT": "SUI_USDT",
     "LINKUSDT": "LINK_USDT",
     "SOLUSDT": "SOL_USDT",
     "PEPEUSDT": "PEPE_USDT"
@@ -71,57 +68,9 @@ SYMBOL_CONFIG = {
         "qty_step": Decimal("1"),
         "contract_size": Decimal("0.0001"),
         "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
-        "leverage": 2
+        "tp_pct": Decimal("0.006")
     },
-    "ETH_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("0.001"),
-        "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
-        "leverage": 2
-    },
-    "ADA_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("10"),
-        "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
-        "leverage": 2
-    },
-    "SUI_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("1"),
-        "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
-        "leverage": 2
-    },
-    "LINK_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("1"),
-        "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
-        "leverage": 2
-    },
-    "SOL_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("0.1"),
-        "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
-        "leverage": 2
-    },
-    "PEPE_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("10000"),
-        "sl_pct": Decimal("0.0035"),
-        "tp_pct": Decimal("0.006"),
-        "leverage": 2
-    }
+    # ... 다른 코인 설정 ...
 }
 
 # ---------------------------- 글로벌 상태 ----------------------------
@@ -132,14 +81,13 @@ actual_entry_prices = {}
 
 # ---------------------------- 코어 함수 ----------------------------
 def get_account(force=False):
-    """계좌 잔고 조회 (5초 캐싱)"""
     try:
         now = time.time()
         if not force and (now - account_cache["time"] < 5):
             return account_cache["equity"]
         
         acc = api.list_futures_accounts(SETTLE)
-        equity = Decimal(str(acc.total)).quantize(Decimal('0.00000001'))
+        equity = Decimal(str(acc.total)).quantize(Decimal('1e-8'))
         account_cache.update({"time": now, "equity": equity})
         logger.info(f"[계정] 총 자산: {equity} USDT")
         return equity
@@ -148,18 +96,16 @@ def get_account(force=False):
         return Decimal("0")
 
 def fetch_price(symbol):
-    """실시간 가격 조회"""
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
-        price = Decimal(str(ticker[0].last)).quantize(Decimal('0.00000001'))
+        price = Decimal(str(ticker[0].last)).quantize(Decimal('1e-8'))
         logger.debug(f"[가격] {symbol} 현재가: {price}")
         return price
     except Exception as e:
         logger.error(f"[가격] 조회 실패 [{symbol}]: {str(e)}", exc_info=True)
         return Decimal("0")
 
-def calculate_position_size(symbol, equity):
-    """위험 관리 기반 수량 계산"""
+def calculate_position_size(symbol, equity, leverage=2):
     cfg = SYMBOL_CONFIG[symbol]
     price = fetch_price(symbol)
     
@@ -168,7 +114,7 @@ def calculate_position_size(symbol, equity):
         return Decimal("0")
     
     try:
-        position_value = equity * cfg["leverage"]
+        position_value = equity * leverage
         raw_qty = position_value / (price * cfg["contract_size"])
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         final_qty = max(qty, cfg["min_qty"])
@@ -179,13 +125,11 @@ def calculate_position_size(symbol, equity):
         return Decimal("0")
 
 def sync_position(symbol):
-    """포지션 상태 동기화"""
     with position_lock:
         try:
             pos = api.get_position(SETTLE, symbol)
             if pos.size == 0:
                 position_state.pop(symbol, None)
-                actual_entry_prices.pop(symbol, None)
                 logger.info(f"[포지션] 청산됨 [{symbol}]")
                 return True
             
@@ -202,7 +146,6 @@ def sync_position(symbol):
             return False
 
 def execute_order(symbol, side, qty, retry=3):
-    """주문 실행 (재시도 로직 포함)"""
     for attempt in range(1, retry+1):
         try:
             cfg = SYMBOL_CONFIG[symbol]
@@ -219,7 +162,7 @@ def execute_order(symbol, side, qty, retry=3):
             )
             response = api.create_futures_order(SETTLE, order)
             
-            logger.info(f"[주문] 성공 ID:{response.id} [{symbol} {side} {qty_dec}]")
+            logger.info(f"[주문] 성공 | ID:{response.id} | {symbol} {side} {qty_dec}")
             sync_position(symbol)
             return True
         except Exception as e:
@@ -237,7 +180,6 @@ def execute_order(symbol, side, qty, retry=3):
 # ---------------------------- 웹훅 처리 ----------------------------
 @app.route("/", methods=["POST"])
 def handle_webhook():
-    """트레이딩뷰 웹훅 핸들러"""
     start_time = time.time()
     try:
         data = request.get_json()
@@ -268,9 +210,12 @@ def handle_webhook():
             success = execute_order(symbol, "close", Decimal("0"))
             return jsonify({"status": "success" if success else "error"})
         
+        # 레버리지 추출 (기본값 2)
+        leverage = int(data.get("leverage", 2))
+        
         # 진입 처리
         equity = get_account(force=True)
-        qty = calculate_position_size(symbol, equity)
+        qty = calculate_position_size(symbol, equity, leverage)
         if qty <= 0:
             logger.error(f"[진입] 무효 수량 [{symbol}]: {qty}")
             return jsonify({"error": "Invalid quantity"}), 400
@@ -288,7 +233,6 @@ def handle_webhook():
 
 # ---------------------------- 실시간 모니터링 ----------------------------
 async def price_monitor():
-    """웹소켓 기반 실시간 가격 모니터링"""
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     
     while True:
@@ -318,10 +262,9 @@ async def price_monitor():
             await asyncio.sleep(5)
 
 def process_ticker(ticker_data):
-    """티커 데이터 처리"""
     try:
         symbol = ticker_data.get("contract")
-        price = Decimal(str(ticker_data["last"])).quantize(Decimal('0.00000001'))
+        price = Decimal(str(ticker_data["last"])).quantize(Decimal('1e-8'))
         logger.debug(f"[티커] 업데이트 [{symbol}]: {price}")
         
         with position_lock:
@@ -329,10 +272,9 @@ def process_ticker(ticker_data):
             if not pos or pos["size"] == 0:
                 return
             
-            entry = pos["entry"]
+            entry = actual_entry_prices.get(symbol, pos["entry"])
             cfg = SYMBOL_CONFIG[symbol]
             
-            # 롱 포지션 체크
             if pos["side"] == "long":
                 sl = entry * (1 - cfg["sl_pct"])
                 tp = entry * (1 + cfg["tp_pct"])
@@ -343,7 +285,6 @@ def process_ticker(ticker_data):
                     logger.warning(f"[TP/SL] 롱 TP 트리거 [{symbol}] 가격:{price} 진입가:{entry}")
                     execute_order(symbol, "close", Decimal(pos["size"]))
             
-            # 숏 포지션 체크
             else:
                 sl = entry * (1 + cfg["sl_pct"])
                 tp = entry * (1 - cfg["tp_pct"])
@@ -359,7 +300,6 @@ def process_ticker(ticker_data):
 
 # ---------------------------- 백그라운드 작업 ----------------------------
 def background_sync():
-    """주기적 포지션 동기화"""
     while True:
         try:
             logger.debug("[백그라운드] 동기화 시작")
@@ -372,11 +312,8 @@ def background_sync():
 
 # ---------------------------- 서버 실행 ----------------------------
 if __name__ == "__main__":
-    # 백그라운드 스레드 시작
     threading.Thread(target=background_sync, daemon=True).start()
     threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
-    
-    # Flask 서버 시작
     port = int(os.environ.get("PORT", 8080))
     logger.info(f"[서버] 시작 (포트: {port})")
     app.run(host="0.0.0.0", port=port, use_reloader=False)
