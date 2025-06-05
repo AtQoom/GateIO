@@ -178,45 +178,55 @@ def update_position_state(symbol, timeout=5):
             pos = api.get_position(SETTLE, symbol)
         except Exception as e:
             if "POSITION_NOT_FOUND" in str(e):
+                # 포지션이 있었다가 없어진 경우에만 로그
+                if symbol in position_state and position_state[symbol].get("size", 0) > 0:
+                    log_debug(f"📊 포지션 ({symbol})", "청산됨")
                 position_state[symbol] = {
-                    "price": None, "side": None,
-                    "size": Decimal("0"), "value": Decimal("0"),
-                    "margin": Decimal("0"), "mode": "cross"
+                    "price": None, "side": None, "size": Decimal("0"), 
+                    "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
                 }
                 if symbol in actual_entry_prices:
                     del actual_entry_prices[symbol]
                 return True
             else:
-                log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
                 return False
-        if hasattr(pos, "margin_mode") and pos.margin_mode != "cross":
-            api.update_position_margin_mode(SETTLE, symbol, "cross")
+                
         size = Decimal(str(pos.size))
         if size != 0:
+            # 기존 포지션 상태 저장
+            old_state = position_state.get(symbol, {})
+            old_size = old_state.get("size", 0)
+            old_side = old_state.get("side")
+            
             api_entry_price = Decimal(str(pos.entry_price))
             mark = Decimal(str(pos.mark_price))
             actual_price = actual_entry_prices.get(symbol)
             entry_price = actual_price if actual_price else api_entry_price
-            value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
-            margin = value / SYMBOL_CONFIG[symbol]["leverage"]
+            
+            new_side = "buy" if size > 0 else "sell"
+            
+            # 포지션 상태 업데이트
             position_state[symbol] = {
-                "price": entry_price, "side": "buy" if size > 0 else "sell",
-                "size": abs(size), "value": value, "margin": margin,
+                "price": entry_price, "side": new_side,
+                "size": abs(size), "value": abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"],
+                "margin": (abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]) / SYMBOL_CONFIG[symbol]["leverage"],
                 "mode": "cross"
             }
-            log_debug(f"📊 포지션 ({symbol})", f"{position_state[symbol]['side']} {abs(size)} 계약, 진입가: {entry_price}")
+            
+            # 포지션 상태가 변경된 경우에만 로그 출력
+            if old_size != abs(size) or old_side != new_side:
+                log_debug(f"📊 포지션 변경 ({symbol})", f"{new_side} {abs(size)} 계약, 진입가: {entry_price}")
         else:
+            # 포지션이 있었다가 청산된 경우에만 로그
+            if symbol in position_state and position_state[symbol].get("size", 0) > 0:
+                log_debug(f"📊 포지션 ({symbol})", "청산됨")
             position_state[symbol] = {
-                "price": None, "side": None,
-                "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
+                "price": None, "side": None, "size": Decimal("0"), 
+                "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
             }
             if symbol in actual_entry_prices:
                 del actual_entry_prices[symbol]
-                log_debug(f"📊 포지션 ({symbol})", "청산됨")
         return True
-    except Exception as e:
-        log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e), exc_info=True)
-        return False
     finally:
         position_lock.release()
 
