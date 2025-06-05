@@ -13,32 +13,24 @@ from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 # ----------- 로그 필터 및 설정 -----------
 class CustomFilter(logging.Filter):
     def filter(self, record):
-        filter_keywords = [
-            "실시간 가격", "티커 수신", "포지션 없음", "계정 필드",
-            "담보금 전환", "최종 선택", "전체 계정 정보"
+        blocked_phrases = [
+            "티커 수신", "가격 (", "Position update failed",
+            "계약:", "마크가:", "사이즈:", "진입가:", "총 담보금:"
         ]
-        return not any(keyword in record.getMessage() for keyword in filter_keywords)
+        return not any(phrase in record.getMessage() for phrase in blocked_phrases)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_handler.addFilter(CustomFilter())
-formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s')
-console_handler.setFormatter(formatter)
-logger.handlers = []
-logger.addHandler(console_handler)
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s'))
+handler.addFilter(CustomFilter())
+logger.addHandler(handler)
 
-def log_debug(tag, msg, exc_info=False):
-    logger.info(f"[{tag}] {msg}")
-    if exc_info:
-        logger.exception(msg)
-
-# ----------- 서버 설정 -----------
 app = Flask(__name__)
 
-API_KEY = os.environ.get("API_KEY", "")
-API_SECRET = os.environ.get("API_SECRET", "")
+# ----------- 거래소 설정 -----------
+API_KEY = os.environ.get("GATE_API_KEY")
+API_SECRET = os.environ.get("GATE_API_SECRET")
 SETTLE = "usdt"
 
 BINANCE_TO_GATE_SYMBOL = {
@@ -119,6 +111,11 @@ position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
 actual_entry_prices = {}
 
+def log_debug(tag, msg, exc_info=False):
+    logger.info(f"[{tag}] {msg}")
+    if exc_info:
+        logger.exception(msg)
+
 def get_account_info(force=False):
     now = time.time()
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
@@ -129,11 +126,7 @@ def get_account_info(force=False):
         available_str = str(acc.available) if hasattr(acc, 'available') else "0"
         total_equity = Decimal(total_str.upper().replace("E", "e"))
         available_equity = Decimal(available_str.upper().replace("E", "e"))
-        
-        # 🔴 실제 사용 가능한 잔고만 사용 (테스트용 fallback 제거)
         final_equity = available_equity if total_equity < Decimal("1") else total_equity
-        log_debug("💰 계정 정보", f"total: {total_equity}, available: {available_equity}, 사용: {final_equity}")
-        
         account_cache.update({"time": now, "data": final_equity})
         return final_equity
     except Exception as e:
@@ -146,8 +139,7 @@ def get_price(symbol):
         if not ticker or len(ticker) == 0:
             return Decimal("0")
         price_str = str(ticker[0].last).upper().replace("E", "e")
-        price = Decimal(price_str).normalize()
-        return price
+        return Decimal(price_str).normalize()
     except Exception as e:
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e), exc_info=True)
         return Decimal("0")
@@ -172,7 +164,6 @@ def get_real_time_price(symbol):
         return None
 
 def get_max_qty(symbol, side):
-    """🔴 수정된 수량 계산 함수"""
     try:
         cfg = SYMBOL_CONFIG[symbol]
         total_equity = get_account_info(force=True)
@@ -185,36 +176,18 @@ def get_max_qty(symbol, side):
         leverage_multiplier = 2
         position_value = total_equity * leverage_multiplier
         contract_size = cfg["contract_size"]
-        
-        # 🔴 올바른 계산 공식: position_value / (price * contract_size)
         raw_qty = (position_value / (price * contract_size)).quantize(Decimal('1e-8'), rounding=ROUND_DOWN)
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         qty = max(qty, cfg["min_qty"])
-        
-        # 🔴 상세 로그
-        log_debug(f"📊 수량 계산 ({symbol})", 
-            f"잔고:{total_equity} × 레버:{leverage_multiplier} = 포지션가치:{position_value}")
-        log_debug(f"📊 수량 계산 ({symbol})", 
-            f"가격:{price} × 계약단위:{contract_size} = {price * contract_size}")
-        log_debug(f"📊 수량 계산 ({symbol})", 
-            f"최종수량: {position_value} ÷ {price * contract_size} = {qty}")
-        
         return float(qty)
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e), exc_info=True)
         return float(cfg["min_qty"])
 
-def get_actual_fill_price(symbol):
-    """체결가 추적: 실제 Gate.io API 사용하도록 수정 필요"""
-    try:
-        return None
-    except Exception as e:
-        log_debug("❌ 체결가 조회 실패", str(e))
-        return None
-
 def update_position_state(symbol, timeout=5):
     acquired = position_lock.acquire(timeout=timeout)
     if not acquired:
+        log_debug(f"⚠️ 락 획득 실패 ({symbol})", f"타임아웃 {timeout}초")
         return False
     try:
         try:
@@ -232,16 +205,17 @@ def update_position_state(symbol, timeout=5):
             else:
                 log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
                 return False
+        if hasattr(pos, "margin_mode") and pos.margin_mode != "cross":
+            api.update_position_margin_mode(SETTLE, symbol, "cross")
+            log_debug(f"⚙️ 마진모드 변경 ({symbol})", f"{pos.margin_mode} → cross")
         size = Decimal(str(pos.size))
         if size != 0:
-            api_entry_price = Decimal(str(pos.entry_price))
+            entry = Decimal(str(pos.entry_price))
             mark = Decimal(str(pos.mark_price))
-            actual_price = actual_entry_prices.get(symbol)
-            entry_price = actual_price if actual_price else api_entry_price
             value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
             margin = value / SYMBOL_CONFIG[symbol]["leverage"]
             position_state[symbol] = {
-                "price": entry_price, "side": "buy" if size > 0 else "sell",
+                "price": entry, "side": "buy" if size > 0 else "sell",
                 "size": abs(size), "value": value, "margin": margin,
                 "mode": "cross"
             }
@@ -272,18 +246,12 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         if qty_dec < min_qty:
             log_debug(f"⛔ 잘못된 수량 ({symbol})", f"{qty_dec} < 최소 {min_qty}")
             return False
-        
         size = float(qty_dec) if side == "buy" else -float(qty_dec)
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         log_debug(f"📤 주문 시도 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약, reduce_only={reduce_only}")
         api.create_futures_order(SETTLE, order)
         log_debug(f"✅ 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약")
-        
-        time.sleep(2)
-        actual_price = get_actual_fill_price(symbol)
-        if actual_price:
-            actual_entry_prices[symbol] = actual_price
-            log_debug(f"💾 실제 진입가 저장 ({symbol})", f"체결가: {actual_price}")
+        time.sleep(0.5)
         update_position_state(symbol)
         return True
     except Exception as e:
@@ -307,9 +275,7 @@ def close_position(symbol):
         log_debug(f"🔄 청산 시도 ({symbol})", "size=0 주문")
         api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
         log_debug(f"✅ 청산 완료 ({symbol})", "")
-        if symbol in actual_entry_prices:
-            del actual_entry_prices[symbol]
-        time.sleep(1)
+        time.sleep(0.5)
         update_position_state(symbol)
         return True
     except Exception as e:
@@ -335,41 +301,41 @@ def webhook():
         symbol = BINANCE_TO_GATE_SYMBOL.get(raw)
         if not symbol or symbol not in SYMBOL_CONFIG:
             return jsonify({"error": "Invalid symbol"}), 400
-        side = data.get("side", "").lower()
         action = data.get("action", "").lower()
         reason = data.get("reason", "")
         if action == "exit" and reason == "reverse_signal":
             success = close_position(symbol)
             log_debug(f"🔁 반대 신호 청산 ({symbol})", f"성공: {success}")
             return jsonify({"status": "success" if success else "error"})
+        side = data.get("side", "").lower()
         if side not in ["long", "short"] or action not in ["entry", "exit"]:
             return jsonify({"error": "Invalid side/action"}), 400
         if not update_position_state(symbol, timeout=1):
             return jsonify({"status": "error", "message": "포지션 조회 실패"}), 500
-        current_side = position_state.get(symbol, {}).get("side")
-        desired_side = "buy" if side == "long" else "sell"
         if action == "exit":
             success = close_position(symbol)
             log_debug(f"🔁 일반 청산 ({symbol})", f"성공: {success}")
             return jsonify({"status": "success" if success else "error"})
+        current_side = position_state.get(symbol, {}).get("side")
+        desired_side = "buy" if side == "long" else "sell"
         if current_side and current_side != desired_side:
             log_debug("🔄 역포지션 처리", f"현재: {current_side} → 목표: {desired_side}")
             if not close_position(symbol):
                 log_debug("❌ 역포지션 청산 실패", "")
-                return jsonify({"status": "error", "message": "역포지션 청산 실패"})
-            time.sleep(3)
+                return jsonify({"status": "error", "message": "역포지션 청산 실패"}), 500
+            time.sleep(1)
             if not update_position_state(symbol):
-                log_debug("❌ 역포지션 후 상태 갱신 실패", "")
+                return jsonify({"status": "error", "message": "포지션 갱신 실패"}), 500
         qty = get_max_qty(symbol, desired_side)
         log_debug(f"🧮 수량 계산 완료 ({symbol})", f"{qty} 계약")
         if qty <= 0:
             log_debug("❌ 수량 오류", f"계산된 수량: {qty}")
-            return jsonify({"status": "error", "message": "수량 계산 오류"})
+            return jsonify({"status": "error", "message": "수량 계산 오류"}), 400
         success = place_order(symbol, desired_side, qty)
         log_debug(f"📨 최종 결과 ({symbol})", f"주문 성공: {success}")
         return jsonify({"status": "success" if success else "error", "qty": qty})
     except Exception as e:
-        log_debug(f"❌ 웹훅 전체 실패 ({symbol or 'unknown'})", str(e))
+        log_debug(f"❌ 웹훅 전체 실패 ({symbol or 'unknown'})", str(e), exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/status", methods=["GET"])
@@ -390,7 +356,7 @@ def status():
             "actual_entry_prices": {k: float(v) for k, v in actual_entry_prices.items()}
         })
     except Exception as e:
-        log_debug("❌ 상태 조회 실패", str(e))
+        log_debug("❌ 상태 조회 실패", str(e), exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/debug", methods=["GET"])
