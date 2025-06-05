@@ -39,8 +39,8 @@ class PatchedApiClient(ApiClient):
 
 # ---------------------------- 서버 초기화 ----------------------------
 app = Flask(__name__)
-API_KEY = os.environ.get("API_KEY")        # 변경: GATE_API_KEY → API_KEY
-API_SECRET = os.environ.get("API_SECRET")  # 변경: GATE_API_SECRET → API_SECRET
+API_KEY = os.environ.get("API_KEY")        # Railway 환경변수명에 맞춤
+API_SECRET = os.environ.get("API_SECRET")
 SETTLE = "usdt"
 
 if not API_KEY or not API_SECRET:
@@ -73,7 +73,6 @@ SYMBOL_CONFIG = {
     # ... 다른 코인 설정 ...
 }
 
-# ---------------------------- 글로벌 상태 ----------------------------
 position_state = {}
 position_lock = threading.RLock()
 account_cache = {"time": 0, "equity": Decimal("0")}
@@ -85,7 +84,6 @@ def get_account(force=False):
         now = time.time()
         if not force and (now - account_cache["time"] < 5):
             return account_cache["equity"]
-        
         acc = api.list_futures_accounts(SETTLE)
         equity = Decimal(str(acc.total)).quantize(Decimal('1e-8'))
         account_cache.update({"time": now, "equity": equity})
@@ -108,11 +106,9 @@ def fetch_price(symbol):
 def calculate_position_size(symbol, equity, leverage=2):
     cfg = SYMBOL_CONFIG[symbol]
     price = fetch_price(symbol)
-    
     if price <= 0 or equity <= 0:
         logger.warning(f"[계산] 무효 값 [{symbol}] 가격:{price} 잔고:{equity}")
         return Decimal("0")
-    
     try:
         position_value = equity * leverage
         raw_qty = position_value / (price * cfg["contract_size"])
@@ -132,7 +128,6 @@ def sync_position(symbol):
                 position_state.pop(symbol, None)
                 logger.info(f"[포지션] 청산됨 [{symbol}]")
                 return True
-            
             entry_price = actual_entry_prices.get(symbol, Decimal(str(pos.entry_price)))
             position_state[symbol] = {
                 "size": abs(pos.size),
@@ -151,9 +146,7 @@ def execute_order(symbol, side, qty, retry=3):
             cfg = SYMBOL_CONFIG[symbol]
             qty_dec = qty.quantize(cfg["qty_step"], rounding=ROUND_DOWN)
             size = float(qty_dec) if side == "buy" else -float(qty_dec)
-            
             logger.info(f"[주문] 시도 [{symbol} {side} {qty_dec}] ({attempt}/{retry})")
-            
             order = FuturesOrder(
                 contract=symbol,
                 size=size,
@@ -161,19 +154,16 @@ def execute_order(symbol, side, qty, retry=3):
                 tif="ioc"
             )
             response = api.create_futures_order(SETTLE, order)
-            
             logger.info(f"[주문] 성공 | ID:{response.id} | {symbol} {side} {qty_dec}")
             sync_position(symbol)
             return True
         except Exception as e:
             error = str(e)
             logger.error(f"[주문] 실패 [{symbol} {side} {qty_dec}]: {error}")
-            
             if "INSUFFICIENT_AVAILABLE" in error:
                 logger.warning("[주문] 잔고 부족으로 재시도 중단")
                 break
             time.sleep(0.5)
-    
     logger.critical(f"[주문] 최종 실패 [{symbol} {side} {qty_dec}]")
     return False
 
@@ -184,47 +174,33 @@ def handle_webhook():
     try:
         data = request.get_json()
         logger.debug(f"[웹훅] 수신: {json.dumps(data, indent=2)}")
-        
-        # 심볼 변환
         raw_symbol = data.get("symbol", "").upper().replace(".P", "")
         symbol = SYMBOL_MAP.get(raw_symbol)
         if not symbol:
             logger.error(f"[웹훅] 잘못된 심볼: {raw_symbol}")
             return jsonify({"error": "Invalid symbol"}), 400
-        
-        # 반대 신호 청산
         if data.get("action") == "exit" and data.get("reason") == "reverse_signal":
             logger.warning(f"[청산] 반대 신호 감지 [{symbol}]")
             success = execute_order(symbol, "close", Decimal("0"))
             return jsonify({"status": "success" if success else "error"})
-        
-        # 주문 파라미터 검증
         action = data.get("action", "").lower()
         if action not in ["entry", "exit"]:
             logger.error(f"[웹훅] 잘못된 액션: {action}")
             return jsonify({"error": "Invalid action"}), 400
-        
-        # 청산 처리
         if action == "exit":
             logger.info(f"[청산] 요청 [{symbol}]")
             success = execute_order(symbol, "close", Decimal("0"))
             return jsonify({"status": "success" if success else "error"})
-        
-        # 레버리지 추출 (기본값 2)
         leverage = int(data.get("leverage", 2))
-        
-        # 진입 처리
         equity = get_account(force=True)
         qty = calculate_position_size(symbol, equity, leverage)
         if qty <= 0:
             logger.error(f"[진입] 무효 수량 [{symbol}]: {qty}")
             return jsonify({"error": "Invalid quantity"}), 400
-        
         desired_side = "buy" if data.get("side") == "long" else "sell"
         logger.info(f"[진입] 시도 [{symbol} {desired_side} {qty}]")
         success = execute_order(symbol, desired_side, qty)
         return jsonify({"status": "success" if success else "error", "qty": float(qty)})
-    
     except Exception as e:
         logger.error(f"[웹훅] 처리 실패: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -234,14 +210,11 @@ def handle_webhook():
 # ---------------------------- 실시간 모니터링 ----------------------------
 async def price_monitor():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-    
     while True:
         try:
             logger.info("[웹소켓] 연결 시도")
             async with websockets.connect(uri, ping_interval=30) as ws:
                 logger.info("[웹소켓] 연결 성공")
-                
-                # 구독 요청
                 await ws.send(json.dumps({
                     "time": int(time.time()),
                     "channel": "futures.tickers",
@@ -249,32 +222,31 @@ async def price_monitor():
                     "payload": list(SYMBOL_CONFIG.keys())
                 }))
                 logger.info("[웹소켓] 티커 구독 완료")
-                
-                # 메시지 수신 루프
                 while True:
                     msg = await ws.recv()
                     data = json.loads(msg)
                     if "result" in data:
                         process_ticker(data["result"])
-                        
         except Exception as e:
             logger.error(f"[웹소켓] 오류: {str(e)}")
             await asyncio.sleep(5)
 
 def process_ticker(ticker_data):
     try:
+        # 리스트면 여러 심볼, 딕셔너리면 단일 심볼
+        if isinstance(ticker_data, list):
+            for item in ticker_data:
+                process_ticker(item)
+            return
         symbol = ticker_data.get("contract")
         price = Decimal(str(ticker_data["last"])).quantize(Decimal('1e-8'))
         logger.debug(f"[티커] 업데이트 [{symbol}]: {price}")
-        
         with position_lock:
             pos = position_state.get(symbol)
             if not pos or pos["size"] == 0:
                 return
-            
             entry = actual_entry_prices.get(symbol, pos["entry"])
             cfg = SYMBOL_CONFIG[symbol]
-            
             if pos["side"] == "long":
                 sl = entry * (1 - cfg["sl_pct"])
                 tp = entry * (1 + cfg["tp_pct"])
@@ -284,7 +256,6 @@ def process_ticker(ticker_data):
                 elif price >= tp:
                     logger.warning(f"[TP/SL] 롱 TP 트리거 [{symbol}] 가격:{price} 진입가:{entry}")
                     execute_order(symbol, "close", Decimal(pos["size"]))
-            
             else:
                 sl = entry * (1 + cfg["sl_pct"])
                 tp = entry * (1 - cfg["tp_pct"])
@@ -294,7 +265,6 @@ def process_ticker(ticker_data):
                 elif price <= tp:
                     logger.warning(f"[TP/SL] 숏 TP 트리거 [{symbol}] 가격:{price} 진입가:{entry}")
                     execute_order(symbol, "close", Decimal(pos["size"]))
-                    
     except Exception as e:
         logger.error(f"[티커] 처리 실패: {str(e)}", exc_info=True)
 
