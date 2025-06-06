@@ -126,15 +126,12 @@ def get_account_info(force=False):
     try:
         acc = api.list_futures_accounts(SETTLE)
         total_str = str(acc.total) if hasattr(acc, 'total') else "0"
-        available_str = str(acc.available) if hasattr(acc, 'available') else "0"
         total_equity = Decimal(total_str.upper().replace("E", "e"))
-        available_equity = Decimal(available_str.upper().replace("E", "e"))
-        final_equity = available_equity if total_equity < Decimal("1") else total_equity
-        if final_equity < Decimal("10"):
-            final_equity = Decimal("100")
-        account_cache.update({"time": now, "data": final_equity})
-        log_debug("💰 계정", f"사용 담보금: {final_equity} USDT")
-        return final_equity
+        if total_equity < Decimal("10"):
+            total_equity = Decimal("100")  # 최소 100 USDT fallback
+        account_cache.update({"time": now, "data": total_equity})
+        log_debug("💰 계정", f"총 담보금: {total_equity} USDT")
+        return total_equity
     except Exception as e:
         log_debug("❌ 계정 조회 실패", str(e), exc_info=True)
         return Decimal("100")
@@ -157,13 +154,13 @@ def get_max_qty(symbol, side):
         price = get_price(symbol)
         if price <= 0:
             return float(cfg["min_qty"])
-        leverage_multiplier = 2
-        position_value = total_equity * leverage_multiplier
-        contract_size = cfg["contract_size"]
-        raw_qty = (position_value / (price * contract_size)).quantize(Decimal('1e-8'), rounding=ROUND_DOWN)
-        qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
+        # (총담보금 / (현재가 × 계약크기)) × 2
+        base_qty = (total_equity / (price * cfg["contract_size"]))
+        base_qty = base_qty.quantize(Decimal('1e-8'), rounding=ROUND_DOWN)
+        qty = (base_qty * 2).quantize(cfg["qty_step"], rounding=ROUND_DOWN)
+        qty = (qty // cfg["qty_step"]) * cfg["qty_step"]
         qty = max(qty, cfg["min_qty"])
-        log_debug(f"📊 수량 계산 ({symbol})", f"최종 수량: {qty}")
+        log_debug(f"📊 수량 계산 ({symbol})", f"총담보금:{total_equity}, 현재가:{price}, 계약크기:{cfg['contract_size']}, 2배수량:{qty}")
         return float(qty)
     except Exception as e:
         log_debug(f"❌ 수량 계산 실패 ({symbol})", str(e), exc_info=True)
@@ -178,11 +175,10 @@ def update_position_state(symbol, timeout=5):
             pos = api.get_position(SETTLE, symbol)
         except Exception as e:
             if "POSITION_NOT_FOUND" in str(e):
-                # 포지션이 있었다가 없어진 경우에만 로그
                 if symbol in position_state and position_state[symbol].get("size", 0) > 0:
                     log_debug(f"📊 포지션 ({symbol})", "청산됨")
                 position_state[symbol] = {
-                    "price": None, "side": None, "size": Decimal("0"), 
+                    "price": None, "side": None, "size": Decimal("0"),
                     "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
                 }
                 if symbol in actual_entry_prices:
@@ -190,38 +186,29 @@ def update_position_state(symbol, timeout=5):
                 return True
             else:
                 return False
-                
         size = Decimal(str(pos.size))
         if size != 0:
-            # 기존 포지션 상태 저장
             old_state = position_state.get(symbol, {})
             old_size = old_state.get("size", 0)
             old_side = old_state.get("side")
-            
             api_entry_price = Decimal(str(pos.entry_price))
             mark = Decimal(str(pos.mark_price))
             actual_price = actual_entry_prices.get(symbol)
             entry_price = actual_price if actual_price else api_entry_price
-            
             new_side = "buy" if size > 0 else "sell"
-            
-            # 포지션 상태 업데이트
             position_state[symbol] = {
                 "price": entry_price, "side": new_side,
                 "size": abs(size), "value": abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"],
                 "margin": (abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]) / SYMBOL_CONFIG[symbol]["leverage"],
                 "mode": "cross"
             }
-            
-            # 포지션 상태가 변경된 경우에만 로그 출력
             if old_size != abs(size) or old_side != new_side:
                 log_debug(f"📊 포지션 변경 ({symbol})", f"{new_side} {abs(size)} 계약, 진입가: {entry_price}")
         else:
-            # 포지션이 있었다가 청산된 경우에만 로그
             if symbol in position_state and position_state[symbol].get("size", 0) > 0:
                 log_debug(f"📊 포지션 ({symbol})", "청산됨")
             position_state[symbol] = {
-                "price": None, "side": None, "size": Decimal("0"), 
+                "price": None, "side": None, "size": Decimal("0"),
                 "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
             }
             if symbol in actual_entry_prices:
