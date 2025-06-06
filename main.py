@@ -10,13 +10,22 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 
-# ---------------------------- 로그 설정 ----------------------------
+# ---------------------------- 로그 설정 (필터 추가) ----------------------------
+class CustomFilter(logging.Filter):
+    def filter(self, record):
+        blocked_phrases = [
+            "티커 업데이트", "가격 (", "Position update failed",
+            "계약:", "마크가:", "사이즈:", "진입가:", "총 담보금:",
+            "실시간 가격", "티커 수신", "포지션 동기화"
+        ]
+        return not any(phrase in record.getMessage() for phrase in blocked_phrases)
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s'))
-logger.addHandler(console_handler)
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s'))
+handler.addFilter(CustomFilter())
+logger.addHandler(handler)
 
 def log_debug(tag, msg, exc_info=False):
     logger.info(f"[{tag}] {msg}")
@@ -128,7 +137,9 @@ def get_account_info(force=False):
         total_str = str(acc.total) if hasattr(acc, 'total') else "0"
         total_equity = Decimal(total_str.upper().replace("E", "e"))
         account_cache.update({"time": now, "data": total_equity})
-        log_debug("💰 계정", f"총 담보금: {total_equity} USDT")
+        # 총 담보금 로그는 force=True일 때만 출력
+        if force:
+            log_debug("💰 계정", f"총 담보금: {total_equity} USDT")
         return total_equity
     except Exception as e:
         log_debug("❌ 계정 조회 실패", str(e), exc_info=True)
@@ -147,7 +158,7 @@ def get_price(symbol):
 
 def calculate_position_size(symbol):
     cfg = SYMBOL_CONFIG[symbol]
-    equity = get_account_info(force=True)
+    equity = get_account_info(force=False)  # 로그 출력 없이 조회
     price = get_price(symbol)
     if price <= 0 or equity <= 0:
         return Decimal("0")
@@ -155,7 +166,7 @@ def calculate_position_size(symbol):
         raw_qty = equity / (price * cfg["contract_size"])
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         final_qty = max(qty, cfg["min_qty"])
-        log_debug(f"📊 수량 계산 ({symbol})", f"계산값:{raw_qty} → 최종:{final_qty}")
+        log_debug(f"📊 수량 계산 ({symbol})", f"최종 수량: {final_qty}")
         return final_qty
     except Exception as e:
         log_debug(f"❌ 수량 계산 오류 ({symbol})", str(e), exc_info=True)
@@ -165,22 +176,33 @@ def sync_position(symbol):
     with position_lock:
         try:
             pos = api.get_position(SETTLE, symbol)
+            old_state = position_state.get(symbol, {})
+            old_size = old_state.get("size", 0)
+            
             if pos.size == 0:
-                if symbol in position_state:
+                if symbol in position_state and old_size > 0:
                     log_debug(f"📊 포지션 ({symbol})", "청산됨")
                     position_state.pop(symbol, None)
                     actual_entry_prices.pop(symbol, None)
                 return True
+            
             entry_price = Decimal(str(pos.entry_price))
+            new_size = abs(pos.size)
+            new_side = "long" if pos.size > 0 else "short"
+            
             position_state[symbol] = {
-                "size": abs(pos.size),
-                "side": "long" if pos.size > 0 else "short",
+                "size": new_size,
+                "side": new_side,
                 "entry": entry_price
             }
-            log_debug(f"📊 포지션 ({symbol})", f"{position_state[symbol]['side']} {abs(pos.size)} 계약")
+            
+            # 포지션 상태 변경시에만 로그 출력
+            if old_size != new_size or old_state.get("side") != new_side:
+                log_debug(f"📊 포지션 변경 ({symbol})", f"{new_side} {new_size} 계약, 진입가: {entry_price}")
             return True
         except Exception as e:
-            log_debug(f"❌ 포지션 동기화 실패 ({symbol})", str(e), exc_info=True)
+            if "POSITION_NOT_FOUND" not in str(e):
+                log_debug(f"❌ 포지션 동기화 실패 ({symbol})", str(e), exc_info=True)
             return False
 
 def execute_order(symbol, side, qty, retry=3):
@@ -207,7 +229,6 @@ def execute_order(symbol, side, qty, retry=3):
             error = str(e)
             log_debug(f"❌ 주문 실패 ({symbol})", f"{error}")
             if "INSUFFICIENT_AVAILABLE" in error:
-                # 수량 50% 줄여서 재시도
                 cfg = SYMBOL_CONFIG[symbol]
                 step = cfg["qty_step"]
                 new_qty = (qty * Decimal("0.5")).quantize(step, rounding=ROUND_DOWN)
@@ -308,32 +329,27 @@ def status():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-async def send_ping(ws):
-    while True:
-        try:
-            await ws.ping()
-        except Exception as e:
-            break
-        await asyncio.sleep(30)
-
 async def price_monitor():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     while True:
         try:
-            async with websockets.connect(uri) as ws:
+            log_debug("📡 웹소켓", "연결 시도")
+            async with websockets.connect(uri, ping_interval=30) as ws:
+                log_debug("📡 웹소켓", "연결 성공")
                 await ws.send(json.dumps({
                     "time": int(time.time()),
                     "channel": "futures.tickers",
                     "event": "subscribe",
                     "payload": list(SYMBOL_CONFIG.keys())
                 }))
+                log_debug("✅ 웹소켓", "티커 구독 완료")
                 while True:
                     msg = await ws.recv()
                     data = json.loads(msg)
                     if "result" in data:
                         process_ticker(data["result"])
         except Exception as e:
-            log_debug("❌ 웹소켓 오류", str(e))
+            log_debug("❌ 웹소켓", f"연결 실패: {str(e)}")
             await asyncio.sleep(5)
 
 def process_ticker(ticker_data):
@@ -347,7 +363,8 @@ def process_ticker(ticker_data):
         if not contract or not last or contract not in SYMBOL_CONFIG:
             return
         price = Decimal(str(last)).quantize(Decimal('1e-8'))
-        log_debug(f"📈 티커 업데이트 ({contract})", f"{price} USDT")
+        # 티커 업데이트 로그 제거 (필터에서 차단됨)
+        
         with position_lock:
             pos = position_state.get(contract)
             if not pos or pos["size"] == 0:
@@ -357,21 +374,28 @@ def process_ticker(ticker_data):
             if pos["side"] == "long":
                 sl = entry * (1 - cfg["sl_pct"])
                 tp = entry * (1 + cfg["tp_pct"])
-                if price <= sl or price >= tp:
-                    log_debug(f"⚡ TP/SL 트리거 ({contract})", f"현재가: {price}")
-                    execute_order(contract, "close", Decimal(pos["size"]))
+                if price <= sl:
+                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} <= SL:{sl}")
+                    close_position(contract)
+                elif price >= tp:
+                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} >= TP:{tp}")
+                    close_position(contract)
             else:
                 sl = entry * (1 + cfg["sl_pct"])
                 tp = entry * (1 - cfg["tp_pct"])
-                if price >= sl or price <= tp:
-                    log_debug(f"⚡ TP/SL 트리거 ({contract})", f"현재가: {price}")
-                    execute_order(contract, "close", Decimal(pos["size"]))
+                if price >= sl:
+                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} >= SL:{sl}")
+                    close_position(contract)
+                elif price <= tp:
+                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} <= TP:{tp}")
+                    close_position(contract)
     except Exception as e:
         log_debug("❌ 티커 처리 실패", str(e), exc_info=True)
 
 def backup_position_loop():
     while True:
         try:
+            # 백그라운드 동기화 로그 제거 (필터에서 차단됨)
             for sym in SYMBOL_CONFIG:
                 sync_position(sym)
             time.sleep(300)
