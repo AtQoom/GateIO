@@ -159,18 +159,30 @@ def status():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ✅ /debug 엔드포인트 추가 위치
+@app.route("/debug", methods=["GET"])
+def debug_account():
+    try:
+        acc = api.list_futures_accounts(SETTLE)
+        return jsonify({
+            "type": str(type(acc)),
+            "total": str(acc.total),
+            "available": str(getattr(acc, 'available', 'N/A')),
+            "position_margin": str(getattr(acc, 'position_margin', 'N/A')),
+            "order_margin": str(getattr(acc, 'order_margin', 'N/A')),
+            "raw_data": str(acc)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+        
 # ---------------------------- 총 담보금 조회 ----------------------------
 def get_total_collateral(force=False):
     now = time.time()
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
-        acc_list = api.list_futures_accounts(SETTLE)
-        if isinstance(acc_list, list) and len(acc_list) > 0:
-            acc = acc_list[0]
-        else:
-            acc = acc_list
-        total = Decimal(str(getattr(acc, "total", "0")))
+        acc = api.list_futures_accounts(SETTLE)  # Gate.io 공식 문서: 단일 객체 반환
+        total = Decimal(str(acc.total))
         account_cache.update({"time": now, "data": total})
         log_debug("💰 계정", f"총 담보금: {total} USDT")
         return total
