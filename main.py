@@ -176,8 +176,13 @@ def get_total_collateral(force=False):
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
-        acc = api.list_futures_accounts(SETTLE)
-        total = Decimal(str(acc.total))
+        acc_list = api.list_futures_accounts(SETTLE)
+        # Gate.io는 계정 리스트를 반환, 일반적으로 첫번째 계정이 현재 계정
+        if isinstance(acc_list, list) and len(acc_list) > 0:
+            acc = acc_list[0]
+        else:
+            acc = acc_list
+        total = Decimal(str(getattr(acc, "total", "0")))
         account_cache.update({"time": now, "data": total})
         log_debug("💰 계정", f"총 담보금: {total} USDT")
         return total
