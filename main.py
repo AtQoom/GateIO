@@ -440,67 +440,71 @@ def webhook():
     try:
         data = request.get_json()
         log_debug("📥 웹훅", f"수신: {json.dumps(data)}")
+        
         raw = data.get("symbol", "").upper().replace(".P", "")
         symbol = BINANCE_TO_GATE_SYMBOL.get(raw)
         if not symbol or symbol not in SYMBOL_CONFIG:
+            log_debug("❌ 심볼 오류", f"지원하지 않는 심볼: {raw}")
             return jsonify({"error": "Invalid symbol"}), 400
+            
         action = data.get("action", "").lower()
         side = data.get("side", "").lower()
-        sync_position(symbol)
+        
+        # ✅ 중복 신호 차단
         signal_key = f"{symbol}_{action}_{side}"
         now = time.time()
         if signal_key in last_signals and now - last_signals[signal_key] < 3:
             log_debug("🚫 중복 신호 차단", signal_key)
             return jsonify({"status": "duplicate_blocked"}), 200
         last_signals[signal_key] = now
-
+        
+        # ✅ 포지션 동기화
+        sync_position(symbol)
+        
         with position_lock:
-            sync_position(symbol)
-            current_pos = position_state.get(symbol, {})  # ← 반드시 들여쓰기
-            current_count = position_counts.get(symbol, 0)
-            if current_count >= 2:
-                log_debug(f"🚫 통합 피라미딩 제한 ({symbol})", "수동+자동 2회 초과")
-                return jsonify({"status": "pyramiding_limit"}), 200
+            if action == "exit":
+                success = close_position(symbol)
+                return jsonify({"status": "success" if success else "error"})
                 
-                # ✅ 역포지션 처리 (수정된 로직)
+            if action == "entry":
+                # ✅ 피라미딩 제한
+                current_count = position_counts.get(symbol, 0)
+                if current_count >= 2:
+                    log_debug(f"🚫 피라미딩 제한 ({symbol})", "최대 2회")
+                    return jsonify({"status": "pyramiding_limit"}), 200
+                
+                # ✅ 역포지션 처리
                 current_pos = position_state.get(symbol, {})
                 current_side = current_pos.get("side")
-                desired_side = "long" if side == "long" else "short"
+                desired_side = "buy" if side == "long" else "sell"
                 
-                log_debug(f"🔍 포지션 확인 ({symbol})", f"현재: {current_side}, 원하는: {desired_side}")
-                
-                # ✅ 반대 방향일 때만 청산
                 if current_side and current_side != desired_side:
                     log_debug(f"🔄 역포지션 감지 ({symbol})", f"{current_side} → {desired_side}")
                     if not close_position(symbol):
-                        return jsonify({"status": "error", "message": "역포지션 청산 실패"}), 500
+                        return jsonify({"status": "error"}), 500
                     time.sleep(3)
-                elif current_side == desired_side:
-                    log_debug(f"➕ 피라미딩 진입 ({symbol})", f"같은 방향: {desired_side}")
                 
                 # ✅ 수량 계산 및 주문 실행
                 qty = calculate_position_size(symbol)
                 if qty <= 0:
-                    return jsonify({"status": "error", "message": "수량 계산 오류"}), 400
-                
-                desired_api_side = "buy" if side == "long" else "sell"
-                success = execute_order(symbol, desired_api_side, qty)
+                    return jsonify({"status": "error"}), 400
+                    
+                success = execute_order(symbol, desired_side, qty)
                 if success:
                     position_counts[symbol] = position_counts.get(symbol, 0) + 1
                     
                 return jsonify({
-                    "status": "success" if success else "error", 
-                    "qty": float(qty),
+                    "status": "success" if success else "error",
                     "symbol": symbol,
                     "side": side,
-                    "action": "pyramiding" if current_side == desired_side else "new_entry"
+                    "qty": float(qty)
                 })
                 
         return jsonify({"error": "Invalid action"}), 400
         
     except Exception as e:
         log_debug(f"❌ 웹훅 처리 실패 ({symbol or 'unknown'})", str(e), exc_info=True)
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"status": "error"}), 500
 
 # ---------------------------- 서버 실행 ----------------------------
 if __name__ == "__main__":
