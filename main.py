@@ -440,32 +440,27 @@ def webhook():
     try:
         data = request.get_json()
         log_debug("📥 웹훅", f"수신: {json.dumps(data)}")
-        
         raw = data.get("symbol", "").upper().replace(".P", "")
         symbol = BINANCE_TO_GATE_SYMBOL.get(raw)
         if not symbol or symbol not in SYMBOL_CONFIG:
-            log_debug("❌ 심볼 오류", f"지원하지 않는 심볼: {raw}")
             return jsonify({"error": "Invalid symbol"}), 400
-            
         action = data.get("action", "").lower()
         side = data.get("side", "").lower()
-        
-        # ✅ 현재 포지션 상태 먼저 동기화
         sync_position(symbol)
-        
         signal_key = f"{symbol}_{action}_{side}"
         now = time.time()
         if signal_key in last_signals and now - last_signals[signal_key] < 3:
             log_debug("🚫 중복 신호 차단", signal_key)
             return jsonify({"status": "duplicate_blocked"}), 200
         last_signals[signal_key] = now
-        
+
         with position_lock:
-            sync_position(symbol)  # ✅ 요청 시 즉시 동기화
+            sync_position(symbol)
+            current_pos = position_state.get(symbol, {})  # ← 반드시 들여쓰기
             current_count = position_counts.get(symbol, 0)
             if current_count >= 2:
-                 log_debug(f"🚫 통합 피라미딩 제한 ({symbol})", "수동+자동 2회 초과")
-                 return jsonify({"status": "pyramiding_limit"}), 200
+                log_debug(f"🚫 통합 피라미딩 제한 ({symbol})", "수동+자동 2회 초과")
+                return jsonify({"status": "pyramiding_limit"}), 200
                 
                 # ✅ 역포지션 처리 (수정된 로직)
                 current_pos = position_state.get(symbol, {})
