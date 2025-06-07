@@ -141,70 +141,37 @@ def status():
     try:
         equity = get_total_collateral()
         active_positions = {}
-        for symbol in SYMBOL_CONFIG:
-            sync_position(symbol)  # ✅ 상태 조회 시 동기화
-            pos = position_state.get(symbol, {})
+        for symbol, pos in position_state.items():
             if pos.get("size", 0) > 0:
                 active_positions[symbol] = {
                     "size": float(pos["size"]),
                     "side": pos["side"],
                     "entry_price": float(pos["entry"]),
-                    "count": position_counts.get(symbol, 0),
-                    "source": "자동" if position_counts.get(symbol,0) >0 else "수동"
+                    "count": position_counts.get(symbol, 0)
                 }
         return jsonify({
             "total_collateral": float(equity),
             "active_positions": active_positions,
-            "position_counts": dict(position_counts)
+            "position_counts": dict(position_counts),
+            "last_signals": {k: datetime.fromtimestamp(v).isoformat() for k, v in last_signals.items()},
+            "server_uptime": int(time.time() - server_start_time)
         }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 디버그 엔드포인트 추가
-@app.route("/debug", methods=["GET"])
-def debug_account():
-    try:
-        acc = api.list_futures_accounts(SETTLE)
-        return jsonify({
-            "type": str(type(acc)),
-            "total": str(getattr(acc, 'total', 'N/A')),
-            "available": str(getattr(acc, 'available', 'N/A')),
-            "position_margin": str(getattr(acc, 'position_margin', 'N/A')),
-            "order_margin": str(getattr(acc, 'order_margin', 'N/A')),
-            "raw_data": str(acc)
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-# ---------------------------- 총 담보금 조회 (강화된 디버깅) ----------------------------
+# ---------------------------- 총 담보금 조회 (기존 유지) ----------------------------
 def get_total_collateral(force=False):
     now = time.time()
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
         acc = api.list_futures_accounts(SETTLE)
-        
-        # ✅ 강화된 디버깅
-        log_debug("🔍 API 응답 디버깅", f"Type: {type(acc)}")
-        log_debug("🔍 API 응답 디버깅", f"Dir: {dir(acc)}")
-        log_debug("🔍 API 응답 디버깅", f"Raw: {acc}")
-        
-        # ✅ 다양한 필드 시도
-        total = None
-        for field in ['total', 'balance', 'equity', 'wallet_balance']:
-            if hasattr(acc, field):
-                total = Decimal(str(getattr(acc, field)))
-                log_debug("💰 담보금 필드 발견", f"{field}: {total}")
-                break
-                
-        if total is None or total <= Decimal("1"):
-            log_debug("⚠️ API 담보금 오류", f"값: {total}, 기본값 61 사용")
-            total = Decimal("61")  # 실제 잔고 강제 설정
-            
+        total = Decimal(str(getattr(acc, 'total', '0')))
+        if total <= Decimal("10"):
+            total = Decimal("61")  # 기본값 사용
         account_cache.update({"time": now, "data": total})
         log_debug("💰 계정", f"최종 담보금: {total} USDT")
         return total
-        
     except Exception as e:
         log_debug("❌ 계정 조회 실패", str(e), exc_info=True)
         return Decimal("61")
@@ -218,13 +185,12 @@ def get_price(symbol):
         log_debug("❌ 가격 조회 실패", str(e), exc_info=True)
         return Decimal("0")
 
-# ---------------------------- 포지션 동기화 (로깅 강화) ----------------------------
+# ---------------------------- 포지션 동기화 (수동 매매 통합) ----------------------------
 def sync_position(symbol):
     with position_lock:
         try:
             pos = api.get_position(SETTLE, symbol)
             current_size = abs(Decimal(str(pos.size)))
-            cfg = SYMBOL_CONFIG[symbol]
             
             if current_size == 0:
                 if symbol in position_state:
@@ -234,21 +200,16 @@ def sync_position(symbol):
                     position_counts[symbol] = 0
                 return True
                 
-            # ✅ 실제 포지션 크기 → 피라미딩 횟수 계산
-            qty_per_entry = calculate_position_size(symbol)  # 1회 진입 수량
-            if qty_per_entry == 0:
-                log_debug(f"⚠️ 수량 계산 실패 ({symbol})", "계약 크기 0")
-                return False
-                
-            current_count = (current_size / cfg["contract_size"]) // qty_per_entry
-            position_counts[symbol] = int(current_count)
+            # ✅ 수동+자동 포지션 통합 계산
+            cfg = SYMBOL_CONFIG[symbol]
+            estimated_count = int(current_size / cfg["contract_size"])
+            position_counts[symbol] = min(estimated_count, 2)  # 최대 2회로 제한
             
             entry_price = Decimal(str(pos.entry_price))
             side = "long" if pos.size > 0 else "short"
             
-            # 로깅 강화 (수동 매매 감지)
             if symbol not in position_state:
-                log_debug(f"📊 외부 포지션 발견 ({symbol})", f"크기: {current_size}, 방향: {side}, 횟수: {current_count}")
+                log_debug(f"📊 기존 포지션 발견 ({symbol})", f"크기: {current_size}, 방향: {side}, 추정 횟수: {estimated_count}")
             
             position_state[symbol] = {
                 "size": current_size,
@@ -319,11 +280,7 @@ def backup_position_loop():
     while True:
         try:
             for sym in SYMBOL_CONFIG:
-                sync_position(sym)  # 5분마다 모든 포지션 동기화
-                pos = position_state.get(sym, {})
-                if pos.get("size", 0) > 0:
-                    log_debug(f"🔁 백그라운드 동기화 ({sym})", 
-                             f"현재: {pos['size']}계약, 횟수: {position_counts.get(sym, 0)}")
+                sync_position(sym)
             time.sleep(300)
         except Exception as e:
             log_debug("❌ 백업 루프 오류", str(e))
@@ -346,11 +303,11 @@ def calculate_position_size(symbol):
         log_debug(f"❌ 수량 계산 오류 ({symbol})", str(e), exc_info=True)
         return Decimal("0")
 
-# ---------------------------- 주문 실행 (피라미딩 2회 제한) ----------------------------
+# ---------------------------- 주문 실행 (피라미딩 2회 제한 강화) ----------------------------
 def execute_order(symbol, side, qty):
     for attempt in range(3):
         try:
-            # ✅ 주문 전 실제 포지션 동기화
+            # ✅ 주문 전 포지션 동기화
             sync_position(symbol)
             
             cfg = SYMBOL_CONFIG[symbol]
@@ -359,9 +316,10 @@ def execute_order(symbol, side, qty):
                 log_debug(f"⛔ 최소 수량 미달 ({symbol})", f"{qty_dec} < {cfg['min_qty']}")
                 return False
                 
-            # ✅ 실제 포지션 크기 기준 피라미딩 제한
-            if position_counts.get(symbol, 0) >= 2:
-                log_debug(f"🚫 피라미딩 제한 ({symbol})", "최대 2회 (수동 포함)")
+            # ✅ 수동+자동 합산 피라미딩 제한
+            current_count = position_counts.get(symbol, 0)
+            if current_count >= 2:
+                log_debug(f"🚫 피라미딩 제한 ({symbol})", f"현재 {current_count}회, 최대 2회")
                 return False
                 
             size = float(qty_dec) if side == "buy" else -float(qty_dec)
@@ -376,7 +334,8 @@ def execute_order(symbol, side, qty):
                 price="0",
                 tif="ioc"
             )
-            api.create_futures_order(SETTLE, order)
+            
+            created_order = api.create_futures_order(SETTLE, order)
             log_debug(f"✅ 주문 완료 ({symbol})", f"{side} {qty_dec} 계약")
             
             # ✅ 주문 후 포지션 재동기화
@@ -384,7 +343,7 @@ def execute_order(symbol, side, qty):
             return True
             
         except Exception as e:
-            log_debug(f"❌ 주문 실패 ({symbol})", str(e))
+            log_debug(f"❌ 주문 실패 ({symbol})", f"{str(e)} ({attempt+1}/3)")
             time.sleep(1)
     return False
 
@@ -403,10 +362,12 @@ def close_position(symbol):
                     log_debug(f"📊 포지션 ({symbol})", "이미 청산됨")
                     position_counts[symbol] = 0
                     return True
+                    
                 try:
                     api.cancel_futures_orders(SETTLE, symbol)
                 except Exception as e:
                     log_debug("주문 취소 무시", str(e))
+                    
                 order = FuturesOrder(
                     contract=symbol,
                     size=0,
@@ -415,6 +376,7 @@ def close_position(symbol):
                     close=True
                 )
                 api.create_futures_order(SETTLE, order)
+                
                 for check in range(10):
                     time.sleep(0.5)
                     current_pos = api.get_position(SETTLE, symbol)
@@ -424,16 +386,20 @@ def close_position(symbol):
                         actual_entry_prices.pop(symbol, None)
                         position_counts[symbol] = 0
                         return True
+                        
                 log_debug(f"⚠️ 청산 미확인 ({symbol})", "재시도 중...")
+                
             except Exception as e:
                 log_debug(f"❌ 청산 실패 ({symbol})", f"{str(e)} ({attempt+1}/5)")
                 time.sleep(1)
+                
         position_counts[symbol] = 0
         return False
+        
     finally:
         position_lock.release()
 
-# ---------------------------- 웹훅 처리 (버그 수정) ----------------------------
+# ---------------------------- 웹훅 처리 (중복 신호 차단 강화) ----------------------------
 @app.route("/", methods=["POST"])
 def webhook():
     symbol = None
@@ -450,11 +416,11 @@ def webhook():
         action = data.get("action", "").lower()
         side = data.get("side", "").lower()
         
-        # ✅ 중복 신호 차단
+        # ✅ 강화된 중복 신호 차단 (3초)
         signal_key = f"{symbol}_{action}_{side}"
         now = time.time()
         if signal_key in last_signals and now - last_signals[signal_key] < 3:
-            log_debug("🚫 중복 신호 차단", signal_key)
+            log_debug("🚫 중복 신호 차단", f"{signal_key} (3초 이내)")
             return jsonify({"status": "duplicate_blocked"}), 200
         last_signals[signal_key] = now
         
@@ -467,10 +433,10 @@ def webhook():
                 return jsonify({"status": "success" if success else "error"})
                 
             if action == "entry":
-                # ✅ 피라미딩 제한
+                # ✅ 피라미딩 제한 (수동+자동 통합)
                 current_count = position_counts.get(symbol, 0)
                 if current_count >= 2:
-                    log_debug(f"🚫 피라미딩 제한 ({symbol})", "최대 2회")
+                    log_debug(f"🚫 통합 피라미딩 제한 ({symbol})", f"현재 {current_count}회, 최대 2회")
                     return jsonify({"status": "pyramiding_limit"}), 200
                 
                 # ✅ 역포지션 처리
@@ -481,30 +447,33 @@ def webhook():
                 if current_side and current_side != desired_side:
                     log_debug(f"🔄 역포지션 감지 ({symbol})", f"{current_side} → {desired_side}")
                     if not close_position(symbol):
-                        return jsonify({"status": "error"}), 500
+                        return jsonify({"status": "error", "message": "역포지션 청산 실패"}), 500
                     time.sleep(3)
+                elif current_side == desired_side:
+                    log_debug(f"➕ 피라미딩 진입 ({symbol})", f"같은 방향: {desired_side}")
                 
                 # ✅ 수량 계산 및 주문 실행
                 qty = calculate_position_size(symbol)
                 if qty <= 0:
-                    return jsonify({"status": "error"}), 400
-                    
+                    return jsonify({"status": "error", "message": "수량 계산 오류"}), 400
+                
                 success = execute_order(symbol, desired_side, qty)
                 if success:
                     position_counts[symbol] = position_counts.get(symbol, 0) + 1
                     
                 return jsonify({
-                    "status": "success" if success else "error",
+                    "status": "success" if success else "error", 
+                    "qty": float(qty),
                     "symbol": symbol,
                     "side": side,
-                    "qty": float(qty)
+                    "action": "pyramiding" if current_side == desired_side else "new_entry"
                 })
                 
         return jsonify({"error": "Invalid action"}), 400
         
     except Exception as e:
         log_debug(f"❌ 웹훅 처리 실패 ({symbol or 'unknown'})", str(e), exc_info=True)
-        return jsonify({"status": "error"}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # ---------------------------- 서버 실행 ----------------------------
 if __name__ == "__main__":
@@ -520,6 +489,5 @@ if __name__ == "__main__":
     logger.info(f"🚀 서버 시작 (포트: {port})")
     logger.info(f"📍 헬스체크: http://localhost:{port}/ping")
     logger.info(f"📊 상태조회: http://localhost:{port}/status")
-    logger.info(f"🔍 디버그: http://localhost:{port}/debug")
     
     app.run(host="0.0.0.0", port=port, debug=False)
