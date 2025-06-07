@@ -393,7 +393,6 @@ def close_position(symbol):
 
 # ---------------------------- 웹훅 처리 (중복 신호 차단 강화) ----------------------------
 @app.route("/", methods=["POST"])
-@app.route("/", methods=["POST"])
 def webhook():
     symbol = None
     try:
