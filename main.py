@@ -282,19 +282,41 @@ def backup_position_loop():
 # ---------------------------- 수량 계산 (총담보금 100%) ----------------------------
 def calculate_position_size(symbol):
     cfg = SYMBOL_CONFIG[symbol]
-    equity = get_total_collateral(force=True)
     price = get_price(symbol)
-    if price <= 0 or equity <= 0:
+    if price <= 0:
         return Decimal("0")
+    
+    # available margin 직접 조회
     try:
-        raw_qty = equity / (price * cfg["contract_size"])
-        qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
-        final_qty = max(qty, cfg["min_qty"])
-        log_debug(f"📊 수량 계산 ({symbol})", f"담보금: {equity}, 가격: {price}, 수량: {final_qty}")
-        return final_qty
-    except Exception as e:
-        log_debug(f"❌ 수량 계산 오류 ({symbol})", str(e), exc_info=True)
+        acc = api.list_futures_accounts(SETTLE)
+        available_margin = Decimal(str(getattr(acc, 'available', '61')))
+    except:
+        available_margin = Decimal("61")
+    
+    leverage = 1  # 레버리지 1배 기준
+    contract_size = cfg["contract_size"]
+    min_notional = Decimal("10")  # Gate.io 최소 주문 금액
+    
+    # available margin 내에서 최대 주문 가능한 계약 개수 계산
+    max_contracts = available_margin * leverage / (price * contract_size)
+    
+    # 계약 단위로 내림
+    contract_qty = int(max_contracts)
+    
+    # 최소 주문 금액 체크
+    if contract_qty * price * contract_size < min_notional:
+        log_debug(f"⛔ 최소 주문 금액 미만 ({symbol})", f"{contract_qty * price * contract_size} < {min_notional}")
         return Decimal("0")
+    
+    # 최소 계약 개수 체크
+    if contract_qty < 1:
+        log_debug(f"⛔ 최소 계약 개수 미만 ({symbol})", f"{contract_qty} < 1")
+        return Decimal("0")
+    
+    log_debug(f"📊 수량 계산 ({symbol})", 
+             f"가용마진: {available_margin}, 가격: {price}, 계약수: {contract_qty}, 실제수량: {contract_qty * contract_size}")
+    
+    return Decimal(str(contract_qty))
 
 # ---------------------------- 주문 실행 (자동만 2회 제한) ----------------------------
 def execute_order(symbol, side, qty):
