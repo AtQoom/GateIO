@@ -8,7 +8,7 @@ import logging
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, WalletApi
 
 # ----------- 로그 필터 및 설정 -----------
 class CustomFilter(logging.Filter):
@@ -119,6 +119,7 @@ SYMBOL_CONFIG = {
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
+wallet_api = WalletApi(client)
 
 position_state = {}
 position_lock = threading.RLock()
@@ -130,96 +131,29 @@ def get_total_collateral(force=False):
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
-        acc = api.list_futures_accounts(SETTLE)
-        
-        # 🔴 API 응답 전체 디버깅
-        log_debug("🔍 API 응답 디버깅", f"Raw response: {acc}")
-        
-        # 🔴 모든 속성 출력
-        for attr in dir(acc):
-            if not attr.startswith('_'):
-                try:
-                    value = getattr(acc, attr)
-                    if not callable(value):
-                        log_debug("🔍 계정 필드", f"{attr}: {value}")
-                except:
-                    pass
-        
-        # 🔴 주요 필드들 개별 확인
-        total = getattr(acc, 'total', None)
-        available = getattr(acc, 'available', None)
-        unrealised_pnl = getattr(acc, 'unrealised_pnl', None)
-        position_margin = getattr(acc, 'position_margin', None)
-        order_margin = getattr(acc, 'order_margin', None)
-        
-        log_debug("🔍 주요 필드 확인", f"total: {total}")
-        log_debug("🔍 주요 필드 확인", f"available: {available}")
-        log_debug("🔍 주요 필드 확인", f"unrealised_pnl: {unrealised_pnl}")
-        log_debug("🔍 주요 필드 확인", f"position_margin: {position_margin}")
-        log_debug("🔍 주요 필드 확인", f"order_margin: {order_margin}")
-        
-        # 🔴 여러 후보 필드 중 가장 큰 값 사용
-        candidates = []
-        if total is not None:
-            candidates.append(("total", Decimal(str(total))))
-        if available is not None:
-            candidates.append(("available", Decimal(str(available))))
-        
-        if candidates:
-            # 가장 큰 값을 총 담보금으로 사용
-            field_name, final_total = max(candidates, key=lambda x: x[1])
-            log_debug("💰 선택된 필드", f"{field_name}: {final_total} USDT")
-        else:
-            final_total = Decimal("0")
-            log_debug("❌ 모든 필드가 None", "담보금을 0으로 설정")
-        
-        account_cache.update({"time": now, "data": final_total})
-        log_debug("💰 최종 총 담보금", f"{final_total} USDT")
-        return final_total
-        
+        # Gate.io WalletApi에서 총 자산(총 담보금) 조회
+        total_balance = wallet_api.get_total_balance(currency="USDT")
+        # total_balance.total은 str 타입일 수 있음
+        total = Decimal(str(getattr(total_balance, 'total', '0')))
+        log_debug("💰 총 자산(총 담보금)", f"{total} USDT")
+        account_cache.update({"time": now, "data": total})
+        return total
     except Exception as e:
-        log_debug("❌ 계정 조회 실패", str(e), exc_info=True)
+        log_debug("❌ 총 자산 조회 실패", str(e), exc_info=True)
         return Decimal("0")
 
-def log_initial_status():
-    """서버 시작 시 초기 포지션/담보금 상태 로깅 (강화)"""
+def get_price(symbol):
     try:
-        log_debug("🚀 서버 시작", "초기 상태 확인 중...")
-        
-        # 🔴 디버그 모드로 계정 정보 상세 조회
-        total_equity = get_total_collateral(force=True)
-        
-        # 🔴 /debug 엔드포인트와 동일한 상세 정보 출력
-        try:
-            acc = api.list_futures_accounts(SETTLE)
-            log_debug("🔍 계정 상세 정보", f"Raw account object: {acc}")
-            log_debug("🔍 계정 상세 정보", f"total: {getattr(acc, 'total', 'N/A')}")
-            log_debug("🔍 계정 상세 정보", f"available: {getattr(acc, 'available', 'N/A')}")
-            log_debug("🔍 계정 상세 정보", f"unrealised_pnl: {getattr(acc, 'unrealised_pnl', 'N/A')}")
-            log_debug("🔍 계정 상세 정보", f"order_margin: {getattr(acc, 'order_margin', 'N/A')}")
-            log_debug("🔍 계정 상세 정보", f"position_margin: {getattr(acc, 'position_margin', 'N/A')}")
-        except Exception as e:
-            log_debug("❌ 상세 계정 정보 조회 실패", str(e))
-        
-        log_debug("💰 최종 총 담보금", f"{total_equity} USDT")
-        
-        for symbol in SYMBOL_CONFIG:
-            if not update_position_state(symbol, timeout=3):
-                log_debug("❌ 포지션 조회 실패", f"초기화 중 {symbol} 상태 확인 불가")
-                continue
-            
-            pos = position_state.get(symbol, {})
-            if pos.get("side"):
-                log_debug(
-                    f"📊 초기 포지션 ({symbol})",
-                    f"방향: {pos['side']}, 수량: {pos['size']}, 진입가: {pos['price']}, 평가금액: {pos['value']} USDT"
-                )
-            else:
-                log_debug(f"📊 초기 포지션 ({symbol})", "포지션 없음")
-                
+        ticker = api.list_futures_tickers(SETTLE, contract=symbol)
+        if not ticker or len(ticker) == 0:
+            return Decimal("0")
+        price_str = str(ticker[0].last).upper().replace("E", "e")
+        price = Decimal(price_str).normalize()
+        return price
     except Exception as e:
-        log_debug("❌ 초기 상태 로깅 실패", str(e), exc_info=True)
-        
+        log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e), exc_info=True)
+        return Decimal("0")
+
 def calculate_position_size(symbol):
     cfg = SYMBOL_CONFIG[symbol]
     equity = get_total_collateral(force=True)
@@ -234,7 +168,7 @@ def calculate_position_size(symbol):
         if order_value < cfg["min_notional"]:
             log_debug(f"⛔ 최소 주문 금액 미달 ({symbol})", f"{order_value} < {cfg['min_notional']} USDT")
             return Decimal("0")
-        log_debug(f"📊 수량 계산 ({symbol})", f"총 담보금: {equity}, 가격: {price}, 수량: {final_qty}, 주문금액: {order_value}")
+        log_debug(f"📊 수량 계산 ({symbol})", f"총 자산: {equity}, 가격: {price}, 수량: {final_qty}, 주문금액: {order_value}")
         return final_qty
     except Exception as e:
         log_debug(f"❌ 수량 계산 오류 ({symbol})", str(e), exc_info=True)
@@ -290,11 +224,11 @@ def update_position_state(symbol, timeout=5):
         position_lock.release()
 
 def log_initial_status():
-    """서버 시작 시 초기 포지션/담보금 상태 로깅"""
+    """서버 시작 시 초기 포지션/총 자산 상태 로깅"""
     try:
         log_debug("🚀 서버 시작", "초기 상태 확인 중...")
         total_equity = get_total_collateral(force=True)
-        log_debug("💰 총 담보금", f"{total_equity} USDT")
+        log_debug("💰 총 자산", f"{total_equity} USDT")
         for symbol in SYMBOL_CONFIG:
             if not update_position_state(symbol, timeout=3):
                 log_debug("❌ 포지션 조회 실패", f"초기화 중 {symbol} 상태 확인 불가")
@@ -456,14 +390,11 @@ def status():
 @app.route("/debug", methods=["GET"])
 def debug_account():
     try:
-        acc = api.list_futures_accounts(SETTLE)
+        # WalletApi의 get_total_balance로 총 자산 확인
+        total_balance = wallet_api.get_total_balance(currency="USDT")
         debug_info = {
-            "raw_response": str(acc),
-            "total": str(acc.total) if hasattr(acc, 'total') else "없음",
-            "available": str(acc.available) if hasattr(acc, 'available') else "없음",
-            "unrealised_pnl": str(acc.unrealised_pnl) if hasattr(acc, 'unrealised_pnl') else "없음",
-            "order_margin": str(acc.order_margin) if hasattr(acc, 'order_margin') else "없음",
-            "position_margin": str(acc.position_margin) if hasattr(acc, 'position_margin') else "없음"
+            "raw_response": str(total_balance),
+            "total": str(getattr(total_balance, 'total', '없음')),
         }
         return jsonify(debug_info)
     except Exception as e:
