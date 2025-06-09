@@ -10,22 +10,20 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 
-# ----------- 로그 필터 및 설정 (강화) -----------
+# ----------- 로그 필터 및 설정 -----------
 class CustomFilter(logging.Filter):
     def filter(self, record):
-        # 🔴 불필요한 로그 필터링 강화
         filter_keywords = [
             "실시간 가격", "티커 수신", "포지션 없음", "계정 필드",
             "담보금 전환", "최종 선택", "전체 계정 정보",
-            "웹소켓 핑", "핑 전송", "핑 성공", "ping",  # 🔴 웹소켓 핑 로그 제거
-            "Serving Flask app", "Debug mode", "WARNING: This is a development server"  # 🔴 Flask 경고 제거
+            "웹소켓 핑", "핑 전송", "핑 성공", "ping",
+            "Serving Flask app", "Debug mode", "WARNING: This is a development server"
         ]
         message = record.getMessage()
         return not any(keyword in message for keyword in filter_keywords)
 
-# Werkzeug(Flask 내부) 로거도 필터링
 werkzeug_logger = logging.getLogger('werkzeug')
-werkzeug_logger.setLevel(logging.ERROR)  # 🔴 Flask 서버 로그 최소화
+werkzeug_logger.setLevel(logging.ERROR)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -134,14 +132,12 @@ def get_total_collateral(force=False):
     try:
         acc = api.list_futures_accounts(SETTLE)
         total = Decimal(str(getattr(acc, 'total', '0')))
-        if total <= Decimal("10"):
-            total = Decimal("61")
         account_cache.update({"time": now, "data": total})
         log_debug("💰 계정", f"총 담보금: {total} USDT")
         return total
     except Exception as e:
         log_debug("❌ 계정 조회 실패", str(e), exc_info=True)
-        return Decimal("61")
+        return Decimal("0")
 
 def get_price(symbol):
     try:
@@ -223,6 +219,27 @@ def update_position_state(symbol, timeout=5):
         return False
     finally:
         position_lock.release()
+
+def log_initial_status():
+    """서버 시작 시 초기 포지션/담보금 상태 로깅"""
+    try:
+        log_debug("🚀 서버 시작", "초기 상태 확인 중...")
+        total_equity = get_total_collateral(force=True)
+        log_debug("💰 총 담보금", f"{total_equity} USDT")
+        for symbol in SYMBOL_CONFIG:
+            if not update_position_state(symbol, timeout=3):
+                log_debug("❌ 포지션 조회 실패", f"초기화 중 {symbol} 상태 확인 불가")
+                continue
+            pos = position_state.get(symbol, {})
+            if pos.get("side"):
+                log_debug(
+                    f"📊 초기 포지션 ({symbol})",
+                    f"방향: {pos['side']}, 수량: {pos['size']}, 진입가: {pos['price']}, 평가금액: {pos['value']} USDT"
+                )
+            else:
+                log_debug(f"📊 초기 포지션 ({symbol})", "포지션 없음")
+    except Exception as e:
+        log_debug("❌ 초기 상태 로깅 실패", str(e), exc_info=True)
 
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
     acquired = position_lock.acquire(timeout=5)
@@ -383,14 +400,11 @@ def debug_account():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 🔴 웹소켓 핑 로그 제거 및 연결 안정성 강화
 async def send_ping(ws):
     while True:
         try:
             await ws.ping()
-            # 🔴 핑 성공 로그 제거 (불필요)
         except Exception:
-            # 🔴 핑 실패 로그도 제거 (자동 재연결로 처리)
             break
         await asyncio.sleep(30)
 
@@ -399,14 +413,10 @@ async def price_listener():
     symbols = list(SYMBOL_CONFIG.keys())
     reconnect_delay = 5
     max_delay = 60
-    
-    # 🔴 서버 시작 시에만 웹소켓 연결 상태 로그
     log_debug("📡 웹소켓 시작", f"URI: {uri}, 심볼: {len(symbols)}개")
-    
     while True:
         try:
             async with websockets.connect(uri, ping_interval=30, ping_timeout=15) as ws:
-                # 🔴 연결 성공은 서버 시작 시에만 로그
                 subscribe_msg = {
                     "time": int(time.time()),
                     "channel": "futures.tickers",
@@ -416,7 +426,6 @@ async def price_listener():
                 await ws.send(json.dumps(subscribe_msg))
                 ping_task = asyncio.create_task(send_ping(ws))
                 reconnect_delay = 5
-                
                 while True:
                     try:
                         msg = await asyncio.wait_for(ws.recv(), timeout=45)
@@ -427,7 +436,6 @@ async def price_listener():
                         if not isinstance(data, dict):
                             continue
                         if data.get("event") == "subscribe":
-                            # 🔴 구독 성공 로그도 서버 시작 시에만
                             continue
                         result = data.get("result")
                         if not result:
@@ -439,14 +447,11 @@ async def price_listener():
                         elif isinstance(result, dict):
                             process_ticker_data(result)
                     except (asyncio.TimeoutError, websockets.ConnectionClosed):
-                        # 🔴 연결 끊김 로그 최소화
                         ping_task.cancel()
                         break
                     except Exception:
-                        # 🔴 불필요한 웹소켓 오류 로그 제거
                         continue
         except Exception:
-            # 🔴 웹소켓 연결 실패 로그 최소화
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
@@ -491,7 +496,6 @@ def process_ticker_data(ticker):
         finally:
             position_lock.release()
     except Exception:
-        # 🔴 티커 처리 실패 로그도 최소화
         pass
 
 def backup_position_loop():
@@ -501,18 +505,12 @@ def backup_position_loop():
                 update_position_state(sym, timeout=1)
             time.sleep(300)
         except Exception:
-            # 🔴 백업 루프 오류 로그 최소화
             time.sleep(300)
 
 if __name__ == "__main__":
-    # 🔴 Flask 경고 메시지 제거
-    os.environ['FLASK_ENV'] = 'production'
-    
+    log_initial_status()
     threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
     threading.Thread(target=backup_position_loop, daemon=True).start()
-    
     port = int(os.environ.get("PORT", 8080))
     log_debug("🚀 서버 시작", f"포트 {port}에서 실행")
-    
-    # 🔴 Flask 개발 서버 경고 제거 (debug=False 명시)
     app.run(host="0.0.0.0", port=port, debug=False)
