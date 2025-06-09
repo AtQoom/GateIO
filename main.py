@@ -10,14 +10,22 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 
-# ----------- 로그 필터 및 설정 -----------
+# ----------- 로그 필터 및 설정 (강화) -----------
 class CustomFilter(logging.Filter):
     def filter(self, record):
+        # 🔴 불필요한 로그 필터링 강화
         filter_keywords = [
             "실시간 가격", "티커 수신", "포지션 없음", "계정 필드",
-            "담보금 전환", "최종 선택", "전체 계정 정보"
+            "담보금 전환", "최종 선택", "전체 계정 정보",
+            "웹소켓 핑", "핑 전송", "핑 성공", "ping",  # 🔴 웹소켓 핑 로그 제거
+            "Serving Flask app", "Debug mode", "WARNING: This is a development server"  # 🔴 Flask 경고 제거
         ]
-        return not any(keyword in record.getMessage() for keyword in filter_keywords)
+        message = record.getMessage()
+        return not any(keyword in message for keyword in filter_keywords)
+
+# Werkzeug(Flask 내부) 로거도 필터링
+werkzeug_logger = logging.getLogger('werkzeug')
+werkzeug_logger.setLevel(logging.ERROR)  # 🔴 Flask 서버 로그 최소화
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -149,12 +157,11 @@ def get_price(symbol):
 
 def calculate_position_size(symbol):
     cfg = SYMBOL_CONFIG[symbol]
-    equity = get_total_collateral(force=True)  # ✅ 총 담보금 사용
+    equity = get_total_collateral(force=True)
     price = get_price(symbol)
     if price <= 0 or equity <= 0:
         return Decimal("0")
     try:
-        # ✅ 레버리지 1배: (총 담보금) / (가격 × 계약 크기)
         raw_qty = equity / (price * cfg["contract_size"])
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         final_qty = max(qty, cfg["min_qty"])
@@ -195,7 +202,6 @@ def update_position_state(symbol, timeout=5):
             actual_price = actual_entry_prices.get(symbol)
             entry_price = actual_price if actual_price else api_entry_price
             value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
-            # Gate.io: size > 0이면 롱, size < 0이면 숏
             position_state[symbol] = {
                 "price": entry_price,
                 "side": "buy" if size > 0 else "sell",
@@ -297,15 +303,12 @@ def webhook():
         action = data.get("action", "").lower()
         reason = data.get("reason", "")
 
-        # ✅ exit일 경우 side 기반 청산
         if action == "exit":
             update_position_state(symbol, timeout=1)
             current_side = position_state.get(symbol, {}).get("side")
-            # reverse_signal은 무조건 청산
             if reason == "reverse_signal":
                 success = close_position(symbol)
             else:
-                # side가 명시된 경우 해당 방향만 청산
                 if side == "long" and current_side == "buy":
                     success = close_position(symbol)
                 elif side == "short" and current_side == "sell":
@@ -316,7 +319,6 @@ def webhook():
             log_debug(f"🔁 청산 결과 ({symbol})", f"성공: {success}")
             return jsonify({"status": "success" if success else "error"})
         
-        # ✅ entry만 side 체크
         if side not in ["long", "short"] or action not in ["entry", "exit"]:
             return jsonify({"error": "Invalid side/action"}), 400
 
@@ -381,13 +383,14 @@ def debug_account():
     except Exception as e:
         return jsonify({"error": str(e)})
 
+# 🔴 웹소켓 핑 로그 제거 및 연결 안정성 강화
 async def send_ping(ws):
     while True:
         try:
             await ws.ping()
-            log_debug("📡 웹소켓 핑", "핑 전송 성공")
-        except Exception as e:
-            log_debug("❌ 핑 실패", str(e))
+            # 🔴 핑 성공 로그 제거 (불필요)
+        except Exception:
+            # 🔴 핑 실패 로그도 제거 (자동 재연결로 처리)
             break
         await asyncio.sleep(30)
 
@@ -396,12 +399,14 @@ async def price_listener():
     symbols = list(SYMBOL_CONFIG.keys())
     reconnect_delay = 5
     max_delay = 60
-    log_debug("📡 웹소켓", f"시작 - URI: {uri}, 심볼: {symbols}")
+    
+    # 🔴 서버 시작 시에만 웹소켓 연결 상태 로그
+    log_debug("📡 웹소켓 시작", f"URI: {uri}, 심볼: {len(symbols)}개")
+    
     while True:
         try:
-            log_debug("📡 웹소켓", f"연결 시도: {uri}")
             async with websockets.connect(uri, ping_interval=30, ping_timeout=15) as ws:
-                log_debug("📡 웹소켓", f"연결 성공: {uri}")
+                # 🔴 연결 성공은 서버 시작 시에만 로그
                 subscribe_msg = {
                     "time": int(time.time()),
                     "channel": "futures.tickers",
@@ -409,9 +414,9 @@ async def price_listener():
                     "payload": symbols
                 }
                 await ws.send(json.dumps(subscribe_msg))
-                log_debug("📡 웹소켓", f"구독 요청 전송: {subscribe_msg}")
                 ping_task = asyncio.create_task(send_ping(ws))
                 reconnect_delay = 5
+                
                 while True:
                     try:
                         msg = await asyncio.wait_for(ws.recv(), timeout=45)
@@ -422,7 +427,7 @@ async def price_listener():
                         if not isinstance(data, dict):
                             continue
                         if data.get("event") == "subscribe":
-                            log_debug("✅ 웹소켓 구독", f"채널: {data.get('channel')}")
+                            # 🔴 구독 성공 로그도 서버 시작 시에만
                             continue
                         result = data.get("result")
                         if not result:
@@ -433,15 +438,15 @@ async def price_listener():
                                     process_ticker_data(item)
                         elif isinstance(result, dict):
                             process_ticker_data(result)
-                    except (asyncio.TimeoutError, websockets.ConnectionClosed) as e:
-                        log_debug("⚠️ 웹소켓", f"연결 끊김: {str(e)}, 재연결 시도")
+                    except (asyncio.TimeoutError, websockets.ConnectionClosed):
+                        # 🔴 연결 끊김 로그 최소화
                         ping_task.cancel()
                         break
-                    except Exception as e:
-                        log_debug("❌ 웹소켓 메시지 처리", f"오류: {str(e)}")
+                    except Exception:
+                        # 🔴 불필요한 웹소켓 오류 로그 제거
                         continue
-        except Exception as e:
-            log_debug("❌ 웹소켓 연결 실패", f"오류: {str(e)}")
+        except Exception:
+            # 🔴 웹소켓 연결 실패 로그 최소화
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
@@ -485,8 +490,9 @@ def process_ticker_data(ticker):
                     close_position(contract)
         finally:
             position_lock.release()
-    except Exception as e:
-        log_debug("❌ 티커 처리 실패", str(e))
+    except Exception:
+        # 🔴 티커 처리 실패 로그도 최소화
+        pass
 
 def backup_position_loop():
     while True:
@@ -494,13 +500,19 @@ def backup_position_loop():
             for sym in SYMBOL_CONFIG:
                 update_position_state(sym, timeout=1)
             time.sleep(300)
-        except Exception as e:
-            log_debug("❌ 백업 루프 오류", str(e))
+        except Exception:
+            # 🔴 백업 루프 오류 로그 최소화
             time.sleep(300)
 
 if __name__ == "__main__":
+    # 🔴 Flask 경고 메시지 제거
+    os.environ['FLASK_ENV'] = 'production'
+    
     threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
     threading.Thread(target=backup_position_loop, daemon=True).start()
+    
     port = int(os.environ.get("PORT", 8080))
-    log_debug("🚀 서버 시작", f"Railway에서 {port} 포트로 시작")
-    app.run(host="0.0.0.0", port=port)
+    log_debug("🚀 서버 시작", f"포트 {port}에서 실행")
+    
+    # 🔴 Flask 개발 서버 경고 제거 (debug=False 명시)
+    app.run(host="0.0.0.0", port=port, debug=False)
