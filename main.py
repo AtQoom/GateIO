@@ -131,25 +131,38 @@ def get_total_collateral(force=False):
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
-        # 1. Unified 계정의 equity(총 자산, Account Equity) 우선 사용
+        # 🔴 Unified Account equity 직접 조회
         try:
-            unified_accounts = unified_api.list_unified_accounts(currency="USDT")
-            if unified_accounts and len(unified_accounts) > 0:
-                usdt_account = unified_accounts[0]
-                equity = getattr(usdt_account, 'equity', None)
-                if equity is not None:
-                    equity = Decimal(str(equity))
-                    log_debug("💰 통합 계정 총 자산(equity)", f"{equity} USDT")
-                    account_cache.update({"time": now, "data": equity})
-                    return equity
+            # 모든 통합 계정 조회
+            unified_accounts = unified_api.list_unified_accounts()
+            total_equity = Decimal("0")
+            
+            for account in unified_accounts:
+                equity = getattr(account, 'equity', None)
+                currency = getattr(account, 'currency', None)
+                if equity is not None and currency:
+                    equity_val = Decimal(str(equity))
+                    log_debug("🔍 계정 정보", f"{currency}: equity = {equity_val}")
+                    
+                    # USD 또는 USDT 계정의 equity 사용
+                    if currency in ['USD', 'USDT'] and equity_val > total_equity:
+                        total_equity = equity_val
+            
+            if total_equity > Decimal("10"):
+                log_debug("💰 Account Equity(실제 총 자산)", f"{total_equity} USD")
+                account_cache.update({"time": now, "data": total_equity})
+                return total_equity
+                
         except Exception as e:
-            log_debug("⚠️ Unified 계정 조회 실패", str(e))
-        # 2. fallback: 선물 계정 available 사용
+            log_debug("⚠️ Unified Account 조회 실패", str(e))
+        
+        # fallback: available만 사용
         acc = api.list_futures_accounts(SETTLE)
         available = Decimal(str(getattr(acc, 'available', '0')))
         log_debug("💰 선물 계정 잔고(fallback)", f"{available} USDT")
         account_cache.update({"time": now, "data": available})
         return available
+        
     except Exception as e:
         log_debug("❌ 총 자산 조회 실패", str(e), exc_info=True)
         return Decimal("0")
