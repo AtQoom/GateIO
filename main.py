@@ -131,16 +131,38 @@ def get_total_collateral(force=False):
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
-        # 🔴 가장 간단한 방법: 현재 available을 2배로 추정
+        # 1. Unified 계정 총 자산 조회
+        try:
+            unified_accounts = unified_api.list_unified_accounts()
+            if unified_accounts:
+                for account in unified_accounts:
+                    if hasattr(account, 'currency') and account.currency == 'USDT':
+                        equity = getattr(account, 'unified_account_total_equity', None)
+                        if equity is None:
+                            equity = getattr(account, 'equity', None)
+                        if equity is not None:
+                            equity = Decimal(str(equity))
+                            log_debug("💰 통합 계정 총 자산", f"{equity} USDT")
+                            account_cache.update({"time": now, "data": equity})
+                            return equity
+                log_debug("⚠️ USDT 계정 없음", "Unified 계정에서 USDT 계정을 찾을 수 없음")
+        except Exception as e:
+            log_debug("⚠️ Unified 계정 조회 실패", str(e))
+        
+        # 2. Fallback: 선물 계정 available + 포지션 가치
         acc = api.list_futures_accounts(SETTLE)
         available = Decimal(str(getattr(acc, 'available', '0')))
         
-        # Gate.io 화면의 61.53 USD vs 서버의 30.6 USDT 비율로 보정
-        estimated_total = available * Decimal("2")  # 약 2배 보정
+        total_position_value = Decimal("0")
+        for symbol, pos in position_state.items():
+            if pos.get("side") and pos.get("value"):
+                total_position_value += pos["value"]
         
-        log_debug("💰 추정 총 자산", f"available({available}) x 2 = {estimated_total} USDT")
-        account_cache.update({"time": now, "data": estimated_total})
-        return estimated_total
+        total_equity = available + total_position_value
+        log_debug("💰 Fallback 총 자산", f"선물잔고({available}) + 포지션가치({total_position_value}) = {total_equity} USDT")
+        
+        account_cache.update({"time": now, "data": total_equity})
+        return total_equity
         
     except Exception as e:
         log_debug("❌ 총 자산 조회 실패", str(e), exc_info=True)
