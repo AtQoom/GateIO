@@ -132,15 +132,25 @@ def get_total_collateral(force=False):
         return account_cache["data"]
     try:
         acc = api.list_futures_accounts(SETTLE)
+        
+        # 🔴 총 자산 계산: 잔고 + 포지션 담보금 + 미실현 손익
         available = Decimal(str(getattr(acc, 'available', '0')))
-        log_debug("💰 계정 잔고", f"{available} USDT")
-        account_cache.update({"time": now, "data": available})
-        return available
+        position_margin = Decimal(str(getattr(acc, 'position_margin', '0')))
+        unrealised_pnl = Decimal(str(getattr(acc, 'unrealised_pnl', '0')))
+        
+        # 총 자산 = 가용잔고 + 포지션담보금 + 미실현손익
+        total_equity = available + position_margin + unrealised_pnl
+        
+        log_debug("💰 총 자산 계산", f"available: {available}")
+        log_debug("💰 총 자산 계산", f"position_margin: {position_margin}")
+        log_debug("💰 총 자산 계산", f"unrealised_pnl: {unrealised_pnl}")
+        log_debug("💰 총 자산 합계", f"{total_equity} USDT")
+        
+        account_cache.update({"time": now, "data": total_equity})
+        return total_equity
+        
     except Exception as e:
-        log_debug("❌ 잔고 조회 실패", str(e), exc_info=True)
-        return Decimal("0")
-    except Exception as e:
-        log_debug("❌ 마진 밸런스 조회 실패", str(e), exc_info=True)
+        log_debug("❌ 총 자산 조회 실패", str(e), exc_info=True)
         return Decimal("0")
         
 def get_price(symbol):
