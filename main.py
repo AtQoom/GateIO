@@ -131,25 +131,27 @@ def get_total_collateral(force=False):
         return account_cache["data"]
     try:
         acc = api.list_futures_accounts(SETTLE)
-        # 디버깅용 로그
-        log_debug("🔍 선물 계정 raw", f"Raw response: {acc}")
-        total = getattr(acc, 'total', None)
+        
+        # available 필드가 실제 마진 밸런스(68.19 USD)와 일치
         available = getattr(acc, 'available', None)
-        # margin_balance, equity는 None이므로 무시
-        if total is not None:
+        total = getattr(acc, 'total', None)
+        
+        if available is not None:
+            total_equity = Decimal(str(available))
+            field_used = "available(마진밸런스)"
+        elif total is not None:
             total_equity = Decimal(str(total))
             field_used = "total"
-        elif available is not None:
-            total_equity = Decimal(str(available))
-            field_used = "available"
         else:
             total_equity = Decimal("0")
             field_used = "none"
-        log_debug("💰 총 자산 선택", f"사용 필드: {field_used}, 값: {total_equity} USDT")
+        
+        log_debug("💰 마진 밸런스", f"사용 필드: {field_used}, 값: {total_equity} USDT")
         account_cache.update({"time": now, "data": total_equity})
         return total_equity
+        
     except Exception as e:
-        log_debug("❌ 총 자산 조회 실패", str(e), exc_info=True)
+        log_debug("❌ 마진 밸런스 조회 실패", str(e), exc_info=True)
         return Decimal("0")
 
 def get_price(symbol):
@@ -166,19 +168,19 @@ def get_price(symbol):
 
 def calculate_position_size(symbol):
     cfg = SYMBOL_CONFIG[symbol]
-    equity = get_total_collateral(force=True)
+    margin_balance = get_total_collateral(force=True)  # 마진 밸런스 기준
     price = get_price(symbol)
-    if price <= 0 or equity <= 0:
+    if price <= 0 or margin_balance <= 0:
         return Decimal("0")
     try:
-        raw_qty = equity / (price * cfg["contract_size"])
+        raw_qty = margin_balance / (price * cfg["contract_size"])
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         final_qty = max(qty, cfg["min_qty"])
         order_value = final_qty * price * cfg["contract_size"]
         if order_value < cfg["min_notional"]:
             log_debug(f"⛔ 최소 주문 금액 미달 ({symbol})", f"{order_value} < {cfg['min_notional']} USDT")
             return Decimal("0")
-        log_debug(f"📊 수량 계산 ({symbol})", f"마진 밸런스: {equity}, 가격: {price}, 수량: {final_qty}, 주문금액: {order_value}")
+        log_debug(f"📊 수량 계산 ({symbol})", f"마진밸런스: {margin_balance}, 가격: {price}, 수량: {final_qty}, 주문금액: {order_value}")
         return final_qty
     except Exception as e:
         log_debug(f"❌ 수량 계산 오류 ({symbol})", str(e), exc_info=True)
