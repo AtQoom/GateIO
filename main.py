@@ -131,32 +131,39 @@ def get_total_collateral(force=False):
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
-        # 🔴 Unified Account equity 직접 조회
+        # 1. 🔴 Unified Account의 Account Equity 조회 (수정된 방식)
         try:
-            # 모든 통합 계정 조회
+            # currency 파라미터 없이 조회
             unified_accounts = unified_api.list_unified_accounts()
-            total_equity = Decimal("0")
-            
-            for account in unified_accounts:
-                equity = getattr(account, 'equity', None)
-                currency = getattr(account, 'currency', None)
-                if equity is not None and currency:
-                    equity_val = Decimal(str(equity))
-                    log_debug("🔍 계정 정보", f"{currency}: equity = {equity_val}")
-                    
-                    # USD 또는 USDT 계정의 equity 사용
-                    if currency in ['USD', 'USDT'] and equity_val > total_equity:
-                        total_equity = equity_val
-            
-            if total_equity > Decimal("10"):
-                log_debug("💰 Account Equity(실제 총 자산)", f"{total_equity} USD")
-                account_cache.update({"time": now, "data": total_equity})
-                return total_equity
-                
+            if unified_accounts and len(unified_accounts) > 0:
+                # USDT 계정 찾기
+                for account in unified_accounts:
+                    if hasattr(account, 'currency') and account.currency == 'USDT':
+                        equity = getattr(account, 'equity', None)
+                        if equity is not None and Decimal(str(equity)) > Decimal("10"):
+                            equity = Decimal(str(equity))
+                            log_debug("💰 Account Equity(실제 총 자산)", f"{equity} USD")
+                            account_cache.update({"time": now, "data": equity})
+                            return equity
         except Exception as e:
             log_debug("⚠️ Unified Account 조회 실패", str(e))
         
-        # fallback: available만 사용
+        # 2. 🔴 대안: Unified Account의 전체 총 자산 조회
+        try:
+            # GET /unified/accounts?currency=USD 방식
+            unified_accounts = unified_api.list_unified_accounts(currency="USD")
+            if unified_accounts and len(unified_accounts) > 0:
+                usd_account = unified_accounts[0]
+                equity = getattr(usd_account, 'equity', None)
+                if equity is not None:
+                    equity = Decimal(str(equity))
+                    log_debug("💰 Account Equity(USD)", f"{equity} USD")
+                    account_cache.update({"time": now, "data": equity})
+                    return equity
+        except Exception as e:
+            log_debug("⚠️ USD Unified Account 조회 실패", str(e))
+        
+        # 3. fallback: 선물 계정 available만 사용 (포지션 가치 제외)
         acc = api.list_futures_accounts(SETTLE)
         available = Decimal(str(getattr(acc, 'available', '0')))
         log_debug("💰 선물 계정 잔고(fallback)", f"{available} USDT")
