@@ -8,7 +8,7 @@ import logging
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
 
 # ----------- 로그 필터 및 설정 -----------
 class CustomFilter(logging.Filter):
@@ -119,6 +119,7 @@ SYMBOL_CONFIG = {
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
+unified_api = UnifiedApi(client)  # 🔴 Unified API 추가
 
 position_state = {}
 position_lock = threading.RLock()
@@ -130,27 +131,29 @@ def get_total_collateral(force=False):
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
+        # 🔴 Unified Account API로 실제 마진 밸런스(Equity) 조회
+        try:
+            unified_accounts = unified_api.list_unified_accounts(currency="USDT")
+            if unified_accounts and len(unified_accounts) > 0:
+                usdt_account = unified_accounts[0]
+                equity = getattr(usdt_account, 'equity', None)
+                if equity is not None and Decimal(str(equity)) > Decimal("10"):
+                    margin_balance = Decimal(str(equity))
+                    log_debug("💰 마진 밸런스", f"Unified Account Equity: {margin_balance} USDT")
+                    account_cache.update({"time": now, "data": margin_balance})
+                    return margin_balance
+        except Exception as e:
+            log_debug("⚠️ Unified Account 조회 실패", f"Fallback to Futures API: {e}")
+        
+        # 🔴 Fallback: Futures API 조합으로 마진 밸런스 계산
         acc = api.list_futures_accounts(SETTLE)
+        available = Decimal(str(getattr(acc, 'available', '0')))
+        unrealised_pnl = Decimal(str(getattr(acc, 'unrealised_pnl', '0')))
+        position_margin = Decimal(str(getattr(acc, 'position_margin', '0')))
         
-        # 🔴 available 필드를 마진 밸런스로 사용 (total 대신)
-        margin_balance = getattr(acc, 'available', None)
-        total = getattr(acc, 'total', None)
+        margin_balance = available + unrealised_pnl + position_margin
         
-        log_debug("🔍 계정 필드 확인", f"available: {margin_balance}, total: {total}")
-        
-        if margin_balance is not None and Decimal(str(margin_balance)) > Decimal("0.01"):
-            # available이 있고 0.01보다 크면 사용
-            margin_balance = Decimal(str(margin_balance))
-            field_used = "available"
-        elif total is not None:
-            # available이 없거나 너무 작으면 total 사용
-            margin_balance = Decimal(str(total))
-            field_used = "total"
-        else:
-            margin_balance = Decimal("0")
-            field_used = "none"
-        
-        log_debug("💰 마진 밸런스", f"사용 필드: {field_used}, 값: {margin_balance} USDT")
+        log_debug("💰 마진 밸런스 계산", f"available({available}) + unrealised_pnl({unrealised_pnl}) + position_margin({position_margin}) = {margin_balance}")
         account_cache.update({"time": now, "data": margin_balance})
         return margin_balance
         
