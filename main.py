@@ -119,7 +119,7 @@ SYMBOL_CONFIG = {
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
-unified_api = UnifiedApi(client)  # 🔴 Unified API 추가
+unified_api = UnifiedApi(client)
 
 position_state = {}
 position_lock = threading.RLock()
@@ -131,28 +131,29 @@ def get_total_collateral(force=False):
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
+        # 1. Unified 계정의 equity(총 자산, Account Equity) 우선 사용
+        try:
+            unified_accounts = unified_api.list_unified_accounts(currency="USDT")
+            if unified_accounts and len(unified_accounts) > 0:
+                usdt_account = unified_accounts[0]
+                equity = getattr(usdt_account, 'equity', None)
+                if equity is not None:
+                    equity = Decimal(str(equity))
+                    log_debug("💰 통합 계정 총 자산(equity)", f"{equity} USDT")
+                    account_cache.update({"time": now, "data": equity})
+                    return equity
+        except Exception as e:
+            log_debug("⚠️ Unified 계정 조회 실패", str(e))
+        # 2. fallback: 선물 계정 available 사용
         acc = api.list_futures_accounts(SETTLE)
-        
-        # 🔴 총 자산 계산: 잔고 + 포지션 담보금 + 미실현 손익
         available = Decimal(str(getattr(acc, 'available', '0')))
-        position_margin = Decimal(str(getattr(acc, 'position_margin', '0')))
-        unrealised_pnl = Decimal(str(getattr(acc, 'unrealised_pnl', '0')))
-        
-        # 총 자산 = 가용잔고 + 포지션담보금 + 미실현손익
-        total_equity = available + position_margin + unrealised_pnl
-        
-        log_debug("💰 총 자산 계산", f"available: {available}")
-        log_debug("💰 총 자산 계산", f"position_margin: {position_margin}")
-        log_debug("💰 총 자산 계산", f"unrealised_pnl: {unrealised_pnl}")
-        log_debug("💰 총 자산 합계", f"{total_equity} USDT")
-        
-        account_cache.update({"time": now, "data": total_equity})
-        return total_equity
-        
+        log_debug("💰 선물 계정 잔고(fallback)", f"{available} USDT")
+        account_cache.update({"time": now, "data": available})
+        return available
     except Exception as e:
         log_debug("❌ 총 자산 조회 실패", str(e), exc_info=True)
         return Decimal("0")
-        
+
 def get_price(symbol):
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
@@ -167,19 +168,19 @@ def get_price(symbol):
 
 def calculate_position_size(symbol):
     cfg = SYMBOL_CONFIG[symbol]
-    margin_balance = get_total_collateral(force=True)
+    equity = get_total_collateral(force=True)
     price = get_price(symbol)
-    if price <= 0 or margin_balance <= 0:
+    if price <= 0 or equity <= 0:
         return Decimal("0")
     try:
-        raw_qty = margin_balance / (price * cfg["contract_size"])
+        raw_qty = equity / (price * cfg["contract_size"])
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         final_qty = max(qty, cfg["min_qty"])
         order_value = final_qty * price * cfg["contract_size"]
         if order_value < cfg["min_notional"]:
             log_debug(f"⛔ 최소 주문 금액 미달 ({symbol})", f"{order_value} < {cfg['min_notional']} USDT")
             return Decimal("0")
-        log_debug(f"📊 수량 계산 ({symbol})", f"마진 밸런스: {margin_balance}, 가격: {price}, 수량: {final_qty}, 주문금액: {order_value}")
+        log_debug(f"📊 수량 계산 ({symbol})", f"총 자산: {equity}, 가격: {price}, 수량: {final_qty}, 주문금액: {order_value}")
         return final_qty
     except Exception as e:
         log_debug(f"❌ 수량 계산 오류 ({symbol})", str(e), exc_info=True)
@@ -235,11 +236,10 @@ def update_position_state(symbol, timeout=5):
         position_lock.release()
 
 def log_initial_status():
-    """서버 시작 시 초기 포지션/마진 밸런스 상태 로깅"""
     try:
         log_debug("🚀 서버 시작", "초기 상태 확인 중...")
-        total_equity = get_total_collateral(force=True)
-        log_debug("💰 마진 밸런스", f"{total_equity} USDT")
+        equity = get_total_collateral(force=True)
+        log_debug("💰 총 자산(초기)", f"{equity} USDT")
         for symbol in SYMBOL_CONFIG:
             if not update_position_state(symbol, timeout=3):
                 log_debug("❌ 포지션 조회 실패", f"초기화 중 {symbol} 상태 확인 불가")
@@ -519,26 +519,6 @@ def backup_position_loop():
             time.sleep(300)
         except Exception:
             time.sleep(300)
-
-def log_initial_status():
-    try:
-        log_debug("🚀 서버 시작", "초기 상태 확인 중...")
-        margin_balance = get_total_collateral(force=True)
-        log_debug("💰 마진 밸런스", f"{margin_balance} USDT")
-        for symbol in SYMBOL_CONFIG:
-            if not update_position_state(symbol, timeout=3):
-                log_debug("❌ 포지션 조회 실패", f"초기화 중 {symbol} 상태 확인 불가")
-                continue
-            pos = position_state.get(symbol, {})
-            if pos.get("side"):
-                log_debug(
-                    f"📊 초기 포지션 ({symbol})",
-                    f"방향: {pos['side']}, 수량: {pos['size']}, 진입가: {pos['price']}, 평가금액: {pos['value']} USDT"
-                )
-            else:
-                log_debug(f"📊 초기 포지션 ({symbol})", "포지션 없음")
-    except Exception as e:
-        log_debug("❌ 초기 상태 로깅 실패", str(e), exc_info=True)
 
 if __name__ == "__main__":
     log_initial_status()
