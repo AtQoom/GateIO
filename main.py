@@ -131,26 +131,95 @@ def get_total_collateral(force=False):
         return account_cache["data"]
     try:
         acc = api.list_futures_accounts(SETTLE)
-        total = Decimal(str(getattr(acc, 'total', '0')))
-        account_cache.update({"time": now, "data": total})
-        log_debug("💰 계정", f"총 담보금: {total} USDT")
-        return total
+        
+        # 🔴 API 응답 전체 디버깅
+        log_debug("🔍 API 응답 디버깅", f"Raw response: {acc}")
+        
+        # 🔴 모든 속성 출력
+        for attr in dir(acc):
+            if not attr.startswith('_'):
+                try:
+                    value = getattr(acc, attr)
+                    if not callable(value):
+                        log_debug("🔍 계정 필드", f"{attr}: {value}")
+                except:
+                    pass
+        
+        # 🔴 주요 필드들 개별 확인
+        total = getattr(acc, 'total', None)
+        available = getattr(acc, 'available', None)
+        unrealised_pnl = getattr(acc, 'unrealised_pnl', None)
+        position_margin = getattr(acc, 'position_margin', None)
+        order_margin = getattr(acc, 'order_margin', None)
+        
+        log_debug("🔍 주요 필드 확인", f"total: {total}")
+        log_debug("🔍 주요 필드 확인", f"available: {available}")
+        log_debug("🔍 주요 필드 확인", f"unrealised_pnl: {unrealised_pnl}")
+        log_debug("🔍 주요 필드 확인", f"position_margin: {position_margin}")
+        log_debug("🔍 주요 필드 확인", f"order_margin: {order_margin}")
+        
+        # 🔴 여러 후보 필드 중 가장 큰 값 사용
+        candidates = []
+        if total is not None:
+            candidates.append(("total", Decimal(str(total))))
+        if available is not None:
+            candidates.append(("available", Decimal(str(available))))
+        
+        if candidates:
+            # 가장 큰 값을 총 담보금으로 사용
+            field_name, final_total = max(candidates, key=lambda x: x[1])
+            log_debug("💰 선택된 필드", f"{field_name}: {final_total} USDT")
+        else:
+            final_total = Decimal("0")
+            log_debug("❌ 모든 필드가 None", "담보금을 0으로 설정")
+        
+        account_cache.update({"time": now, "data": final_total})
+        log_debug("💰 최종 총 담보금", f"{final_total} USDT")
+        return final_total
+        
     except Exception as e:
         log_debug("❌ 계정 조회 실패", str(e), exc_info=True)
         return Decimal("0")
 
-def get_price(symbol):
+def log_initial_status():
+    """서버 시작 시 초기 포지션/담보금 상태 로깅 (강화)"""
     try:
-        ticker = api.list_futures_tickers(SETTLE, contract=symbol)
-        if not ticker or len(ticker) == 0:
-            return Decimal("0")
-        price_str = str(ticker[0].last).upper().replace("E", "e")
-        price = Decimal(price_str).normalize()
-        return price
+        log_debug("🚀 서버 시작", "초기 상태 확인 중...")
+        
+        # 🔴 디버그 모드로 계정 정보 상세 조회
+        total_equity = get_total_collateral(force=True)
+        
+        # 🔴 /debug 엔드포인트와 동일한 상세 정보 출력
+        try:
+            acc = api.list_futures_accounts(SETTLE)
+            log_debug("🔍 계정 상세 정보", f"Raw account object: {acc}")
+            log_debug("🔍 계정 상세 정보", f"total: {getattr(acc, 'total', 'N/A')}")
+            log_debug("🔍 계정 상세 정보", f"available: {getattr(acc, 'available', 'N/A')}")
+            log_debug("🔍 계정 상세 정보", f"unrealised_pnl: {getattr(acc, 'unrealised_pnl', 'N/A')}")
+            log_debug("🔍 계정 상세 정보", f"order_margin: {getattr(acc, 'order_margin', 'N/A')}")
+            log_debug("🔍 계정 상세 정보", f"position_margin: {getattr(acc, 'position_margin', 'N/A')}")
+        except Exception as e:
+            log_debug("❌ 상세 계정 정보 조회 실패", str(e))
+        
+        log_debug("💰 최종 총 담보금", f"{total_equity} USDT")
+        
+        for symbol in SYMBOL_CONFIG:
+            if not update_position_state(symbol, timeout=3):
+                log_debug("❌ 포지션 조회 실패", f"초기화 중 {symbol} 상태 확인 불가")
+                continue
+            
+            pos = position_state.get(symbol, {})
+            if pos.get("side"):
+                log_debug(
+                    f"📊 초기 포지션 ({symbol})",
+                    f"방향: {pos['side']}, 수량: {pos['size']}, 진입가: {pos['price']}, 평가금액: {pos['value']} USDT"
+                )
+            else:
+                log_debug(f"📊 초기 포지션 ({symbol})", "포지션 없음")
+                
     except Exception as e:
-        log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e), exc_info=True)
-        return Decimal("0")
-
+        log_debug("❌ 초기 상태 로깅 실패", str(e), exc_info=True)
+        
 def calculate_position_size(symbol):
     cfg = SYMBOL_CONFIG[symbol]
     equity = get_total_collateral(force=True)
