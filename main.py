@@ -130,31 +130,13 @@ def get_total_collateral(force=False):
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
-        # FuturesApi로 선물 계정의 마진 밸런스 조회
         acc = api.list_futures_accounts(SETTLE)
-        
-        # 선물 계정의 모든 필드 로깅 (디버깅용)
+        # 디버깅용 로그
         log_debug("🔍 선물 계정 raw", f"Raw response: {acc}")
-        
-        # 마진 밸런스 관련 필드들 확인
         total = getattr(acc, 'total', None)
         available = getattr(acc, 'available', None)
-        margin_balance = getattr(acc, 'margin_balance', None)
-        equity = getattr(acc, 'equity', None)
-        
-        log_debug("🔍 필드 확인", f"total: {total}")
-        log_debug("🔍 필드 확인", f"available: {available}")
-        log_debug("🔍 필드 확인", f"margin_balance: {margin_balance}")
-        log_debug("🔍 필드 확인", f"equity: {equity}")
-        
-        # 마진 밸런스 우선 사용, 없으면 다른 필드 사용
-        if margin_balance is not None:
-            total_equity = Decimal(str(margin_balance))
-            field_used = "margin_balance"
-        elif equity is not None:
-            total_equity = Decimal(str(equity))
-            field_used = "equity"
-        elif total is not None:
+        # margin_balance, equity는 None이므로 무시
+        if total is not None:
             total_equity = Decimal(str(total))
             field_used = "total"
         elif available is not None:
@@ -163,13 +145,11 @@ def get_total_collateral(force=False):
         else:
             total_equity = Decimal("0")
             field_used = "none"
-        
-        log_debug("💰 마진 밸런스 선택", f"사용 필드: {field_used}, 값: {total_equity} USDT")
+        log_debug("💰 총 자산 선택", f"사용 필드: {field_used}, 값: {total_equity} USDT")
         account_cache.update({"time": now, "data": total_equity})
         return total_equity
-        
     except Exception as e:
-        log_debug("❌ 마진 밸런스 조회 실패", str(e), exc_info=True)
+        log_debug("❌ 총 자산 조회 실패", str(e), exc_info=True)
         return Decimal("0")
 
 def get_price(symbol):
