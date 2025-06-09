@@ -195,9 +195,13 @@ def update_position_state(symbol, timeout=5):
             actual_price = actual_entry_prices.get(symbol)
             entry_price = actual_price if actual_price else api_entry_price
             value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
+            # Gate.io: size > 0이면 롱, size < 0이면 숏
             position_state[symbol] = {
-                "price": entry_price, "side": "buy" if size > 0 else "sell",
-                "size": abs(size), "value": value, "margin": value,
+                "price": entry_price,
+                "side": "buy" if size > 0 else "sell",
+                "size": abs(size),
+                "value": value,
+                "margin": value,
                 "mode": "cross"
             }
         else:
@@ -292,20 +296,34 @@ def webhook():
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
         reason = data.get("reason", "")
-        if action == "exit" and reason == "reverse_signal":
-            success = close_position(symbol)
-            log_debug(f"🔁 반대 신호 청산 ({symbol})", f"성공: {success}")
+
+        # ✅ exit일 경우 side 기반 청산
+        if action == "exit":
+            update_position_state(symbol, timeout=1)
+            current_side = position_state.get(symbol, {}).get("side")
+            # reverse_signal은 무조건 청산
+            if reason == "reverse_signal":
+                success = close_position(symbol)
+            else:
+                # side가 명시된 경우 해당 방향만 청산
+                if side == "long" and current_side == "buy":
+                    success = close_position(symbol)
+                elif side == "short" and current_side == "sell":
+                    success = close_position(symbol)
+                else:
+                    log_debug(f"❌ 청산 실패 ({symbol})", f"현재 포지션: {current_side}, 요청 side: {side}")
+                    success = False
+            log_debug(f"🔁 청산 결과 ({symbol})", f"성공: {success}")
             return jsonify({"status": "success" if success else "error"})
+        
+        # ✅ entry만 side 체크
         if side not in ["long", "short"] or action not in ["entry", "exit"]:
             return jsonify({"error": "Invalid side/action"}), 400
+
         if not update_position_state(symbol, timeout=1):
             return jsonify({"status": "error", "message": "포지션 조회 실패"}), 500
         current_side = position_state.get(symbol, {}).get("side")
         desired_side = "buy" if side == "long" else "sell"
-        if action == "exit":
-            success = close_position(symbol)
-            log_debug(f"🔁 일반 청산 ({symbol})", f"성공: {success}")
-            return jsonify({"status": "success" if success else "error"})
         if current_side and current_side != desired_side:
             log_debug("🔄 역포지션 처리", f"현재: {current_side} → 목표: {desired_side}")
             if not close_position(symbol):
