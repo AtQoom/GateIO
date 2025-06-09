@@ -132,15 +132,11 @@ def get_total_collateral(force=False):
         return account_cache["data"]
     try:
         total_balance = wallet_api.get_total_balance(currency="USDT")
-        # 디버깅용 로그
-        log_debug("DEBUG", f"total_balance: {total_balance}, type: {type(total_balance)}")
-        total_str = str(getattr(total_balance, 'total', '0'))
-        log_debug("DEBUG", f"total_balance.total: {total_str}")
-        # 숫자 변환 시도, 실패하면 0으로 대체
-        try:
-            total = Decimal(total_str)
-        except Exception:
-            log_debug("❌ 총 자산 변환 실패", f"값: {total_str}")
+        # total_balance.total는 dict임
+        total_dict = getattr(total_balance, 'total', None)
+        if isinstance(total_dict, dict) and 'amount' in total_dict:
+            total = Decimal(str(total_dict['amount']))
+        else:
             total = Decimal("0")
         log_debug("💰 총 자산(총 담보금)", f"{total} USDT")
         account_cache.update({"time": now, "data": total})
@@ -148,6 +144,7 @@ def get_total_collateral(force=False):
     except Exception as e:
         log_debug("❌ 총 자산 조회 실패", str(e), exc_info=True)
         return Decimal("0")
+        
 def get_price(symbol):
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
