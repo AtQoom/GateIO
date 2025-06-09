@@ -131,32 +131,40 @@ def get_total_collateral(force=False):
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
-        # 1. Unified 계정 총 자산 조회
+        # 1. 🔴 UnifiedApi 응답 구조 수정 (단일 객체 처리)
         try:
-            unified_accounts = unified_api.list_unified_accounts()
-            if unified_accounts:
-                for account in unified_accounts:
-                    if hasattr(account, 'currency') and account.currency == 'USDT':
-                        equity = getattr(account, 'unified_account_total_equity', None)
-                        if equity is None:
-                            equity = getattr(account, 'equity', None)
-                        if equity is not None:
-                            equity = Decimal(str(equity))
-                            log_debug("💰 통합 계정 총 자산", f"{equity} USDT")
-                            account_cache.update({"time": now, "data": equity})
-                            return equity
-                log_debug("⚠️ USDT 계정 없음", "Unified 계정에서 USDT 계정을 찾을 수 없음")
+            unified_response = unified_api.list_unified_accounts()
+            log_debug("🔍 Unified 응답 타입", f"{type(unified_response)}")
+            
+            # 단일 객체에서 직접 추출
+            total_equity = None
+            if hasattr(unified_response, 'unified_account_total_equity'):
+                total_equity = Decimal(str(unified_response.unified_account_total_equity))
+            elif hasattr(unified_response, 'total_equity'):
+                total_equity = Decimal(str(unified_response.total_equity))
+            elif hasattr(unified_response, 'equity'):
+                total_equity = Decimal(str(unified_response.equity))
+            
+            if total_equity and total_equity > Decimal("10"):
+                log_debug("💰 통합 계정 총 자산", f"{total_equity} USD")
+                account_cache.update({"time": now, "data": total_equity})
+                return total_equity
+                
         except Exception as e:
             log_debug("⚠️ Unified 계정 조회 실패", str(e))
         
-        # 2. Fallback: 선물 계정 available + 포지션 가치
+        # 2. 🔴 Fallback 강화: 선물잔고 + 실제 포지션 재계산
         acc = api.list_futures_accounts(SETTLE)
         available = Decimal(str(getattr(acc, 'available', '0')))
         
+        # position_state 강제 업데이트 후 포지션 가치 재계산
         total_position_value = Decimal("0")
-        for symbol, pos in position_state.items():
+        for symbol in SYMBOL_CONFIG:
+            update_position_state(symbol, timeout=2)
+            pos = position_state.get(symbol, {})
             if pos.get("side") and pos.get("value"):
                 total_position_value += pos["value"]
+                log_debug("🔍 포지션 재계산", f"{symbol}: {pos['value']} USDT")
         
         total_equity = available + total_position_value
         log_debug("💰 Fallback 총 자산", f"선물잔고({available}) + 포지션가치({total_position_value}) = {total_equity} USDT")
