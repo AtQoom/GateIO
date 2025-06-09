@@ -131,25 +131,15 @@ def get_total_collateral(force=False):
         return account_cache["data"]
     try:
         acc = api.list_futures_accounts(SETTLE)
-        
-        # available 필드가 실제 마진 밸런스(68.19 USD)와 일치
-        available = getattr(acc, 'available', None)
-        total = getattr(acc, 'total', None)
-        
-        if available is not None:
-            total_equity = Decimal(str(available))
-            field_used = "available(마진밸런스)"
-        elif total is not None:
-            total_equity = Decimal(str(total))
-            field_used = "total"
+        # Gate.io 선물 계정의 마진 밸런스는 total 필드(웹과 일치)
+        margin_balance = getattr(acc, 'total', None)
+        log_debug("💰 마진 밸런스", f"total: {margin_balance}")
+        if margin_balance is not None:
+            margin_balance = Decimal(str(margin_balance))
         else:
-            total_equity = Decimal("0")
-            field_used = "none"
-        
-        log_debug("💰 마진 밸런스", f"사용 필드: {field_used}, 값: {total_equity} USDT")
-        account_cache.update({"time": now, "data": total_equity})
-        return total_equity
-        
+            margin_balance = Decimal("0")
+        account_cache.update({"time": now, "data": margin_balance})
+        return margin_balance
     except Exception as e:
         log_debug("❌ 마진 밸런스 조회 실패", str(e), exc_info=True)
         return Decimal("0")
@@ -168,7 +158,7 @@ def get_price(symbol):
 
 def calculate_position_size(symbol):
     cfg = SYMBOL_CONFIG[symbol]
-    margin_balance = get_total_collateral(force=True)  # 마진 밸런스 기준
+    margin_balance = get_total_collateral(force=True)
     price = get_price(symbol)
     if price <= 0 or margin_balance <= 0:
         return Decimal("0")
@@ -180,7 +170,7 @@ def calculate_position_size(symbol):
         if order_value < cfg["min_notional"]:
             log_debug(f"⛔ 최소 주문 금액 미달 ({symbol})", f"{order_value} < {cfg['min_notional']} USDT")
             return Decimal("0")
-        log_debug(f"📊 수량 계산 ({symbol})", f"마진밸런스: {margin_balance}, 가격: {price}, 수량: {final_qty}, 주문금액: {order_value}")
+        log_debug(f"📊 수량 계산 ({symbol})", f"마진 밸런스: {margin_balance}, 가격: {price}, 수량: {final_qty}, 주문금액: {order_value}")
         return final_qty
     except Exception as e:
         log_debug(f"❌ 수량 계산 오류 ({symbol})", str(e), exc_info=True)
@@ -520,6 +510,26 @@ def backup_position_loop():
             time.sleep(300)
         except Exception:
             time.sleep(300)
+
+def log_initial_status():
+    try:
+        log_debug("🚀 서버 시작", "초기 상태 확인 중...")
+        margin_balance = get_total_collateral(force=True)
+        log_debug("💰 마진 밸런스", f"{margin_balance} USDT")
+        for symbol in SYMBOL_CONFIG:
+            if not update_position_state(symbol, timeout=3):
+                log_debug("❌ 포지션 조회 실패", f"초기화 중 {symbol} 상태 확인 불가")
+                continue
+            pos = position_state.get(symbol, {})
+            if pos.get("side"):
+                log_debug(
+                    f"📊 초기 포지션 ({symbol})",
+                    f"방향: {pos['side']}, 수량: {pos['size']}, 진입가: {pos['price']}, 평가금액: {pos['value']} USDT"
+                )
+            else:
+                log_debug(f"📊 초기 포지션 ({symbol})", "포지션 없음")
+    except Exception as e:
+        log_debug("❌ 초기 상태 로깅 실패", str(e), exc_info=True)
 
 if __name__ == "__main__":
     log_initial_status()
