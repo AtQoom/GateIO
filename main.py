@@ -131,32 +131,14 @@ def get_total_collateral(force=False):
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
-        # 🔴 Unified Account API로 실제 마진 밸런스(Equity) 조회
-        try:
-            unified_accounts = unified_api.list_unified_accounts(currency="USDT")
-            if unified_accounts and len(unified_accounts) > 0:
-                usdt_account = unified_accounts[0]
-                equity = getattr(usdt_account, 'equity', None)
-                if equity is not None and Decimal(str(equity)) > Decimal("10"):
-                    margin_balance = Decimal(str(equity))
-                    log_debug("💰 마진 밸런스", f"Unified Account Equity: {margin_balance} USDT")
-                    account_cache.update({"time": now, "data": margin_balance})
-                    return margin_balance
-        except Exception as e:
-            log_debug("⚠️ Unified Account 조회 실패", f"Fallback to Futures API: {e}")
-        
-        # 🔴 Fallback: Futures API 조합으로 마진 밸런스 계산
         acc = api.list_futures_accounts(SETTLE)
         available = Decimal(str(getattr(acc, 'available', '0')))
-        unrealised_pnl = Decimal(str(getattr(acc, 'unrealised_pnl', '0')))
-        position_margin = Decimal(str(getattr(acc, 'position_margin', '0')))
-        
-        margin_balance = available + unrealised_pnl + position_margin
-        
-        log_debug("💰 마진 밸런스 계산", f"available({available}) + unrealised_pnl({unrealised_pnl}) + position_margin({position_margin}) = {margin_balance}")
-        account_cache.update({"time": now, "data": margin_balance})
-        return margin_balance
-        
+        log_debug("💰 계정 잔고", f"{available} USDT")
+        account_cache.update({"time": now, "data": available})
+        return available
+    except Exception as e:
+        log_debug("❌ 잔고 조회 실패", str(e), exc_info=True)
+        return Decimal("0")
     except Exception as e:
         log_debug("❌ 마진 밸런스 조회 실패", str(e), exc_info=True)
         return Decimal("0")
