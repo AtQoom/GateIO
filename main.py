@@ -131,19 +131,33 @@ def get_total_collateral(force=False):
         return account_cache["data"]
     try:
         acc = api.list_futures_accounts(SETTLE)
-        # Gate.io 선물 계정의 마진 밸런스는 total 필드(웹과 일치)
-        margin_balance = getattr(acc, 'total', None)
-        log_debug("💰 마진 밸런스", f"total: {margin_balance}")
-        if margin_balance is not None:
+        
+        # 🔴 available 필드를 마진 밸런스로 사용 (total 대신)
+        margin_balance = getattr(acc, 'available', None)
+        total = getattr(acc, 'total', None)
+        
+        log_debug("🔍 계정 필드 확인", f"available: {margin_balance}, total: {total}")
+        
+        if margin_balance is not None and Decimal(str(margin_balance)) > Decimal("0.01"):
+            # available이 있고 0.01보다 크면 사용
             margin_balance = Decimal(str(margin_balance))
+            field_used = "available"
+        elif total is not None:
+            # available이 없거나 너무 작으면 total 사용
+            margin_balance = Decimal(str(total))
+            field_used = "total"
         else:
             margin_balance = Decimal("0")
+            field_used = "none"
+        
+        log_debug("💰 마진 밸런스", f"사용 필드: {field_used}, 값: {margin_balance} USDT")
         account_cache.update({"time": now, "data": margin_balance})
         return margin_balance
+        
     except Exception as e:
         log_debug("❌ 마진 밸런스 조회 실패", str(e), exc_info=True)
         return Decimal("0")
-
+        
 def get_price(symbol):
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
