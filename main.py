@@ -132,42 +132,39 @@ def get_total_collateral(force=False):
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
-        # 1. Unified 계정 총 자산 조회
+        # 1. Unified Account의 Account Equity만 사용
         try:
             unified_accounts = unified_api.list_unified_accounts()
-            if unified_accounts:
-                for account in unified_accounts:
-                    if hasattr(account, 'currency') and account.currency == 'USDT':
-                        equity = getattr(account, 'unified_account_total_equity', None)
-                        if equity is None:
-                            equity = getattr(account, 'equity', None)
-                        if equity is not None:
-                            equity = Decimal(str(equity))
-                            log_debug("💰 통합 계정 총 자산", f"{equity} USDT")
-                            account_cache.update({"time": now, "data": equity})
-                            return equity
-                log_debug("⚠️ USDT 계정 없음", "Unified 계정에서 USDT 계정을 찾을 수 없음")
+            if hasattr(unified_accounts, 'unified_account_total_equity'):
+                equity = Decimal(str(unified_accounts.unified_account_total_equity))
+                log_debug("💰 Account Equity(순자산)", f"{equity} USDT")
+                account_cache.update({"time": now, "data": equity})
+                return equity
+            elif hasattr(unified_accounts, 'equity'):
+                equity = Decimal(str(unified_accounts.equity))
+                log_debug("💰 Account Equity(순자산)", f"{equity} USDT")
+                account_cache.update({"time": now, "data": equity})
+                return equity
         except Exception as e:
-            log_debug("⚠️ Unified 계정 조회 실패", str(e))
-        
-        # 2. Fallback: 선물 계정 available + 모든 포지션 가치
+            log_debug("⚠️ Unified Account 조회 실패", str(e))
+        # 2. Fallback: WalletApi.get_total_balance(currency="USDT") 사용
+        try:
+            from gate_api import WalletApi
+            wallet_api = WalletApi(client)
+            total_balance = wallet_api.get_total_balance(currency="USDT")
+            if hasattr(total_balance, 'total'):
+                equity = Decimal(str(total_balance.total))
+                log_debug("💰 WalletApi 총 잔고", f"{equity} USDT")
+                account_cache.update({"time": now, "data": equity})
+                return equity
+        except Exception as e:
+            log_debug("⚠️ WalletApi 조회 실패", str(e))
+        # 3. Fallback: 선물 계정 available만 사용
         acc = api.list_futures_accounts(SETTLE)
         available = Decimal(str(getattr(acc, 'available', '0')))
-        
-        total_position_value = Decimal("0")
-        for symbol in SYMBOL_CONFIG:
-            if update_position_state(symbol, timeout=3):
-                pos = position_state.get(symbol, {})
-                if pos.get("side") and pos.get("value"):
-                    total_position_value += pos["value"]
-                    log_debug("🔍 포지션 가치", f"{symbol}: {pos['value']} USDT")
-        
-        total_equity = available + total_position_value
-        log_debug("💰 Fallback 총 자산", f"선물잔고({available}) + 포지션가치({total_position_value}) = {total_equity} USDT")
-        
-        account_cache.update({"time": now, "data": total_equity})
-        return total_equity
-        
+        log_debug("💰 선물 계정 available", f"{available} USDT")
+        account_cache.update({"time": now, "data": available})
+        return available
     except Exception as e:
         log_debug("❌ 총 자산 조회 실패", str(e), exc_info=True)
         return Decimal("0")
