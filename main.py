@@ -57,11 +57,12 @@ BINANCE_TO_GATE_SYMBOL = {
     "PEPEUSDT": "PEPE_USDT"
 }
 
+# 🔴 Gate.io 공식 선물 계약 크기로 수정 (2025-06-10 기준)
 SYMBOL_CONFIG = {
     "BTC_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("0.0001"),
+        "contract_size": Decimal("0.0001"),  # 1계약 = 0.0001 BTC
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
         "min_notional": Decimal("10")
@@ -69,7 +70,7 @@ SYMBOL_CONFIG = {
     "ETH_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("0.001"),
+        "contract_size": Decimal("0.001"),   # 1계약 = 0.001 ETH
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
         "min_notional": Decimal("10")
@@ -77,7 +78,7 @@ SYMBOL_CONFIG = {
     "ADA_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("10"),
+        "contract_size": Decimal("10"),      # 1계약 = 10 ADA
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
         "min_notional": Decimal("10")
@@ -85,7 +86,7 @@ SYMBOL_CONFIG = {
     "SUI_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("1"),
+        "contract_size": Decimal("1"),       # 1계약 = 1 SUI
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
         "min_notional": Decimal("10")
@@ -93,7 +94,7 @@ SYMBOL_CONFIG = {
     "LINK_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("1"),
+        "contract_size": Decimal("1"),       # 1계약 = 1 LINK
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
         "min_notional": Decimal("10")
@@ -101,7 +102,7 @@ SYMBOL_CONFIG = {
     "SOL_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("0.1"),
+        "contract_size": Decimal("1"),       # 1계약 = 1 SOL (기존 0.01 → 1로 수정)
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
         "min_notional": Decimal("10")
@@ -109,7 +110,7 @@ SYMBOL_CONFIG = {
     "PEPE_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("10000"),
+        "contract_size": Decimal("10000"),   # 1계약 = 10,000 PEPE
         "sl_pct": Decimal("0.0035"),
         "tp_pct": Decimal("0.006"),
         "min_notional": Decimal("10")
@@ -131,40 +132,35 @@ def get_total_collateral(force=False):
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
     try:
-        # 1. 🔴 UnifiedApi 응답 구조 수정 (단일 객체 처리)
+        # 1. Unified 계정 총 자산 조회
         try:
-            unified_response = unified_api.list_unified_accounts()
-            log_debug("🔍 Unified 응답 타입", f"{type(unified_response)}")
-            
-            # 단일 객체에서 직접 추출
-            total_equity = None
-            if hasattr(unified_response, 'unified_account_total_equity'):
-                total_equity = Decimal(str(unified_response.unified_account_total_equity))
-            elif hasattr(unified_response, 'total_equity'):
-                total_equity = Decimal(str(unified_response.total_equity))
-            elif hasattr(unified_response, 'equity'):
-                total_equity = Decimal(str(unified_response.equity))
-            
-            if total_equity and total_equity > Decimal("10"):
-                log_debug("💰 통합 계정 총 자산", f"{total_equity} USD")
-                account_cache.update({"time": now, "data": total_equity})
-                return total_equity
-                
+            unified_accounts = unified_api.list_unified_accounts()
+            if unified_accounts:
+                for account in unified_accounts:
+                    if hasattr(account, 'currency') and account.currency == 'USDT':
+                        equity = getattr(account, 'unified_account_total_equity', None)
+                        if equity is None:
+                            equity = getattr(account, 'equity', None)
+                        if equity is not None:
+                            equity = Decimal(str(equity))
+                            log_debug("💰 통합 계정 총 자산", f"{equity} USDT")
+                            account_cache.update({"time": now, "data": equity})
+                            return equity
+                log_debug("⚠️ USDT 계정 없음", "Unified 계정에서 USDT 계정을 찾을 수 없음")
         except Exception as e:
             log_debug("⚠️ Unified 계정 조회 실패", str(e))
         
-        # 2. 🔴 Fallback 강화: 선물잔고 + 실제 포지션 재계산
+        # 2. Fallback: 선물 계정 available + 모든 포지션 가치
         acc = api.list_futures_accounts(SETTLE)
         available = Decimal(str(getattr(acc, 'available', '0')))
         
-        # position_state 강제 업데이트 후 포지션 가치 재계산
         total_position_value = Decimal("0")
         for symbol in SYMBOL_CONFIG:
-            update_position_state(symbol, timeout=2)
-            pos = position_state.get(symbol, {})
-            if pos.get("side") and pos.get("value"):
-                total_position_value += pos["value"]
-                log_debug("🔍 포지션 재계산", f"{symbol}: {pos['value']} USDT")
+            if update_position_state(symbol, timeout=3):
+                pos = position_state.get(symbol, {})
+                if pos.get("side") and pos.get("value"):
+                    total_position_value += pos["value"]
+                    log_debug("🔍 포지션 가치", f"{symbol}: {pos['value']} USDT")
         
         total_equity = available + total_position_value
         log_debug("💰 Fallback 총 자산", f"선물잔고({available}) + 포지션가치({total_position_value}) = {total_equity} USDT")
@@ -195,14 +191,19 @@ def calculate_position_size(symbol):
     if price <= 0 or equity <= 0:
         return Decimal("0")
     try:
+        # 1배 레버리지 계산 (전체 자산 사용)
         raw_qty = equity / (price * cfg["contract_size"])
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         final_qty = max(qty, cfg["min_qty"])
+        
+        # 주문 금액 검증
         order_value = final_qty * price * cfg["contract_size"]
         if order_value < cfg["min_notional"]:
             log_debug(f"⛔ 최소 주문 금액 미달 ({symbol})", f"{order_value} < {cfg['min_notional']} USDT")
             return Decimal("0")
-        log_debug(f"📊 수량 계산 ({symbol})", f"총 자산: {equity}, 가격: {price}, 수량: {final_qty}, 주문금액: {order_value}")
+        
+        log_debug(f"📊 수량 계산 ({symbol})", 
+                 f"총자산: {equity}, 가격: {price}, 계약크기: {cfg['contract_size']}, 수량: {final_qty}")
         return final_qty
     except Exception as e:
         log_debug(f"❌ 수량 계산 오류 ({symbol})", str(e), exc_info=True)
@@ -543,9 +544,14 @@ def backup_position_loop():
             time.sleep(300)
 
 if __name__ == "__main__":
+    # 초기 포지션 상태 로깅
     log_initial_status()
+    
+    # 웹소켓 리스너 시작
     threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
+    # 백업 포지션 루프 시작
     threading.Thread(target=backup_position_loop, daemon=True).start()
+    
     port = int(os.environ.get("PORT", 8080))
     log_debug("🚀 서버 시작", f"포트 {port}에서 실행")
     app.run(host="0.0.0.0", port=port, debug=False)
