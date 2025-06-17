@@ -1,12 +1,9 @@
 import os
-import json
 import time
-import asyncio
 import threading
 import logging
-from decimal import Decimal, ROUND_DOWN
-from datetime import datetime
-from flask import Flask, request, jsonify
+from decimal import Decimal
+from flask import Flask
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
 
 # ----------- 로그 필터 및 설정 -----------
@@ -350,6 +347,25 @@ def generate_signal(symbol):
     )
     return long_signal, short_signal
 
+# ----------- log_initial_status 함수 추가 -----------
+def log_initial_status():
+    print("=== Gate.io 자동매매 서버 시작 ===")
+    try:
+        acc = api.list_futures_accounts(SETTLE)
+        print(f"잔고: {getattr(acc, 'available', 'N/A')} USDT")
+        for symbol in SYMBOL_CONFIG.keys():
+            try:
+                pos = api.get_position(SETTLE, symbol)
+                size = Decimal(str(pos.size))
+                if size != 0:
+                    print(f"{symbol}: {('Long' if size > 0 else 'Short')} {abs(size)} 계약 @ {pos.entry_price}")
+                else:
+                    print(f"{symbol}: 포지션 없음")
+            except Exception:
+                print(f"{symbol}: 포지션 없음")
+    except Exception as e:
+        print(f"초기 상태 로깅 실패: {e}")
+        
 # ----------- 자동매매 메인 루프 -----------
 def main_trading_loop():
     while True:
@@ -369,6 +385,8 @@ def main_trading_loop():
         time.sleep(15)
 
 # ----------- Flask 서버 및 실행 -----------
+app = Flask(__name__)
+
 @app.route("/ping", methods=["GET", "HEAD"])
 def ping():
     return "pong", 200
@@ -376,12 +394,12 @@ def ping():
 @app.route("/", methods=["POST"])
 def webhook():
     # 기존 웹훅 로직 유지 (수동 개입 가능)
-    return jsonify({"status": "ok"})
+    return {"status": "ok"}
 
 if __name__ == "__main__":
-    log_initial_status()
+    log_initial_status()  # <== 반드시 정의된 함수로!
     trading_thread = threading.Thread(target=main_trading_loop, daemon=True)
     trading_thread.start()
     port = int(os.environ.get("PORT", 8080))
-    log_debug("🚀 서버 시작", f"포트 {port}에서 실행")
+    print(f"🚀 서버 시작: 포트 {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
