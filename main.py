@@ -9,6 +9,7 @@ from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
+from collections import OrderedDict
 
 # ----------- 로그 필터 및 설정 -----------
 class CustomFilter(logging.Filter):
@@ -125,6 +126,19 @@ position_state = {}
 position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
 actual_entry_prices = {}
+
+# ----------- 중복 알림 방지용 딕셔너리 -----------
+recent_alert_ids = OrderedDict()
+
+def is_duplicate_alert(alert_id):
+    if not alert_id:
+        return False
+    if alert_id in recent_alert_ids:
+        return True
+    recent_alert_ids[alert_id] = True
+    if len(recent_alert_ids) > 1000:
+        recent_alert_ids.popitem(last=False)
+    return False
 
 def get_total_collateral(force=False):
     now = time.time()
@@ -339,6 +353,13 @@ def webhook():
             return jsonify({"error": "JSON required"}), 400
         data = request.get_json()
         log_debug("📥 웹훅 데이터", json.dumps(data))
+
+        # ----------- 중복 알림 방지 -----------
+        alert_id = data.get("id")
+        if alert_id and is_duplicate_alert(alert_id):
+            log_debug("🚫 중복 알림 무시", f"alert_id: {alert_id}")
+            return jsonify({"status": "duplicate", "alert_id": alert_id})
+
         raw = data.get("symbol", "").upper().replace(".P", "")
         symbol = BINANCE_TO_GATE_SYMBOL.get(raw)
         if not symbol or symbol not in SYMBOL_CONFIG:
@@ -362,13 +383,20 @@ def webhook():
                     success = False
             log_debug(f"🔁 청산 결과 ({symbol})", f"성공: {success}")
             return jsonify({"status": "success" if success else "error"})
-        
+
         if side not in ["long", "short"] or action not in ["entry", "exit"]:
             return jsonify({"error": "Invalid side/action"}), 400
         if not update_position_state(symbol, timeout=1):
             return jsonify({"status": "error", "message": "포지션 조회 실패"}), 500
         current_side = position_state.get(symbol, {}).get("side")
         desired_side = "buy" if side == "long" else "sell"
+        # ----------- 피라미딩 2 진입 제한 -----------
+        current_size = position_state.get(symbol, {}).get("size", Decimal("0"))
+        # 피라미딩 2: 최대 2계약까지만 진입 허용 (여기서 1계약 단위로 진입 가정)
+        if current_side == desired_side and current_size >= 2:
+            log_debug("⛔ 피라미딩 2 제한", f"{symbol} {desired_side} 이미 2계약 진입")
+            return jsonify({"status": "pyramiding_limit", "current_size": float(current_size)})
+
         if current_side and current_side != desired_side:
             log_debug("🔄 역포지션 처리", f"현재: {current_side} → 목표: {desired_side}")
             if not close_position(symbol):
