@@ -272,10 +272,32 @@ class PositionSyncManager:
 duplicate_filter = AdvancedDuplicateFilter()
 sync_manager = PositionSyncManager()
 
-# ----------- 알림 검증 시스템 -----------
+# ----------- 수정된 알림 검증 시스템 -----------
 def validate_alert_data(data):
-    """알림 데이터 무결성 검증"""
+    """알림 데이터 무결성 검증 (heartbeat/sync 예외 처리)"""
     try:
+        # heartbeat와 sync 타입은 간단한 검증만
+        alert_type = data.get("type", "")
+        if alert_type in ["heartbeat", "sync"]:
+            # 기본 필드만 체크
+            required_fields = ["type", "symbol", "timestamp"]
+            for field in required_fields:
+                if field not in data:
+                    return False, f"Missing required field for {alert_type}: {field}"
+            
+            # 타임스탬프 검증만
+            try:
+                alert_time = int(data.get("timestamp", 0)) / 1000
+                current_time = time.time()
+                time_diff = abs(current_time - alert_time)
+                if time_diff > 900:  # heartbeat/sync는 15분 허용
+                    return False, f"Alert time difference too large: {time_diff:.1f}s"
+            except (ValueError, TypeError):
+                return False, "Invalid timestamp"
+            
+            return True, "Valid heartbeat/sync"
+        
+        # 거래 신호 (entry/exit)는 기존 검증 로직 적용
         # 1. 필수 필드 체크
         required_fields = ["id", "symbol", "side", "action", "price", "timestamp"]
         for field in required_fields:
@@ -327,9 +349,7 @@ def validate_alert_data(data):
                 price_diff = abs(price - current_price) / current_price
                 if price_diff > 0.05:  # 5% 이상 차이
                     log_debug("⚠️ 가격 편차 감지", f"Alert: {price}, Current: {current_price}, Diff: {price_diff*100:.2f}%")
-                    # 5% 초과시 경고만 하고 통과 (급격한 가격 변동 가능성)
         except (ValueError, TypeError, ZeroDivisionError):
-            # 가격 조회 실패시 경고만 하고 통과
             log_debug("⚠️ 현재가 조회 실패", f"Symbol: {symbol}")
         
         # 7. side/action 검증
@@ -561,37 +581,6 @@ def process_trading_signal(data):
             return jsonify({"status": "error", "message": "포지션 동기화 실패", "alert_id": alert_id}), 500
         
         current_side = position_state.get(symbol, {}).get("side")
-        
-        if reason == "reverse_signal":
-            success = close_position(symbol)
-            log_debug(f"🔁 역신호 청산 ({symbol})", f"성공: {success}")
-        else:
-            if side == "long" and current_side == "buy":
-                success = close_position(symbol)
-                log_debug(f"🔁 롱 청산 ({symbol})", f"성공: {success}")
-            elif side == "short" and current_side == "sell":
-                success = close_position(symbol)
-                log_debug(f"🔁 숏 청산 ({symbol})", f"성공: {success}")
-            else:
-                log_debug(f"❌ 청산 불일치 ({symbol})", f"현재: {current_side}, 요청: {side}")
-                success = False
-        
-        return jsonify({
-            "status": "success" if success else "error",
-            "action": "exit",
-            "symbol": symbol,
-            "alert_id": alert_id
-        })
-
-    # 진입 처리
-    if side not in ["long", "short"] or action not in ["entry", "exit"]:
-        return jsonify({"error": "Invalid side/action", "side": side, "action": action}), 400
-    
-    # 포지션 상태 동기화
-    if not sync_manager.sync_position_with_retry(symbol, max_retries=2):
-        return jsonify({"status": "error", "message": "포지션 동기화 실패", "alert_id": alert_id}), 500
-    
-    current_side = position_state.get(symbol, {}).get("side")
     desired_side = "buy" if side == "long" else "sell"
     
     # 피라미딩 제한 체크 (계약 수만 체크, 자산 비율 제외)
@@ -654,25 +643,36 @@ def enhanced_webhook():
             return jsonify({"error": "JSON required"}), 400
         
         data = request.get_json()
-        alert_id = data.get("id", "unknown")
+        alert_type = data.get("type", "unknown")
+        alert_id = data.get("id", f"auto_{alert_type}_{int(time.time())}")
         
-        log_debug("📥 웹훅 데이터", f"ID: {alert_id}, Type: {data.get('type', 'unknown')}")
+        log_debug("📥 웹훅 데이터", f"Type: {alert_type}, ID: {alert_id}")
 
-        # 1. 알림 데이터 검증
+        # 1. 알림 데이터 검증 (heartbeat/sync 구분)
         is_valid, validation_msg = validate_alert_data(data)
         if not is_valid:
             log_debug("❌ 알림 검증 실패", f"ID: {alert_id}, Reason: {validation_msg}")
             return jsonify({"error": validation_msg, "alert_id": alert_id}), 400
         
-        # 2. 중복 체크
+        # 2. heartbeat/sync 처리 (거래 없이 상태만 반환)
+        if alert_type in ["heartbeat", "sync"]:
+            log_debug("💓 상태 알림 수신", f"Type: {alert_type}, Symbol: {data.get('symbol')}")
+            return jsonify({
+                "status": "received", 
+                "type": alert_type,
+                "symbol": data.get("symbol"),
+                "timestamp": data.get("timestamp")
+            })
+        
+        # 3. 거래 신호만 중복 체크 적용
         if duplicate_filter.is_duplicate_or_processing(data):
             return jsonify({"status": "duplicate", "alert_id": alert_id})
         
         try:
-            # 3. 신호 처리
+            # 4. 거래 신호 처리
             result = process_trading_signal(data)
             
-            # 4. 성공적으로 처리됨을 표시
+            # 5. 성공적으로 처리됨을 표시
             duplicate_filter.mark_processed(alert_id)
             
             return result
@@ -684,7 +684,7 @@ def enhanced_webhook():
             
     except Exception as e:
         log_debug(f"❌ 웹훅 처리 실패 ({symbol or 'unknown'})", f"ID: {alert_id}, Error: {str(e)}")
-        if alert_id:
+        if alert_id and not alert_id.startswith("auto_"):
             duplicate_filter.mark_processed(alert_id)
         return jsonify({"status": "error", "message": str(e), "alert_id": alert_id}), 500
 
@@ -957,4 +957,35 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🚀 서버 시작", f"포트 {port}에서 실행 중 (개선된 버전 v3.0)")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False).get(symbol, {}).get("side")
+        
+        if reason == "reverse_signal":
+            success = close_position(symbol)
+            log_debug(f"🔁 역신호 청산 ({symbol})", f"성공: {success}")
+        else:
+            if side == "long" and current_side == "buy":
+                success = close_position(symbol)
+                log_debug(f"🔁 롱 청산 ({symbol})", f"성공: {success}")
+            elif side == "short" and current_side == "sell":
+                success = close_position(symbol)
+                log_debug(f"🔁 숏 청산 ({symbol})", f"성공: {success}")
+            else:
+                log_debug(f"❌ 청산 불일치 ({symbol})", f"현재: {current_side}, 요청: {side}")
+                success = False
+        
+        return jsonify({
+            "status": "success" if success else "error",
+            "action": "exit",
+            "symbol": symbol,
+            "alert_id": alert_id
+        })
+
+    # 진입 처리
+    if side not in ["long", "short"] or action not in ["entry", "exit"]:
+        return jsonify({"error": "Invalid side/action", "side": side, "action": action}), 400
+    
+    # 포지션 상태 동기화
+    if not sync_manager.sync_position_with_retry(symbol, max_retries=2):
+        return jsonify({"status": "error", "message": "포지션 동기화 실패", "alert_id": alert_id}), 500
+    
+    current_side = position_state
