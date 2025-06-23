@@ -5,12 +5,10 @@ import asyncio
 import threading
 import websockets
 import logging
-import hashlib
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
-from collections import OrderedDict, defaultdict, deque
 
 # ----------- 로그 필터 및 설정 -----------
 class CustomFilter(logging.Filter):
@@ -128,252 +126,8 @@ position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
 actual_entry_prices = {}
 
-# ----------- 고급 중복 방지 시스템 강화 -----------
-class AdvancedDuplicateFilter:
-    def __init__(self):
-        self.alert_history = defaultdict(lambda: deque(maxlen=100))
-        self.processing_alerts = set()
-        self.lock = threading.RLock()
-        self.cleanup_interval = 300
-        self.last_cleanup = time.time()
-        self.duplicate_stats = defaultdict(int)
-        # GUARANTEED 모드를 위한 추가 추적
-        self.guaranteed_alerts = defaultdict(list)
-    
-    def is_duplicate_or_processing(self, alert_data):
-        with self.lock:
-            if time.time() - self.last_cleanup > self.cleanup_interval:
-                self._cleanup_old_alerts()
-            
-            alert_id = alert_data.get("id", "")
-            symbol = alert_data.get("symbol", "")
-            side = alert_data.get("side", "")
-            action = alert_data.get("action", "")
-            sync_mode = alert_data.get("sync_mode", "BASIC")
-            guaranteed = alert_data.get("guaranteed", False)
-            redundancy_level = alert_data.get("redundancy_level", 1)
-            
-            # GUARANTEED 모드 특별 처리
-            if sync_mode == "GUARANTEED" and guaranteed:
-                base_id = alert_id.split('_R')[0]  # 중복 알림 제거
-                
-                # 첫 번째 GUARANTEED 알림이거나 중복 레벨이 다르면 허용
-                if base_id not in self.guaranteed_alerts[symbol]:
-                    self.guaranteed_alerts[symbol].append(base_id)
-                    log_debug("✅ GUARANTEED 허용", f"ID: {base_id}, Level: {redundancy_level}")
-                elif redundancy_level > 1:
-                    # 중복 알림은 허용하되 로그만 남김
-                    log_debug("🔄 GUARANTEED 중복", f"ID: {alert_id}, Level: {redundancy_level}")
-                else:
-                    log_debug("🚫 GUARANTEED 중복 차단", f"ID: {base_id} 이미 처리됨")
-                    self.duplicate_stats["guaranteed_duplicate"] += 1
-                    return True
-            
-            # 기존 중복 체크 로직
-            if alert_id in self.processing_alerts:
-                log_debug("🚫 ID 중복 차단", f"ID {alert_id} 처리 중")
-                self.duplicate_stats["id_duplicate"] += 1
-                return True
-            
-            content_hash = self._generate_content_hash(alert_data)
-            symbol_history = self.alert_history[symbol]
-            
-            current_time = time.time()
-            for hist_time, hist_hash, hist_side, hist_action in symbol_history:
-                if (current_time - hist_time < 30 and
-                    hist_hash == content_hash and
-                    hist_side == side and 
-                    hist_action == action):
-                    log_debug("🚫 내용 중복 차단", f"{symbol} {side} {action}")
-                    self.duplicate_stats["content_duplicate"] += 1
-                    return True
-            
-            self.processing_alerts.add(alert_id)
-            symbol_history.append((current_time, content_hash, side, action))
-            return False
-    
-    def mark_processed(self, alert_id):
-        with self.lock:
-            self.processing_alerts.discard(alert_id)
-    
-    def _generate_content_hash(self, alert_data):
-        content = f"{alert_data.get('symbol')}_{alert_data.get('side')}_{alert_data.get('action')}_{alert_data.get('price', 0):.2f}_{alert_data.get('signal_type', '')}_{alert_data.get('sync_mode', '')}"
-        return hashlib.md5(content.encode()).hexdigest()[:8]
-    
-    def _cleanup_old_alerts(self):
-        current_time = time.time()
-        old_alerts = {aid for aid in self.processing_alerts 
-                     if '_' in aid and len(aid.split('_')) > 1}
-        
-        for aid in list(old_alerts):
-            try:
-                parts = aid.split('_')
-                if len(parts) >= 2:
-                    timestamp = int(parts[1])
-                    if current_time - timestamp > 600:
-                        self.processing_alerts.discard(aid)
-            except (ValueError, IndexError):
-                self.processing_alerts.discard(aid)
-        
-        # GUARANTEED 알림 기록도 정리
-        for symbol in list(self.guaranteed_alerts.keys()):
-            if len(self.guaranteed_alerts[symbol]) > 50:
-                self.guaranteed_alerts[symbol] = self.guaranteed_alerts[symbol][-25:]
-        
-        self.last_cleanup = current_time
-        log_debug("🧹 중복 필터 정리", f"처리 중: {len(self.processing_alerts)}, GUARANTEED: {sum(len(v) for v in self.guaranteed_alerts.values())}")
-    
-    def get_stats(self):
-        with self.lock:
-            return {
-                "processing_count": len(self.processing_alerts),
-                "history_symbols": len(self.alert_history),
-                "guaranteed_symbols": len(self.guaranteed_alerts),
-                "duplicate_stats": dict(self.duplicate_stats)
-            }
-
-# ----------- 포지션 동기화 관리자 -----------
-class PositionSyncManager:
-    def __init__(self):
-        self.sync_lock = threading.RLock()
-        self.last_sync_time = {}
-        self.sync_failures = defaultdict(int)
-        self.max_failures = 5
-    
-    def sync_position_with_retry(self, symbol, max_retries=3):
-        with self.sync_lock:
-            for attempt in range(max_retries):
-                try:
-                    if update_position_state(symbol, timeout=10):
-                        self.last_sync_time[symbol] = time.time()
-                        self.sync_failures[symbol] = 0
-                        return True
-                    else:
-                        if attempt < max_retries - 1:
-                            time.sleep(2 ** attempt)
-                except Exception as e:
-                    log_debug(f"❌ 포지션 동기화 오류 ({symbol})", f"시도 {attempt + 1}: {str(e)}")
-                    if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)
-            
-            self.sync_failures[symbol] += 1
-            return False
-    
-    def is_sync_fresh(self, symbol, max_age=30):
-        last_sync = self.last_sync_time.get(symbol, 0)
-        return time.time() - last_sync < max_age
-    
-    def get_sync_status(self):
-        current_time = time.time()
-        status = {}
-        for symbol in SYMBOL_CONFIG:
-            last_sync = self.last_sync_time.get(symbol, 0)
-            failures = self.sync_failures.get(symbol, 0)
-            status[symbol] = {
-                "last_sync_ago": current_time - last_sync,
-                "failures": failures,
-                "is_fresh": self.is_sync_fresh(symbol)
-            }
-        return status
-
-# 전역 인스턴스
-duplicate_filter = AdvancedDuplicateFilter()
-sync_manager = PositionSyncManager()
-
-# ----------- 알림 검증 시스템 강화 -----------
-def validate_alert_data(data):
-    try:
-        alert_type = data.get("type", "")
-        if alert_type in ["heartbeat", "sync"]:
-            required_fields = ["type", "symbol", "timestamp"]
-            for field in required_fields:
-                if field not in data:
-                    return False, f"Missing required field for {alert_type}: {field}"
-            
-            try:
-                alert_time = int(data.get("timestamp", 0)) / 1000
-                current_time = time.time()
-                time_diff = abs(current_time - alert_time)
-                if time_diff > 900:
-                    return False, f"Alert time difference too large: {time_diff:.1f}s"
-            except (ValueError, TypeError):
-                return False, "Invalid timestamp"
-            
-            return True, "Valid heartbeat/sync"
-        
-        required_fields = ["id", "symbol", "side", "action", "price", "timestamp"]
-        for field in required_fields:
-            if field not in data:
-                return False, f"Missing required field: {field}"
-        
-        # 새로운 필드들 처리 (GUARANTEED 모드 관련)
-        sync_mode = data.get("sync_mode", "BASIC")
-        guaranteed = data.get("guaranteed", False)
-        signal_type = data.get("signal_type", "unknown")
-        redundancy_level = data.get("redundancy_level", 1)
-        
-        # GUARANTEED 모드 특별 처리
-        if sync_mode == "GUARANTEED" and guaranteed:
-            log_debug("🎯 GUARANTEED 알림", f"ID: {data.get('id')}, Type: {signal_type}, Level: {redundancy_level}")
-        
-        try:
-            float(data.get("price", 0))
-            int(data.get("timestamp", 0))
-        except (ValueError, TypeError):
-            return False, "Invalid price or timestamp format"
-        
-        if "checksum" in data and data.get("checksum"):
-            expected_checksum = calculate_server_checksum(
-                data.get("symbol"), data.get("side"), 
-                data.get("action"), data.get("price"), 
-                data.get("timestamp")
-            )
-            if str(data.get("checksum")) != str(expected_checksum):
-                return False, "Checksum mismatch"
-        
-        try:
-            alert_time = int(data.get("timestamp", 0)) / 1000
-            current_time = time.time()
-            time_diff = abs(current_time - alert_time)
-            if time_diff > 300:
-                return False, f"Alert time difference too large: {time_diff:.1f}s"
-        except (ValueError, TypeError):
-            return False, "Invalid timestamp"
-        
-        symbol = BINANCE_TO_GATE_SYMBOL.get(data.get("symbol", "").upper().replace(".P", ""))
-        if not symbol or symbol not in SYMBOL_CONFIG:
-            return False, f"Invalid or unsupported symbol: {data.get('symbol')}"
-        
-        try:
-            price = float(data.get("price", 0))
-            if price <= 0:
-                return False, "Invalid price: must be positive"
-        except (ValueError, TypeError):
-            return False, "Invalid price format"
-        
-        valid_sides = ["long", "short"]
-        valid_actions = ["entry", "exit"]
-        if data.get("side") not in valid_sides:
-            return False, f"Invalid side: {data.get('side')}"
-        if data.get("action") not in valid_actions:
-            return False, f"Invalid action: {data.get('action')}"
-        
-        return True, "Valid"
-        
-    except Exception as e:
-        log_debug("❌ 알림 검증 중 오류", str(e))
-        return False, f"Validation error: {str(e)}"
-
-def calculate_server_checksum(symbol, side, action, price, timestamp):
-    try:
-        result = (len(symbol) + len(side) + len(action) + 
-                 round(float(price) * 1000) + round(int(timestamp) / 1000))
-        return str(result)
-    except (ValueError, TypeError):
-        return "0"
-
-# ----------- 기존 함수들 -----------
 def get_total_collateral(force=False):
+    """순자산(Account Equity) 조회"""
     now = time.time()
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
@@ -382,35 +136,38 @@ def get_total_collateral(force=False):
             unified_accounts = unified_api.list_unified_accounts()
             if hasattr(unified_accounts, 'unified_account_total_equity'):
                 equity = Decimal(str(unified_accounts.unified_account_total_equity))
+                log_debug("💰 Account Equity(순자산)", f"{equity} USDT")
                 account_cache.update({"time": now, "data": equity})
                 return equity
             elif hasattr(unified_accounts, 'equity'):
                 equity = Decimal(str(unified_accounts.equity))
+                log_debug("💰 Account Equity(순자산)", f"{equity} USDT")
                 account_cache.update({"time": now, "data": equity})
                 return equity
-        except Exception:
-            pass
-        
+        except Exception as e:
+            log_debug("⚠️ Unified Account 조회 실패", str(e))
         try:
             from gate_api import WalletApi
             wallet_api = WalletApi(client)
             total_balance = wallet_api.get_total_balance(currency="USDT")
             if hasattr(total_balance, 'total'):
                 equity = Decimal(str(total_balance.total))
+                log_debug("💰 WalletApi 총 잔고", f"{equity} USDT")
                 account_cache.update({"time": now, "data": equity})
                 return equity
-        except Exception:
-            pass
-        
+        except Exception as e:
+            log_debug("⚠️ WalletApi 조회 실패", str(e))
         acc = api.list_futures_accounts(SETTLE)
         available = Decimal(str(getattr(acc, 'available', '0')))
+        log_debug("💰 선물 계정 available", f"{available} USDT")
         account_cache.update({"time": now, "data": available})
         return available
     except Exception as e:
-        log_debug("❌ 총 자산 조회 실패", str(e))
+        log_debug("❌ 총 자산 조회 실패", str(e), exc_info=True)
         return Decimal("0")
 
 def get_price(symbol):
+    """현재 가격 조회"""
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
         if not ticker or len(ticker) == 0:
@@ -419,32 +176,53 @@ def get_price(symbol):
         price = Decimal(price_str).normalize()
         return price
     except Exception as e:
-        log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
+        log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e), exc_info=True)
         return Decimal("0")
 
 def calculate_position_size(symbol):
+    """
+    순자산(Account Equity) 기반으로 포지션 크기 계산
+    실제 레버리지 1배로 동작
+    """
     cfg = SYMBOL_CONFIG[symbol]
+    
+    # 1. 순자산 조회 (전체 보유 자산)
     equity = get_total_collateral(force=True)
     price = get_price(symbol)
+    
     if price <= 0 or equity <= 0:
         return Decimal("0")
+    
     try:
-        acc = api.list_futures_accounts(SETTLE)
-        available = Decimal(str(getattr(acc, 'available', '0')))
-        raw_qty = available / (price * cfg["contract_size"])
+        # 2. 순자산 전액을 기준으로 수량 계산 (레버리지 1배)
+        raw_qty = equity / (price * cfg["contract_size"])
+        
+        # 3. 거래소 규칙에 맞게 수량 조정
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         final_qty = max(qty, cfg["min_qty"])
+        
+        # 4. 최소 주문 금액 체크
         order_value = final_qty * price * cfg["contract_size"]
         if order_value < cfg["min_notional"]:
+            log_debug(f"⛔ 최소 주문 금액 미달 ({symbol})", f"{order_value} < {cfg['min_notional']} USDT")
             return Decimal("0")
+        
+        # 5. 로깅 (순자산 기반임을 명시)
+        log_debug(f"📊 수량 계산 ({symbol})", 
+                 f"순자산: {equity} USDT, 가격: {price}, 계약크기: {cfg['contract_size']}, "
+                 f"수량(계약): {final_qty}, 투자금액: {order_value:.2f} USDT (레버리지 1배)")
+        
         return final_qty
+        
     except Exception as e:
-        log_debug(f"❌ 수량 계산 오류 ({symbol})", str(e))
+        log_debug(f"❌ 수량 계산 오류 ({symbol})", str(e), exc_info=True)
         return Decimal("0")
 
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
+    """주문 실행"""
     acquired = position_lock.acquire(timeout=5)
     if not acquired:
+        log_debug(f"⚠️ 주문 락 실패 ({symbol})", "타임아웃")
         return False
     try:
         cfg = SYMBOL_CONFIG[symbol]
@@ -452,30 +230,35 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         min_qty = cfg["min_qty"]
         qty_dec = Decimal(str(qty)).quantize(step, rounding=ROUND_DOWN)
         if qty_dec < min_qty:
+            log_debug(f"⛔ 잘못된 수량 ({symbol})", f"{qty_dec} < 최소 {min_qty}")
             return False
         price = get_price(symbol)
         order_value = qty_dec * price * cfg["contract_size"]
         if order_value < cfg["min_notional"]:
+            log_debug(f"⛔ 최소 주문 금액 미달 ({symbol})", f"{order_value} < {cfg['min_notional']}")
             return False
         size = float(qty_dec) if side == "buy" else -float(qty_dec)
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
+        log_debug(f"📤 주문 시도 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약, 주문금액: {order_value:.2f} USDT (레버리지 1배)")
         api.create_futures_order(SETTLE, order)
         log_debug(f"✅ 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약")
         time.sleep(2)
-        sync_manager.sync_position_with_retry(symbol)
+        update_position_state(symbol)
         return True
     except Exception as e:
         error_msg = str(e)
         log_debug(f"❌ 주문 실패 ({symbol})", f"{error_msg}")
-        if retry > 0 and ("INVALID_PARAM" in error_msg or "POSITION_EMPTY" in error_msg):
+        if retry > 0 and ("INVALID_PARAM" in error_msg or "POSITION_EMPTY" in error_msg or "INSUFFICIENT_AVAILABLE" in error_msg):
             retry_qty = (Decimal(str(qty)) * Decimal("0.5") // step) * step
             retry_qty = max(retry_qty, min_qty)
+            log_debug(f"🔄 재시도 ({symbol})", f"{qty} → {retry_qty}")
             return place_order(symbol, side, float(retry_qty), reduce_only, retry-1)
         return False
     finally:
         position_lock.release()
 
 def update_position_state(symbol, timeout=5):
+    """포지션 상태 업데이트"""
     acquired = position_lock.acquire(timeout=timeout)
     if not acquired:
         return False
@@ -493,6 +276,7 @@ def update_position_state(symbol, timeout=5):
                     del actual_entry_prices[symbol]
                 return True
             else:
+                log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
                 return False
         size = Decimal(str(pos.size))
         if size != 0:
@@ -512,28 +296,52 @@ def update_position_state(symbol, timeout=5):
         else:
             position_state[symbol] = {
                 "price": None, "side": None,
-                "size": Decimal("0"), "value": Decimal("0"), 
-                "margin": Decimal("0"), "mode": "cross"
+                "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross"
             }
             if symbol in actual_entry_prices:
                 del actual_entry_prices[symbol]
         return True
-    except Exception:
+    except Exception as e:
+        log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e), exc_info=True)
         return False
     finally:
         position_lock.release()
 
+def log_initial_status():
+    """서버 시작시 초기 상태 로깅"""
+    try:
+        log_debug("🚀 서버 시작", "초기 상태 확인 중...")
+        equity = get_total_collateral(force=True)
+        log_debug("💰 총 자산(초기)", f"{equity} USDT")
+        for symbol in SYMBOL_CONFIG:
+            if not update_position_state(symbol, timeout=3):
+                log_debug("❌ 포지션 조회 실패", f"초기화 중 {symbol} 상태 확인 불가")
+                continue
+            pos = position_state.get(symbol, {})
+            if pos.get("side"):
+                log_debug(
+                    f"📊 초기 포지션 ({symbol})",
+                    f"방향: {pos['side']}, 수량: {pos['size']}, 진입가: {pos['price']}, 평가금액: {pos['value']} USDT"
+                )
+            else:
+                log_debug(f"📊 초기 포지션 ({symbol})", "포지션 없음")
+    except Exception as e:
+        log_debug("❌ 초기 상태 로깅 실패", str(e), exc_info=True)
+
 def close_position(symbol):
+    """포지션 청산"""
     acquired = position_lock.acquire(timeout=5)
     if not acquired:
+        log_debug(f"⚠️ 청산 락 실패 ({symbol})", "타임아웃")
         return False
     try:
+        log_debug(f"🔄 청산 시도 ({symbol})", "size=0 주문")
         api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
         log_debug(f"✅ 청산 완료 ({symbol})", "")
         if symbol in actual_entry_prices:
             del actual_entry_prices[symbol]
         time.sleep(1)
-        sync_manager.sync_position_with_retry(symbol)
+        update_position_state(symbol)
         return True
     except Exception as e:
         log_debug(f"❌ 청산 실패 ({symbol})", str(e))
@@ -541,255 +349,111 @@ def close_position(symbol):
     finally:
         position_lock.release()
 
-# ----------- 신호 처리 함수 강화 -----------
-def process_trading_signal(data):
-    raw = data.get("symbol", "").upper().replace(".P", "")
-    symbol = BINANCE_TO_GATE_SYMBOL.get(raw)
-    if not symbol or symbol not in SYMBOL_CONFIG:
-        return jsonify({"error": "Invalid symbol", "symbol": raw}), 400
-    
-    side = data.get("side", "").lower()
-    action = data.get("action", "").lower()
-    reason = data.get("reason", "")
-    signal_type = data.get("signal_type", "unknown")
-    alert_id = data.get("id", "unknown")
-    sync_mode = data.get("sync_mode", "BASIC")
-    guaranteed = data.get("guaranteed", False)
-    redundancy_level = data.get("redundancy_level", 1)
-
-    # GUARANTEED 모드 특별 로깅
-    if sync_mode == "GUARANTEED" and guaranteed:
-        log_debug("🎯 GUARANTEED 신호 처리", f"Symbol: {symbol}, Side: {side}, Action: {action}, Type: {signal_type}, Level: {redundancy_level}")
-
-    if action == "exit":
-        if not sync_manager.sync_position_with_retry(symbol, max_retries=2):
-            return jsonify({"status": "error", "message": "포지션 동기화 실패", "alert_id": alert_id}), 500
-        
-        current_side = position_state.get(symbol, {}).get("side")
-        
-        if reason == "reverse_signal":
-            success = close_position(symbol)
-            log_debug("🔄 역신호 청산", f"Symbol: {symbol}, Success: {success}")
-        else:
-            if side == "long" and current_side == "buy":
-                success = close_position(symbol)
-                log_debug("📤 롱 청산", f"Symbol: {symbol}, Success: {success}")
-            elif side == "short" and current_side == "sell":
-                success = close_position(symbol)
-                log_debug("📤 숏 청산", f"Symbol: {symbol}, Success: {success}")
-            else:
-                success = False
-                log_debug("⚠️ 청산 조건 불일치", f"요청: {side}, 현재: {current_side}")
-        
-        return jsonify({
-            "status": "success" if success else "error",
-            "action": "exit",
-            "symbol": symbol,
-            "alert_id": alert_id,
-            "sync_mode": sync_mode,
-            "guaranteed": guaranteed
-        })
-
-    if side not in ["long", "short"] or action not in ["entry", "exit"]:
-        return jsonify({"error": "Invalid side/action", "side": side, "action": action}), 400
-    
-    if not sync_manager.sync_position_with_retry(symbol, max_retries=2):
-        return jsonify({"status": "error", "message": "포지션 동기화 실패", "alert_id": alert_id}), 500
-    
-    current_side = position_state.get(symbol, {}).get("side")
-    desired_side = "buy" if side == "long" else "sell"
-    
-    current_size = position_state.get(symbol, {}).get("size", Decimal("0"))
-    if current_side == desired_side and current_size >= 2:
-        log_debug("🚫 피라미딩 제한", f"Symbol: {symbol}, 현재 사이즈: {current_size}")
-        return jsonify({
-            "status": "pyramiding_limit",
-            "current_size": float(current_size),
-            "alert_id": alert_id,
-            "sync_mode": sync_mode
-        })
-
-    if current_side and current_side != desired_side:
-        log_debug("🔄 역포지션 청산 시작", f"Symbol: {symbol}, 현재: {current_side}, 요청: {desired_side}")
-        if not close_position(symbol):
-            return jsonify({"status": "error", "message": "역포지션 청산 실패", "alert_id": alert_id})
-        time.sleep(3)
-        sync_manager.sync_position_with_retry(symbol)
-
-    qty = calculate_position_size(symbol)
-    if qty <= 0:
-        log_debug("❌ 수량 계산 실패", f"Symbol: {symbol}, 계산된 수량: {qty}")
-        return jsonify({"status": "error", "message": "수량 계산 오류", "alert_id": alert_id})
-
-    log_debug("📈 포지션 진입 시작", f"Symbol: {symbol}, Side: {desired_side}, Qty: {qty}, Mode: {sync_mode}")
-    success = place_order(symbol, desired_side, qty)
-    
-    if success and sync_mode == "GUARANTEED":
-        log_debug("✅ GUARANTEED 진입 완료", f"Symbol: {symbol}, AlertID: {alert_id}")
-    
-    return jsonify({
-        "status": "success" if success else "error",
-        "action": "entry",
-        "symbol": symbol,
-        "side": side,
-        "qty": float(qty),
-        "signal_type": signal_type,
-        "alert_id": alert_id,
-        "sync_mode": sync_mode,
-        "guaranteed": guaranteed,
-        "redundancy_level": redundancy_level
-    })
-
-# ----------- 라우트 핸들러들 -----------
 @app.route("/ping", methods=["GET", "HEAD"])
 def ping():
+    """헬스체크 엔드포인트"""
     return "pong", 200
 
 @app.route("/", methods=["POST"])
-def enhanced_webhook():
-    alert_id = None
-    
+def webhook():
+    """TradingView 웹훅 처리"""
+    symbol = None
     try:
+        log_debug("🔄 웹훅 시작", "요청 수신")
         if not request.is_json:
             return jsonify({"error": "JSON required"}), 400
-        
         data = request.get_json()
-        alert_type = data.get("type", "unknown")
-        alert_id = data.get("id", f"auto_{alert_type}_{int(time.time())}")
+        log_debug("📥 웹훅 데이터", json.dumps(data))
+        raw = data.get("symbol", "").upper().replace(".P", "")
+        symbol = BINANCE_TO_GATE_SYMBOL.get(raw)
+        if not symbol or symbol not in SYMBOL_CONFIG:
+            return jsonify({"error": "Invalid symbol"}), 400
+        side = data.get("side", "").lower()
+        action = data.get("action", "").lower()
+        reason = data.get("reason", "")
+
+        if action == "exit":
+            update_position_state(symbol, timeout=1)
+            current_side = position_state.get(symbol, {}).get("side")
+            if reason == "reverse_signal":
+                success = close_position(symbol)
+            else:
+                if side == "long" and current_side == "buy":
+                    success = close_position(symbol)
+                elif side == "short" and current_side == "sell":
+                    success = close_position(symbol)
+                else:
+                    log_debug(f"❌ 청산 실패 ({symbol})", f"현재 포지션: {current_side}, 요청 side: {side}")
+                    success = False
+            log_debug(f"🔁 청산 결과 ({symbol})", f"성공: {success}")
+            return jsonify({"status": "success" if success else "error"})
         
-        is_valid, validation_msg = validate_alert_data(data)
-        if not is_valid:
-            return jsonify({"error": validation_msg, "alert_id": alert_id}), 400
-        
-        if alert_type in ["heartbeat", "sync"]:
-            log_debug("💓 상태 알림 수신", f"Type: {alert_type}, Symbol: {data.get('symbol')}")
-            return jsonify({
-                "status": "received", 
-                "type": alert_type,
-                "symbol": data.get("symbol"),
-                "timestamp": data.get("timestamp")
-            })
-        
-        if duplicate_filter.is_duplicate_or_processing(data):
-            return jsonify({"status": "duplicate", "alert_id": alert_id})
-        
-        try:
-            result = process_trading_signal(data)
-            duplicate_filter.mark_processed(alert_id)
-            return result
-        except Exception as e:
-            duplicate_filter.mark_processed(alert_id)
-            raise e
-            
+        if side not in ["long", "short"] or action not in ["entry", "exit"]:
+            return jsonify({"error": "Invalid side/action"}), 400
+        if not update_position_state(symbol, timeout=1):
+            return jsonify({"status": "error", "message": "포지션 조회 실패"}), 500
+        current_side = position_state.get(symbol, {}).get("side")
+        desired_side = "buy" if side == "long" else "sell"
+        if current_side and current_side != desired_side:
+            log_debug("🔄 역포지션 처리", f"현재: {current_side} → 목표: {desired_side}")
+            if not close_position(symbol):
+                log_debug("❌ 역포지션 청산 실패", "")
+                return jsonify({"status": "error", "message": "역포지션 청산 실패"})
+            time.sleep(3)
+            if not update_position_state(symbol):
+                log_debug("❌ 역포지션 후 상태 갱신 실패", "")
+        qty = calculate_position_size(symbol)
+        log_debug(f"🧮 수량 계산 완료 ({symbol})", f"{qty} 계약")
+        if qty <= 0:
+            log_debug("❌ 수량 오류", f"계산된 수량: {qty}")
+            return jsonify({"status": "error", "message": "수량 계산 오류"})
+        success = place_order(symbol, desired_side, qty)
+        log_debug(f"📨 최종 결과 ({symbol})", f"주문 성공: {success}")
+        return jsonify({"status": "success" if success else "error", "qty": float(qty)})
     except Exception as e:
-        if alert_id and not alert_id.startswith("auto_"):
-            duplicate_filter.mark_processed(alert_id)
-        return jsonify({"status": "error", "message": str(e), "alert_id": alert_id}), 500
+        log_debug(f"❌ 웹훅 전체 실패 ({symbol or 'unknown'})", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/status", methods=["GET"])
 def status():
+    """서버 상태 조회"""
     try:
         equity = get_total_collateral(force=True)
         positions = {}
-        
         for sym in SYMBOL_CONFIG:
-            if sync_manager.sync_position_with_retry(sym, max_retries=1):
+            if update_position_state(sym, timeout=1):
                 pos = position_state.get(sym, {})
                 if pos.get("side"):
                     positions[sym] = {k: float(v) if isinstance(v, Decimal) else v for k, v in pos.items()}
-        
-        # 중복 필터 통계 추가
-        filter_stats = duplicate_filter.get_stats()
-        
         return jsonify({
             "status": "running",
             "timestamp": datetime.now().isoformat(),
             "margin_balance": float(equity),
             "positions": positions,
-            "actual_entry_prices": {k: float(v) for k, v in actual_entry_prices.items()},
-            "duplicate_filter_stats": filter_stats,
-            "sync_manager_status": sync_manager.get_sync_status()
+            "actual_entry_prices": {k: float(v) for k, v in actual_entry_prices.items()}
         })
     except Exception as e:
+        log_debug("❌ 상태 조회 실패", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route("/health", methods=["GET"])
-def health_check():
-    health_status = {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "version": "v3.1_guaranteed"
-    }
-    
+@app.route("/debug", methods=["GET"])
+def debug_account():
+    """계정 디버깅 정보"""
     try:
-        balance = get_total_collateral(force=True)
-        health_status["balance"] = float(balance)
-        
-        # GUARANTEED 모드 대응 확인
-        health_status["guaranteed_support"] = True
-        health_status["duplicate_filter_active"] = len(duplicate_filter.processing_alerts) >= 0
-        
-    except Exception:
-        health_status["status"] = "degraded"
-    
-    return jsonify(health_status)
-
-# ----------- 새로운 통계 엔드포인트 -----------
-@app.route("/stats", methods=["GET"])
-def get_stats():
-    try:
-        filter_stats = duplicate_filter.get_stats()
-        sync_stats = sync_manager.get_sync_status()
-        
-        # 포지션 요약
-        position_summary = {}
-        total_positions = 0
-        for sym in SYMBOL_CONFIG:
-            pos = position_state.get(sym, {})
-            if pos.get("side"):
-                total_positions += 1
-                position_summary[sym] = {
-                    "side": pos.get("side"),
-                    "size": float(pos.get("size", 0)),
-                    "value": float(pos.get("value", 0))
-                }
-        
-        return jsonify({
-            "timestamp": datetime.now().isoformat(),
-            "duplicate_filter": filter_stats,
-            "position_sync": sync_stats,
-            "positions": {
-                "total_count": total_positions,
-                "summary": position_summary
-            },
-            "system": {
-                "uptime_hours": (time.time() - start_time) / 3600 if 'start_time' in globals() else 0,
-                "processing_alerts": len(duplicate_filter.processing_alerts),
-                "guaranteed_alerts": sum(len(v) for v in duplicate_filter.guaranteed_alerts.values())
-            }
-        })
+        acc = api.list_futures_accounts(SETTLE)
+        debug_info = {
+            "raw_response": str(acc),
+            "total": str(getattr(acc, 'total', '없음')),
+            "available": str(getattr(acc, 'available', '없음')),
+            "margin_balance": str(getattr(acc, 'margin_balance', '없음')),
+            "equity": str(getattr(acc, 'equity', '없음')),
+        }
+        return jsonify(debug_info)
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-# ----------- 백그라운드 작업 -----------
-def log_initial_status():
-    try:
-        global start_time
-        start_time = time.time()
-        
-        log_debug("🚀 서버 시작", "초기 상태 확인 중... (GUARANTEED 모드 지원)")
-        equity = get_total_collateral(force=True)
-        log_debug("💰 총 자산(초기)", f"{equity} USDT")
-        
-        for symbol in SYMBOL_CONFIG:
-            sync_manager.sync_position_with_retry(symbol, max_retries=2)
-        
-        log_debug("✅ 시스템 준비 완료", f"지원 기능: GUARANTEED 동기화, 고급 중복 방지, 포지션 동기화")
-        
-    except Exception as e:
-        log_debug("❌ 초기 상태 로깅 실패", str(e))
+        return jsonify({"error": str(e)})
 
 async def send_ping(ws):
+    """웹소켓 핑 전송"""
     while True:
         try:
             await ws.ping()
@@ -798,11 +462,12 @@ async def send_ping(ws):
         await asyncio.sleep(30)
 
 async def price_listener():
+    """실시간 가격 모니터링"""
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     symbols = list(SYMBOL_CONFIG.keys())
     reconnect_delay = 5
     max_delay = 60
-    
+    log_debug("📡 웹소켓 시작", f"URI: {uri}, 심볼: {len(symbols)}개")
     while True:
         try:
             async with websockets.connect(uri, ping_interval=30, ping_timeout=15) as ws:
@@ -815,7 +480,6 @@ async def price_listener():
                 await ws.send(json.dumps(subscribe_msg))
                 ping_task = asyncio.create_task(send_ping(ws))
                 reconnect_delay = 5
-                
                 while True:
                     try:
                         msg = await asyncio.wait_for(ws.recv(), timeout=45)
@@ -823,76 +487,66 @@ async def price_listener():
                             data = json.loads(msg)
                         except json.JSONDecodeError:
                             continue
-                        
                         if not isinstance(data, dict):
                             continue
                         if data.get("event") == "subscribe":
                             continue
-                        
                         result = data.get("result")
                         if not result:
                             continue
-                        
                         if isinstance(result, list):
                             for item in result:
                                 if isinstance(item, dict):
                                     process_ticker_data(item)
                         elif isinstance(result, dict):
                             process_ticker_data(result)
-                            
                     except (asyncio.TimeoutError, websockets.ConnectionClosed):
                         ping_task.cancel()
                         break
                     except Exception:
                         continue
-                        
         except Exception:
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
 def process_ticker_data(ticker):
+    """실시간 가격 데이터 처리 및 SL/TP 체크"""
     try:
         contract = ticker.get("contract")
         last = ticker.get("last")
         if not contract or not last or contract not in SYMBOL_CONFIG:
             return
-        
         price = Decimal(str(last).replace("E", "e")).normalize()
-        
         acquired = position_lock.acquire(timeout=1)
         if not acquired:
             return
-        
         try:
-            if not sync_manager.is_sync_fresh(contract, max_age=60):
-                sync_manager.sync_position_with_retry(contract, max_retries=1)
-            
+            if not update_position_state(contract, timeout=1):
+                return
             pos = position_state.get(contract, {})
             entry = pos.get("price")
             size = pos.get("size", 0)
             side = pos.get("side")
-            
             if not entry or size <= 0 or side not in ["buy", "sell"]:
                 return
-            
             cfg = SYMBOL_CONFIG[contract]
             if side == "buy":
                 sl = entry * (1 - cfg["sl_pct"])
                 tp = entry * (1 + cfg["tp_pct"])
                 if price <= sl:
-                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} <= SL:{sl}")
+                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} <= SL:{sl} (진입가:{entry})")
                     close_position(contract)
                 elif price >= tp:
-                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} >= TP:{tp}")
+                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} >= TP:{tp} (진입가:{entry})")
                     close_position(contract)
             else:
                 sl = entry * (1 + cfg["sl_pct"])
                 tp = entry * (1 - cfg["tp_pct"])
                 if price >= sl:
-                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} >= SL:{sl}")
+                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} >= SL:{sl} (진입가:{entry})")
                     close_position(contract)
                 elif price <= tp:
-                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} <= TP:{tp}")
+                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} <= TP:{tp} (진입가:{entry})")
                     close_position(contract)
         finally:
             position_lock.release()
@@ -900,47 +554,19 @@ def process_ticker_data(ticker):
         pass
 
 def backup_position_loop():
+    """백업 포지션 상태 갱신"""
     while True:
         try:
             for sym in SYMBOL_CONFIG:
-                sync_manager.sync_position_with_retry(sym, max_retries=1)
+                update_position_state(sym, timeout=1)
             time.sleep(300)
         except Exception:
             time.sleep(300)
 
-# ----------- 정기 정리 작업 -----------
-def cleanup_background_task():
-    """백그라운드에서 정기적으로 시스템 정리 작업 수행"""
-    while True:
-        try:
-            time.sleep(3600)  # 1시간마다 실행
-            
-            # 중복 필터 강제 정리
-            duplicate_filter._cleanup_old_alerts()
-            
-            # 시스템 상태 로그
-            filter_stats = duplicate_filter.get_stats()
-            sync_stats = sync_manager.get_sync_status()
-            
-            active_positions = sum(1 for sym in SYMBOL_CONFIG if position_state.get(sym, {}).get("side"))
-            
-            log_debug("🔧 시스템 정리 완료", 
-                     f"활성 포지션: {active_positions}, "
-                     f"처리중 알림: {filter_stats['processing_count']}, "
-                     f"GUARANTEED 기록: {filter_stats.get('guaranteed_symbols', 0)}")
-            
-        except Exception as e:
-            log_debug("❌ 백그라운드 정리 오류", str(e))
-
-# ----------- 메인 실행 -----------
 if __name__ == "__main__":
     log_initial_status()
-    
-    # 백그라운드 스레드 시작
     threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
     threading.Thread(target=backup_position_loop, daemon=True).start()
-    threading.Thread(target=cleanup_background_task, daemon=True).start()
-    
     port = int(os.environ.get("PORT", 8080))
-    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 중 (GUARANTEED 모드 지원 v3.1)")
+    log_debug("🚀 서버 시작", f"포트 {port}에서 실행")
     app.run(host="0.0.0.0", port=port, debug=False)
