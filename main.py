@@ -126,6 +126,180 @@ position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
 actual_entry_prices = {}
 
+import os
+import json
+import time
+import asyncio
+import threading
+import websockets
+import logging
+from decimal import Decimal, ROUND_DOWN
+from datetime import datetime
+from flask import Flask, request, jsonify
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
+
+# ----------- 로그 필터 및 설정 -----------
+class CustomFilter(logging.Filter):
+    def filter(self, record):
+        filter_keywords = [
+            "실시간 가격", "티커 수신", "포지션 없음", "계정 필드",
+            "담보금 전환", "최종 선택", "전체 계정 정보",
+            "웹소켓 핑", "핑 전송", "핑 성공", "ping",
+            "Serving Flask app", "Debug mode", "WARNING: This is a development server"
+        ]
+        message = record.getMessage()
+        return not any(keyword in message for keyword in filter_keywords)
+
+werkzeug_logger = logging.getLogger('werkzeug')
+werkzeug_logger.setLevel(logging.ERROR)
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.addFilter(CustomFilter())
+formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s')
+console_handler.setFormatter(formatter)
+logger.handlers = []
+logger.addHandler(console_handler)
+
+def log_debug(tag, msg, exc_info=False):
+    logger.info(f"[{tag}] {msg}")
+    if exc_info:
+        logger.exception(msg)
+
+# ----------- 서버 설정 -----------
+app = Flask(__name__)
+
+API_KEY = os.environ.get("API_KEY", "")
+API_SECRET = os.environ.get("API_SECRET", "")
+SETTLE = "usdt"
+
+BINANCE_TO_GATE_SYMBOL = {
+    "BTCUSDT": "BTC_USDT",
+    "ETHUSDT": "ETH_USDT",
+    "ADAUSDT": "ADA_USDT",
+    "SUIUSDT": "SUI_USDT",
+    "LINKUSDT": "LINK_USDT",
+    "SOLUSDT": "SOL_USDT",
+    "PEPEUSDT": "PEPE_USDT"
+}
+
+SYMBOL_CONFIG = {
+    "BTC_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("0.0001"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "min_notional": Decimal("10")
+    },
+    "ETH_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("0.001"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "min_notional": Decimal("10")
+    },
+    "ADA_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("10"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "min_notional": Decimal("10")
+    },
+    "SUI_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("1"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "min_notional": Decimal("10")
+    },
+    "LINK_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("1"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "min_notional": Decimal("10")
+    },
+    "SOL_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("1"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "min_notional": Decimal("10")
+    },
+    "PEPE_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("10000"),
+        "sl_pct": Decimal("0.0035"),
+        "tp_pct": Decimal("0.006"),
+        "min_notional": Decimal("10")
+    }
+}
+
+config = Configuration(key=API_KEY, secret=API_SECRET)
+client = ApiClient(config)
+api = FuturesApi(client)
+unified_api = UnifiedApi(client)
+
+position_state = {}
+position_lock = threading.RLock()
+account_cache = {"time": 0, "data": None}
+actual_entry_prices = {}
+
+# === 🔥 중복 진입 방지 시스템 ===
+alert_cache = {}  # {alert_id: timestamp}
+recent_signals = {}  # {symbol: {"side": side, "time": timestamp, "action": action}}
+duplicate_prevention_lock = threading.RLock()
+
+def is_duplicate_alert(alert_id, symbol, side, action):
+    """중복 알림 체크 및 방지"""
+    global alert_cache  # 🔥 전역 변수로 명시적 선언
+    
+    with duplicate_prevention_lock:
+        current_time = time.time()
+        
+        # 1. 같은 alert_id가 이미 처리되었는지 확인
+        if alert_id in alert_cache:
+            time_diff = current_time - alert_cache[alert_id]
+            if time_diff < 60:  # 1분 이내 같은 ID는 중복
+                log_debug("🚫 중복 알림 차단", f"ID: {alert_id}, {time_diff:.1f}초 전 처리됨")
+                return True
+        
+        # 2. 같은 심볼의 최근 신호 확인 (진입 신호만)
+        if action == "entry" and symbol in recent_signals:
+            recent = recent_signals[symbol]
+            time_diff = current_time - recent["time"]
+            
+            # 같은 방향 신호가 30초 이내에 있으면 중복
+            if recent["side"] == side and recent["action"] == "entry" and time_diff < 30:
+                log_debug("🚫 중복 진입 차단", f"{symbol} {side} 신호가 {time_diff:.1f}초 전에 이미 처리됨")
+                return True
+        
+        # 3. 중복이 아니면 캐시에 저장
+        alert_cache[alert_id] = current_time
+        
+        if action == "entry":
+            recent_signals[symbol] = {
+                "side": side,
+                "time": current_time,
+                "action": action
+            }
+        
+        # 4. 오래된 캐시 정리 (메모리 관리) - 🔥 수정
+        cutoff_time = current_time - 300  # 5분 이전 데이터 삭제
+        alert_cache = {k: v for k, v in alert_cache.items() if v > cutoff_time}
+        
+        log_debug("✅ 신규 알림 승인", f"ID: {alert_id}, {symbol} {side} {action}")
+        return False
+
 def get_total_collateral(force=False):
     """순자산(Account Equity) 조회"""
     now = time.time()
@@ -356,7 +530,7 @@ def ping():
 
 @app.route("/", methods=["POST"])
 def webhook():
-    """TradingView 웹훅 처리"""
+    """TradingView 웹훅 처리 (중복 방지 기능 포함)"""
     symbol = None
     try:
         log_debug("🔄 웹훅 시작", "요청 수신")
@@ -364,13 +538,33 @@ def webhook():
             return jsonify({"error": "JSON required"}), 400
         data = request.get_json()
         log_debug("📥 웹훅 데이터", json.dumps(data))
+        
+        # === 🔥 중복 방지 체크 ===
+        alert_id = data.get("id", "")
         raw = data.get("symbol", "").upper().replace(".P", "")
         symbol = BINANCE_TO_GATE_SYMBOL.get(raw)
-        if not symbol or symbol not in SYMBOL_CONFIG:
-            return jsonify({"error": "Invalid symbol"}), 400
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
         reason = data.get("reason", "")
+        prevent_duplicate = data.get("prevent_duplicate", False)
+        copy_number = data.get("copy", 0)
+        attempt_number = data.get("attempt", 1)  # 🔥 추가: 시도 번호
+        
+        if not symbol or symbol not in SYMBOL_CONFIG:
+            return jsonify({"error": "Invalid symbol"}), 400
+        
+        # 중복 방지가 활성화된 경우 체크
+        if prevent_duplicate and copy_number == 0:  # 원본 알림만 체크 (copy는 무시)
+            if is_duplicate_alert(alert_id, symbol, side, action):
+                return jsonify({"status": "duplicate_ignored", "message": "중복 알림 무시됨"})
+        elif copy_number > 0:
+            # copy 알림은 로그만 남기고 무시
+            log_debug("📋 Copy 알림 무시", f"copy={copy_number}, ID={alert_id}")
+            return jsonify({"status": "copy_ignored", "message": "Copy 알림 무시됨"})
+
+        # 🔥 추가: 시도 번호 로깅
+        if attempt_number > 1:
+            log_debug("🔄 재시도 알림", f"attempt={attempt_number}, {symbol} {side} {action}")
 
         if action == "exit":
             update_position_state(symbol, timeout=1)
@@ -394,6 +588,12 @@ def webhook():
             return jsonify({"status": "error", "message": "포지션 조회 실패"}), 500
         current_side = position_state.get(symbol, {}).get("side")
         desired_side = "buy" if side == "long" else "sell"
+        
+        # === 🔥 포지션 상태 기반 중복 진입 체크 ===
+        if current_side and current_side == desired_side:
+            log_debug("🚫 동일 방향 포지션 존재", f"현재: {current_side}, 요청: {desired_side} - 진입 취소 (attempt: {attempt_number})")
+            return jsonify({"status": "duplicate_position", "message": "동일 방향 포지션이 이미 존재함", "attempt": attempt_number})
+        
         if current_side and current_side != desired_side:
             log_debug("🔄 역포지션 처리", f"현재: {current_side} → 목표: {desired_side}")
             if not close_position(symbol):
@@ -408,8 +608,13 @@ def webhook():
             log_debug("❌ 수량 오류", f"계산된 수량: {qty}")
             return jsonify({"status": "error", "message": "수량 계산 오류"})
         success = place_order(symbol, desired_side, qty)
-        log_debug(f"📨 최종 결과 ({symbol})", f"주문 성공: {success}")
-        return jsonify({"status": "success" if success else "error", "qty": float(qty)})
+        log_debug(f"📨 최종 결과 ({symbol})", f"주문 성공: {success}, attempt: {attempt_number}")
+        return jsonify({
+            "status": "success" if success else "error", 
+            "qty": float(qty), 
+            "duplicate_prevention": prevent_duplicate,
+            "attempt": attempt_number
+        })
     except Exception as e:
         log_debug(f"❌ 웹훅 전체 실패 ({symbol or 'unknown'})", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -425,12 +630,23 @@ def status():
                 pos = position_state.get(sym, {})
                 if pos.get("side"):
                     positions[sym] = {k: float(v) if isinstance(v, Decimal) else v for k, v in pos.items()}
+        
+        # 중복 방지 상태 정보 추가
+        with duplicate_prevention_lock:
+            duplicate_stats = {
+                "alert_cache_size": len(alert_cache),
+                "recent_signals_size": len(recent_signals),
+                "recent_signals": {k: {"side": v["side"], "action": v["action"], "age": time.time() - v["time"]} 
+                                 for k, v in recent_signals.items()}
+            }
+        
         return jsonify({
             "status": "running",
             "timestamp": datetime.now().isoformat(),
             "margin_balance": float(equity),
             "positions": positions,
-            "actual_entry_prices": {k: float(v) for k, v in actual_entry_prices.items()}
+            "actual_entry_prices": {k: float(v) for k, v in actual_entry_prices.items()},
+            "duplicate_prevention": duplicate_stats
         })
     except Exception as e:
         log_debug("❌ 상태 조회 실패", str(e))
@@ -568,5 +784,5 @@ if __name__ == "__main__":
     threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
     threading.Thread(target=backup_position_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 8080))
-    log_debug("🚀 서버 시작", f"포트 {port}에서 실행")
+    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (중복 진입 방지 활성화)")
     app.run(host="0.0.0.0", port=port, debug=False)
