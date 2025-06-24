@@ -118,7 +118,7 @@ recent_signals = {}  # {symbol: {"side": side, "time": timestamp, "action": acti
 duplicate_prevention_lock = threading.RLock()
 
 def is_duplicate_alert(alert_data):
-    """파인스크립트 완벽한 알림 시스템과 연동된 중복 방지"""
+    """최대 엄격한 중복 방지"""
     global alert_cache, recent_signals
     
     with duplicate_prevention_lock:
@@ -128,41 +128,32 @@ def is_duplicate_alert(alert_data):
         side = alert_data.get("side", "")
         action = alert_data.get("action", "")
         strategy_name = alert_data.get("strategy", "")
-        signal_source = alert_data.get("signal_source", "")
-        is_backup = "backup" in alert_data.get("type", "").lower() or "_BACKUP" in alert_id
         
         # 1. 같은 alert_id가 이미 처리되었는지 확인
         if alert_id in alert_cache:
             cache_entry = alert_cache[alert_id]
             time_diff = current_time - cache_entry["timestamp"]
             
-            if cache_entry["processed"] and time_diff < 120:  # 2분 이내 같은 ID는 중복
+            if cache_entry["processed"] and time_diff < 300:  # 5분 이내 같은 ID는 중복
                 log_debug("🚫 중복 ID 차단", f"ID: {alert_id}, {time_diff:.1f}초 전 처리됨")
                 return True
         
-        # 2. 백업 알림인 경우 원본이 이미 처리되었는지 확인
-        if is_backup:
-            original_id = alert_id.split("_BACKUP")[0]
-            if original_id in alert_cache and alert_cache[original_id]["processed"]:
-                log_debug("🚫 백업 알림 차단", f"원본 ID {original_id} 이미 처리됨")
-                return True
-        
-        # 3. 같은 심볼+방향의 최근 신호 확인 (진입 신호만)
+        # 2. 같은 심볼+방향의 최근 신호 확인 (진입 신호만)
         if action == "entry":
             symbol_key = f"{symbol}_{side}"
             if symbol_key in recent_signals:
                 recent = recent_signals[symbol_key]
                 time_diff = current_time - recent["time"]
                 
-                # 같은 전략의 같은 방향 신호가 45초 이내에 있으면 중복
+                # 🔥 같은 방향 신호가 120초(2분) 이내에 있으면 중복
                 if (recent["strategy"] == strategy_name and 
                     recent["action"] == "entry" and 
-                    time_diff < 45):
+                    time_diff < 120):
                     log_debug("🚫 중복 진입 차단", 
                              f"{symbol} {side} {strategy_name} 신호가 {time_diff:.1f}초 전에 이미 처리됨")
                     return True
         
-        # 4. 중복이 아니면 캐시에 저장
+        # 3. 중복이 아니면 캐시에 저장
         alert_cache[alert_id] = {"timestamp": current_time, "processed": False}
         
         if action == "entry":
@@ -171,12 +162,11 @@ def is_duplicate_alert(alert_data):
                 "side": side,
                 "time": current_time,
                 "action": action,
-                "strategy": strategy_name,
-                "signal_source": signal_source
+                "strategy": strategy_name
             }
         
-        # 5. 오래된 캐시 정리 (메모리 관리)
-        cutoff_time = current_time - 600  # 10분 이전 데이터 삭제
+        # 4. 오래된 캐시 정리 (메모리 관리)
+        cutoff_time = current_time - 900  # 15분 이전 데이터 삭제
         alert_cache = {k: v for k, v in alert_cache.items() if v["timestamp"] > cutoff_time}
         recent_signals = {k: v for k, v in recent_signals.items() if v["time"] > cutoff_time}
         
@@ -451,30 +441,21 @@ def webhook():
         data = request.get_json()
         log_debug("📥 웹훅 데이터", json.dumps(data, indent=2))
         
-        # === 🔥 파인스크립트 데이터 파싱 ===
+        # === 🔥 파인스크립트 데이터 파싱 (간소화) ===
         alert_id = data.get("id", "")
-        alert_type = data.get("type", "")
         raw_symbol = data.get("symbol", "").upper()
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
         strategy_name = data.get("strategy", "")
-        signal_source = data.get("signal_source", "")
-        perfect_system = data.get("perfect_system", False)
-        is_realtime = data.get("realtime", False)
-        signal_strength = data.get("signal_strength", 0)
+        price = data.get("price", 0)
         
         # 심볼 변환
         symbol = SYMBOL_MAPPING.get(raw_symbol)
         if not symbol or symbol not in SYMBOL_CONFIG:
             return jsonify({"error": f"Invalid symbol: {raw_symbol}"}), 400
         
-        # === 🔥 특수 알림 타입 처리 ===
-        if alert_type in ["alive", "heartbeat", "confirmation"]:
-            log_debug(f"📊 {alert_type.upper()} 신호", f"시스템 상태: 정상")
-            return jsonify({"status": "acknowledged", "type": alert_type})
-        
-        # === 🔥 중복 방지 체크 (완벽한 시스템 연동) ===
-        if perfect_system and is_duplicate_alert(data):
+        # === 🔥 중복 방지 체크 (엄격한 모드) ===
+        if is_duplicate_alert(data):
             return jsonify({"status": "duplicate_ignored", "message": "중복 알림 무시됨"})
         
         # === 🔥 진입/청산 신호 처리 ===
