@@ -75,11 +75,6 @@ SYMBOL_MAPPING = {
     "LINKUSDTPERP": "LINK_USDT",
     "SOLUSDTPERP": "SOL_USDT",
     "PEPEUSDTPERP": "PEPE_USDT",
-    
-    # 1INCH (추가 지원)
-    "1INCHUSDT": "1INCH_USDT",
-    "1INCHUSDT.P": "1INCH_USDT",
-    "1INCHUSDTPERP": "1INCH_USDT"
 }
 
 def normalize_symbol(raw_symbol):
@@ -166,7 +161,7 @@ SYMBOL_CONFIG = {
     "PEPE_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("10000"),
+        "contract_size": Decimal("100"),
         "min_notional": Decimal("10")
     },
     "1INCH_USDT": {
