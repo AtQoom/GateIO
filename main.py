@@ -230,10 +230,10 @@ def is_duplicate_alert(alert_data):
                              f"{symbol} {side} {strategy_name} 이미 2번 진입 완료 (최근: {time_diff:.1f}초 전)")
                     return True
                 
-                # 🔥 30초 이내 동일 신호는 중복으로 간주
+                # 🔥 14초 이내 동일 신호는 중복으로 간주
                 if (recent["strategy"] == strategy_name and 
                     recent["action"] == "entry" and 
-                    time_diff < 30):
+                    time_diff < 14):
                     log_debug("🚫 중복 진입 차단", 
                              f"{symbol} {side} {strategy_name} 신호가 {time_diff:.1f}초 전에 이미 처리됨")
                     return True
