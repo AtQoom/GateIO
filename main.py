@@ -47,16 +47,84 @@ API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
 
-# 🔥 파인스크립트 전략에 맞춰 심볼 매핑 확장
+# 🔥 확장된 심볼 매핑 (모든 가능한 형태 지원)
 SYMBOL_MAPPING = {
+    # 기본 형태
     "BTCUSDT": "BTC_USDT",
     "ETHUSDT": "ETH_USDT", 
     "ADAUSDT": "ADA_USDT",
     "SUIUSDT": "SUI_USDT",
     "LINKUSDT": "LINK_USDT",
     "SOLUSDT": "SOL_USDT",
-    "PEPEUSDT": "PEPE_USDT"
+    "PEPEUSDT": "PEPE_USDT",
+    
+    # .P 형태 (영구선물)
+    "BTCUSDT.P": "BTC_USDT",
+    "ETHUSDT.P": "ETH_USDT", 
+    "ADAUSDT.P": "ADA_USDT",
+    "SUIUSDT.P": "SUI_USDT",
+    "LINKUSDT.P": "LINK_USDT",
+    "SOLUSDT.P": "SOL_USDT",
+    "PEPEUSDT.P": "PEPE_USDT",
+    
+    # PERP 형태
+    "BTCUSDTPERP": "BTC_USDT",
+    "ETHUSDTPERP": "ETH_USDT", 
+    "ADAUSDTPERP": "ADA_USDT",
+    "SUIUSDTPERP": "SUI_USDT",
+    "LINKUSDTPERP": "LINK_USDT",
+    "SOLUSDTPERP": "SOL_USDT",
+    "PEPEUSDTPERP": "PEPE_USDT",
+    
+    # 1INCH (추가 지원)
+    "1INCHUSDT": "1INCH_USDT",
+    "1INCHUSDT.P": "1INCH_USDT",
+    "1INCHUSDTPERP": "1INCH_USDT"
 }
+
+def normalize_symbol(raw_symbol):
+    """심볼 정규화 - 다양한 형태를 표준 형태로 변환"""
+    if not raw_symbol:
+        return None
+    
+    # 대문자로 변환
+    symbol = raw_symbol.upper().strip()
+    
+    # 직접 매핑이 있으면 사용
+    if symbol in SYMBOL_MAPPING:
+        return SYMBOL_MAPPING[symbol]
+    
+    # 동적 정규화 시도
+    # .P 제거
+    if symbol.endswith('.P'):
+        base_symbol = symbol[:-2]
+        if base_symbol in SYMBOL_MAPPING:
+            return SYMBOL_MAPPING[base_symbol]
+    
+    # PERP 제거  
+    if symbol.endswith('PERP'):
+        base_symbol = symbol[:-4]
+        if base_symbol in SYMBOL_MAPPING:
+            return SYMBOL_MAPPING[base_symbol]
+    
+    # : 이후 제거 (일부 거래소 형태)
+    if ':' in symbol:
+        base_symbol = symbol.split(':')[0]
+        if base_symbol in SYMBOL_MAPPING:
+            return SYMBOL_MAPPING[base_symbol]
+    
+    # 기본 USDT 형태로 추정해서 매핑 시도
+    if 'USDT' in symbol:
+        # 숫자로 시작하는 경우 처리 (1INCH 등)
+        if symbol[0].isdigit():
+            clean_symbol = symbol
+        else:
+            clean_symbol = symbol.replace('.P', '').replace('PERP', '').split(':')[0]
+        
+        if clean_symbol in SYMBOL_MAPPING:
+            return SYMBOL_MAPPING[clean_symbol]
+    
+    return None
 
 SYMBOL_CONFIG = {
     "BTC_USDT": {
@@ -99,6 +167,12 @@ SYMBOL_CONFIG = {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("10000"),
+        "min_notional": Decimal("10")
+    },
+    "1INCH_USDT": {
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("1"),
         "min_notional": Decimal("10")
     }
 }
@@ -429,7 +503,7 @@ def ping():
 
 @app.route("/", methods=["POST"])
 def webhook():
-    """파인스크립트 완벽한 알림 시스템과 연동된 웹훅 처리"""
+    """파인스크립트 완벽한 알림 시스템과 연동된 웹훅 처리 - 심볼 매핑 강화"""
     symbol = None
     alert_id = None
     try:
@@ -449,15 +523,20 @@ def webhook():
         strategy_name = data.get("strategy", "")
         price = data.get("price", 0)
         
+        log_debug("🔍 원본 심볼", f"수신된 심볼: '{raw_symbol}'")
+        
         # 🔥 누락된 변수들 정의 (기본값 설정)
         signal_source = strategy_name  # 전략명을 신호 소스로 사용
         signal_strength = "strong"     # 기본 신호 강도
         perfect_system = True          # 완벽한 시스템 플래그
         
-        # 심볼 변환
-        symbol = SYMBOL_MAPPING.get(raw_symbol)
+        # 🔥 강화된 심볼 변환
+        symbol = normalize_symbol(raw_symbol)
         if not symbol or symbol not in SYMBOL_CONFIG:
-            return jsonify({"error": f"Invalid symbol: {raw_symbol}"}), 400
+            log_debug("❌ 심볼 매핑 실패", f"'{raw_symbol}' -> '{symbol}' (지원되지 않는 심볼)")
+            return jsonify({"error": f"Invalid symbol: {raw_symbol} -> {symbol}"}), 400
+        
+        log_debug("✅ 심볼 매핑 성공", f"'{raw_symbol}' -> '{symbol}'")
         
         # === 🔥 중복 방지 체크 (엄격한 모드) ===
         if is_duplicate_alert(data):
@@ -484,6 +563,8 @@ def webhook():
         
         # === 🔥 진입 신호 처리 ===
         if action == "entry" and side in ["long", "short"]:
+            log_debug(f"🎯 진입 신호 처리 ({symbol})", f"{side} 방향, 전략: {strategy_name}")
+            
             if not update_position_state(symbol, timeout=1):
                 return jsonify({"status": "error", "message": "포지션 조회 실패"}), 500
             
@@ -608,6 +689,31 @@ def debug_account():
         return jsonify(debug_info)
     except Exception as e:
         return jsonify({"error": str(e)})
+
+# === 🔥 추가 디버깅 엔드포인트 ===
+@app.route("/test-symbol/<symbol>", methods=["GET"])
+def test_symbol_mapping(symbol):
+    """심볼 매핑 테스트"""
+    normalized = normalize_symbol(symbol)
+    is_valid = normalized and normalized in SYMBOL_CONFIG
+    
+    return jsonify({
+        "input": symbol,
+        "normalized": normalized,
+        "valid": is_valid,
+        "config_exists": normalized in SYMBOL_CONFIG if normalized else False,
+        "all_mappings": {k: v for k, v in SYMBOL_MAPPING.items() if k.startswith(symbol.upper()[:3])}
+    })
+
+@app.route("/clear-cache", methods=["POST"])
+def clear_cache():
+    """중복 방지 캐시 초기화"""
+    global alert_cache, recent_signals
+    with duplicate_prevention_lock:
+        alert_cache.clear()
+        recent_signals.clear()
+    log_debug("🗑️ 캐시 초기화", "모든 중복 방지 캐시가 초기화되었습니다")
+    return jsonify({"status": "cache_cleared", "message": "중복 방지 캐시가 초기화되었습니다"})
 
 # === 🔥 실시간 가격 모니터링 및 TP/SL 처리 (Gate.io 기준) ===
 async def send_ping(ws):
@@ -742,6 +848,7 @@ if __name__ == "__main__":
              f"포트 {port}에서 실행 (하이브리드 모드)\n"
              f"✅ TP/SL: 서버에서 Gate.io 가격 기준으로 처리\n"
              f"✅ 진입/청산 신호: 파인스크립트 알림으로 처리\n"
-             f"✅ 중복 방지: 완벽한 알림 시스템 연동")
+             f"✅ 중복 방지: 완벽한 알림 시스템 연동\n"
+             f"✅ 심볼 매핑: 모든 형태 지원 (.P, PERP 등)")
     
     app.run(host="0.0.0.0", port=port, debug=False)
