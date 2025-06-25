@@ -186,13 +186,13 @@ position_state = {}
 position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
 
-# === 🔥 완벽한 중복 방지 시스템 (파인스크립트 연동) ===
+# === 🔥 피라미딩 2 지원 중복 방지 시스템 ===
 alert_cache = {}  # {alert_id: {"timestamp": time, "processed": bool}}
-recent_signals = {}  # {symbol: {"side": side, "time": timestamp, "action": action, "strategy": strategy}}
+recent_signals = {}  # {symbol: {"side": side, "time": timestamp, "action": action, "strategy": strategy, "count": int}}
 duplicate_prevention_lock = threading.RLock()
 
 def is_duplicate_alert(alert_data):
-    """최대 엄격한 중복 방지"""
+    """피라미딩 2 지원 중복 방지 - 같은 방향 최대 2번까지 허용"""
     global alert_cache, recent_signals
     
     with duplicate_prevention_lock:
@@ -202,6 +202,7 @@ def is_duplicate_alert(alert_data):
         side = alert_data.get("side", "")
         action = alert_data.get("action", "")
         strategy_name = alert_data.get("strategy", "")
+        position_count = alert_data.get("position_count", 1)
         
         # 1. 같은 alert_id가 이미 처리되었는지 확인
         if alert_id in alert_cache:
@@ -212,17 +213,27 @@ def is_duplicate_alert(alert_data):
                 log_debug("🚫 중복 ID 차단", f"ID: {alert_id}, {time_diff:.1f}초 전 처리됨")
                 return True
         
-        # 2. 같은 심볼+방향의 최근 신호 확인 (진입 신호만)
+        # 2. 피라미딩 2 지원 - 같은 방향 최대 2번까지 허용
         if action == "entry":
             symbol_key = f"{symbol}_{side}"
             if symbol_key in recent_signals:
                 recent = recent_signals[symbol_key]
                 time_diff = current_time - recent["time"]
+                current_count = recent.get("count", 0)
                 
-                # 🔥 같은 방향 신호가 120초(2분) 이내에 있으면 중복
+                # 🔥 같은 방향 신호 - 120초 이내이고 이미 2번 진입했으면 차단
                 if (recent["strategy"] == strategy_name and 
                     recent["action"] == "entry" and 
-                    time_diff < 120):
+                    time_diff < 120 and 
+                    current_count >= 2):
+                    log_debug("🚫 피라미딩 한계 차단", 
+                             f"{symbol} {side} {strategy_name} 이미 2번 진입 완료 (최근: {time_diff:.1f}초 전)")
+                    return True
+                
+                # 🔥 30초 이내 동일 신호는 중복으로 간주
+                if (recent["strategy"] == strategy_name and 
+                    recent["action"] == "entry" and 
+                    time_diff < 30):
                     log_debug("🚫 중복 진입 차단", 
                              f"{symbol} {side} {strategy_name} 신호가 {time_diff:.1f}초 전에 이미 처리됨")
                     return True
@@ -232,12 +243,18 @@ def is_duplicate_alert(alert_data):
         
         if action == "entry":
             symbol_key = f"{symbol}_{side}"
-            recent_signals[symbol_key] = {
-                "side": side,
-                "time": current_time,
-                "action": action,
-                "strategy": strategy_name
-            }
+            # 피라미딩 카운트 업데이트
+            if symbol_key in recent_signals:
+                recent_signals[symbol_key]["count"] = position_count
+                recent_signals[symbol_key]["time"] = current_time
+            else:
+                recent_signals[symbol_key] = {
+                    "side": side,
+                    "time": current_time,
+                    "action": action,
+                    "strategy": strategy_name,
+                    "count": position_count
+                }
         
         # 4. 오래된 캐시 정리 (메모리 관리)
         cutoff_time = current_time - 900  # 15분 이전 데이터 삭제
@@ -245,7 +262,7 @@ def is_duplicate_alert(alert_data):
         recent_signals = {k: v for k, v in recent_signals.items() if v["time"] > cutoff_time}
         
         log_debug("✅ 신규 알림 승인", 
-                 f"ID: {alert_id}, {symbol} {side} {action} ({strategy_name})")
+                 f"ID: {alert_id}, {symbol} {side} {action} ({strategy_name}) 포지션#{position_count}")
         return False
 
 def mark_alert_processed(alert_id):
@@ -309,10 +326,26 @@ def get_price(symbol):
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e), exc_info=True)
         return Decimal("0")
 
+def get_current_position_count(symbol):
+    """현재 포지션 개수 조회 (Gate.io API 기준)"""
+    try:
+        pos = api.get_position(SETTLE, symbol)
+        size = Decimal(str(pos.size))
+        if size == 0:
+            return 0
+        # Gate.io는 단일 포지션이므로 1 반환 (파인스크립트가 피라미딩 관리)
+        return 1
+    except Exception as e:
+        if "POSITION_NOT_FOUND" in str(e):
+            return 0
+        log_debug(f"❌ 포지션 개수 조회 실패 ({symbol})", str(e))
+        return 0
+
 def calculate_position_size(symbol, strategy_type="standard"):
     """
     순자산(Account Equity) 기반으로 포지션 크기 계산
     파인스크립트의 default_qty_value=100 (순자산 100%) 반영
+    피라미딩 2 지원 - 수량은 수정하지 않음 (레버리지로 조절)
     """
     cfg = SYMBOL_CONFIG[symbol]
     
@@ -324,7 +357,7 @@ def calculate_position_size(symbol, strategy_type="standard"):
         return Decimal("0")
     
     try:
-        # 2. 전략별 포지션 크기 조정
+        # 2. 전략별 포지션 크기 조정 (수량은 그대로 유지)
         if "backup" in strategy_type.lower():
             # 백업 전략은 50% 규모로 진입
             position_ratio = Decimal("0.5")
@@ -332,7 +365,7 @@ def calculate_position_size(symbol, strategy_type="standard"):
             # 메인 전략은 순자산 100% 사용 (파인스크립트와 동일)
             position_ratio = Decimal("1.0")
         
-        # 3. 조정된 순자산으로 수량 계산
+        # 3. 조정된 순자산으로 수량 계산 (피라미딩을 위해 수량 유지)
         adjusted_equity = equity * position_ratio
         raw_qty = adjusted_equity / (price * cfg["contract_size"])
         
@@ -346,10 +379,12 @@ def calculate_position_size(symbol, strategy_type="standard"):
             log_debug(f"⛔ 최소 주문 금액 미달 ({symbol})", f"{order_value} < {cfg['min_notional']} USDT")
             return Decimal("0")
         
-        # 6. 로깅
+        # 6. 로깅 (피라미딩 정보 포함)
+        current_count = get_current_position_count(symbol)
         log_debug(f"📊 수량 계산 ({symbol})", 
                  f"순자산: {equity} USDT, 사용비율: {position_ratio*100}%, "
-                 f"가격: {price}, 수량: {final_qty}, 투자금액: {order_value:.2f} USDT")
+                 f"가격: {price}, 수량: {final_qty}, 투자금액: {order_value:.2f} USDT, "
+                 f"현재 포지션: {current_count}/2")
         
         return final_qty
         
@@ -358,7 +393,7 @@ def calculate_position_size(symbol, strategy_type="standard"):
         return Decimal("0")
 
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
-    """주문 실행"""
+    """주문 실행 (피라미딩 2 지원)"""
     acquired = position_lock.acquire(timeout=5)
     if not acquired:
         log_debug(f"⚠️ 주문 락 실패 ({symbol})", "타임아웃")
@@ -383,11 +418,13 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         size = float(qty_dec) if side == "buy" else -float(qty_dec)
         order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
         
+        current_count = get_current_position_count(symbol)
         log_debug(f"📤 주문 시도 ({symbol})", 
-                 f"{side.upper()} {float(qty_dec)} 계약, 주문금액: {order_value:.2f} USDT")
+                 f"{side.upper()} {float(qty_dec)} 계약, 주문금액: {order_value:.2f} USDT, "
+                 f"피라미딩: {current_count + 1}/2")
         
         api.create_futures_order(SETTLE, order)
-        log_debug(f"✅ 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약")
+        log_debug(f"✅ 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약 (피라미딩 #{current_count + 1})")
         
         time.sleep(2)
         update_position_state(symbol)
@@ -421,7 +458,8 @@ def update_position_state(symbol, timeout=5):
                 position_state[symbol] = {
                     "price": None, "side": None,
                     "size": Decimal("0"), "value": Decimal("0"),
-                    "margin": Decimal("0"), "mode": "cross"
+                    "margin": Decimal("0"), "mode": "cross",
+                    "count": 0
                 }
                 return True
             else:
@@ -439,13 +477,15 @@ def update_position_state(symbol, timeout=5):
                 "size": abs(size),
                 "value": value,
                 "margin": value,
-                "mode": "cross"
+                "mode": "cross",
+                "count": 1  # Gate.io는 단일 포지션
             }
         else:
             position_state[symbol] = {
                 "price": None, "side": None,
                 "size": Decimal("0"), "value": Decimal("0"), 
-                "margin": Decimal("0"), "mode": "cross"
+                "margin": Decimal("0"), "mode": "cross",
+                "count": 0
             }
         return True
     except Exception as e:
@@ -463,7 +503,13 @@ def close_position(symbol):
     try:
         log_debug(f"🔄 청산 시도 ({symbol})", "파인스크립트 신호에 의한 청산")
         api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
-        log_debug(f"✅ 청산 완료 ({symbol})", "")
+        log_debug(f"✅ 청산 완료 ({symbol})", "전체 포지션 청산 (피라미딩 포함)")
+        
+        # 청산 후 recent_signals 초기화
+        with duplicate_prevention_lock:
+            keys_to_remove = [k for k in recent_signals.keys() if k.startswith(symbol + "_")]
+            for key in keys_to_remove:
+                del recent_signals[key]
         
         time.sleep(1)
         update_position_state(symbol)
@@ -477,7 +523,7 @@ def close_position(symbol):
 def log_initial_status():
     """서버 시작시 초기 상태 로깅"""
     try:
-        log_debug("🚀 서버 시작", "파인스크립트 연동 모드 - 초기 상태 확인 중...")
+        log_debug("🚀 서버 시작", "파인스크립트 피라미딩 2 연동 모드 - 초기 상태 확인 중...")
         equity = get_total_collateral(force=True)
         log_debug("💰 총 자산(초기)", f"{equity} USDT")
         
@@ -487,9 +533,11 @@ def log_initial_status():
                 continue
             pos = position_state.get(symbol, {})
             if pos.get("side"):
+                count = pos.get("count", 0)
                 log_debug(
                     f"📊 초기 포지션 ({symbol})",
-                    f"방향: {pos['side']}, 수량: {pos['size']}, 진입가: {pos['price']}, 평가금액: {pos['value']} USDT"
+                    f"방향: {pos['side']}, 수량: {pos['size']}, 진입가: {pos['price']}, "
+                    f"평가금액: {pos['value']} USDT, 포지션수: {count}/2"
                 )
             else:
                 log_debug(f"📊 초기 포지션 ({symbol})", "포지션 없음")
@@ -503,11 +551,11 @@ def ping():
 
 @app.route("/", methods=["POST"])
 def webhook():
-    """파인스크립트 완벽한 알림 시스템과 연동된 웹훅 처리 - 심볼 매핑 강화"""
+    """파인스크립트 피라미딩 2 지원 웹훅 처리"""
     symbol = None
     alert_id = None
     try:
-        log_debug("🔄 웹훅 시작", "파인스크립트 신호 수신")
+        log_debug("🔄 웹훅 시작", "파인스크립트 피라미딩 2 신호 수신")
         
         if not request.is_json:
             return jsonify({"error": "JSON required"}), 400
@@ -515,20 +563,16 @@ def webhook():
         data = request.get_json()
         log_debug("📥 웹훅 데이터", json.dumps(data, indent=2))
         
-        # === 🔥 파인스크립트 데이터 파싱 (간소화) ===
+        # === 🔥 파인스크립트 데이터 파싱 (피라미딩 지원) ===
         alert_id = data.get("id", "")
         raw_symbol = data.get("symbol", "").upper()
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
         strategy_name = data.get("strategy", "")
         price = data.get("price", 0)
+        position_count = data.get("position_count", 1)  # 피라미딩 정보
         
-        log_debug("🔍 원본 심볼", f"수신된 심볼: '{raw_symbol}'")
-        
-        # 🔥 누락된 변수들 정의 (기본값 설정)
-        signal_source = strategy_name  # 전략명을 신호 소스로 사용
-        signal_strength = "strong"     # 기본 신호 강도
-        perfect_system = True          # 완벽한 시스템 플래그
+        log_debug("🔍 원본 심볼", f"수신된 심볼: '{raw_symbol}', 포지션#{position_count}")
         
         # 🔥 강화된 심볼 변환
         symbol = normalize_symbol(raw_symbol)
@@ -538,7 +582,7 @@ def webhook():
         
         log_debug("✅ 심볼 매핑 성공", f"'{raw_symbol}' -> '{symbol}'")
         
-        # === 🔥 중복 방지 체크 (엄격한 모드) ===
+        # === 🔥 피라미딩 2 지원 중복 방지 체크 ===
         if is_duplicate_alert(data):
             return jsonify({"status": "duplicate_ignored", "message": "중복 알림 무시됨"})
         
@@ -561,25 +605,30 @@ def webhook():
             log_debug(f"🔁 청산 결과 ({symbol})", f"성공: {success}")
             return jsonify({"status": "success" if success else "error", "action": "exit"})
         
-        # === 🔥 진입 신호 처리 ===
+        # === 🔥 피라미딩 2 지원 진입 신호 처리 ===
         if action == "entry" and side in ["long", "short"]:
-            log_debug(f"🎯 진입 신호 처리 ({symbol})", f"{side} 방향, 전략: {strategy_name}")
+            log_debug(f"🎯 피라미딩 진입 신호 ({symbol})", f"{side} 방향, 전략: {strategy_name}, 포지션#{position_count}")
             
             if not update_position_state(symbol, timeout=1):
                 return jsonify({"status": "error", "message": "포지션 조회 실패"}), 500
             
             current_side = position_state.get(symbol, {}).get("side")
+            current_count = get_current_position_count(symbol)
             desired_side = "buy" if side == "long" else "sell"
             
-            # 동일 방향 포지션 존재 시 건너뜀
+            # 🔥 피라미딩 2 로직 - 같은 방향 최대 2번까지 허용
             if current_side and current_side == desired_side:
-                log_debug("🚫 동일 방향 포지션 존재", 
-                         f"현재: {current_side}, 요청: {desired_side} - 진입 취소")
-                if alert_id:
-                    mark_alert_processed(alert_id)
-                return jsonify({"status": "duplicate_position", "message": "동일 방향 포지션이 이미 존재함"})
+                if current_count >= 2:
+                    log_debug("🚫 피라미딩 한계 도달", 
+                             f"현재: {current_side} x{current_count}, 요청: {desired_side} - 진입 불가 (최대 2개)")
+                    if alert_id:
+                        mark_alert_processed(alert_id)
+                    return jsonify({"status": "pyramiding_limit", "message": "피라미딩 한계 도달 (최대 2개)"})
+                else:
+                    log_debug("✅ 피라미딩 진입 허용", 
+                             f"현재: {current_side} x{current_count}, 요청: {desired_side} - 추가 진입")
             
-            # 역포지션 처리
+            # 역포지션 처리 (기존 포지션 전체 청산)
             if current_side and current_side != desired_side:
                 log_debug("🔄 역포지션 처리", f"현재: {current_side} → 목표: {desired_side}")
                 if not close_position(symbol):
@@ -592,7 +641,7 @@ def webhook():
             # 수량 계산 (전략 타입에 따라 조정)
             qty = calculate_position_size(symbol, strategy_name)
             log_debug(f"🧮 수량 계산 완료 ({symbol})", 
-                     f"{qty} 계약 (전략: {strategy_name}, 신호강도: {signal_strength})")
+                     f"{qty} 계약 (전략: {strategy_name}, 피라미딩#{position_count})")
             
             if qty <= 0:
                 log_debug("❌ 수량 오류", f"계산된 수량: {qty}")
@@ -605,15 +654,15 @@ def webhook():
                 mark_alert_processed(alert_id)
             
             log_debug(f"📨 최종 결과 ({symbol})", 
-                     f"주문 성공: {success}, 전략: {strategy_name}, 신호: {signal_source}")
+                     f"주문 성공: {success}, 전략: {strategy_name}, 피라미딩#{position_count}")
             
             return jsonify({
                 "status": "success" if success else "error", 
                 "qty": float(qty),
                 "strategy": strategy_name,
-                "signal_source": signal_source,
-                "signal_strength": signal_strength,
-                "perfect_system": perfect_system
+                "position_count": position_count,
+                "pyramiding_mode": "enabled",
+                "max_positions": 2
             })
         
         # 잘못된 액션
@@ -631,7 +680,7 @@ def webhook():
 
 @app.route("/status", methods=["GET"])
 def status():
-    """서버 상태 조회 (파인스크립트 연동 정보 포함)"""
+    """서버 상태 조회 (피라미딩 2 정보 포함)"""
     try:
         equity = get_total_collateral(force=True)
         positions = {}
@@ -643,7 +692,7 @@ def status():
                     positions[sym] = {k: float(v) if isinstance(v, Decimal) else v 
                                     for k, v in pos.items()}
         
-        # 중복 방지 상태 정보
+        # 중복 방지 상태 정보 (피라미딩 포함)
         with duplicate_prevention_lock:
             duplicate_stats = {
                 "alert_cache_size": len(alert_cache),
@@ -652,13 +701,14 @@ def status():
                     "side": v["side"], 
                     "action": v["action"], 
                     "strategy": v["strategy"],
+                    "count": v.get("count", 1),
                     "age_seconds": round(time.time() - v["time"], 1)
                 } for k, v in recent_signals.items()}
             }
         
         return jsonify({
             "status": "running",
-            "mode": "pinescript_integration",
+            "mode": "pinescript_pyramiding_2",
             "timestamp": datetime.now().isoformat(),
             "margin_balance": float(equity),
             "positions": positions,
@@ -667,6 +717,7 @@ def status():
                 "perfect_alerts": True,
                 "future_prediction": True,
                 "backup_signals": True,
+                "pyramiding": 2,
                 "sl_tp_managed_by_pinescript": True
             }
         })
@@ -707,13 +758,40 @@ def test_symbol_mapping(symbol):
 
 @app.route("/clear-cache", methods=["POST"])
 def clear_cache():
-    """중복 방지 캐시 초기화"""
+    """중복 방지 캐시 초기화 (피라미딩 정보 포함)"""
     global alert_cache, recent_signals
     with duplicate_prevention_lock:
         alert_cache.clear()
         recent_signals.clear()
-    log_debug("🗑️ 캐시 초기화", "모든 중복 방지 캐시가 초기화되었습니다")
+    log_debug("🗑️ 캐시 초기화", "모든 중복 방지 캐시가 초기화되었습니다 (피라미딩 정보 포함)")
     return jsonify({"status": "cache_cleared", "message": "중복 방지 캐시가 초기화되었습니다"})
+
+@app.route("/pyramiding-status", methods=["GET"])
+def pyramiding_status():
+    """피라미딩 상태 조회"""
+    try:
+        pyramiding_info = {}
+        
+        for symbol in SYMBOL_CONFIG:
+            current_count = get_current_position_count(symbol)
+            pos = position_state.get(symbol, {})
+            
+            pyramiding_info[symbol] = {
+                "current_positions": current_count,
+                "max_positions": 2,
+                "can_add_position": current_count < 2,
+                "side": pos.get("side"),
+                "size": float(pos.get("size", 0)) if pos.get("size") else 0,
+                "value": float(pos.get("value", 0)) if pos.get("value") else 0
+            }
+        
+        return jsonify({
+            "pyramiding_enabled": True,
+            "max_positions_per_symbol": 2,
+            "symbols": pyramiding_info
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # === 🔥 실시간 가격 모니터링 및 TP/SL 처리 (Gate.io 기준) ===
 async def send_ping(ws):
@@ -731,7 +809,7 @@ async def price_listener():
     symbols = list(SYMBOL_CONFIG.keys())
     reconnect_delay = 5
     max_delay = 60
-    log_debug("📡 웹소켓 시작", f"Gate.io 가격 기준 TP/SL 모니터링 - 심볼: {len(symbols)}개")
+    log_debug("📡 웹소켓 시작", f"Gate.io 가격 기준 TP/SL 모니터링 - 심볼: {len(symbols)}개 (피라미딩 2 지원)")
     
     while True:
         try:
@@ -776,7 +854,7 @@ async def price_listener():
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
 def process_ticker_data(ticker):
-    """Gate.io 실시간 가격으로 TP/SL 체크"""
+    """Gate.io 실시간 가격으로 TP/SL 체크 (피라미딩 포지션 포함)"""
     try:
         contract = ticker.get("contract")
         last = ticker.get("last")
@@ -794,6 +872,8 @@ def process_ticker_data(ticker):
             entry = pos.get("price")
             size = pos.get("size", 0)
             side = pos.get("side")
+            count = pos.get("count", 0)
+            
             if not entry or size <= 0 or side not in ["buy", "sell"]:
                 return
             
@@ -805,19 +885,19 @@ def process_ticker_data(ticker):
                 sl = entry * (1 - sl_pct)
                 tp = entry * (1 + tp_pct)
                 if price <= sl:
-                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} <= SL:{sl} (진입가:{entry})")
+                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} <= SL:{sl} (진입가:{entry}, 포지션:{count}개)")
                     close_position(contract)
                 elif price >= tp:
-                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} >= TP:{tp} (진입가:{entry})")
+                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} >= TP:{tp} (진입가:{entry}, 포지션:{count}개)")
                     close_position(contract)
             else:
                 sl = entry * (1 + sl_pct)
                 tp = entry * (1 - tp_pct)
                 if price >= sl:
-                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} >= SL:{sl} (진입가:{entry})")
+                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} >= SL:{sl} (진입가:{entry}, 포지션:{count}개)")
                     close_position(contract)
                 elif price <= tp:
-                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} <= TP:{tp} (진입가:{entry})")
+                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} <= TP:{tp} (진입가:{entry}, 포지션:{count}개)")
                     close_position(contract)
         finally:
             position_lock.release()
@@ -845,9 +925,10 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🚀 서버 시작", 
-             f"포트 {port}에서 실행 (하이브리드 모드)\n"
+             f"포트 {port}에서 실행 (피라미딩 2 하이브리드 모드)\n"
              f"✅ TP/SL: 서버에서 Gate.io 가격 기준으로 처리\n"
              f"✅ 진입/청산 신호: 파인스크립트 알림으로 처리\n"
+             f"✅ 피라미딩: 같은 방향 최대 2번 진입 지원\n"
              f"✅ 중복 방지: 완벽한 알림 시스템 연동\n"
              f"✅ 심볼 매핑: 모든 형태 지원 (.P, PERP 등)")
     
