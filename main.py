@@ -449,6 +449,11 @@ def webhook():
         strategy_name = data.get("strategy", "")
         price = data.get("price", 0)
         
+        # 🔥 누락된 변수들 정의 (기본값 설정)
+        signal_source = strategy_name  # 전략명을 신호 소스로 사용
+        signal_strength = "strong"     # 기본 신호 강도
+        perfect_system = True          # 완벽한 시스템 플래그
+        
         # 심볼 변환
         symbol = SYMBOL_MAPPING.get(raw_symbol)
         if not symbol or symbol not in SYMBOL_CONFIG:
@@ -460,7 +465,7 @@ def webhook():
         
         # === 🔥 진입/청산 신호 처리 ===
         if action == "exit":
-            log_debug(f"🔄 청산 신호 ({symbol})", f"전략: {strategy_name}, 사유: {alert_type}")
+            log_debug(f"🔄 청산 신호 ({symbol})", f"전략: {strategy_name}")
             
             update_position_state(symbol, timeout=1)
             current_side = position_state.get(symbol, {}).get("side")
@@ -566,7 +571,6 @@ def status():
                     "side": v["side"], 
                     "action": v["action"], 
                     "strategy": v["strategy"],
-                    "signal_source": v["signal_source"],
                     "age_seconds": round(time.time() - v["time"], 1)
                 } for k, v in recent_signals.items()}
             }
