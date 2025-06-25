@@ -136,7 +136,7 @@ SYMBOL_CONFIG = {
     "ETH_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
-        "contract_size": Decimal("0.001"),
+        "contract_size": Decimal("0.01"),
         "min_notional": Decimal("10")
     },
     "ADA_USDT": {
@@ -230,10 +230,10 @@ def is_duplicate_alert(alert_data):
                              f"{symbol} {side} {strategy_name} 이미 2번 진입 완료 (최근: {time_diff:.1f}초 전)")
                     return True
                 
-                # 🔥 15초 이내 동일 신호는 중복으로 간주
+                # 🔥 30초 이내 동일 신호는 중복으로 간주
                 if (recent["strategy"] == strategy_name and 
                     recent["action"] == "entry" and 
-                    time_diff < 15):
+                    time_diff < 30):
                     log_debug("🚫 중복 진입 차단", 
                              f"{symbol} {side} {strategy_name} 신호가 {time_diff:.1f}초 전에 이미 처리됨")
                     return True
