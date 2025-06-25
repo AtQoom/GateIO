@@ -168,7 +168,7 @@ SYMBOL_CONFIG = {
     "PEPE_USDT": {
         "min_qty": Decimal("1"),          # 최소 주문 수량: 1계약 (= 10,000 PEPE)
         "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
-        "contract_size": Decimal("1000000"), # 계약 크기: 10,000 PEPE
+        "contract_size": Decimal("10000000"), # 계약 크기: 10,000 PEPE
         "min_notional": Decimal("10")     # 최소 주문 금액: 10 USDT
     },
 }
