@@ -122,54 +122,55 @@ def normalize_symbol(raw_symbol):
     return None
 
 SYMBOL_CONFIG = {
+    # BTC: 최소 0.001 BTC, 1계약 = 0.0001 BTC이므로 최소 10계약
     "BTC_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("0.0001"),
-        "min_notional": Decimal("10")
+        "min_qty": Decimal("1"),         # 최소 주문 수량: 10계약 (= 0.001 BTC)
+        "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
+        "contract_size": Decimal("0.0001"), # 계약 크기: 0.0001 BTC
+        "min_notional": Decimal("10")     # 최소 주문 금액: 10 USDT
     },
+    # ETH: 최소 0.01 ETH, 1계약 = 0.01 ETH이므로 최소 1계약
     "ETH_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("0.01"),
+        "min_qty": Decimal("1"),          # 최소 주문 수량: 1계약 (= 0.01 ETH)
+        "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
+        "contract_size": Decimal("0.01"), # 계약 크기: 0.01 ETH
         "min_notional": Decimal("10")
     },
+    # ADA: 추정 최소 10 ADA, 1계약 = 10 ADA이므로 최소 1계약
     "ADA_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("10"),
+        "min_qty": Decimal("1"),          # 최소 주문 수량: 1계약 (= 10 ADA)
+        "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
+        "contract_size": Decimal("10"),   # 계약 크기: 10 ADA
         "min_notional": Decimal("10")
     },
+    # SUI: 추정 최소 1 SUI, 1계약 = 1 SUI이므로 최소 1계약
     "SUI_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("1"),
+        "min_qty": Decimal("1"),          # 최소 주문 수량: 1계약 (= 1 SUI)
+        "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
+        "contract_size": Decimal("1"),    # 계약 크기: 1 SUI
         "min_notional": Decimal("10")
     },
+    # LINK: 추정 최소 1 LINK, 1계약 = 1 LINK이므로 최소 1계약
     "LINK_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("1"),
+        "min_qty": Decimal("1"),          # 최소 주문 수량: 1계약 (= 1 LINK)
+        "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
+        "contract_size": Decimal("1"),    # 계약 크기: 1 LINK
         "min_notional": Decimal("10")
     },
+    # SOL: 추정 최소 0.1 SOL, 1계약 = 0.1 SOL이므로 최소 1계약
     "SOL_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("1"),
+        "min_qty": Decimal("1"),          # 최소 주문 수량: 1계약 (= 0.1 SOL)
+        "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
+        "contract_size": Decimal("0.1"),  # 계약 크기: 0.1 SOL
         "min_notional": Decimal("10")
     },
+    # 🔥 PEPE: 최소 10,000 PEPE, 1계약 = 10,000 PEPE이므로 최소 1계약
     "PEPE_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("100"),
-        "min_notional": Decimal("10")
+        "min_qty": Decimal("1"),          # 최소 주문 수량: 1계약 (= 10,000 PEPE)
+        "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
+        "contract_size": Decimal("0.01"), # 계약 크기: 10,000 PEPE
+        "min_notional": Decimal("10")     # 최소 주문 금액: 10 USDT
     },
-    "1INCH_USDT": {
-        "min_qty": Decimal("1"),
-        "qty_step": Decimal("1"),
-        "contract_size": Decimal("1"),
-        "min_notional": Decimal("10")
-    }
 }
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
