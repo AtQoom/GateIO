@@ -161,7 +161,7 @@ SYMBOL_CONFIG = {
     "SOL_USDT": {
         "min_qty": Decimal("1"),          # 최소 주문 수량: 1계약 (= 0.1 SOL)
         "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
-        "contract_size": Decimal("0.1"),  # 계약 크기: 0.1 SOL
+        "contract_size": Decimal("1"),  # 계약 크기: 0.1 SOL
         "min_notional": Decimal("10")
     },
     # 🔥 PEPE: 최소 10,000 PEPE, 1계약 = 10,000 PEPE이므로 최소 1계약
