@@ -562,7 +562,7 @@ def ping():
 
 @app.route("/", methods=["POST"])
 def webhook():
-    """🔥 강화된 디버깅이 포함된 웹훅 처리"""
+    """🔥 Content-Type 문제 해결된 웹훅 처리"""
     symbol = None
     alert_id = None
     
@@ -584,22 +584,27 @@ def webhook():
             log_debug("❌ Raw 데이터 읽기 실패", str(e))
             raw_data = ""
         
-        # JSON 유효성 검사
-        if not request.is_json:
-            log_debug("❌ JSON 오류", f"Content-Type: {request.content_type}, is_json: {request.is_json}")
-            log_debug("📄 받은 데이터", raw_data)
-            return jsonify({"error": "JSON required", "content_type": request.content_type}), 400
-            
+        # 🔥 Content-Type 문제 해결: text/plain도 JSON으로 처리
+        data = None
+        
+        # JSON 파싱 시도 (Content-Type 무시)
         try:
-            data = request.get_json()
-            log_debug("✅ JSON 파싱 성공", "데이터 추출 완료")
-        except Exception as e:
+            if raw_data.strip():
+                data = json.loads(raw_data)
+                log_debug("✅ JSON 파싱 성공", "Raw 데이터에서 JSON 추출 완료")
+            else:
+                log_debug("❌ 빈 데이터", "Raw 데이터가 비어있음")
+                return jsonify({"error": "Empty data"}), 400
+        except json.JSONDecodeError as e:
             log_debug("❌ JSON 파싱 실패", f"오류: {str(e)}, Raw 데이터: {raw_data}")
             return jsonify({"error": "Invalid JSON format", "raw_data": raw_data[:200]}), 400
+        except Exception as e:
+            log_debug("❌ 예상치 못한 파싱 오류", f"오류: {str(e)}, Raw 데이터: {raw_data}")
+            return jsonify({"error": "Parsing error", "raw_data": raw_data[:200]}), 400
             
         if not data:
-            log_debug("❌ 빈 데이터", f"JSON 데이터가 비어있음, Raw: {raw_data}")
-            return jsonify({"error": "Empty JSON data", "raw_data": raw_data[:200]}), 400
+            log_debug("❌ 빈 JSON 데이터", f"파싱된 데이터가 비어있음")
+            return jsonify({"error": "Empty JSON data"}), 400
             
         log_debug("📥 웹훅 데이터", json.dumps(data, indent=2, ensure_ascii=False))
         
@@ -646,31 +651,118 @@ def webhook():
         
         log_debug("✅ 심볼 매핑 성공", f"'{raw_symbol}' -> '{symbol}'")
         
-        # === 🔥 여기서부터 기존 로직 계속 ===
-        # 피라미딩 중복 방지 체크
+        # === 🔥 피라미딩 중복 방지 체크 ===
         if is_duplicate_alert(data):
             log_debug("🚫 중복 알림 차단", f"Symbol: {symbol}, Side: {side}, Action: {action}")
             return jsonify({"status": "duplicate_ignored", "message": "중복 알림 무시됨"})
         
         log_debug("✅ 중복 체크 통과", "신규 알림으로 확인됨")
         
-        # 나머지 로직은 기존과 동일...
-        # (진입/청산 처리 등)
+        # === 🔥 진입/청산 신호 처리 ===
+        if action == "exit":
+            log_debug(f"🔄 청산 신호 처리 시작 ({symbol})", f"전략: {strategy_name}")
+            
+            update_position_state(symbol, timeout=1)
+            current_side = position_state.get(symbol, {}).get("side")
+            
+            if not current_side:
+                log_debug(f"⚠️ 청산 건너뜀 ({symbol})", "포지션 없음")
+                success = True
+            else:
+                log_debug(f"🔄 포지션 청산 실행 ({symbol})", f"현재 포지션: {current_side}")
+                success = close_position(symbol)
+            
+            if success and alert_id:
+                mark_alert_processed(alert_id)
+                
+            log_debug(f"🔁 청산 결과 ({symbol})", f"성공: {success}")
+            return jsonify({
+                "status": "success" if success else "error", 
+                "action": "exit",
+                "symbol": symbol,
+                "strategy": strategy_name
+            })
         
-        # 임시로 성공 응답
-        log_debug("🎯 임시 응답", f"Symbol: {symbol}, Action: {action}, Side: {side}")
-        return jsonify({
-            "status": "debug_success",
-            "symbol": symbol,
-            "action": action,
-            "side": side,
-            "received_data": data
-        })
+        # === 🔥 피라미딩 2 지원 진입 신호 처리 ===
+        if action == "entry" and side in ["long", "short"]:
+            log_debug(f"🎯 피라미딩 진입 신호 처리 시작 ({symbol})", f"{side} 방향, 전략: {strategy_name}, 포지션#{position_count}")
+            
+            if not update_position_state(symbol, timeout=1):
+                log_debug(f"❌ 포지션 상태 조회 실패 ({symbol})", "")
+                return jsonify({"status": "error", "message": "포지션 조회 실패"}), 500
+            
+            current_side = position_state.get(symbol, {}).get("side")
+            current_count = get_current_position_count(symbol)
+            desired_side = "buy" if side == "long" else "sell"
+            
+            log_debug(f"📊 현재 상태 ({symbol})", f"현재: {current_side} x{current_count}, 요청: {desired_side}")
+            
+            # 🔥 피라미딩 2 로직 - 같은 방향 최대 2번까지 허용
+            if current_side and current_side == desired_side:
+                if current_count >= 2:
+                    log_debug("🚫 피라미딩 한계 도달", 
+                             f"현재: {current_side} x{current_count}, 요청: {desired_side} - 진입 불가 (최대 2개)")
+                    if alert_id:
+                        mark_alert_processed(alert_id)
+                    return jsonify({"status": "pyramiding_limit", "message": "피라미딩 한계 도달 (최대 2개)"})
+                else:
+                    log_debug("✅ 피라미딩 진입 허용", 
+                             f"현재: {current_side} x{current_count}, 요청: {desired_side} - 추가 진입")
+            
+            # 역포지션 처리 (기존 포지션 전체 청산)
+            if current_side and current_side != desired_side:
+                log_debug("🔄 역포지션 처리 시작", f"현재: {current_side} → 목표: {desired_side}")
+                if not close_position(symbol):
+                    log_debug("❌ 역포지션 청산 실패", "")
+                    return jsonify({"status": "error", "message": "역포지션 청산 실패"})
+                time.sleep(3)
+                if not update_position_state(symbol):
+                    log_debug("❌ 역포지션 후 상태 갱신 실패", "")
+            
+            # 수량 계산 (전략 타입에 따라 조정)
+            log_debug(f"🧮 수량 계산 시작 ({symbol})", f"전략: {strategy_name}")
+            qty = calculate_position_size(symbol, strategy_name)
+            log_debug(f"🧮 수량 계산 완료 ({symbol})", 
+                     f"{qty} 계약 (전략: {strategy_name}, 피라미딩#{position_count})")
+            
+            if qty <= 0:
+                log_debug("❌ 수량 오류", f"계산된 수량: {qty}")
+                return jsonify({"status": "error", "message": "수량 계산 오류"})
+            
+            # 주문 실행
+            log_debug(f"📤 주문 실행 시작 ({symbol})", f"{desired_side} {qty} 계약")
+            success = place_order(symbol, desired_side, qty)
+            
+            if success and alert_id:
+                mark_alert_processed(alert_id)
+            
+            log_debug(f"📨 최종 결과 ({symbol})", 
+                     f"주문 성공: {success}, 전략: {strategy_name}, 피라미딩#{position_count}")
+            
+            return jsonify({
+                "status": "success" if success else "error", 
+                "action": "entry",
+                "symbol": symbol,
+                "side": side,
+                "qty": float(qty),
+                "strategy": strategy_name,
+                "position_count": position_count,
+                "pyramiding_mode": "enabled",
+                "max_positions": 2
+            })
+        
+        # 잘못된 액션
+        log_debug("❌ 잘못된 액션", f"Action: {action}, 지원되는 액션: entry, exit")
+        return jsonify({"error": f"Invalid action: {action}"}), 400
         
     except Exception as e:
         error_msg = str(e)
         log_debug(f"❌ 웹훅 전체 실패 ({symbol or 'unknown'})", error_msg, exc_info=True)
         
+        # 오류 발생 시에도 중복 방지를 위해 ID 처리
+        if alert_id:
+            mark_alert_processed(alert_id)
+            
         return jsonify({
             "status": "error", 
             "message": error_msg,
