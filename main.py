@@ -58,7 +58,7 @@ SYMBOL_MAPPING = {
     "SOLUSDT": "SOL_USDT",
     "PEPEUSDT": "PEPE_USDT",
     
-    # .P 형태 (영구선물)
+    # .P 형태 (영구선물) - 🔥 핵심 추가
     "BTCUSDT.P": "BTC_USDT",
     "ETHUSDT.P": "ETH_USDT", 
     "ADAUSDT.P": "ADA_USDT",
@@ -75,50 +75,61 @@ SYMBOL_MAPPING = {
     "LINKUSDTPERP": "LINK_USDT",
     "SOLUSDTPERP": "SOL_USDT",
     "PEPEUSDTPERP": "PEPE_USDT",
+    
+    # 🔥 추가 형태들
+    "BTC_USDT": "BTC_USDT",
+    "ETH_USDT": "ETH_USDT",
+    "ADA_USDT": "ADA_USDT",
+    "SUI_USDT": "SUI_USDT",
+    "LINK_USDT": "LINK_USDT",
+    "SOL_USDT": "SOL_USDT",
+    "PEPE_USDT": "PEPE_USDT",
 }
 
 def normalize_symbol(raw_symbol):
-    """심볼 정규화 - 다양한 형태를 표준 형태로 변환"""
+    """🔥 강화된 심볼 정규화 - 다양한 형태를 표준 형태로 변환"""
     if not raw_symbol:
+        log_debug("❌ 심볼 정규화", "입력 심볼이 비어있음")
         return None
     
-    # 대문자로 변환
-    symbol = raw_symbol.upper().strip()
+    # 대문자로 변환하고 공백 제거
+    symbol = str(raw_symbol).upper().strip()
+    log_debug("🔍 심볼 정규화 시작", f"원본: '{raw_symbol}' -> 정리: '{symbol}'")
     
     # 직접 매핑이 있으면 사용
     if symbol in SYMBOL_MAPPING:
-        return SYMBOL_MAPPING[symbol]
+        result = SYMBOL_MAPPING[symbol]
+        log_debug("✅ 직접 매핑 성공", f"'{symbol}' -> '{result}'")
+        return result
     
-    # 동적 정규화 시도
-    # .P 제거
+    # .P 제거 시도
     if symbol.endswith('.P'):
         base_symbol = symbol[:-2]
+        log_debug("🔍 .P 제거 시도", f"'{symbol}' -> '{base_symbol}'")
         if base_symbol in SYMBOL_MAPPING:
-            return SYMBOL_MAPPING[base_symbol]
+            result = SYMBOL_MAPPING[base_symbol]
+            log_debug("✅ .P 제거 후 매핑 성공", f"'{base_symbol}' -> '{result}'")
+            return result
     
-    # PERP 제거  
+    # PERP 제거 시도
     if symbol.endswith('PERP'):
         base_symbol = symbol[:-4]
+        log_debug("🔍 PERP 제거 시도", f"'{symbol}' -> '{base_symbol}'")
         if base_symbol in SYMBOL_MAPPING:
-            return SYMBOL_MAPPING[base_symbol]
+            result = SYMBOL_MAPPING[base_symbol]
+            log_debug("✅ PERP 제거 후 매핑 성공", f"'{base_symbol}' -> '{result}'")
+            return result
     
-    # : 이후 제거 (일부 거래소 형태)
+    # : 이후 제거 시도
     if ':' in symbol:
         base_symbol = symbol.split(':')[0]
+        log_debug("🔍 : 이후 제거 시도", f"'{symbol}' -> '{base_symbol}'")
         if base_symbol in SYMBOL_MAPPING:
-            return SYMBOL_MAPPING[base_symbol]
+            result = SYMBOL_MAPPING[base_symbol]
+            log_debug("✅ : 제거 후 매핑 성공", f"'{base_symbol}' -> '{result}'")
+            return result
     
-    # 기본 USDT 형태로 추정해서 매핑 시도
-    if 'USDT' in symbol:
-        # 숫자로 시작하는 경우 처리 (1INCH 등)
-        if symbol[0].isdigit():
-            clean_symbol = symbol
-        else:
-            clean_symbol = symbol.replace('.P', '').replace('PERP', '').split(':')[0]
-        
-        if clean_symbol in SYMBOL_MAPPING:
-            return SYMBOL_MAPPING[clean_symbol]
-    
+    log_debug("❌ 심볼 매핑 실패", f"'{symbol}' 매핑을 찾을 수 없음")
     return None
 
 SYMBOL_CONFIG = {
@@ -200,6 +211,8 @@ def is_duplicate_alert(alert_data):
         strategy_name = alert_data.get("strategy", "")
         position_count = alert_data.get("position_count", 1)
         
+        log_debug("🔍 중복 체크 시작", f"ID: {alert_id}, Symbol: {symbol}, Side: {side}, Action: {action}")
+        
         # 1. 같은 alert_id가 이미 처리되었는지 확인
         if alert_id in alert_cache:
             cache_entry = alert_cache[alert_id]
@@ -266,6 +279,7 @@ def mark_alert_processed(alert_id):
     with duplicate_prevention_lock:
         if alert_id in alert_cache:
             alert_cache[alert_id]["processed"] = True
+            log_debug("✅ 알림 처리 완료", f"ID: {alert_id}")
 
 def get_total_collateral(force=False):
     """순자산(Account Equity) 조회"""
@@ -350,6 +364,7 @@ def calculate_position_size(symbol, strategy_type="standard"):
     price = get_price(symbol)
     
     if price <= 0 or equity <= 0:
+        log_debug(f"❌ 수량 계산 불가 ({symbol})", f"가격: {price}, 순자산: {equity}")
         return Decimal("0")
     
     try:
@@ -547,44 +562,70 @@ def ping():
 
 @app.route("/", methods=["POST"])
 def webhook():
-    """파인스크립트 피라미딩 2 지원 웹훅 처리"""
+    """🔥 강화된 파인스크립트 피라미딩 2 지원 웹훅 처리"""
     symbol = None
     alert_id = None
     try:
         log_debug("🔄 웹훅 시작", "파인스크립트 피라미딩 2 신호 수신")
         
+        # JSON 유효성 검사
         if not request.is_json:
+            log_debug("❌ JSON 오류", "Content-Type이 application/json이 아님")
             return jsonify({"error": "JSON required"}), 400
             
-        data = request.get_json()
+        try:
+            data = request.get_json()
+        except Exception as e:
+            log_debug("❌ JSON 파싱 실패", str(e))
+            return jsonify({"error": "Invalid JSON format"}), 400
+            
+        if not data:
+            log_debug("❌ 빈 데이터", "JSON 데이터가 비어있음")
+            return jsonify({"error": "Empty JSON data"}), 400
+            
         log_debug("📥 웹훅 데이터", json.dumps(data, indent=2))
         
-        # === 🔥 파인스크립트 데이터 파싱 (피라미딩 지원) ===
+        # === 🔥 강화된 파인스크립트 데이터 파싱 (피라미딩 지원) ===
         alert_id = data.get("id", "")
-        raw_symbol = data.get("symbol", "").upper()
-        side = data.get("side", "").lower()
-        action = data.get("action", "").lower()
+        raw_symbol = data.get("symbol", "")
+        side = data.get("side", "").lower() if data.get("side") else ""
+        action = data.get("action", "").lower() if data.get("action") else ""
         strategy_name = data.get("strategy", "")
         price = data.get("price", 0)
         position_count = data.get("position_count", 1)  # 피라미딩 정보
         
-        log_debug("🔍 원본 심볼", f"수신된 심볼: '{raw_symbol}', 포지션#{position_count}")
+        # 필수 필드 검증
+        if not raw_symbol:
+            log_debug("❌ 필수 필드 누락", "symbol 필드가 없음")
+            return jsonify({"error": "Missing required field: symbol"}), 400
+            
+        if not side:
+            log_debug("❌ 필수 필드 누락", "side 필드가 없음")
+            return jsonify({"error": "Missing required field: side"}), 400
+            
+        if not action:
+            log_debug("❌ 필수 필드 누락", "action 필드가 없음") 
+            return jsonify({"error": "Missing required field: action"}), 400
+        
+        log_debug("🔍 파싱 결과", f"ID: {alert_id}, Symbol: {raw_symbol}, Side: {side}, Action: {action}, Strategy: {strategy_name}, Position: #{position_count}")
         
         # 🔥 강화된 심볼 변환
         symbol = normalize_symbol(raw_symbol)
         if not symbol or symbol not in SYMBOL_CONFIG:
             log_debug("❌ 심볼 매핑 실패", f"'{raw_symbol}' -> '{symbol}' (지원되지 않는 심볼)")
+            log_debug("📋 지원되는 심볼", f"{list(SYMBOL_CONFIG.keys())}")
             return jsonify({"error": f"Invalid symbol: {raw_symbol} -> {symbol}"}), 400
         
         log_debug("✅ 심볼 매핑 성공", f"'{raw_symbol}' -> '{symbol}'")
         
         # === 🔥 피라미딩 2 지원 중복 방지 체크 ===
         if is_duplicate_alert(data):
+            log_debug("🚫 중복 알림 차단", f"Symbol: {symbol}, Side: {side}, Action: {action}")
             return jsonify({"status": "duplicate_ignored", "message": "중복 알림 무시됨"})
         
         # === 🔥 진입/청산 신호 처리 ===
         if action == "exit":
-            log_debug(f"🔄 청산 신호 ({symbol})", f"전략: {strategy_name}")
+            log_debug(f"🔄 청산 신호 처리 시작 ({symbol})", f"전략: {strategy_name}")
             
             update_position_state(symbol, timeout=1)
             current_side = position_state.get(symbol, {}).get("side")
@@ -593,24 +634,33 @@ def webhook():
                 log_debug(f"⚠️ 청산 건너뜀 ({symbol})", "포지션 없음")
                 success = True
             else:
+                log_debug(f"🔄 포지션 청산 실행 ({symbol})", f"현재 포지션: {current_side}")
                 success = close_position(symbol)
             
             if success and alert_id:
                 mark_alert_processed(alert_id)
                 
             log_debug(f"🔁 청산 결과 ({symbol})", f"성공: {success}")
-            return jsonify({"status": "success" if success else "error", "action": "exit"})
+            return jsonify({
+                "status": "success" if success else "error", 
+                "action": "exit",
+                "symbol": symbol,
+                "strategy": strategy_name
+            })
         
         # === 🔥 피라미딩 2 지원 진입 신호 처리 ===
         if action == "entry" and side in ["long", "short"]:
-            log_debug(f"🎯 피라미딩 진입 신호 ({symbol})", f"{side} 방향, 전략: {strategy_name}, 포지션#{position_count}")
+            log_debug(f"🎯 피라미딩 진입 신호 처리 시작 ({symbol})", f"{side} 방향, 전략: {strategy_name}, 포지션#{position_count}")
             
             if not update_position_state(symbol, timeout=1):
+                log_debug(f"❌ 포지션 상태 조회 실패 ({symbol})", "")
                 return jsonify({"status": "error", "message": "포지션 조회 실패"}), 500
             
             current_side = position_state.get(symbol, {}).get("side")
             current_count = get_current_position_count(symbol)
             desired_side = "buy" if side == "long" else "sell"
+            
+            log_debug(f"📊 현재 상태 ({symbol})", f"현재: {current_side} x{current_count}, 요청: {desired_side}")
             
             # 🔥 피라미딩 2 로직 - 같은 방향 최대 2번까지 허용
             if current_side and current_side == desired_side:
@@ -626,7 +676,7 @@ def webhook():
             
             # 역포지션 처리 (기존 포지션 전체 청산)
             if current_side and current_side != desired_side:
-                log_debug("🔄 역포지션 처리", f"현재: {current_side} → 목표: {desired_side}")
+                log_debug("🔄 역포지션 처리 시작", f"현재: {current_side} → 목표: {desired_side}")
                 if not close_position(symbol):
                     log_debug("❌ 역포지션 청산 실패", "")
                     return jsonify({"status": "error", "message": "역포지션 청산 실패"})
@@ -635,6 +685,7 @@ def webhook():
                     log_debug("❌ 역포지션 후 상태 갱신 실패", "")
             
             # 수량 계산 (전략 타입에 따라 조정)
+            log_debug(f"🧮 수량 계산 시작 ({symbol})", f"전략: {strategy_name}")
             qty = calculate_position_size(symbol, strategy_name)
             log_debug(f"🧮 수량 계산 완료 ({symbol})", 
                      f"{qty} 계약 (전략: {strategy_name}, 피라미딩#{position_count})")
@@ -644,6 +695,7 @@ def webhook():
                 return jsonify({"status": "error", "message": "수량 계산 오류"})
             
             # 주문 실행
+            log_debug(f"📤 주문 실행 시작 ({symbol})", f"{desired_side} {qty} 계약")
             success = place_order(symbol, desired_side, qty)
             
             if success and alert_id:
@@ -654,6 +706,9 @@ def webhook():
             
             return jsonify({
                 "status": "success" if success else "error", 
+                "action": "entry",
+                "symbol": symbol,
+                "side": side,
                 "qty": float(qty),
                 "strategy": strategy_name,
                 "position_count": position_count,
@@ -662,11 +717,12 @@ def webhook():
             })
         
         # 잘못된 액션
+        log_debug("❌ 잘못된 액션", f"Action: {action}, 지원되는 액션: entry, exit")
         return jsonify({"error": f"Invalid action: {action}"}), 400
         
     except Exception as e:
         error_msg = str(e)
-        log_debug(f"❌ 웹훅 전체 실패 ({symbol or 'unknown'})", error_msg)
+        log_debug(f"❌ 웹훅 전체 실패 ({symbol or 'unknown'})", error_msg, exc_info=True)
         
         # 오류 발생 시에도 중복 방지를 위해 ID 처리
         if alert_id:
@@ -704,17 +760,19 @@ def status():
         
         return jsonify({
             "status": "running",
-            "mode": "pinescript_pyramiding_2",
+            "mode": "pinescript_pyramiding_2_enhanced",
             "timestamp": datetime.now().isoformat(),
             "margin_balance": float(equity),
             "positions": positions,
             "duplicate_prevention": duplicate_stats,
+            "symbol_mappings": SYMBOL_MAPPING,
             "pinescript_features": {
                 "perfect_alerts": True,
                 "future_prediction": True,
                 "backup_signals": True,
                 "pyramiding": 2,
-                "sl_tp_managed_by_pinescript": True
+                "sl_tp_managed_by_pinescript": True,
+                "enhanced_logging": True
             }
         })
     except Exception as e:
@@ -875,7 +933,7 @@ def process_ticker_data(ticker):
             
             # TP/SL 비율 (파인스크립트와 동일)
             sl_pct = Decimal("0.0035")  # 0.35%
-            tp_pct = Decimal("0.006")   # 0.6%
+            tp_pct = Decimal("0.0065")  # 0.65% (미세 조정된 값)
             
             if side == "buy":
                 sl = entry * (1 - sl_pct)
@@ -921,11 +979,12 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🚀 서버 시작", 
-             f"포트 {port}에서 실행 (피라미딩 2 하이브리드 모드)\n"
-             f"✅ TP/SL: 서버에서 Gate.io 가격 기준으로 처리\n"
+             f"포트 {port}에서 실행 (피라미딩 2 하이브리드 모드 - 강화된 로깅)\n"
+             f"✅ TP/SL: 서버에서 Gate.io 가격 기준으로 처리 (0.65% TP)\n"
              f"✅ 진입/청산 신호: 파인스크립트 알림으로 처리\n"
              f"✅ 피라미딩: 같은 방향 최대 2번 진입 지원\n"
              f"✅ 중복 방지: 완벽한 알림 시스템 연동\n"
-             f"✅ 심볼 매핑: 모든 형태 지원 (.P, PERP 등)")
+             f"✅ 심볼 매핑: 모든 형태 지원 (.P, PERP 등)\n"
+             f"✅ 강화된 로깅: 모든 단계별 상세 로그")
     
     app.run(host="0.0.0.0", port=port, debug=False)
