@@ -88,8 +88,8 @@ SYMBOL_MAPPING = {
 
 # 🔥 심볼별 TP/SL 배수 설정
 SYMBOL_TPSL_MULTIPLIERS = {
-    "BTC_USDT": {"tp": 0.7, "sl": 0.7},    # BTC: 70%
-    "ETH_USDT": {"tp": 0.85, "sl": 0.85},  # ETH: 85%
+    "BTC_USDT": {"tp": 0.8, "sl": 0.8},    # BTC: 80%
+    "ETH_USDT": {"tp": 0.9, "sl": 0.9},    # ETH: 90%
     # 기타 심볼은 기본값 (100%) 사용
 }
 
