@@ -1014,8 +1014,9 @@ async def price_listener():
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
+# 🔥 수정: TP/SL 비율 파인스크립트와 동기화
 def process_ticker_data(ticker):
-    """Gate.io 실시간 가격으로 TP/SL 체크 (피라미딩 포지션 포함) - entry 변수명 수정"""
+    """Gate.io 실시간 가격으로 TP/SL 체크 (파인스크립트와 동기화)"""
     try:
         contract = ticker.get("contract")
         last = ticker.get("last")
@@ -1030,21 +1031,22 @@ def process_ticker_data(ticker):
             if not update_position_state(contract, timeout=1):
                 return
             pos = position_state.get(contract, {})
-            position_entry_price = pos.get("price")  # 🔥 수정: entry -> position_entry_price
+            position_entry_price = pos.get("price")
             size = pos.get("size", 0)
             side = pos.get("side")
             count = pos.get("count", 0)
             
-            if not position_entry_price or size <= 0 or side not in ["buy", "sell"]:  # 🔥 수정된 변수명 사용
+            if not position_entry_price or size <= 0 or side not in ["buy", "sell"]:
                 return
             
-            # TP/SL 비율 (파인스크립트와 동일)
-            sl_pct = Decimal("0.0035")  # 0.35%
-            tp_pct = Decimal("0.0065")  # 0.65% (미세 조정된 값)
+            # 🔥 파인스크립트와 동일한 TP/SL 비율
+            sl_pct = Decimal("0.0035")  # 0.35% (동일)
+            tp_pct = Decimal("0.006")   # 0.6% (파인스크립트와 동일하게 수정)
+            slippage_pct = Decimal("0.02") / 100  # 0.02% 슬리피지
             
             if side == "buy":
-                sl = position_entry_price * (1 - sl_pct)  # 🔥 수정된 변수명 사용
-                tp = position_entry_price * (1 + tp_pct)  # 🔥 수정된 변수명 사용
+                sl = position_entry_price * (1 - sl_pct - slippage_pct)
+                tp = position_entry_price * (1 + tp_pct - slippage_pct)
                 if price <= sl:
                     log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} <= SL:{sl} (진입가:{position_entry_price}, 포지션:{count}개)")
                     close_position(contract)
@@ -1052,8 +1054,8 @@ def process_ticker_data(ticker):
                     log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} >= TP:{tp} (진입가:{position_entry_price}, 포지션:{count}개)")
                     close_position(contract)
             else:
-                sl = position_entry_price * (1 + sl_pct)  # 🔥 수정된 변수명 사용
-                tp = position_entry_price * (1 - tp_pct)  # 🔥 수정된 변수명 사용
+                sl = position_entry_price * (1 + sl_pct + slippage_pct)
+                tp = position_entry_price * (1 - tp_pct + slippage_pct)
                 if price >= sl:
                     log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} >= SL:{sl} (진입가:{position_entry_price}, 포지션:{count}개)")
                     close_position(contract)
