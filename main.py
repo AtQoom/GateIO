@@ -86,6 +86,17 @@ SYMBOL_MAPPING = {
     "PEPE_USDT": "PEPE_USDT",
 }
 
+# 🔥 심볼별 TP/SL 배수 설정
+SYMBOL_TPSL_MULTIPLIERS = {
+    "BTC_USDT": {"tp": 0.7, "sl": 0.7},    # BTC: 70%
+    "ETH_USDT": {"tp": 0.85, "sl": 0.85},  # ETH: 85%
+    # 기타 심볼은 기본값 (100%) 사용
+}
+
+def get_tpsl_multipliers(symbol):
+    """심볼별 TP/SL 배수 반환"""
+    return SYMBOL_TPSL_MULTIPLIERS.get(symbol, {"tp": 1.0, "sl": 1.0})
+
 def normalize_symbol(raw_symbol):
     """🔥 강화된 심볼 정규화 - 다양한 형태를 표준 형태로 변환"""
     if not raw_symbol:
@@ -535,9 +546,22 @@ def close_position(symbol):
 def log_initial_status():
     """서버 시작시 초기 상태 로깅"""
     try:
-        log_debug("🚀 서버 시작", "파인스크립트 피라미딩 2 연동 모드 - 초기 상태 확인 중...")
+        log_debug("🚀 서버 시작", "파인스크립트 피라미딩 2 연동 모드 (심볼별 TP/SL) - 초기 상태 확인 중...")
         equity = get_total_collateral(force=True)
         log_debug("💰 총 자산(초기)", f"{equity} USDT")
+        
+        # 🔥 심볼별 TP/SL 설정 로깅
+        log_debug("🎯 심볼별 TP/SL 설정", "")
+        for symbol in SYMBOL_CONFIG:
+            multipliers = get_tpsl_multipliers(symbol)
+            base_tp = 0.006  # 0.6%
+            base_sl = 0.0035  # 0.35%
+            actual_tp = base_tp * multipliers["tp"]
+            actual_sl = base_sl * multipliers["sl"]
+            
+            log_debug(f"📊 {symbol} TP/SL", 
+                     f"TP: {actual_tp*100:.3f}% ({multipliers['tp']*100:.0f}%), "
+                     f"SL: {actual_sl*100:.3f}% ({multipliers['sl']*100:.0f}%)")
         
         for symbol in SYMBOL_CONFIG:
             if not update_position_state(symbol, timeout=3):
@@ -563,7 +587,7 @@ def ping():
 
 @app.route("/", methods=["POST"])
 def webhook():
-    """🔥 Content-Type 문제 해결된 웹훅 처리"""
+    """🔥 심볼별 TP/SL 지원 웹훅 처리"""
     symbol = None
     alert_id = None
     
@@ -575,7 +599,7 @@ def webhook():
     log_debug("📏 Content-Length", request.content_length)
     
     try:
-        log_debug("🔄 웹훅 시작", "파인스크립트 피라미딩 2 신호 수신")
+        log_debug("🔄 웹훅 시작", "파인스크립트 피라미딩 2 신호 수신 (심볼별 TP/SL)")
         
         # === 🔥 Raw 데이터 먼저 확인 ===
         try:
@@ -635,6 +659,8 @@ def webhook():
                             action_match = re.search(r'"action"\s*:\s*"([^"]*)"', raw_data)
                             strategy_match = re.search(r'"strategy"\s*:\s*"([^"]*)"', raw_data)
                             price_match = re.search(r'"price"\s*:\s*([0-9.]+)', raw_data)
+                            sl_pct_match = re.search(r'"sl_pct"\s*:\s*([0-9.]+)', raw_data)
+                            tp_pct_match = re.search(r'"tp_pct"\s*:\s*([0-9.]+)', raw_data)
                             
                             if symbol_match and side_match and action_match:
                                 data = {
@@ -644,6 +670,8 @@ def webhook():
                                     "action": action_match.group(1),
                                     "strategy": strategy_match.group(1) if strategy_match else "",
                                     "price": float(price_match.group(1)) if price_match else 0,
+                                    "sl_pct": float(sl_pct_match.group(1)) if sl_pct_match else None,
+                                    "tp_pct": float(tp_pct_match.group(1)) if tp_pct_match else None,
                                     "position_count": 1,
                                     "parsed_method": "regex_fallback"
                                 }
@@ -676,7 +704,7 @@ def webhook():
             
         log_debug("📥 웹훅 데이터", json.dumps(data, indent=2, ensure_ascii=False))
         
-        # === 🔥 필드별 상세 검사 ===
+        # === 🔥 필드별 상세 검사 (심볼별 TP/SL 포함) ===
         log_debug("🔍 데이터 검사", f"키들: {list(data.keys())}")
         
         alert_id = data.get("id", "")
@@ -686,9 +714,14 @@ def webhook():
         strategy_name = data.get("strategy", "")
         price = data.get("price", 0)
         position_count = data.get("position_count", 1)
+        # 🔥 파인스크립트에서 전달받은 심볼별 TP/SL 비율
+        received_sl_pct = data.get("sl_pct")
+        received_tp_pct = data.get("tp_pct")
         
         log_debug("🔍 필드 추출", f"ID: '{alert_id}', Symbol: '{raw_symbol}', Side: '{side}', Action: '{action}'")
         log_debug("🔍 추가 필드", f"Strategy: '{strategy_name}', Price: {price}, Position: {position_count}")
+        if received_sl_pct is not None or received_tp_pct is not None:
+            log_debug("🎯 심볼별 TP/SL", f"SL: {received_sl_pct}%, TP: {received_tp_pct}%")
         
         # 필수 필드 검증
         missing_fields = []
@@ -719,6 +752,10 @@ def webhook():
         
         log_debug("✅ 심볼 매핑 성공", f"'{raw_symbol}' -> '{symbol}'")
         
+        # 🔥 심볼별 TP/SL 설정 확인
+        multipliers = get_tpsl_multipliers(symbol)
+        log_debug("🎯 심볼별 TP/SL 배수", f"{symbol}: TP={multipliers['tp']*100:.0f}%, SL={multipliers['sl']*100:.0f}%")
+        
         # === 🔥 피라미딩 중복 방지 체크 ===
         if is_duplicate_alert(data):
             log_debug("🚫 중복 알림 차단", f"Symbol: {symbol}, Side: {side}, Action: {action}")
@@ -748,12 +785,14 @@ def webhook():
                 "status": "success" if success else "error", 
                 "action": "exit",
                 "symbol": symbol,
-                "strategy": strategy_name
+                "strategy": strategy_name,
+                "tpsl_multipliers": multipliers
             })
         
-        # === 🔥 피라미딩 2 지원 진입 신호 처리 ===
+        # === 🔥 피라미딩 2 지원 진입 신호 처리 (심볼별 TP/SL) ===
         if action == "entry" and side in ["long", "short"]:
-            log_debug(f"🎯 피라미딩 진입 신호 처리 시작 ({symbol})", f"{side} 방향, 전략: {strategy_name}, 포지션#{position_count}")
+            log_debug(f"🎯 피라미딩 진입 신호 처리 시작 ({symbol})", 
+                     f"{side} 방향, 전략: {strategy_name}, 포지션#{position_count}, TP/SL: {multipliers}")
             
             if not update_position_state(symbol, timeout=1):
                 log_debug(f"❌ 포지션 상태 조회 실패 ({symbol})", "")
@@ -816,7 +855,12 @@ def webhook():
                 "strategy": strategy_name,
                 "position_count": position_count,
                 "pyramiding_mode": "enabled",
-                "max_positions": 2
+                "max_positions": 2,
+                "tpsl_multipliers": multipliers,
+                "received_tpsl": {
+                    "sl_pct": received_sl_pct,
+                    "tp_pct": received_tp_pct
+                }
             })
         
         # 잘못된 액션
@@ -839,7 +883,7 @@ def webhook():
 
 @app.route("/status", methods=["GET"])
 def status():
-    """서버 상태 조회 (피라미딩 2 정보 포함)"""
+    """서버 상태 조회 (피라미딩 2 + 심볼별 TP/SL 정보 포함)"""
     try:
         equity = get_total_collateral(force=True)
         positions = {}
@@ -848,8 +892,24 @@ def status():
             if update_position_state(sym, timeout=1):
                 pos = position_state.get(sym, {})
                 if pos.get("side"):
-                    positions[sym] = {k: float(v) if isinstance(v, Decimal) else v 
-                                    for k, v in pos.items()}
+                    # 🔥 심볼별 TP/SL 정보 추가
+                    multipliers = get_tpsl_multipliers(sym)
+                    base_tp = 0.006  # 0.6%
+                    base_sl = 0.0035  # 0.35%
+                    actual_tp = base_tp * multipliers["tp"]
+                    actual_sl = base_sl * multipliers["sl"]
+                    
+                    position_info = {k: float(v) if isinstance(v, Decimal) else v 
+                                   for k, v in pos.items()}
+                    position_info.update({
+                        "tp_multiplier": multipliers["tp"],
+                        "sl_multiplier": multipliers["sl"],
+                        "actual_tp_pct": actual_tp * 100,
+                        "actual_sl_pct": actual_sl * 100,
+                        "base_tp_pct": base_tp * 100,
+                        "base_sl_pct": base_sl * 100
+                    })
+                    positions[sym] = position_info
         
         # 중복 방지 상태 정보 (피라미딩 포함)
         with duplicate_prevention_lock:
@@ -865,20 +925,37 @@ def status():
                 } for k, v in recent_signals.items()}
             }
         
+        # 🔥 심볼별 TP/SL 설정 정보
+        tpsl_settings = {}
+        for symbol in SYMBOL_CONFIG:
+            multipliers = get_tpsl_multipliers(symbol)
+            base_tp = 0.006
+            base_sl = 0.0035
+            tpsl_settings[symbol] = {
+                "tp_multiplier": multipliers["tp"],
+                "sl_multiplier": multipliers["sl"],
+                "actual_tp_pct": base_tp * multipliers["tp"] * 100,
+                "actual_sl_pct": base_sl * multipliers["sl"] * 100,
+                "base_tp_pct": base_tp * 100,
+                "base_sl_pct": base_sl * 100
+            }
+        
         return jsonify({
             "status": "running",
-            "mode": "pinescript_pyramiding_2_enhanced",
+            "mode": "pinescript_pyramiding_2_symbol_tpsl",
             "timestamp": datetime.now().isoformat(),
             "margin_balance": float(equity),
             "positions": positions,
             "duplicate_prevention": duplicate_stats,
             "symbol_mappings": SYMBOL_MAPPING,
+            "tpsl_settings": tpsl_settings,
             "pinescript_features": {
                 "perfect_alerts": True,
                 "future_prediction": True,
                 "backup_signals": True,
                 "pyramiding": 2,
                 "sl_tp_managed_by_pinescript": True,
+                "symbol_specific_tpsl": True,
                 "enhanced_logging": True
             }
         })
@@ -905,15 +982,26 @@ def debug_account():
 # === 🔥 추가 디버깅 엔드포인트 ===
 @app.route("/test-symbol/<symbol>", methods=["GET"])
 def test_symbol_mapping(symbol):
-    """심볼 매핑 테스트"""
+    """심볼 매핑 및 TP/SL 테스트"""
     normalized = normalize_symbol(symbol)
     is_valid = normalized and normalized in SYMBOL_CONFIG
+    multipliers = get_tpsl_multipliers(normalized) if normalized else {"tp": 1.0, "sl": 1.0}
+    
+    base_tp = 0.006
+    base_sl = 0.0035
     
     return jsonify({
         "input": symbol,
         "normalized": normalized,
         "valid": is_valid,
         "config_exists": normalized in SYMBOL_CONFIG if normalized else False,
+        "tpsl_multipliers": multipliers,
+        "calculated_tpsl": {
+            "tp_pct": base_tp * multipliers["tp"] * 100,
+            "sl_pct": base_sl * multipliers["sl"] * 100,
+            "base_tp_pct": base_tp * 100,
+            "base_sl_pct": base_sl * 100
+        },
         "all_mappings": {k: v for k, v in SYMBOL_MAPPING.items() if k.startswith(symbol.upper()[:3])}
     })
 
@@ -929,13 +1017,17 @@ def clear_cache():
 
 @app.route("/pyramiding-status", methods=["GET"])
 def pyramiding_status():
-    """피라미딩 상태 조회"""
+    """피라미딩 상태 조회 (심볼별 TP/SL 포함)"""
     try:
         pyramiding_info = {}
         
         for symbol in SYMBOL_CONFIG:
             current_count = get_current_position_count(symbol)
             pos = position_state.get(symbol, {})
+            multipliers = get_tpsl_multipliers(symbol)
+            
+            base_tp = 0.006
+            base_sl = 0.0035
             
             pyramiding_info[symbol] = {
                 "current_positions": current_count,
@@ -943,18 +1035,60 @@ def pyramiding_status():
                 "can_add_position": current_count < 2,
                 "side": pos.get("side"),
                 "size": float(pos.get("size", 0)) if pos.get("size") else 0,
-                "value": float(pos.get("value", 0)) if pos.get("value") else 0
+                "value": float(pos.get("value", 0)) if pos.get("value") else 0,
+                "tpsl_config": {
+                    "tp_multiplier": multipliers["tp"],
+                    "sl_multiplier": multipliers["sl"],
+                    "actual_tp_pct": base_tp * multipliers["tp"] * 100,
+                    "actual_sl_pct": base_sl * multipliers["sl"] * 100
+                }
             }
         
         return jsonify({
             "pyramiding_enabled": True,
             "max_positions_per_symbol": 2,
+            "symbol_specific_tpsl": True,
+            "base_tpsl": {
+                "tp_pct": base_tp * 100,
+                "sl_pct": base_sl * 100
+            },
             "symbols": pyramiding_info
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# === 🔥 실시간 가격 모니터링 및 TP/SL 처리 (Gate.io 기준) ===
+@app.route("/tpsl-settings", methods=["GET"])
+def tpsl_settings():
+    """심볼별 TP/SL 설정 조회"""
+    try:
+        base_tp = 0.006  # 0.6%
+        base_sl = 0.0035  # 0.35%
+        
+        settings = {}
+        for symbol in SYMBOL_CONFIG:
+            multipliers = get_tpsl_multipliers(symbol)
+            settings[symbol] = {
+                "tp_multiplier": multipliers["tp"],
+                "sl_multiplier": multipliers["sl"],
+                "base_tp_pct": base_tp * 100,
+                "base_sl_pct": base_sl * 100,
+                "actual_tp_pct": base_tp * multipliers["tp"] * 100,
+                "actual_sl_pct": base_sl * multipliers["sl"] * 100,
+                "is_custom": symbol in SYMBOL_TPSL_MULTIPLIERS
+            }
+        
+        return jsonify({
+            "base_settings": {
+                "tp_pct": base_tp * 100,
+                "sl_pct": base_sl * 100
+            },
+            "symbol_settings": settings,
+            "custom_symbols": list(SYMBOL_TPSL_MULTIPLIERS.keys())
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# === 🔥 실시간 가격 모니터링 및 심볼별 TP/SL 처리 (Gate.io 기준) ===
 async def send_ping(ws):
     """웹소켓 핑 전송"""
     while True:
@@ -965,12 +1099,12 @@ async def send_ping(ws):
         await asyncio.sleep(30)
 
 async def price_listener():
-    """실시간 가격 모니터링 및 TP/SL 처리 (Gate.io 가격 기준)"""
+    """실시간 가격 모니터링 및 심볼별 TP/SL 처리 (Gate.io 가격 기준)"""
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     symbols = list(SYMBOL_CONFIG.keys())
     reconnect_delay = 5
     max_delay = 60
-    log_debug("📡 웹소켓 시작", f"Gate.io 가격 기준 TP/SL 모니터링 - 심볼: {len(symbols)}개 (피라미딩 2 지원)")
+    log_debug("📡 웹소켓 시작", f"Gate.io 가격 기준 심볼별 TP/SL 모니터링 - 심볼: {len(symbols)}개 (피라미딩 2 지원)")
     
     while True:
         try:
@@ -1014,10 +1148,8 @@ async def price_listener():
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
-
-# 🔥 수정: TP/SL 비율 파인스크립트와 동기화 (슬리피지 제거)
 def process_ticker_data(ticker):
-    """Gate.io 실시간 가격으로 TP/SL 체크 (파인스크립트와 동기화)"""
+    """Gate.io 실시간 가격으로 심볼별 TP/SL 체크 (파인스크립트와 동기화)"""
     try:
         contract = ticker.get("contract")
         last = ticker.get("last")
@@ -1040,27 +1172,39 @@ def process_ticker_data(ticker):
             if not position_entry_price or size <= 0 or side not in ["buy", "sell"]:
                 return
             
-            # 🔥 파인스크립트와 동일한 TP/SL 비율 (슬리피지 제거)
-            sl_pct = Decimal("0.0035")  # 0.35%
-            tp_pct = Decimal("0.006")   # 0.6%
+            # 🔥 심볼별 TP/SL 비율 적용
+            multipliers = get_tpsl_multipliers(contract)
+            base_sl_pct = Decimal("0.0035")  # 기본 0.35%
+            base_tp_pct = Decimal("0.006")   # 기본 0.6%
+            
+            sl_pct = base_sl_pct * Decimal(str(multipliers["sl"]))
+            tp_pct = base_tp_pct * Decimal(str(multipliers["tp"]))
             
             if side == "buy":
                 sl = position_entry_price * (1 - sl_pct)
                 tp = position_entry_price * (1 + tp_pct)
                 if price <= sl:
-                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} <= SL:{sl} (진입가:{position_entry_price}, 포지션:{count}개)")
+                    log_debug(f"🛑 SL 트리거 ({contract})", 
+                             f"현재가:{price} <= SL:{sl} (진입가:{position_entry_price}, "
+                             f"SL비율:{sl_pct*100:.3f}% [배수:{multipliers['sl']*100:.0f}%], 포지션:{count}개)")
                     close_position(contract)
                 elif price >= tp:
-                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} >= TP:{tp} (진입가:{position_entry_price}, 포지션:{count}개)")
+                    log_debug(f"🎯 TP 트리거 ({contract})", 
+                             f"현재가:{price} >= TP:{tp} (진입가:{position_entry_price}, "
+                             f"TP비율:{tp_pct*100:.3f}% [배수:{multipliers['tp']*100:.0f}%], 포지션:{count}개)")
                     close_position(contract)
             else:
                 sl = position_entry_price * (1 + sl_pct)
                 tp = position_entry_price * (1 - tp_pct)
                 if price >= sl:
-                    log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} >= SL:{sl} (진입가:{position_entry_price}, 포지션:{count}개)")
+                    log_debug(f"🛑 SL 트리거 ({contract})", 
+                             f"현재가:{price} >= SL:{sl} (진입가:{position_entry_price}, "
+                             f"SL비율:{sl_pct*100:.3f}% [배수:{multipliers['sl']*100:.0f}%], 포지션:{count}개)")
                     close_position(contract)
                 elif price <= tp:
-                    log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} <= TP:{tp} (진입가:{position_entry_price}, 포지션:{count}개)")
+                    log_debug(f"🎯 TP 트리거 ({contract})", 
+                             f"현재가:{price} <= TP:{tp} (진입가:{position_entry_price}, "
+                             f"TP비율:{tp_pct*100:.3f}% [배수:{multipliers['tp']*100:.0f}%], 포지션:{count}개)")
                     close_position(contract)
         finally:
             position_lock.release()
@@ -1080,7 +1224,7 @@ def backup_position_loop():
 if __name__ == "__main__":
     log_initial_status()
     
-    # 🔥 Gate.io 실시간 가격 모니터링으로 TP/SL 처리
+    # 🔥 Gate.io 실시간 가격 모니터링으로 심볼별 TP/SL 처리
     threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
     
     # 백업 포지션 상태 갱신
@@ -1088,8 +1232,11 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🚀 서버 시작", 
-             f"포트 {port}에서 실행 (피라미딩 2 하이브리드 모드 - 강화된 로깅)\n"
-             f"✅ TP/SL: 서버에서 Gate.io 가격 기준으로 처리 (SL: 0.35%, TP: 0.6%)\n"
+             f"포트 {port}에서 실행 (피라미딩 2 하이브리드 모드 + 심볼별 TP/SL - 강화된 로깅)\n"
+             f"✅ TP/SL: 서버에서 Gate.io 가격 기준으로 처리 (심볼별 맞춤 설정)\n"
+             f"   - BTC: TP {0.006*0.7*100:.2f}%, SL {0.0035*0.7*100:.2f}% (70%)\n"
+             f"   - ETH: TP {0.006*0.85*100:.2f}%, SL {0.0035*0.85*100:.2f}% (85%)\n"
+             f"   - 기타: TP {0.006*100:.1f}%, SL {0.0035*100:.1f}% (100%)\n"
              f"✅ 진입/청산 신호: 파인스크립트 알림으로 처리\n"
              f"✅ 피라미딩: 같은 방향 최대 2번 진입 지원\n"
              f"✅ 중복 방지: 완벽한 알림 시스템 연동\n"
