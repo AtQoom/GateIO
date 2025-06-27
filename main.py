@@ -1014,7 +1014,8 @@ async def price_listener():
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
-# 🔥 수정: TP/SL 비율 파인스크립트와 동기화
+
+# 🔥 수정: TP/SL 비율 파인스크립트와 동기화 (슬리피지 제거)
 def process_ticker_data(ticker):
     """Gate.io 실시간 가격으로 TP/SL 체크 (파인스크립트와 동기화)"""
     try:
@@ -1039,13 +1040,13 @@ def process_ticker_data(ticker):
             if not position_entry_price or size <= 0 or side not in ["buy", "sell"]:
                 return
             
-            # 🔥 파인스크립트와 동일한 TP/SL 비율
-            sl_pct = Decimal("0.0035")  # 0.35% (동일)
-            tp_pct = Decimal("0.006")   # 0.6% (파인스크립트와 동일하게 수정)
+            # 🔥 파인스크립트와 동일한 TP/SL 비율 (슬리피지 제거)
+            sl_pct = Decimal("0.0035")  # 0.35%
+            tp_pct = Decimal("0.006")   # 0.6%
             
             if side == "buy":
-                sl = position_entry_price * (1 - sl_pct - slippage_pct)
-                tp = position_entry_price * (1 + tp_pct - slippage_pct)
+                sl = position_entry_price * (1 - sl_pct)
+                tp = position_entry_price * (1 + tp_pct)
                 if price <= sl:
                     log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} <= SL:{sl} (진입가:{position_entry_price}, 포지션:{count}개)")
                     close_position(contract)
@@ -1053,8 +1054,8 @@ def process_ticker_data(ticker):
                     log_debug(f"🎯 TP 트리거 ({contract})", f"현재가:{price} >= TP:{tp} (진입가:{position_entry_price}, 포지션:{count}개)")
                     close_position(contract)
             else:
-                sl = position_entry_price * (1 + sl_pct + slippage_pct)
-                tp = position_entry_price * (1 - tp_pct + slippage_pct)
+                sl = position_entry_price * (1 + sl_pct)
+                tp = position_entry_price * (1 - tp_pct)
                 if price >= sl:
                     log_debug(f"🛑 SL 트리거 ({contract})", f"현재가:{price} >= SL:{sl} (진입가:{position_entry_price}, 포지션:{count}개)")
                     close_position(contract)
@@ -1088,7 +1089,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     log_debug("🚀 서버 시작", 
              f"포트 {port}에서 실행 (피라미딩 2 하이브리드 모드 - 강화된 로깅)\n"
-             f"✅ TP/SL: 서버에서 Gate.io 가격 기준으로 처리 (0.65% TP)\n"
+             f"✅ TP/SL: 서버에서 Gate.io 가격 기준으로 처리 (SL: 0.35%, TP: 0.6%)\n"
              f"✅ 진입/청산 신호: 파인스크립트 알림으로 처리\n"
              f"✅ 피라미딩: 같은 방향 최대 2번 진입 지원\n"
              f"✅ 중복 방지: 완벽한 알림 시스템 연동\n"
