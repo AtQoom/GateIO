@@ -1042,7 +1042,6 @@ def process_ticker_data(ticker):
             # 🔥 파인스크립트와 동일한 TP/SL 비율
             sl_pct = Decimal("0.0035")  # 0.35% (동일)
             tp_pct = Decimal("0.006")   # 0.6% (파인스크립트와 동일하게 수정)
-            slippage_pct = Decimal("0.02") / 100  # 0.02% 슬리피지
             
             if side == "buy":
                 sl = position_entry_price * (1 - sl_pct - slippage_pct)
