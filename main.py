@@ -612,84 +612,50 @@ def webhook():
         # 🔥 Content-Type 문제 해결: text/plain도 JSON으로 처리
         data = None
         
-        # 🔥 강화된 JSON 파싱 (오류 복구 기능 추가)
-        try:
+def parse_simple_alert(message):
+    """간단한 파이프 구분 메시지 파싱"""
+    try:
+        if message.startswith("ENTRY:"):
+            # ENTRY:long|BTCUSDT|Hybrid_LONG|50000|1|0.28|0.48|5s_30s_optimized
+            parts = message.split("|")
+            if len(parts) >= 8:
+                return {
+                    "action": "entry",
+                    "side": parts[0].split(":")[1],
+                    "symbol": parts[1],
+                    "strategy": parts[2],
+                    "price": float(parts[3]),
+                    "position_count": int(parts[4]),
+                    "sl_pct": float(parts[5]),
+                    "tp_pct": float(parts[6]),
+                    "mode": parts[7],
+                    "id": str(int(time.time())) + "_simple"
+                }
+        elif message.startswith("EXIT:"):
+            # EXIT:long|BTCUSDT|stop_loss|50500|1.2|5s_30s_optimized
+            parts = message.split("|")
+            if len(parts) >= 6:
+                return {
+                    "action": "exit",
+                    "side": parts[0].split(":")[1],
+                    "symbol": parts[1],
+                    "exit_reason": parts[2],
+                    "price": float(parts[3]),
+                    "pnl_pct": float(parts[4]),
+                    "mode": parts[5],
+                    "id": str(int(time.time())) + "_simple"
+                }
+    except Exception as e:
+        log_debug("❌ 간단 메시지 파싱 실패", str(e))
+    return None
             if raw_data.strip():
-                # 1차 시도: 정상 JSON 파싱
+                # JSON 파싱 시도
                 try:
                     data = json.loads(raw_data)
                     log_debug("✅ JSON 파싱 성공", "Raw 데이터에서 JSON 추출 완료")
                 except json.JSONDecodeError as e:
-                    log_debug("⚠️ JSON 파싱 1차 실패", f"오류: {str(e)}")
-                    log_debug("🔍 Raw 데이터 상세", f"전체 내용: {raw_data}")
-                    
-                    # 2차 시도: JSON 수정 및 복구
-                    try:
-                        # 일반적인 JSON 오류 수정 시도
-                        fixed_data = raw_data
-                        
-                        # 후행 쉼표 제거
-                        fixed_data = fixed_data.replace(',}', '}').replace(',]', ']')
-                        
-                        # 중복 쉼표 제거
-                        import re
-                        fixed_data = re.sub(r',\s*,', ',', fixed_data)
-                        
-                        # 잘못된 인용부호 수정
-                        fixed_data = fixed_data.replace("'", '"')
-                        
-                        # 제어 문자 제거
-                        fixed_data = ''.join(char for char in fixed_data if ord(char) >= 32 or char in '\t\n\r')
-                        
-                        data = json.loads(fixed_data)
-                        log_debug("✅ JSON 복구 성공", f"수정된 데이터로 파싱 완료")
-                        
-                    except json.JSONDecodeError as e2:
-                        log_debug("❌ JSON 복구도 실패", f"2차 오류: {str(e2)}")
-                        
-                        # 3차 시도: 부분 파싱
-                        try:
-                            # 기본적인 필드만 추출 시도
-                            import re
-                            
-                            # 정규표현식으로 필수 필드 추출
-                            id_match = re.search(r'"id"\s*:\s*"([^"]*)"', raw_data)
-                            symbol_match = re.search(r'"symbol"\s*:\s*"([^"]*)"', raw_data)
-                            side_match = re.search(r'"side"\s*:\s*"([^"]*)"', raw_data)
-                            action_match = re.search(r'"action"\s*:\s*"([^"]*)"', raw_data)
-                            strategy_match = re.search(r'"strategy"\s*:\s*"([^"]*)"', raw_data)
-                            price_match = re.search(r'"price"\s*:\s*([0-9.]+)', raw_data)
-                            sl_pct_match = re.search(r'"sl_pct"\s*:\s*([0-9.]+)', raw_data)
-                            tp_pct_match = re.search(r'"tp_pct"\s*:\s*([0-9.]+)', raw_data)
-                            
-                            if symbol_match and side_match and action_match:
-                                data = {
-                                    "id": id_match.group(1) if id_match else "",
-                                    "symbol": symbol_match.group(1),
-                                    "side": side_match.group(1),
-                                    "action": action_match.group(1),
-                                    "strategy": strategy_match.group(1) if strategy_match else "",
-                                    "price": float(price_match.group(1)) if price_match else 0,
-                                    "sl_pct": float(sl_pct_match.group(1)) if sl_pct_match else None,
-                                    "tp_pct": float(tp_pct_match.group(1)) if tp_pct_match else None,
-                                    "position_count": 1,
-                                    "parsed_method": "regex_fallback"
-                                }
-                                log_debug("✅ 정규표현식 파싱 성공", f"필수 필드 추출 완료")
-                            else:
-                                raise ValueError("필수 필드를 찾을 수 없음")
-                                
-                        except Exception as e3:
-                            log_debug("❌ 모든 파싱 방법 실패", f"3차 오류: {str(e3)}")
-                            log_debug("🔍 실패한 데이터", f"Raw: {raw_data[:500]}...")
-                            
-                            return jsonify({
-                                "error": "All JSON parsing methods failed", 
-                                "original_error": str(e),
-                                "recovery_error": str(e2),
-                                "regex_error": str(e3),
-                                "raw_data": raw_data[:300]
-                            }), 400
+                    log_debug("❌ JSON 파싱 실패", f"오류: {str(e)}, Raw: {raw_data[:100]}")
+                    return jsonify({"error": "JSON parsing failed", "raw_data": raw_data[:200]}), 400
             else:
                 log_debug("❌ 빈 데이터", "Raw 데이터가 비어있음")
                 return jsonify({"error": "Empty data"}), 400
