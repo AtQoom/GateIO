@@ -86,7 +86,7 @@ SYMBOL_MAPPING = {
     "PEPE_USDT": "PEPE_USDT",
 }
 
-# 🔥 심볼별 TP/SL 배수 설정 (5초/30초 최적화)
+# 🔥 심볼별 TP/SL 배수 설정 (15초/1분 최적화)
 SYMBOL_TPSL_MULTIPLIERS = {
     "BTC_USDT": {"tp": 0.8, "sl": 0.8},    # BTC: 80%
     "ETH_USDT": {"tp": 0.9, "sl": 0.9},    # ETH: 90%
@@ -129,6 +129,8 @@ def parse_simple_alert(message):
     except Exception as e:
         log_debug("❌ 간단 메시지 파싱 실패", str(e))
     return None
+
+def normalize_symbol(raw_symbol):
     """🔥 강화된 심볼 정규화 - 다양한 형태를 표준 형태로 변환"""
     if not raw_symbol:
         log_debug("❌ 심볼 정규화", "입력 심볼이 비어있음")
@@ -618,16 +620,10 @@ def ping():
 
 @app.route("/", methods=["POST"])
 def webhook():
-    """🔥 심볼별 TP/SL 지원 웹훅 처리"""
+    """🔥 심볼별 TP/SL 지원 웹훅 처리 - JSON 오류 수정"""
     symbol = None
     alert_id = None
-    
-    # === 🔥 모든 요청 정보 로깅 ===
-    log_debug("🔄 웹훅 요청 수신", f"Method: {request.method}")
-    log_debug("📋 요청 헤더", str(dict(request.headers)))
-    log_debug("🌐 요청 URL", f"{request.url}")
-    log_debug("📦 Content-Type", request.content_type)
-    log_debug("📏 Content-Length", request.content_length)
+    raw_data = ""
     
     try:
         log_debug("🔄 웹훅 시작", "파인스크립트 피라미딩 2 신호 수신 (심볼별 TP/SL)")
@@ -639,6 +635,11 @@ def webhook():
         except Exception as e:
             log_debug("❌ Raw 데이터 읽기 실패", str(e))
             raw_data = ""
+        
+        # 빈 데이터 체크
+        if not raw_data or raw_data.strip() == "":
+            log_debug("❌ 빈 데이터", "Raw 데이터가 비어있음")
+            return jsonify({"error": "Empty data"}), 400
         
         # === 🔥 메시지 파싱 (간단한 형태와 JSON 모두 지원) ===
         data = None
@@ -652,26 +653,34 @@ def webhook():
                 log_debug("❌ 간단 메시지 파싱 실패", f"Raw: {raw_data[:100]}")
                 return jsonify({"error": "Simple message parsing failed"}), 400
         else:
-            # 2차 시도: JSON 파싱 (기존 방식)
+            # 2차 시도: JSON 파싱 (기존 방식) - 🔥 오류 수정
             try:
+                # JSON 파싱 시도
+                data = request.get_json(force=True)  # force=True로 Content-Type 무시
+                if data is None:
+                    # get_json이 실패하면 직접 파싱 시도
                     data = json.loads(raw_data)
-                    log_debug("✅ JSON 파싱 성공", "Raw 데이터에서 JSON 추출 완료")
-                except json.JSONDecodeError as e:
-                    log_debug("❌ JSON 파싱 실패", f"오류: {str(e)}, Raw: {raw_data[:100]}")
-                    return jsonify({"error": "JSON parsing failed", "raw_data": raw_data[:200]}), 400
-            else:
-                log_debug("❌ 빈 데이터", "Raw 데이터가 비어있음")
-                return jsonify({"error": "Empty data"}), 400
+                log_debug("✅ JSON 파싱 성공", "JSON 데이터 추출 완료")
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                log_debug("❌ JSON 파싱 실패", f"오류: {str(e)}, Raw: {raw_data[:100]}")
+                # JSON 파싱이 실패했지만 데이터가 있다면 텍스트로 처리 시도
+                if raw_data and len(raw_data.strip()) > 0:
+                    return jsonify({
+                        "error": "JSON parsing failed but data exists", 
+                        "raw_data": raw_data[:200],
+                        "suggestion": "데이터가 JSON 형식이 아닙니다. 간단한 메시지 형식(ENTRY:/EXIT:)을 사용하세요."
+                    }), 400
+                else:
+                    return jsonify({"error": "Empty or invalid JSON data"}), 400
+            except Exception as e:
+                log_debug("❌ 예상치 못한 파싱 오류", f"오류: {str(e)}, Raw 데이터: {raw_data}")
+                return jsonify({"error": "Parsing error", "raw_data": raw_data[:200]}), 500
                 
-        except Exception as e:
-            log_debug("❌ 예상치 못한 파싱 오류", f"오류: {str(e)}, Raw 데이터: {raw_data}")
-            return jsonify({"error": "Parsing error", "raw_data": raw_data[:200]}), 400
-            
         if not data:
-            log_debug("❌ 빈 JSON 데이터", f"파싱된 데이터가 비어있음")
-            return jsonify({"error": "Empty JSON data"}), 400
+            log_debug("❌ 빈 파싱 결과", "파싱된 데이터가 비어있음")
+            return jsonify({"error": "Empty parsed data"}), 400
             
-        log_debug("📥 웹훅 데이터", json.dumps(data, indent=2, ensure_ascii=False))
+        log_debug("📥 웹훅 데이터", json.dumps(data, indent=2, ensure_ascii=False, default=str))
         
         # === 🔥 필드별 상세 검사 (심볼별 TP/SL 포함) ===
         log_debug("🔍 데이터 검사", f"키들: {list(data.keys())}")
@@ -847,7 +856,7 @@ def webhook():
         return jsonify({
             "status": "error", 
             "message": error_msg,
-            "raw_data": raw_data[:200] if 'raw_data' in locals() else "unavailable"
+            "raw_data": raw_data[:200] if raw_data else "unavailable"
         }), 500
 
 @app.route("/status", methods=["GET"])
@@ -911,7 +920,7 @@ def status():
         
         return jsonify({
             "status": "running",
-            "mode": "pinescript_5s_30s_optimized",
+            "mode": "pinescript_15s_1m_optimized",  # 🔥 15초/1분으로 변경
             "timestamp": datetime.now().isoformat(),
             "margin_balance": float(equity),
             "positions": positions,
@@ -923,8 +932,8 @@ def status():
                 "future_prediction": True,
                 "backup_signals": True,
                 "pyramiding": 2,
-                "entry_timeframe": "5S",
-                "exit_timeframe": "30S",
+                "entry_timeframe": "15S",  # 🔥 15초로 변경
+                "exit_timeframe": "1M",    # 🔥 1분으로 변경
                 "sl_tp_managed_by_pinescript": True,
                 "symbol_specific_tpsl": True,
                 "enhanced_logging": True
@@ -1203,16 +1212,17 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🚀 서버 시작", 
-             f"포트 {port}에서 실행 (피라미딩 2 하이브리드 모드 + 5초/30초 최적화 - 강화된 로깅)\n"
+             f"포트 {port}에서 실행 (피라미딩 2 하이브리드 모드 + 15초/1분 최적화 - JSON 오류 수정)\n"
              f"✅ TP/SL: 서버에서 Gate.io 가격 기준으로 처리 (심볼별 맞춤 설정)\n"
              f"   - BTC: TP {0.006*0.8*100:.2f}%, SL {0.0035*0.8*100:.2f}% (80%)\n"
              f"   - ETH: TP {0.006*0.9*100:.2f}%, SL {0.0035*0.9*100:.2f}% (90%)\n"
              f"   - 기타: TP {0.006*100:.1f}%, SL {0.0035*100:.1f}% (100%)\n"
-             f"✅ 진입신호: 5초봉 극값 포착 (빠른 반응)\n"
-             f"✅ 청산신호: 30초봉 안정화 (수익 극대화)\n"
+             f"✅ 진입신호: 15초봉 극값 포착 (밸런스 조정)\n"
+             f"✅ 청산신호: 1분봉 안정화 (수익 극대화)\n"
              f"✅ 피라미딩: 같은 방향 최대 2번 진입 지원\n"
              f"✅ 중복 방지: 완벽한 알림 시스템 연동\n"
              f"✅ 심볼 매핑: 모든 형태 지원 (.P, PERP 등)\n"
+             f"✅ JSON 오류 수정: 강화된 파싱 시스템\n"
              f"✅ 강화된 로깅: 모든 단계별 상세 로그")
     
     app.run(host="0.0.0.0", port=port, debug=False)
