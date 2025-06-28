@@ -86,7 +86,7 @@ SYMBOL_MAPPING = {
     "PEPE_USDT": "PEPE_USDT",
 }
 
-# 🔥 심볼별 TP/SL 배수 설정
+# 🔥 심볼별 TP/SL 배수 설정 (5초/30초 최적화)
 SYMBOL_TPSL_MULTIPLIERS = {
     "BTC_USDT": {"tp": 0.8, "sl": 0.8},    # BTC: 80%
     "ETH_USDT": {"tp": 0.9, "sl": 0.9},    # ETH: 90%
@@ -942,7 +942,7 @@ def status():
         
         return jsonify({
             "status": "running",
-            "mode": "pinescript_pyramiding_2_symbol_tpsl",
+            "mode": "pinescript_5s_30s_optimized",
             "timestamp": datetime.now().isoformat(),
             "margin_balance": float(equity),
             "positions": positions,
@@ -954,6 +954,8 @@ def status():
                 "future_prediction": True,
                 "backup_signals": True,
                 "pyramiding": 2,
+                "entry_timeframe": "5S",
+                "exit_timeframe": "30S",
                 "sl_tp_managed_by_pinescript": True,
                 "symbol_specific_tpsl": True,
                 "enhanced_logging": True
@@ -1232,12 +1234,13 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🚀 서버 시작", 
-             f"포트 {port}에서 실행 (피라미딩 2 하이브리드 모드 + 심볼별 TP/SL - 강화된 로깅)\n"
+             f"포트 {port}에서 실행 (피라미딩 2 하이브리드 모드 + 5초/30초 최적화 - 강화된 로깅)\n"
              f"✅ TP/SL: 서버에서 Gate.io 가격 기준으로 처리 (심볼별 맞춤 설정)\n"
-             f"   - BTC: TP {0.006*0.7*100:.2f}%, SL {0.0035*0.7*100:.2f}% (70%)\n"
-             f"   - ETH: TP {0.006*0.85*100:.2f}%, SL {0.0035*0.85*100:.2f}% (85%)\n"
+             f"   - BTC: TP {0.006*0.8*100:.2f}%, SL {0.0035*0.8*100:.2f}% (80%)\n"
+             f"   - ETH: TP {0.006*0.9*100:.2f}%, SL {0.0035*0.9*100:.2f}% (90%)\n"
              f"   - 기타: TP {0.006*100:.1f}%, SL {0.0035*100:.1f}% (100%)\n"
-             f"✅ 진입/청산 신호: 파인스크립트 알림으로 처리\n"
+             f"✅ 진입신호: 5초봉 극값 포착 (빠른 반응)\n"
+             f"✅ 청산신호: 30초봉 안정화 (수익 극대화)\n"
              f"✅ 피라미딩: 같은 방향 최대 2번 진입 지원\n"
              f"✅ 중복 방지: 완벽한 알림 시스템 연동\n"
              f"✅ 심볼 매핑: 모든 형태 지원 (.P, PERP 등)\n"
