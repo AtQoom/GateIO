@@ -97,7 +97,38 @@ def get_tpsl_multipliers(symbol):
     """심볼별 TP/SL 배수 반환"""
     return SYMBOL_TPSL_MULTIPLIERS.get(symbol, {"tp": 1.0, "sl": 1.0})
 
-def normalize_symbol(raw_symbol):
+def parse_simple_alert(message):
+    """간단한 파이프 구분 메시지 파싱"""
+    try:
+        if message.startswith("ENTRY:"):
+            # ENTRY:long|BTCUSDT|Hybrid_LONG|50000|1
+            parts = message.split("|")
+            if len(parts) >= 5:
+                return {
+                    "action": "entry",
+                    "side": parts[0].split(":")[1],
+                    "symbol": parts[1],
+                    "strategy": parts[2],
+                    "price": float(parts[3]),
+                    "position_count": int(parts[4]),
+                    "id": str(int(time.time())) + "_simple"
+                }
+        elif message.startswith("EXIT:"):
+            # EXIT:long|BTCUSDT|stop_loss|50500|1.2
+            parts = message.split("|")
+            if len(parts) >= 5:
+                return {
+                    "action": "exit",
+                    "side": parts[0].split(":")[1],
+                    "symbol": parts[1],
+                    "exit_reason": parts[2],
+                    "price": float(parts[3]),
+                    "pnl_pct": float(parts[4]),
+                    "id": str(int(time.time())) + "_simple"
+                }
+    except Exception as e:
+        log_debug("❌ 간단 메시지 파싱 실패", str(e))
+    return None
     """🔥 강화된 심볼 정규화 - 다양한 형태를 표준 형태로 변환"""
     if not raw_symbol:
         log_debug("❌ 심볼 정규화", "입력 심볼이 비어있음")
@@ -609,48 +640,20 @@ def webhook():
             log_debug("❌ Raw 데이터 읽기 실패", str(e))
             raw_data = ""
         
-        # 🔥 Content-Type 문제 해결: text/plain도 JSON으로 처리
+        # === 🔥 메시지 파싱 (간단한 형태와 JSON 모두 지원) ===
         data = None
         
-def parse_simple_alert(message):
-    """간단한 파이프 구분 메시지 파싱"""
-    try:
-        if message.startswith("ENTRY:"):
-            # ENTRY:long|BTCUSDT|Hybrid_LONG|50000|1|0.28|0.48|5s_30s_optimized
-            parts = message.split("|")
-            if len(parts) >= 8:
-                return {
-                    "action": "entry",
-                    "side": parts[0].split(":")[1],
-                    "symbol": parts[1],
-                    "strategy": parts[2],
-                    "price": float(parts[3]),
-                    "position_count": int(parts[4]),
-                    "sl_pct": float(parts[5]),
-                    "tp_pct": float(parts[6]),
-                    "mode": parts[7],
-                    "id": str(int(time.time())) + "_simple"
-                }
-        elif message.startswith("EXIT:"):
-            # EXIT:long|BTCUSDT|stop_loss|50500|1.2|5s_30s_optimized
-            parts = message.split("|")
-            if len(parts) >= 6:
-                return {
-                    "action": "exit",
-                    "side": parts[0].split(":")[1],
-                    "symbol": parts[1],
-                    "exit_reason": parts[2],
-                    "price": float(parts[3]),
-                    "pnl_pct": float(parts[4]),
-                    "mode": parts[5],
-                    "id": str(int(time.time())) + "_simple"
-                }
-    except Exception as e:
-        log_debug("❌ 간단 메시지 파싱 실패", str(e))
-    return None
-            if raw_data.strip():
-                # JSON 파싱 시도
-                try:
+        # 1차 시도: 간단한 파이프 구분 메시지 파싱
+        if raw_data.startswith("ENTRY:") or raw_data.startswith("EXIT:"):
+            data = parse_simple_alert(raw_data.strip())
+            if data:
+                log_debug("✅ 간단 메시지 파싱 성공", f"Action: {data.get('action')}, Symbol: {data.get('symbol')}")
+            else:
+                log_debug("❌ 간단 메시지 파싱 실패", f"Raw: {raw_data[:100]}")
+                return jsonify({"error": "Simple message parsing failed"}), 400
+        else:
+            # 2차 시도: JSON 파싱 (기존 방식)
+            try:
                     data = json.loads(raw_data)
                     log_debug("✅ JSON 파싱 성공", "Raw 데이터에서 JSON 추출 완료")
                 except json.JSONDecodeError as e:
