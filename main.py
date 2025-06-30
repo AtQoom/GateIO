@@ -152,6 +152,14 @@ duplicate_prevention_lock = threading.RLock()
 real_time_prices = {}
 price_lock = threading.RLock()
 
+# TP/SL 체크 상태
+tpsl_check_active = {}
+tpsl_lock = threading.RLock()
+
+# 웹소켓 연결 상태
+websocket_connected = False
+websocket_lock = threading.RLock()
+
 # =================== 유틸리티 함수 ===================
 def normalize_symbol(raw_symbol):
     """심볼 정규화 - 다양한 형태를 표준 형태로 변환"""
@@ -280,13 +288,19 @@ def get_real_time_price(symbol):
     return get_price(symbol)
 
 def check_tpsl_conditions(symbol):
-    """TP/SL 조건 체크 및 실행"""
+    """TP/SL 조건 체크 및 실행 - 개선된 버전"""
+    with tpsl_lock:
+        # 이미 체크 중이거나 체크 비활성화된 경우 스킵
+        if not tpsl_check_active.get(symbol, True):
+            return False
+    
     pos = position_state.get(symbol, {})
     if not pos.get("side") or not pos.get("entry_time"):
         return False
     
     current_price = get_real_time_price(symbol)
     if current_price <= 0:
+        log_debug(f"⚠️ 가격 조회 실패 ({symbol})", "TP/SL 체크 스킵")
         return False
     
     entry_price = pos["price"]
@@ -301,11 +315,27 @@ def check_tpsl_conditions(symbol):
         if current_price >= tp_price:
             log_debug(f"🎯 TP 달성 ({symbol})", 
                      f"현재가: {current_price}, TP: {tp_price} ({tp_pct*100:.3f}%)")
-            return close_position(symbol)
+            # TP/SL 체크 일시 비활성화
+            with tpsl_lock:
+                tpsl_check_active[symbol] = False
+            success = close_position(symbol)
+            # 청산 후 다시 활성화
+            with tpsl_lock:
+                tpsl_check_active[symbol] = True
+            return success
+            
         elif current_price <= sl_price:
             log_debug(f"🛑 SL 달성 ({symbol})", 
                      f"현재가: {current_price}, SL: {sl_price} ({sl_pct*100:.3f}%)")
-            return close_position(symbol)
+            # TP/SL 체크 일시 비활성화
+            with tpsl_lock:
+                tpsl_check_active[symbol] = False
+            success = close_position(symbol)
+            # 청산 후 다시 활성화
+            with tpsl_lock:
+                tpsl_check_active[symbol] = True
+            return success
+            
     else:  # 숏 포지션
         tp_price = entry_price * (1 - tp_pct)
         sl_price = entry_price * (1 + sl_pct)
@@ -313,17 +343,33 @@ def check_tpsl_conditions(symbol):
         if current_price <= tp_price:
             log_debug(f"🎯 TP 달성 ({symbol})", 
                      f"현재가: {current_price}, TP: {tp_price} ({tp_pct*100:.3f}%)")
-            return close_position(symbol)
+            # TP/SL 체크 일시 비활성화
+            with tpsl_lock:
+                tpsl_check_active[symbol] = False
+            success = close_position(symbol)
+            # 청산 후 다시 활성화
+            with tpsl_lock:
+                tpsl_check_active[symbol] = True
+            return success
+            
         elif current_price >= sl_price:
             log_debug(f"🛑 SL 달성 ({symbol})", 
                      f"현재가: {current_price}, SL: {sl_price} ({sl_pct*100:.3f}%)")
-            return close_position(symbol)
+            # TP/SL 체크 일시 비활성화
+            with tpsl_lock:
+                tpsl_check_active[symbol] = False
+            success = close_position(symbol)
+            # 청산 후 다시 활성화
+            with tpsl_lock:
+                tpsl_check_active[symbol] = True
+            return success
     
     return False
 
-# =================== 웹소켓 실시간 가격 모니터링 ===================
+# =================== 개선된 웹소켓 실시간 가격 모니터링 ===================
 async def price_listener():
-    """Gate.io 웹소켓으로 실시간 가격 수신 및 TP/SL 처리"""
+    """Gate.io 웹소켓으로 실시간 가격 수신 및 TP/SL 처리 - 개선된 버전"""
+    global websocket_connected
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     symbols = list(SYMBOL_CONFIG.keys())
     
@@ -332,6 +378,9 @@ async def price_listener():
             log_debug("🔌 웹소켓 연결 시도", f"URI: {uri}")
             
             async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as websocket:
+                with websocket_lock:
+                    websocket_connected = True
+                
                 # 구독 메시지 전송
                 subscribe_msg = {
                     "method": "ticker.subscribe",
@@ -340,6 +389,15 @@ async def price_listener():
                 }
                 await websocket.send(json.dumps(subscribe_msg))
                 log_debug("✅ 웹소켓 구독 완료", f"심볼: {symbols}")
+                
+                # TP/SL 체크 활성화
+                with tpsl_lock:
+                    for symbol in symbols:
+                        tpsl_check_active[symbol] = True
+                
+                last_tpsl_check = {}
+                for symbol in symbols:
+                    last_tpsl_check[symbol] = 0
                 
                 async for message in websocket:
                     try:
@@ -354,16 +412,27 @@ async def price_listener():
                                 price = Decimal(str(ticker_data.get("last", "0")))
                                 
                                 if price > 0:
+                                    current_time = time.time()
+                                    
                                     # 실시간 가격 저장
                                     with price_lock:
                                         real_time_prices[symbol] = {
                                             "price": price,
-                                            "timestamp": time.time()
+                                            "timestamp": current_time
                                         }
                                     
-                                    # 해당 심볼의 TP/SL 체크
-                                    if symbol in position_state:
-                                        check_tpsl_conditions(symbol)
+                                    # TP/SL 체크 (1초 간격으로 제한)
+                                    if (symbol in position_state and 
+                                        position_state[symbol].get("side") and
+                                        current_time - last_tpsl_check.get(symbol, 0) >= 1.0):
+                                        
+                                        last_tpsl_check[symbol] = current_time
+                                        
+                                        # 비동기적으로 TP/SL 체크 실행
+                                        try:
+                                            check_tpsl_conditions(symbol)
+                                        except Exception as e:
+                                            log_debug(f"❌ TP/SL 체크 오류 ({symbol})", str(e))
                         
                         # ping 응답
                         elif data.get("method") == "server.ping":
@@ -377,8 +446,44 @@ async def price_listener():
                         continue
                         
         except Exception as e:
+            with websocket_lock:
+                websocket_connected = False
+            
+            # TP/SL 체크 비활성화
+            with tpsl_lock:
+                for symbol in symbols:
+                    tpsl_check_active[symbol] = False
+            
             log_debug("❌ 웹소켓 연결 실패", f"{str(e)}, 10초 후 재연결")
             await asyncio.sleep(10)
+
+# =================== 백업 TP/SL 체크 시스템 ===================
+def backup_tpsl_monitor():
+    """웹소켓 실패시 백업 TP/SL 모니터링"""
+    while True:
+        try:
+            # 웹소켓이 연결되어 있으면 스킵
+            with websocket_lock:
+                if websocket_connected:
+                    time.sleep(10)
+                    continue
+            
+            log_debug("🔄 백업 TP/SL 체크", "웹소켓 연결 없음, 백업 모니터링 실행")
+            
+            for symbol in SYMBOL_CONFIG:
+                try:
+                    pos = position_state.get(symbol, {})
+                    if pos.get("side") and pos.get("entry_time"):
+                        check_tpsl_conditions(symbol)
+                        time.sleep(0.5)  # 500ms 간격
+                except Exception as e:
+                    log_debug(f"❌ 백업 TP/SL 체크 오류 ({symbol})", str(e))
+            
+            time.sleep(2)  # 2초마다 전체 체크
+            
+        except Exception as e:
+            log_debug("❌ 백업 TP/SL 모니터 오류", str(e))
+            time.sleep(10)
 
 # =================== 중복 방지 시스템 ===================
 def is_duplicate_alert(alert_data):
@@ -583,6 +688,9 @@ def update_position_state(symbol, timeout=5):
                     "value": Decimal("0"), "margin": Decimal("0"), 
                     "mode": "cross", "entry_time": None
                 }
+                # 포지션이 없으면 TP/SL 체크 비활성화
+                with tpsl_lock:
+                    tpsl_check_active[symbol] = False
                 return True
             else:
                 return False
@@ -610,12 +718,20 @@ def update_position_state(symbol, timeout=5):
                 "mode": "cross",
                 "entry_time": entry_time
             }
+            
+            # 포지션이 있으면 TP/SL 체크 활성화
+            with tpsl_lock:
+                tpsl_check_active[symbol] = True
+                
         else:
             position_state[symbol] = {
                 "price": None, "side": None, "size": Decimal("0"), 
                 "value": Decimal("0"), "margin": Decimal("0"), 
                 "mode": "cross", "entry_time": None
             }
+            # 포지션이 없으면 TP/SL 체크 비활성화
+            with tpsl_lock:
+                tpsl_check_active[symbol] = False
         return True
         
     except Exception as e:
@@ -632,6 +748,11 @@ def close_position(symbol):
         
     try:
         log_debug(f"🔄 청산 시도 ({symbol})", "포지션 청산 실행")
+        
+        # TP/SL 체크 일시 비활성화
+        with tpsl_lock:
+            tpsl_check_active[symbol] = False
+            
         api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
         log_debug(f"✅ 청산 완료 ({symbol})", "전체 포지션 청산")
         
@@ -647,6 +768,9 @@ def close_position(symbol):
         
     except Exception as e:
         log_debug(f"❌ 청산 실패 ({symbol})", str(e))
+        # 청산 실패시 TP/SL 체크 재활성화
+        with tpsl_lock:
+            tpsl_check_active[symbol] = True
         return False
     finally:
         position_lock.release()
@@ -868,18 +992,34 @@ def status():
                 elapsed_minutes = (time.time() - pos["entry_time"]) / 60
                 multipliers = get_tpsl_multipliers(symbol)
                 
+                # 현재 가격으로 TP/SL 가격 계산
+                current_price = get_real_time_price(symbol)
+                entry_price = pos["price"]
+                
+                if pos["side"] == "buy":
+                    tp_price = entry_price * (1 + tp)
+                    sl_price = entry_price * (1 - sl)
+                else:
+                    tp_price = entry_price * (1 - tp)
+                    sl_price = entry_price * (1 + sl)
+                
                 dynamic_tpsl_info[symbol] = {
                     "elapsed_minutes": round(elapsed_minutes, 1),
                     "current_tp_pct": tp * 100,
                     "current_sl_pct": sl * 100,
-                    "min_tp_pct": 0.25,  # 0.2% → 0.25%
-                    "min_sl_pct": 0.15,  # 0.1% → 0.15%
+                    "current_price": float(current_price),
+                    "entry_price": float(entry_price),
+                    "tp_price": float(tp_price),
+                    "sl_price": float(sl_price),
+                    "min_tp_pct": 0.25,
+                    "min_sl_pct": 0.15,
                     "multiplier": {
                         "tp": multipliers["tp"],
                         "sl": multipliers["sl"]
                     },
                     "initial_tp_pct": 0.5 * multipliers["tp"] * 100,
-                    "initial_sl_pct": 0.2 * multipliers["sl"] * 100
+                    "initial_sl_pct": 0.2 * multipliers["sl"] * 100,
+                    "tpsl_check_active": tpsl_check_active.get(symbol, False)
                 }
         
         # 실시간 가격 정보
@@ -893,24 +1033,31 @@ def status():
                     "is_fresh": age < 5
                 }
         
+        # TP/SL 체크 상태
+        with tpsl_lock:
+            tpsl_status = dict(tpsl_check_active)
+        
         return jsonify({
             "status": "running",
-            "mode": "live_trading_dynamic_tpsl_websocket",
+            "mode": "live_trading_dynamic_tpsl_websocket_improved",
             "timestamp": datetime.now().isoformat(),
             "margin_balance": float(equity),
             "positions": positions,
             "duplicate_prevention": duplicate_stats,
             "dynamic_tpsl_info": dynamic_tpsl_info,
             "real_time_prices": price_info,
-            "websocket_connected": len(real_time_prices) > 0,
+            "websocket_connected": websocket_connected,
+            "tpsl_check_status": tpsl_status,
             "features": {
                 "live_trading_only": True,
                 "pinescript_alerts": True,
-                "server_tpsl": True,  # TP/SL은 서버에서 자동 처리
+                "server_tpsl": True,
                 "dynamic_tpsl": True,
                 "websocket_prices": True,
+                "backup_tpsl_monitor": True,
                 "single_entry": True,
-                "enhanced_logging": True
+                "enhanced_logging": True,
+                "improved_tpsl_system": True
             }
         })
     except Exception as e:
@@ -956,6 +1103,65 @@ def clear_cache():
     log_debug("🗑️ 캐시 초기화", "모든 중복 방지 캐시가 초기화되었습니다")
     return jsonify({"status": "cache_cleared", "message": "중복 방지 캐시가 초기화되었습니다"})
 
+@app.route("/force-tpsl-check", methods=["POST"])
+def force_tpsl_check():
+    """수동 TP/SL 체크 트리거"""
+    try:
+        results = {}
+        for symbol in SYMBOL_CONFIG:
+            pos = position_state.get(symbol, {})
+            if pos.get("side") and pos.get("entry_time"):
+                try:
+                    result = check_tpsl_conditions(symbol)
+                    results[symbol] = {
+                        "checked": True,
+                        "triggered": result,
+                        "side": pos["side"],
+                        "entry_price": float(pos["price"]),
+                        "current_price": float(get_real_time_price(symbol))
+                    }
+                except Exception as e:
+                    results[symbol] = {
+                        "checked": False,
+                        "error": str(e)
+                    }
+            else:
+                results[symbol] = {
+                    "checked": False,
+                    "reason": "no_position"
+                }
+        
+        return jsonify({
+            "status": "completed",
+            "results": results,
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/tpsl-toggle/<symbol>", methods=["POST"])
+def toggle_tpsl_check(symbol):
+    """특정 심볼의 TP/SL 체크 활성화/비활성화"""
+    try:
+        if symbol not in SYMBOL_CONFIG:
+            return jsonify({"error": "Invalid symbol"}), 400
+        
+        with tpsl_lock:
+            current_status = tpsl_check_active.get(symbol, False)
+            tpsl_check_active[symbol] = not current_status
+            new_status = tpsl_check_active[symbol]
+        
+        log_debug(f"🔧 TP/SL 토글 ({symbol})", f"{current_status} → {new_status}")
+        
+        return jsonify({
+            "symbol": symbol,
+            "previous_status": current_status,
+            "new_status": new_status,
+            "message": f"TP/SL 체크가 {'활성화' if new_status else '비활성화'}되었습니다"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/dynamic-tpsl", methods=["GET"])
 def dynamic_tpsl_status():
     """동적 TP/SL 상태 조회"""
@@ -971,44 +1177,60 @@ def dynamic_tpsl_status():
                 
                 # 초기값 계산
                 multipliers = get_tpsl_multipliers(symbol)
-                initial_tp = 0.005 * multipliers["tp"]  # 0.5% 기준
-                initial_sl = 0.002 * multipliers["sl"]  # 0.2% 기준
+                initial_tp = 0.005 * multipliers["tp"]
+                initial_sl = 0.002 * multipliers["sl"]
                 
                 # 다음 변화 시점 계산
                 next_tp_change = math.ceil(elapsed_minutes - 10) + 10 if elapsed_minutes >= 10 else 10
                 next_sl_change = math.ceil((elapsed_minutes - 10) / 3) * 3 + 10 if elapsed_minutes >= 10 else 10
                 
+                # 현재 가격과 TP/SL 가격
+                current_price = get_real_time_price(symbol)
+                entry_price = pos["price"]
+                
+                if pos["side"] == "buy":
+                    tp_price = entry_price * (1 + tp_pct)
+                    sl_price = entry_price * (1 - sl_pct)
+                else:
+                    tp_price = entry_price * (1 - tp_pct)
+                    sl_price = entry_price * (1 + sl_pct)
+                
                 dynamic_info[symbol] = {
                     "side": pos["side"],
-                    "entry_price": float(pos["price"]),
+                    "entry_price": float(entry_price),
+                    "current_price": float(current_price),
+                    "tp_price": float(tp_price),
+                    "sl_price": float(sl_price),
                     "entry_time": datetime.fromtimestamp(entry_time).strftime('%Y-%m-%d %H:%M:%S'),
                     "elapsed_minutes": round(elapsed_minutes, 1),
                     "initial_tp_pct": initial_tp * 100,
                     "initial_sl_pct": initial_sl * 100,
                     "current_tp_pct": tp_pct * 100,
                     "current_sl_pct": sl_pct * 100,
-                    "min_tp_pct": 0.25,  # 0.2% → 0.25%
-                    "min_sl_pct": 0.15,  # 0.1% → 0.15%
+                    "min_tp_pct": 0.25,
+                    "min_sl_pct": 0.15,
                     "next_tp_change_at": next_tp_change,
                     "next_sl_change_at": next_sl_change,
-                    "tp_at_min": tp_pct <= 0.0025,  # 0.002 → 0.0025
-                    "sl_at_min": sl_pct <= 0.0015,  # 0.001 → 0.0015
+                    "tp_at_min": tp_pct <= 0.0025,
+                    "sl_at_min": sl_pct <= 0.0015,
                     "multiplier": {
                         "tp": multipliers["tp"],
                         "sl": multipliers["sl"]
-                    }
+                    },
+                    "tpsl_check_active": tpsl_check_active.get(symbol, False)
                 }
         
         return jsonify({
             "status": "success",
             "timestamp": datetime.now().isoformat(),
             "dynamic_tpsl_enabled": True,
+            "websocket_connected": websocket_connected,
             "positions_with_dynamic_tpsl": dynamic_info,
             "rules": {
                 "tp_reduction": "10분부터 1분마다 0.01%씩 감소",
                 "sl_reduction": "10분부터 3분마다 0.01%씩 감소",
-                "tp_minimum": "0.25%",  # 0.2% → 0.25%
-                "sl_minimum": "0.15%"   # 0.1% → 0.15%
+                "tp_minimum": "0.25%",
+                "sl_minimum": "0.15%"
             },
             "base_rates_enhanced": {
                 "tp_base": "0.5% (기존 0.4%에서 강화)",
@@ -1023,9 +1245,9 @@ def trading_info():
     """실거래 설정 정보 조회"""
     return jsonify({
         "trading_mode": "live_trading_only",
-        "tp_sl_handling": "server_automatic",
+        "tp_sl_handling": "server_automatic_improved",
         "entry_signals": "pinescript_alerts",
-        "exit_signals": "pinescript_signals_only",  # TP/SL은 서버에서 자동 처리
+        "exit_signals": "pinescript_signals_only",
         "symbol_multipliers": {
             "BTC_USDT": get_tpsl_multipliers("BTC_USDT"),
             "ETH_USDT": get_tpsl_multipliers("ETH_USDT"),
@@ -1033,15 +1255,21 @@ def trading_info():
             "others": get_tpsl_multipliers("ADA_USDT")
         },
         "base_rates": {
-            "tp_pct": 0.5,   # 강화된 기준: 0.4% → 0.5%
-            "sl_pct": 0.2    # 강화된 기준: 0.15% → 0.2%
+            "tp_pct": 0.5,
+            "sl_pct": 0.2
         },
         "dynamic_tpsl_rules": {
             "tp_reduction": "10분 후부터 1분마다 0.01%씩 감소",
             "sl_reduction": "10분 후부터 3분마다 0.01%씩 감소", 
-            "tp_minimum": "0.25%",  # 0.2% → 0.25%
-            "sl_minimum": "0.15%",  # 0.1% → 0.15%
+            "tp_minimum": "0.25%",
+            "sl_minimum": "0.15%",
             "initial_period": "10분간 초기값 유지"
+        },
+        "improvements": {
+            "websocket_monitoring": "실시간 가격 기반 TP/SL 체크",
+            "backup_monitoring": "웹소켓 실패시 백업 모니터링",
+            "race_condition_prevention": "TP/SL 체크 동기화",
+            "performance_optimization": "1초 간격 체크 제한"
         },
         "actual_tpsl_by_symbol": {
             "BTC_USDT": {"tp": "0.35%", "sl": "0.14%"},
@@ -1099,8 +1327,12 @@ if __name__ == "__main__":
     log_initial_status()
     
     # 웹소켓 실시간 가격 모니터링 시작
-    log_debug("🚀 웹소켓 시작", "동적 TP/SL 실시간 모니터링 스레드 시작")
+    log_debug("🚀 웹소켓 시작", "개선된 동적 TP/SL 실시간 모니터링 스레드 시작")
     threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
+    
+    # 백업 TP/SL 모니터링 시작
+    log_debug("🚀 백업 TP/SL 모니터 시작", "웹소켓 실패시 백업 TP/SL 체크 스레드 시작")
+    threading.Thread(target=backup_tpsl_monitor, daemon=True).start()
     
     # 백업 포지션 상태 갱신 시작
     log_debug("🚀 백업 루프 시작", "포지션 상태 갱신 스레드 시작")
@@ -1108,9 +1340,13 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🚀 서버 시작", 
-             f"포트 {port}에서 실행 (실거래 전용 + 강화된 동적 TP/SL + 웹소켓)\n"
-             f"✅ 강화된 동적 TP/SL: 서버에서 Gate.io 웹소켓 기준으로 자동 처리\n"
-             f"   📊 기준값 강화: TP 0.5% (기존 0.4%), SL 0.2% (기존 0.15%)\n"
+             f"포트 {port}에서 실행 (실거래 전용 + 개선된 동적 TP/SL + 웹소켓)\n"
+             f"✅ 개선된 동적 TP/SL 시스템:\n"
+             f"   🔧 웹소켓 기반 실시간 모니터링 (1초 간격 제한)\n"
+             f"   🛡️ 백업 모니터링 (웹소켓 실패시 자동 전환)\n"
+             f"   ⚡ Race Condition 방지 (동기화된 TP/SL 체크)\n"
+             f"   🎯 성능 최적화 (중복 체크 방지)\n"
+             f"   📊 기준값 강화: TP 0.5%, SL 0.2%\n"
              f"   🎯 4단계 가중치 시스템:\n"
              f"      - BTC: 70% (TP 0.35%, SL 0.14%) - 최고 안전성\n"
              f"      - ETH: 80% (TP 0.4%, SL 0.16%) - 높은 안전성\n"
@@ -1118,6 +1354,11 @@ if __name__ == "__main__":
              f"      - 기타: 100% (TP 0.5%, SL 0.2%) - 일반/고위험\n"
              f"   ⏰ 동적 감소: 10분 후 TP 1분마다, SL 3분마다 0.01%씩\n"
              f"   🛡️ 최소값: TP 0.25%, SL 0.15% (안전성 강화)\n"
+             f"✅ 신규 기능:\n"
+             f"   🔧 수동 TP/SL 체크 트리거 (/force-tpsl-check)\n"
+             f"   🎛️ 심볼별 TP/SL 토글 (/tpsl-toggle/<symbol>)\n"
+             f"   📊 실시간 TP/SL 상태 모니터링\n"
+             f"   🔄 개선된 동기화 및 오류 처리\n"
              f"✅ 진입신호: 파인스크립트 15초봉 극값 알림\n"
              f"✅ 청산신호: 파인스크립트 1분봉 시그널 알림 (TP/SL 제외)\n"
              f"✅ 진입 모드: 단일 진입 (역포지션시 청산 후 재진입)\n"
