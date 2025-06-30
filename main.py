@@ -226,42 +226,44 @@ def parse_simple_alert(message):
         log_debug("❌ 간단 메시지 파싱 실패", str(e))
     return None
 
-# =================== 동적 TP/SL 시스템 ===================
+# =================== 개선된 동적 TP/SL 시스템 ===================
 def get_tpsl_multipliers(symbol):
-    """심볼별 TP/SL 가중치 반환 (파인스크립트 기준값과 동일)"""
+    """심볼별 TP/SL 가중치 반환 (4단계 세분화)"""
     if symbol == "BTC_USDT":
-        return {"tp": 0.8, "sl": 0.8}
+        return {"tp": 0.7, "sl": 0.7}  # 가장 타이트 (안전성 최고)
     elif symbol == "ETH_USDT":
-        return {"tp": 0.9, "sl": 0.9}
+        return {"tp": 0.8, "sl": 0.8}  # 타이트 (높은 안전성)
+    elif symbol == "SOL_USDT":
+        return {"tp": 0.9, "sl": 0.9}  # 적당 (중간 안전성)
     else:
-        return {"tp": 1.0, "sl": 1.0}
+        return {"tp": 1.0, "sl": 1.0}  # 여유로움 (일반/고위험)
 
 def calculate_dynamic_tpsl(symbol, entry_time):
-    """실거래 전용 동적 TP/SL 계산"""
+    """실거래 전용 동적 TP/SL 계산 (강화된 기준값)"""
     if not entry_time:
         # 기본값 반환 (진입 시간이 없는 경우)
         multipliers = get_tpsl_multipliers(symbol)
-        return 0.004 * multipliers["tp"], 0.0015 * multipliers["sl"]
+        return 0.005 * multipliers["tp"], 0.002 * multipliers["sl"]
     
     elapsed_minutes = (time.time() - entry_time) / 60
     multipliers = get_tpsl_multipliers(symbol)
     
-    # 파인스크립트와 동일한 기준값
-    base_tp = 0.004 * multipliers["tp"]  # 기본 0.4%에 심볼별 가중치 적용
-    base_sl = 0.0015 * multipliers["sl"] # 기본 0.15%에 심볼별 가중치 적용
+    # 강화된 기준값 적용
+    base_tp = 0.005 * multipliers["tp"]  # 기본 0.5%에 심볼별 가중치 적용
+    base_sl = 0.002 * multipliers["sl"]  # 기본 0.2%에 심볼별 가중치 적용
     
     # 10분 전에는 초기값 유지
     if elapsed_minutes < 10:
         return base_tp, base_sl
     
     # 10분 후부터 동적 감소 (실거래 최적화)
-    # TP: 1분마다 0.01%씩 감소 → 최소 0.2%
+    # TP: 1분마다 0.01%씩 감소 → 최소 0.25%
     tp_reductions = int(elapsed_minutes - 10)
-    tp_pct = max(base_tp - (tp_reductions * 0.0001), 0.002)
+    tp_pct = max(base_tp - (tp_reductions * 0.0001), 0.0025)
     
-    # SL: 3분마다 0.01%씩 감소 → 최소 0.1%
+    # SL: 3분마다 0.01%씩 감소 → 최소 0.15%
     sl_reductions = int((elapsed_minutes - 10) / 3)
-    sl_pct = max(base_sl - (sl_reductions * 0.0001), 0.001)
+    sl_pct = max(base_sl - (sl_reductions * 0.0001), 0.0015)
     
     return tp_pct, sl_pct
 
@@ -864,12 +866,20 @@ def status():
             if pos.get("side") and pos.get("entry_time"):
                 tp, sl = calculate_dynamic_tpsl(symbol, pos["entry_time"])
                 elapsed_minutes = (time.time() - pos["entry_time"]) / 60
+                multipliers = get_tpsl_multipliers(symbol)
+                
                 dynamic_tpsl_info[symbol] = {
                     "elapsed_minutes": round(elapsed_minutes, 1),
                     "current_tp_pct": tp * 100,
                     "current_sl_pct": sl * 100,
-                    "min_tp_pct": 0.2,
-                    "min_sl_pct": 0.1
+                    "min_tp_pct": 0.25,  # 0.2% → 0.25%
+                    "min_sl_pct": 0.15,  # 0.1% → 0.15%
+                    "multiplier": {
+                        "tp": multipliers["tp"],
+                        "sl": multipliers["sl"]
+                    },
+                    "initial_tp_pct": 0.5 * multipliers["tp"] * 100,
+                    "initial_sl_pct": 0.2 * multipliers["sl"] * 100
                 }
         
         # 실시간 가격 정보
@@ -961,8 +971,8 @@ def dynamic_tpsl_status():
                 
                 # 초기값 계산
                 multipliers = get_tpsl_multipliers(symbol)
-                initial_tp = 0.004 * multipliers["tp"]
-                initial_sl = 0.0015 * multipliers["sl"]
+                initial_tp = 0.005 * multipliers["tp"]  # 0.5% 기준
+                initial_sl = 0.002 * multipliers["sl"]  # 0.2% 기준
                 
                 # 다음 변화 시점 계산
                 next_tp_change = math.ceil(elapsed_minutes - 10) + 10 if elapsed_minutes >= 10 else 10
@@ -977,12 +987,12 @@ def dynamic_tpsl_status():
                     "initial_sl_pct": initial_sl * 100,
                     "current_tp_pct": tp_pct * 100,
                     "current_sl_pct": sl_pct * 100,
-                    "min_tp_pct": 0.2,
-                    "min_sl_pct": 0.1,
+                    "min_tp_pct": 0.25,  # 0.2% → 0.25%
+                    "min_sl_pct": 0.15,  # 0.1% → 0.15%
                     "next_tp_change_at": next_tp_change,
                     "next_sl_change_at": next_sl_change,
-                    "tp_at_min": tp_pct <= 0.002,
-                    "sl_at_min": sl_pct <= 0.001,
+                    "tp_at_min": tp_pct <= 0.0025,  # 0.002 → 0.0025
+                    "sl_at_min": sl_pct <= 0.0015,  # 0.001 → 0.0015
                     "multiplier": {
                         "tp": multipliers["tp"],
                         "sl": multipliers["sl"]
@@ -997,8 +1007,12 @@ def dynamic_tpsl_status():
             "rules": {
                 "tp_reduction": "10분부터 1분마다 0.01%씩 감소",
                 "sl_reduction": "10분부터 3분마다 0.01%씩 감소",
-                "tp_minimum": "0.2%",
-                "sl_minimum": "0.1%"
+                "tp_minimum": "0.25%",  # 0.2% → 0.25%
+                "sl_minimum": "0.15%"   # 0.1% → 0.15%
+            },
+            "base_rates_enhanced": {
+                "tp_base": "0.5% (기존 0.4%에서 강화)",
+                "sl_base": "0.2% (기존 0.15%에서 강화)"
             }
         })
     except Exception as e:
@@ -1015,18 +1029,25 @@ def trading_info():
         "symbol_multipliers": {
             "BTC_USDT": get_tpsl_multipliers("BTC_USDT"),
             "ETH_USDT": get_tpsl_multipliers("ETH_USDT"),
+            "SOL_USDT": get_tpsl_multipliers("SOL_USDT"),
             "others": get_tpsl_multipliers("ADA_USDT")
         },
         "base_rates": {
-            "tp_pct": 0.004,  # 파인스크립트 기준값
-            "sl_pct": 0.0015  # 파인스크립트 기준값
+            "tp_pct": 0.5,   # 강화된 기준: 0.4% → 0.5%
+            "sl_pct": 0.2    # 강화된 기준: 0.15% → 0.2%
         },
         "dynamic_tpsl_rules": {
             "tp_reduction": "10분 후부터 1분마다 0.01%씩 감소",
             "sl_reduction": "10분 후부터 3분마다 0.01%씩 감소", 
-            "tp_minimum": "0.2%",
-            "sl_minimum": "0.1%",
+            "tp_minimum": "0.25%",  # 0.2% → 0.25%
+            "sl_minimum": "0.15%",  # 0.1% → 0.15%
             "initial_period": "10분간 초기값 유지"
+        },
+        "actual_tpsl_by_symbol": {
+            "BTC_USDT": {"tp": "0.35%", "sl": "0.14%"},
+            "ETH_USDT": {"tp": "0.4%", "sl": "0.16%"},
+            "SOL_USDT": {"tp": "0.45%", "sl": "0.18%"},
+            "others": {"tp": "0.5%", "sl": "0.2%"}
         },
         "compatibility": {
             "pinescript_version": "v5.0",
@@ -1085,11 +1106,16 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🚀 서버 시작", 
-             f"포트 {port}에서 실행 (실거래 전용 + 동적 TP/SL + 웹소켓)\n"
-             f"✅ 동적 TP/SL: 서버에서 Gate.io 웹소켓 기준으로 자동 처리\n"
-             f"   - TP: 10분부터 1분마다 0.01%씩 감소 → 최소 0.2%\n"
-             f"   - SL: 10분부터 3분마다 0.01%씩 감소 → 최소 0.1%\n"
-             f"   - BTC 가중치: 80%, ETH 가중치: 90%, 기타: 100%\n"
+             f"포트 {port}에서 실행 (실거래 전용 + 강화된 동적 TP/SL + 웹소켓)\n"
+             f"✅ 강화된 동적 TP/SL: 서버에서 Gate.io 웹소켓 기준으로 자동 처리\n"
+             f"   📊 기준값 강화: TP 0.5% (기존 0.4%), SL 0.2% (기존 0.15%)\n"
+             f"   🎯 4단계 가중치 시스템:\n"
+             f"      - BTC: 70% (TP 0.35%, SL 0.14%) - 최고 안전성\n"
+             f"      - ETH: 80% (TP 0.4%, SL 0.16%) - 높은 안전성\n"
+             f"      - SOL: 90% (TP 0.45%, SL 0.18%) - 중간 안전성\n"
+             f"      - 기타: 100% (TP 0.5%, SL 0.2%) - 일반/고위험\n"
+             f"   ⏰ 동적 감소: 10분 후 TP 1분마다, SL 3분마다 0.01%씩\n"
+             f"   🛡️ 최소값: TP 0.25%, SL 0.15% (안전성 강화)\n"
              f"✅ 진입신호: 파인스크립트 15초봉 극값 알림\n"
              f"✅ 청산신호: 파인스크립트 1분봉 시그널 알림 (TP/SL 제외)\n"
              f"✅ 진입 모드: 단일 진입 (역포지션시 청산 후 재진입)\n"
