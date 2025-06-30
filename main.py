@@ -1,6 +1,33 @@
-import os
+if __name__ == "__main__":
+    log_initial_status()
+    
+    # 🔥 Gate.io 실시간 가격 모니터링으로 동적 TP/SL 처리
+    log_debug("🚀 웹소켓 시작", "동적 TP/SL 실시간 모니터링 스레드 시작")
+    threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
+    
+    # 백업 포지션 상태 갱신
+    log_debug("🚀 백업 루프 시작", "포지션 상태 갱신 스레드 시작")
+    threading.Thread(target=backup_position_loop, daemon=True).start()
+    
+    port = int(os.environ.get("PORT", 8080))
+    log_debug("🚀 서버 시작", 
+             f"포트 {port}에서 실행 (단일 진입 + 동적 TP/SL)\n"
+             f"✅ 동적 TP/SL: 서버에서 Gate.io 가격 기준으로 처리\n"
+             f"   - TP: 10분부터 1분마다 0.01%씩 감소 → 최소 0.2%\n"
+             f"   - SL: 10분부터 3분마다 0.01%씩 감소 → 최소 0.1%\n"
+             f"   - BTC 가중치: 80%, ETH 가중치: 90%, 기타: 100%\n"
+             f"✅ 진입신호: 15초봉 극값 포착 (밸런스 조정)\n"
+             f"✅ 청산신호: 1분봉 안정화 + 파인스크립트 시그널\n"
+             f"✅ 진입 모드: 단일 진입 (역포지션시 청산 후 재진입)\n"
+             f"✅ 중복 방지: 완벽한 알림 시스템 연동\n"
+             f"✅ 심볼 매핑: 모든 형태 지원 (.P, PERP 등)\n"
+             f"✅ JSON 오류 수정: 강화된 파싱 시스템\n"
+             f"✅ 강화된 로깅: 모든 단계별 상세 로그")
+    
+    app.run(host="0.0.0.0", port=port, debug=False)import os
 import json
 import time
+import math
 import asyncio
 import threading
 import websockets
@@ -453,7 +480,7 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         position_lock.release()
 
 def update_position_state(symbol, timeout=5):
-    """포지션 상태 업데이트"""
+    """포지션 상태 업데이트 - 진입 시간 추가"""
     acquired = position_lock.acquire(timeout=timeout)
     if not acquired:
         return False
@@ -465,7 +492,8 @@ def update_position_state(symbol, timeout=5):
                 position_state[symbol] = {
                     "price": None, "side": None,
                     "size": Decimal("0"), "value": Decimal("0"),
-                    "margin": Decimal("0"), "mode": "cross"
+                    "margin": Decimal("0"), "mode": "cross",
+                    "entry_time": None
                 }
                 return True
             else:
@@ -477,19 +505,30 @@ def update_position_state(symbol, timeout=5):
             position_entry_price = Decimal(str(pos.entry_price))
             mark = Decimal(str(pos.mark_price))
             value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
+            
+            # 기존 진입 시간 유지 또는 새로 설정
+            existing_entry_time = position_state.get(symbol, {}).get("entry_time")
+            if not existing_entry_time:
+                entry_time = time.time()  # 새 포지션
+                log_debug(f"🕐 진입 시간 설정 ({symbol})", f"새 포지션 진입 시간: {datetime.fromtimestamp(entry_time).strftime('%H:%M:%S')}")
+            else:
+                entry_time = existing_entry_time  # 기존 포지션 시간 유지
+            
             position_state[symbol] = {
                 "price": position_entry_price,
                 "side": "buy" if size > 0 else "sell",
                 "size": abs(size),
                 "value": value,
                 "margin": value,
-                "mode": "cross"
+                "mode": "cross",
+                "entry_time": entry_time
             }
         else:
             position_state[symbol] = {
                 "price": None, "side": None,
                 "size": Decimal("0"), "value": Decimal("0"), 
-                "margin": Decimal("0"), "mode": "cross"
+                "margin": Decimal("0"), "mode": "cross",
+                "entry_time": None
             }
         return True
     except Exception as e:
@@ -793,14 +832,30 @@ def status():
                 } for k, v in recent_signals.items()}
             }
         
+        # 동적 TP/SL 정보
+        dynamic_tpsl_info = {}
+        for symbol in SYMBOL_CONFIG:
+            pos = position_state.get(symbol, {})
+            if pos.get("side") and pos.get("entry_time"):
+                tp, sl = calculate_dynamic_tpsl(symbol, pos["entry_time"])
+                elapsed_minutes = (time.time() - pos["entry_time"]) / 60
+                dynamic_tpsl_info[symbol] = {
+                    "elapsed_minutes": round(elapsed_minutes, 1),
+                    "current_tp_pct": tp * 100,
+                    "current_sl_pct": sl * 100,
+                    "min_tp_pct": 0.2,
+                    "min_sl_pct": 0.1
+                }
+        
         return jsonify({
             "status": "running",
-            "mode": "pinescript_single_entry",
+            "mode": "pinescript_single_entry_dynamic_tpsl",
             "timestamp": datetime.now().isoformat(),
             "margin_balance": float(equity),
             "positions": positions,
             "duplicate_prevention": duplicate_stats,
             "symbol_mappings": SYMBOL_MAPPING,
+            "dynamic_tpsl_info": dynamic_tpsl_info,
             "pinescript_features": {
                 "perfect_alerts": True,
                 "future_prediction": True,
@@ -808,7 +863,8 @@ def status():
                 "pyramiding": 1,
                 "entry_timeframe": "15S",
                 "exit_timeframe": "1M",
-                "tp_sl_managed_by_pinescript": True,
+                "tp_sl_managed_by_server": True,
+                "dynamic_tpsl": True,
                 "enhanced_logging": True
             }
         })
@@ -855,6 +911,64 @@ def clear_cache():
         recent_signals.clear()
     log_debug("🗑️ 캐시 초기화", "모든 중복 방지 캐시가 초기화되었습니다")
     return jsonify({"status": "cache_cleared", "message": "중복 방지 캐시가 초기화되었습니다"})
+
+@app.route("/dynamic-tpsl", methods=["GET"])
+def dynamic_tpsl_status():
+    """동적 TP/SL 상태 조회"""
+    try:
+        dynamic_info = {}
+        
+        for symbol in SYMBOL_CONFIG:
+            pos = position_state.get(symbol, {})
+            if pos.get("side") and pos.get("entry_time"):
+                entry_time = pos["entry_time"]
+                elapsed_minutes = (time.time() - entry_time) / 60
+                tp_pct, sl_pct = calculate_dynamic_tpsl(symbol, entry_time)
+                
+                # 초기값 계산
+                multipliers = get_tpsl_multipliers(symbol)
+                initial_tp = 0.004 * multipliers["tp"]
+                initial_sl = 0.0015 * multipliers["sl"]
+                
+                # 다음 변화 시점 계산
+                next_tp_change = math.ceil(elapsed_minutes - 10) + 10 if elapsed_minutes >= 10 else 10
+                next_sl_change = math.ceil((elapsed_minutes - 10) / 3) * 3 + 10 if elapsed_minutes >= 10 else 10
+                
+                dynamic_info[symbol] = {
+                    "side": pos["side"],
+                    "entry_price": float(pos["price"]),
+                    "entry_time": datetime.fromtimestamp(entry_time).strftime('%Y-%m-%d %H:%M:%S'),
+                    "elapsed_minutes": round(elapsed_minutes, 1),
+                    "initial_tp_pct": initial_tp * 100,
+                    "initial_sl_pct": initial_sl * 100,
+                    "current_tp_pct": tp_pct * 100,
+                    "current_sl_pct": sl_pct * 100,
+                    "min_tp_pct": 0.2,
+                    "min_sl_pct": 0.1,
+                    "next_tp_change_at": next_tp_change,
+                    "next_sl_change_at": next_sl_change,
+                    "tp_at_min": tp_pct >= 0.002,
+                    "sl_at_min": sl_pct >= 0.001,
+                    "multiplier": {
+                        "tp": multipliers["tp"],
+                        "sl": multipliers["sl"]
+                    }
+                }
+        
+        return jsonify({
+            "status": "success",
+            "timestamp": datetime.now().isoformat(),
+            "dynamic_tpsl_enabled": True,
+            "positions_with_dynamic_tpsl": dynamic_info,
+            "rules": {
+                "tp_reduction": "10분부터 1분마다 0.01%씩 감소",
+                "sl_reduction": "10분부터 3분마다 0.01%씩 감소",
+                "tp_minimum": "0.2%",
+                "sl_minimum": "0.1%"
+            }
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 def backup_position_loop():
     """백업 포지션 상태 갱신"""
