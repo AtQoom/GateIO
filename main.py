@@ -1057,6 +1057,8 @@ def trading_info():
             "symbol_mapping": "auto_detected"
         }
     })
+
+@app.route("/prices", methods=["GET"])
 def get_current_prices():
     """현재 가격 조회"""
     try:
