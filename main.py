@@ -381,8 +381,10 @@ def get_current_position_count(symbol):
 
 def calculate_position_size(symbol, strategy_type="standard"):
     """
-    순자산(Account Equity) 기반으로 포지션 크기 계산 (단일 진입)
-    파인스크립트의 default_qty_value=100 (순자산 100%) 반영
+    순자산(Account Equity) 기반으로 포지션 크기 계산 (전략별 차등 적용)
+    🔥 5분 전략: 2배 수량 (최고 신뢰도)
+    🔥 3분 전략: 1배 수량 (기본)
+    🔥 백업 전략: 0.5배 수량 (보조)
     """
     cfg = SYMBOL_CONFIG[symbol]
     
@@ -395,13 +397,23 @@ def calculate_position_size(symbol, strategy_type="standard"):
         return Decimal("0")
     
     try:
-        # 2. 전략별 포지션 크기 조정
-        if "backup" in strategy_type.lower():
-            # 백업 전략은 50% 규모로 진입
-            position_ratio = Decimal("0.5")
-        else:
-            # 메인 전략은 순자산 100% 사용 (파인스크립트와 동일)
+        # 2. 🔥 전략별 포지션 크기 조정 (업데이트됨)
+        if "5m" in strategy_type.lower():
+            # 🔥 5분 전략: 2배 수량 (5분-3분-15초 삼중 확인이므로 매우 확실)
+            position_ratio = Decimal("2.0")
+            log_debug(f"🔥 5분 전략 감지 ({symbol})", "2배 수량 적용 (최고 신뢰도)")
+        elif "3m" in strategy_type.lower():
+            # 3분 전략: 기본 수량 (3분-15초 이중 확인)
             position_ratio = Decimal("1.0")
+            log_debug(f"📊 3분 전략 감지 ({symbol})", "기본 수량 적용 (중간 신뢰도)")
+        elif "backup" in strategy_type.lower():
+            # 백업 전략: 50% 수량 (보조 전략)
+            position_ratio = Decimal("0.5")
+            log_debug(f"⚠️ 백업 전략 감지 ({symbol})", "50% 수량 적용 (낮은 신뢰도)")
+        else:
+            # 기본값
+            position_ratio = Decimal("1.0")
+            log_debug(f"🔧 기본 전략 ({symbol})", "표준 수량 적용")
         
         # 3. 조정된 순자산으로 수량 계산
         adjusted_equity = equity * position_ratio
@@ -417,12 +429,13 @@ def calculate_position_size(symbol, strategy_type="standard"):
             log_debug(f"⛔ 최소 주문 금액 미달 ({symbol})", f"{order_value} < {cfg['min_notional']} USDT")
             return Decimal("0")
         
-        # 6. 로깅
+        # 6. 🔥 전략별 상세 로깅
         current_count = get_current_position_count(symbol)
-        log_debug(f"📊 수량 계산 ({symbol})", 
-                 f"순자산: {equity} USDT, 사용비율: {position_ratio*100}%, "
-                 f"가격: {price}, 수량: {final_qty}, 투자금액: {order_value:.2f} USDT, "
-                 f"현재 포지션: {current_count}/1")
+        log_debug(f"📊 수량 계산 완료 ({symbol})", 
+                 f"전략: {strategy_type}, 순자산: {equity} USDT, "
+                 f"배수: {position_ratio}x, 조정순자산: {adjusted_equity} USDT, "
+                 f"가격: {price}, 최종수량: {final_qty}, "
+                 f"투자금액: {order_value:.2f} USDT, 현재포지션: {current_count}/1")
         
         return final_qty
         
@@ -741,10 +754,27 @@ def webhook():
                 "tpsl_multipliers": multipliers
             })
         
-        # === 🔥 단일 진입 신호 처리 (심볼별 TP/SL) ===
+        # === 🔥 전략별 진입 신호 처리 (5분-3분-15초 추가) ===
         if action == "entry" and side in ["long", "short"]:
-            log_debug(f"🎯 단일 진입 신호 처리 시작 ({symbol})", 
-                     f"{side} 방향, 전략: {strategy_name}, TP/SL: {multipliers}")
+            log_debug(f"🎯 진입 신호 처리 시작 ({symbol})", 
+                     f"{side} 방향, 전략: {strategy_name}")
+            
+            # 🔥 전략 타입 분석
+            if "5M_" in strategy_name.upper():
+                strategy_display = "🔥 5분 전략 (2배 수량)"
+                strategy_priority = "HIGH"
+            elif "3M_" in strategy_name.upper():
+                strategy_display = "📊 3분 전략 (기본 수량)"
+                strategy_priority = "MEDIUM"
+            elif "BACKUP_" in strategy_name.upper():
+                strategy_display = "⚠️ 백업 전략 (50% 수량)"
+                strategy_priority = "LOW"
+            else:
+                strategy_display = "🔧 표준 전략 (기본 수량)"
+                strategy_priority = "MEDIUM"
+            
+            log_debug(f"📈 전략 분석 ({symbol})", 
+                     f"타입: {strategy_display}, 우선순위: {strategy_priority}")
             
             if not update_position_state(symbol, timeout=1):
                 log_debug(f"❌ 포지션 상태 조회 실패 ({symbol})", "")
@@ -771,11 +801,11 @@ def webhook():
                     if not update_position_state(symbol):
                         log_debug("❌ 역포지션 후 상태 갱신 실패", "")
             
-            # 수량 계산
+            # 🔥 전략별 수량 계산
             log_debug(f"🧮 수량 계산 시작 ({symbol})", f"전략: {strategy_name}")
             qty = calculate_position_size(symbol, strategy_name)
             log_debug(f"🧮 수량 계산 완료 ({symbol})", 
-                     f"{qty} 계약 (전략: {strategy_name}, 단일 진입)")
+                     f"{qty} 계약 ({strategy_display})")
             
             if qty <= 0:
                 log_debug("❌ 수량 오류", f"계산된 수량: {qty}")
@@ -789,7 +819,7 @@ def webhook():
                 mark_alert_processed(alert_id)
             
             log_debug(f"📨 최종 결과 ({symbol})", 
-                     f"주문 성공: {success}, 전략: {strategy_name}, 단일 진입")
+                     f"주문 성공: {success}, {strategy_display}")
             
             return jsonify({
                 "status": "success" if success else "error", 
@@ -798,6 +828,8 @@ def webhook():
                 "side": side,
                 "qty": float(qty),
                 "strategy": strategy_name,
+                "strategy_display": strategy_display,
+                "strategy_priority": strategy_priority,
                 "entry_mode": "single",
                 "max_positions": 1,
                 "tpsl_multipliers": multipliers
@@ -881,7 +913,7 @@ def status():
         
         return jsonify({
             "status": "running",
-            "mode": "pinescript_single_entry_weighted_tpsl",
+            "mode": "pinescript_5m3m15s_enhanced_strategy",
             "timestamp": datetime.now().isoformat(),
             "margin_balance": float(equity),
             "positions": positions,
@@ -891,7 +923,12 @@ def status():
             "pinescript_features": {
                 "perfect_alerts": True,
                 "future_prediction": True,
-                "backup_signals": True,
+                "enhanced_5m_strategy": True,
+                "strategy_levels": {
+                    "5m_strategy": {"multiplier": 2.0, "priority": "HIGH", "description": "5분-3분-15초 삼중확인"},
+                    "3m_strategy": {"multiplier": 1.0, "priority": "MEDIUM", "description": "3분-15초 이중확인"},
+                    "backup": {"multiplier": 0.5, "priority": "LOW", "description": "백업전략"}
+                },
                 "pyramiding": 1,
                 "entry_timeframe": "15S",
                 "exit_timeframe": "1M",
