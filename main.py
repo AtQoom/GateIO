@@ -1331,5 +1331,4 @@ if __name__ == "__main__":
     log_debug("✅ 실거래 전용", "백테스트 불가 (알림 기반)")
     log_debug("✅ 완전 자동화", "사용자 개입 없는 TP/SL 실행")
     
-    app.run(host="0.0.0.0", port=port, debug=False)L 모니터링 시작
-    log_debug("🚀 백업 TP/S
+    app.run(host="0.0.0.0", port=port, debug=False)
