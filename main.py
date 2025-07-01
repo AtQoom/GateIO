@@ -395,27 +395,28 @@ async def price_listener():
                                 if price > 0:
                                     current_time = time.time()
                                     
-                                    # 실시간 가격 저장
+                                    # 실시간 가격 저장 (모든 심볼)
                                     with price_lock:
                                         real_time_prices[symbol] = {
                                             "price": price,
                                             "timestamp": current_time
                                         }
                                     
-                                    # TP/SL 체크 (1초 간격 - 포지션 보유시만)
-                                    if (symbol in position_state and 
-                                        position_state[symbol].get("side") and
-                                        current_time - last_tpsl_check.get(symbol, 0) >= 1.0):
-                                        
+                                    # TP/SL 체크 (1초 간격 - 포지션이 있는 심볼만 실제 체크)
+                                    if current_time - last_tpsl_check.get(symbol, 0) >= 1.0:
                                         last_tpsl_check[symbol] = current_time
                                         
-                                        # 비동기적으로 TP/SL 체크 실행
-                                        try:
-                                            triggered = check_tpsl_conditions(symbol)
-                                            if triggered:
-                                                log_debug(f"✅ TP/SL 트리거 ({symbol})", "자동 청산 완료")
-                                        except Exception as e:
-                                            log_debug(f"❌ TP/SL 체크 오류 ({symbol})", str(e))
+                                        # 포지션이 있으면 TP/SL 체크 실행
+                                        if (symbol in position_state and 
+                                            position_state[symbol].get("side") and
+                                            position_state[symbol].get("entry_time")):
+                                            
+                                            try:
+                                                triggered = check_tpsl_conditions(symbol)
+                                                if triggered:
+                                                    log_debug(f"✅ TP/SL 트리거 ({symbol})", "자동 청산 완료")
+                                            except Exception as e:
+                                                log_debug(f"❌ TP/SL 체크 오류 ({symbol})", str(e))
                         
                         # ping 응답
                         elif data.get("method") == "server.ping":
