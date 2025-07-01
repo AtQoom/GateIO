@@ -413,8 +413,74 @@ def calculate_position_size(symbol, strategy_type="standard"):
         log_debug(f"❌ 수량 계산 오류 ({symbol})", str(e), exc_info=True)
         return Decimal("0")
 
+def set_tp_sl_orders(symbol, side, entry_price, qty):
+    """TP/SL 주문 설정 (진입 후 즉시 실행)"""
+    try:
+        # 심볼별 TP/SL 가중치 적용
+        multipliers = get_tpsl_multipliers(symbol)
+        base_tp_pct = 0.004  # 0.4%
+        base_sl_pct = 0.0015  # 0.15%
+        
+        tp_pct = base_tp_pct * multipliers["tp"]
+        sl_pct = base_sl_pct * multipliers["sl"]
+        
+        if side == "buy":
+            # 롱 포지션: TP는 위로, SL은 아래로
+            tp_price = entry_price * (1 + tp_pct)
+            sl_price = entry_price * (1 - sl_pct)
+            tp_size = -float(qty)  # 매도로 청산
+            sl_size = -float(qty)  # 매도로 청산
+        else:
+            # 숏 포지션: TP는 아래로, SL은 위로
+            tp_price = entry_price * (1 - tp_pct)
+            sl_price = entry_price * (1 + sl_pct)
+            tp_size = float(qty)   # 매수로 청산
+            sl_size = float(qty)   # 매수로 청산
+        
+        log_debug(f"🎯 TP/SL 설정 시작 ({symbol})", 
+                 f"{side.upper()}, 진입가: {entry_price}, TP: {tp_price:.4f} ({tp_pct*100:.2f}%), SL: {sl_price:.4f} ({sl_pct*100:.2f}%)")
+        
+        # TP 주문 생성 (지정가 주문)
+        tp_order = FuturesOrder(
+            contract=symbol, 
+            size=tp_size, 
+            price=str(tp_price), 
+            tif="gtc", 
+            reduce_only=True
+        )
+        
+        # SL 주문 생성 (스톱 주문)
+        sl_order = FuturesOrder(
+            contract=symbol, 
+            size=sl_size, 
+            price=str(sl_price), 
+            tif="gtc", 
+            reduce_only=True
+        )
+        
+        # TP 주문 실행
+        try:
+            api.create_futures_order(SETTLE, tp_order)
+            log_debug(f"✅ TP 주문 성공 ({symbol})", f"가격: {tp_price:.4f}, 수량: {tp_size}")
+        except Exception as e:
+            log_debug(f"❌ TP 주문 실패 ({symbol})", f"오류: {str(e)}")
+        
+        # SL 주문 실행 (0.5초 후)
+        time.sleep(0.5)
+        try:
+            api.create_futures_order(SETTLE, sl_order)
+            log_debug(f"✅ SL 주문 성공 ({symbol})", f"가격: {sl_price:.4f}, 수량: {sl_size}")
+        except Exception as e:
+            log_debug(f"❌ SL 주문 실패 ({symbol})", f"오류: {str(e)}")
+            
+        return True
+        
+    except Exception as e:
+        log_debug(f"❌ TP/SL 설정 실패 ({symbol})", str(e), exc_info=True)
+        return False
+
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
-    """주문 실행 (단일 진입)"""
+    """주문 실행 (단일 진입) + TP/SL 자동 설정"""
     acquired = position_lock.acquire(timeout=5)
     if not acquired:
         log_debug(f"⚠️ 주문 락 실패 ({symbol})", "타임아웃")
@@ -442,8 +508,18 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         log_debug(f"📤 주문 시도 ({symbol})", 
                  f"{side.upper()} {float(qty_dec)} 계약, 주문금액: {order_value:.2f} USDT")
         
-        api.create_futures_order(SETTLE, order)
-        log_debug(f"✅ 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약")
+        # 메인 진입 주문 실행
+        result = api.create_futures_order(SETTLE, order)
+        log_debug(f"✅ 진입 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약")
+        
+        # 진입 성공 후 즉시 TP/SL 설정 (reduce_only가 아닐 때만)
+        if not reduce_only:
+            time.sleep(1)  # 진입 주문 처리 대기
+            entry_price = price  # 현재 가격을 진입가로 사용
+            
+            # TP/SL 주문 설정
+            log_debug(f"🔄 TP/SL 설정 시작 ({symbol})", "진입 완료 후 자동 설정")
+            set_tp_sl_orders(symbol, side, entry_price, qty_dec)
         
         time.sleep(2)
         update_position_state(symbol)
@@ -511,13 +587,25 @@ def update_position_state(symbol, timeout=5):
         position_lock.release()
 
 def close_position(symbol):
-    """포지션 청산 - 파인스크립트가 청산 신호를 보낼 때만 실행"""
+    """포지션 청산 - 파인스크립트가 청산 신호를 보낼 때만 실행 + 기존 TP/SL 주문 취소"""
     acquired = position_lock.acquire(timeout=5)
     if not acquired:
         log_debug(f"⚠️ 청산 락 실패 ({symbol})", "타임아웃")
         return False
     try:
         log_debug(f"🔄 청산 시도 ({symbol})", "파인스크립트 신호에 의한 청산")
+        
+        # 1. 기존 TP/SL 주문들 취소
+        try:
+            orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
+            for order in orders:
+                if order.reduce_only:  # TP/SL 주문은 reduce_only=True
+                    api.cancel_futures_order(SETTLE, order.id)
+                    log_debug(f"✅ TP/SL 주문 취소 ({symbol})", f"주문ID: {order.id}")
+        except Exception as e:
+            log_debug(f"⚠️ TP/SL 주문 취소 실패 ({symbol})", str(e))
+        
+        # 2. 포지션 청산
         api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
         log_debug(f"✅ 청산 완료 ({symbol})", "전체 포지션 청산")
         
@@ -908,6 +996,36 @@ def test_symbol_mapping(symbol):
         "all_mappings": {k: v for k, v in SYMBOL_MAPPING.items() if k.startswith(symbol.upper()[:3])}
     })
 
+@app.route("/cancel-orders/<symbol>", methods=["POST"])
+def cancel_symbol_orders(symbol):
+    """특정 심볼의 모든 열린 주문 취소"""
+    try:
+        normalized_symbol = normalize_symbol(symbol)
+        if not normalized_symbol:
+            return jsonify({"error": f"Invalid symbol: {symbol}"}), 400
+            
+        orders = api.list_futures_orders(SETTLE, contract=normalized_symbol, status="open")
+        cancelled_count = 0
+        
+        for order in orders:
+            try:
+                api.cancel_futures_order(SETTLE, order.id)
+                cancelled_count += 1
+                log_debug(f"✅ 주문 취소 ({normalized_symbol})", f"ID: {order.id}, 가격: {order.price}")
+            except Exception as e:
+                log_debug(f"❌ 주문 취소 실패 ({normalized_symbol})", f"ID: {order.id}, 오류: {str(e)}")
+        
+        return jsonify({
+            "status": "success",
+            "symbol": normalized_symbol,
+            "cancelled_orders": cancelled_count,
+            "message": f"{cancelled_count}개 주문이 취소되었습니다"
+        })
+        
+    except Exception as e:
+        log_debug(f"❌ 주문 취소 실패 ({symbol})", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 @app.route("/clear-cache", methods=["POST"])
 def clear_cache():
     """중복 방지 캐시 초기화"""
@@ -935,15 +1053,18 @@ if __name__ == "__main__":
     threading.Thread(target=backup_position_loop, daemon=True).start()
     
     port = int(os.environ.get("PORT", 8080))
-    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (수정된 가중치 TP/SL)")
+    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (TP/SL 자동 설정)")
     log_debug("✅ TP/SL 가중치", "BTC 70%, ETH 80%, SOL 90%, 기타 100%")
     log_debug("✅ 기본 TP/SL", "TP 0.4%, SL 0.15%")
     log_debug("✅ 실제 TP/SL", "BTC 0.28%/0.105%, ETH 0.32%/0.12%, SOL 0.36%/0.135%")
+    log_debug("✅ 자동 TP/SL", "진입 즉시 TP/SL 주문 자동 설정")
     log_debug("✅ 진입신호", "파인스크립트 15초봉 극값 알림")
-    log_debug("✅ 청산신호", "파인스크립트 1분봉 시그널 알림")
+    log_debug("✅ 청산신호", "파인스크립트 1분봉 시그널 알림 + 자동 TP/SL")
     log_debug("✅ 진입 모드", "단일 진입 (Pyramiding=1)")
     log_debug("✅ 중복 방지", "완벽한 알림 시스템 연동")
     log_debug("✅ 심볼 매핑", "모든 형태 지원 (.P, PERP 등)")
     log_debug("✅ 실거래 전용", "백테스트 불가 (알림 기반)")
+    log_debug("🎯 새로운 기능", "GET /orders/<symbol> - 주문 조회")
+    log_debug("🎯 새로운 기능", "POST /cancel-orders/<symbol> - 주문 취소")
     
     app.run(host="0.0.0.0", port=port, debug=False)
