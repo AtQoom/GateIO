@@ -86,13 +86,13 @@ SYMBOL_MAPPING = {
     "PEPE_USDT": "PEPE_USDT",
 }
 
-# 🔥 심볼별 TP/SL 가중치 설정
+# 🔥 심볼별 TP/SL 가중치 설정 (수정됨)
 def get_tpsl_multipliers(symbol):
     """심볼별 TP/SL 가중치 반환"""
     if symbol == "BTC_USDT":
-        return {"tp": 0.8, "sl": 0.8}    # BTC: 80%
+        return {"tp": 0.7, "sl": 0.7}    # BTC: 70%
     elif symbol == "ETH_USDT":
-        return {"tp": 0.85, "sl": 0.85}  # ETH: 85%
+        return {"tp": 0.8, "sl": 0.8}    # ETH: 80%
     elif symbol == "SOL_USDT":
         return {"tp": 0.9, "sl": 0.9}    # SOL: 90%
     else:
@@ -935,10 +935,10 @@ if __name__ == "__main__":
     threading.Thread(target=backup_position_loop, daemon=True).start()
     
     port = int(os.environ.get("PORT", 8080))
-    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (예전 방식 + 가중치 TP/SL)")
-    log_debug("✅ TP/SL 가중치", "BTC 80%, ETH 85%, SOL 90%, 기타 100%")
+    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (수정된 가중치 TP/SL)")
+    log_debug("✅ TP/SL 가중치", "BTC 70%, ETH 80%, SOL 90%, 기타 100%")
     log_debug("✅ 기본 TP/SL", "TP 0.4%, SL 0.15%")
-    log_debug("✅ 실제 TP/SL", "BTC 0.32%/0.12%, ETH 0.34%/0.128%, SOL 0.36%/0.135%")
+    log_debug("✅ 실제 TP/SL", "BTC 0.28%/0.105%, ETH 0.32%/0.12%, SOL 0.36%/0.135%")
     log_debug("✅ 진입신호", "파인스크립트 15초봉 극값 알림")
     log_debug("✅ 청산신호", "파인스크립트 1분봉 시그널 알림")
     log_debug("✅ 진입 모드", "단일 진입 (Pyramiding=1)")
