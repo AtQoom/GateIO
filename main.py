@@ -58,7 +58,7 @@ SYMBOL_MAPPING = {
     "SOLUSDT": "SOL_USDT",
     "PEPEUSDT": "PEPE_USDT",
     
-    # .P 형태 (영구선물) - 🔥 핵심 추가
+    # .P 형태 (영구선물)
     "BTCUSDT.P": "BTC_USDT",
     "ETHUSDT.P": "ETH_USDT", 
     "ADAUSDT.P": "ADA_USDT",
@@ -76,7 +76,7 @@ SYMBOL_MAPPING = {
     "SOLUSDTPERP": "SOL_USDT",
     "PEPEUSDTPERP": "PEPE_USDT",
     
-    # 🔥 추가 형태들
+    # 언더스코어 형태
     "BTC_USDT": "BTC_USDT",
     "ETH_USDT": "ETH_USDT",
     "ADA_USDT": "ADA_USDT",
@@ -86,11 +86,11 @@ SYMBOL_MAPPING = {
     "PEPE_USDT": "PEPE_USDT",
 }
 
-# 🔥 심볼별 TP/SL 배수 설정 (수정됨: BTC 70%, ETH 80%, SOL 90%)
+# 🔥 심볼별 TP/SL 배수 설정
 SYMBOL_TPSL_MULTIPLIERS = {
-    "BTC_USDT": {"tp": 0.7, "sl": 0.7},    # BTC: 70% (80%에서 수정)
-    "ETH_USDT": {"tp": 0.8, "sl": 0.8},    # ETH: 80% (90%에서 수정)
-    "SOL_USDT": {"tp": 0.9, "sl": 0.9},    # SOL: 90% (유지)
+    "BTC_USDT": {"tp": 0.7, "sl": 0.7},    # BTC: 70%
+    "ETH_USDT": {"tp": 0.8, "sl": 0.8},    # ETH: 80%
+    "SOL_USDT": {"tp": 0.9, "sl": 0.9},    # SOL: 90%
     # 기타 심볼은 기본값 (100%) 사용
 }
 
@@ -102,7 +102,7 @@ def parse_simple_alert(message):
     """간단한 파이프 구분 메시지 파싱"""
     try:
         if message.startswith("ENTRY:"):
-            # ENTRY:long|BTCUSDT|Hybrid_LONG|50000|1
+            # ENTRY:long|BTCUSDT|5M_LONG|50000|1
             parts = message.split("|")
             if len(parts) >= 5:
                 return {
@@ -132,16 +132,15 @@ def parse_simple_alert(message):
     return None
 
 def normalize_symbol(raw_symbol):
-    """🔥 강화된 심볼 정규화 - 다양한 형태를 표준 형태로 변환"""
+    """🔥 강화된 심볼 정규화"""
     if not raw_symbol:
         log_debug("❌ 심볼 정규화", "입력 심볼이 비어있음")
         return None
     
-    # 대문자로 변환하고 공백 제거
     symbol = str(raw_symbol).upper().strip()
     log_debug("🔍 심볼 정규화 시작", f"원본: '{raw_symbol}' -> 정리: '{symbol}'")
     
-    # 직접 매핑이 있으면 사용
+    # 직접 매핑
     if symbol in SYMBOL_MAPPING:
         result = SYMBOL_MAPPING[symbol]
         log_debug("✅ 직접 매핑 성공", f"'{symbol}' -> '{result}'")
@@ -150,7 +149,6 @@ def normalize_symbol(raw_symbol):
     # .P 제거 시도
     if symbol.endswith('.P'):
         base_symbol = symbol[:-2]
-        log_debug("🔍 .P 제거 시도", f"'{symbol}' -> '{base_symbol}'")
         if base_symbol in SYMBOL_MAPPING:
             result = SYMBOL_MAPPING[base_symbol]
             log_debug("✅ .P 제거 후 매핑 성공", f"'{base_symbol}' -> '{result}'")
@@ -159,7 +157,6 @@ def normalize_symbol(raw_symbol):
     # PERP 제거 시도
     if symbol.endswith('PERP'):
         base_symbol = symbol[:-4]
-        log_debug("🔍 PERP 제거 시도", f"'{symbol}' -> '{base_symbol}'")
         if base_symbol in SYMBOL_MAPPING:
             result = SYMBOL_MAPPING[base_symbol]
             log_debug("✅ PERP 제거 후 매핑 성공", f"'{base_symbol}' -> '{result}'")
@@ -168,7 +165,6 @@ def normalize_symbol(raw_symbol):
     # : 이후 제거 시도
     if ':' in symbol:
         base_symbol = symbol.split(':')[0]
-        log_debug("🔍 : 이후 제거 시도", f"'{symbol}' -> '{base_symbol}'")
         if base_symbol in SYMBOL_MAPPING:
             result = SYMBOL_MAPPING[base_symbol]
             log_debug("✅ : 제거 후 매핑 성공", f"'{base_symbol}' -> '{result}'")
@@ -178,54 +174,47 @@ def normalize_symbol(raw_symbol):
     return None
 
 SYMBOL_CONFIG = {
-    # BTC: 최소 0.001 BTC, 1계약 = 0.0001 BTC이므로 최소 10계약
     "BTC_USDT": {
-        "min_qty": Decimal("1"),         # 최소 주문 수량: 10계약 (= 0.001 BTC)
-        "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
-        "contract_size": Decimal("0.0001"), # 계약 크기: 0.0001 BTC
-        "min_notional": Decimal("10")     # 최소 주문 금액: 10 USDT
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("0.0001"),
+        "min_notional": Decimal("10")
     },
-    # ETH: 최소 0.01 ETH, 1계약 = 0.01 ETH이므로 최소 1계약
     "ETH_USDT": {
-        "min_qty": Decimal("1"),          # 최소 주문 수량: 1계약 (= 0.01 ETH)
-        "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
-        "contract_size": Decimal("0.01"), # 계약 크기: 0.01 ETH
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("0.01"),
         "min_notional": Decimal("10")
     },
-    # ADA: 추정 최소 10 ADA, 1계약 = 10 ADA이므로 최소 1계약
     "ADA_USDT": {
-        "min_qty": Decimal("1"),          # 최소 주문 수량: 1계약 (= 10 ADA)
-        "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
-        "contract_size": Decimal("10"),   # 계약 크기: 10 ADA
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("10"),
         "min_notional": Decimal("10")
     },
-    # SUI: 추정 최소 1 SUI, 1계약 = 1 SUI이므로 최소 1계약
     "SUI_USDT": {
-        "min_qty": Decimal("1"),          # 최소 주문 수량: 1계약 (= 1 SUI)
-        "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
-        "contract_size": Decimal("1"),    # 계약 크기: 1 SUI
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("1"),
         "min_notional": Decimal("10")
     },
-    # LINK: 추정 최소 1 LINK, 1계약 = 1 LINK이므로 최소 1계약
     "LINK_USDT": {
-        "min_qty": Decimal("1"),          # 최소 주문 수량: 1계약 (= 1 LINK)
-        "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
-        "contract_size": Decimal("1"),    # 계약 크기: 1 LINK
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("1"),
         "min_notional": Decimal("10")
     },
-    # SOL: 추정 최소 0.1 SOL, 1계약 = 0.1 SOL이므로 최소 1계약
     "SOL_USDT": {
-        "min_qty": Decimal("1"),          # 최소 주문 수량: 1계약 (= 0.1 SOL)
-        "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
-        "contract_size": Decimal("1"),  # 계약 크기: 0.1 SOL
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("1"),
         "min_notional": Decimal("10")
     },
-    # 🔥 PEPE: 최소 10,000 PEPE, 1계약 = 10,000 PEPE이므로 최소 1계약
     "PEPE_USDT": {
-        "min_qty": Decimal("1"),          # 최소 주문 수량: 1계약 (= 10,000 PEPE)
-        "qty_step": Decimal("1"),         # 주문 수량 단위: 1계약
-        "contract_size": Decimal("10000000"), # 계약 크기: 10,000 PEPE
-        "min_notional": Decimal("10")     # 최소 주문 금액: 10 USDT
+        "min_qty": Decimal("1"),
+        "qty_step": Decimal("1"),
+        "contract_size": Decimal("10000000"),
+        "min_notional": Decimal("10")
     },
 }
 
@@ -238,13 +227,13 @@ position_state = {}
 position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
 
-# === 🔥 단일 진입 지원 중복 방지 시스템 (수정) ===
-alert_cache = {}  # {alert_id: {"timestamp": time, "processed": bool}}
-recent_signals = {}  # {symbol: {"side": side, "time": timestamp, "action": action, "strategy": strategy}}
+# === 🔥 중복 방지 시스템 ===
+alert_cache = {}
+recent_signals = {}
 duplicate_prevention_lock = threading.RLock()
 
 def is_duplicate_alert(alert_data):
-    """단일 진입 중복 방지 (피라미딩=1)"""
+    """중복 방지 (단일 진입)"""
     global alert_cache, recent_signals
     
     with duplicate_prevention_lock:
@@ -257,23 +246,22 @@ def is_duplicate_alert(alert_data):
         
         log_debug("🔍 중복 체크 시작", f"ID: {alert_id}, Symbol: {symbol}, Side: {side}, Action: {action}")
         
-        # 1. 같은 alert_id가 이미 처리되었는지 확인
+        # 1. 같은 alert_id 확인
         if alert_id in alert_cache:
             cache_entry = alert_cache[alert_id]
             time_diff = current_time - cache_entry["timestamp"]
             
-            if cache_entry["processed"] and time_diff < 300:  # 5분 이내 같은 ID는 중복
+            if cache_entry["processed"] and time_diff < 300:
                 log_debug("🚫 중복 ID 차단", f"ID: {alert_id}, {time_diff:.1f}초 전 처리됨")
                 return True
         
-        # 2. 단일 진입 - 같은 방향 신호 중복 확인
+        # 2. 같은 방향 신호 중복 확인
         if action == "entry":
             symbol_key = f"{symbol}_{side}"
             if symbol_key in recent_signals:
                 recent = recent_signals[symbol_key]
                 time_diff = current_time - recent["time"]
                 
-                # 60초 이내 동일 신호는 중복으로 간주
                 if (recent["strategy"] == strategy_name and 
                     recent["action"] == "entry" and 
                     time_diff < 60):
@@ -281,7 +269,7 @@ def is_duplicate_alert(alert_data):
                              f"{symbol} {side} {strategy_name} 신호가 {time_diff:.1f}초 전에 이미 처리됨")
                     return True
         
-        # 3. 중복이 아니면 캐시에 저장
+        # 3. 캐시에 저장
         alert_cache[alert_id] = {"timestamp": current_time, "processed": False}
         
         if action == "entry":
@@ -293,13 +281,12 @@ def is_duplicate_alert(alert_data):
                 "strategy": strategy_name
             }
         
-        # 4. 오래된 캐시 정리 (메모리 관리)
-        cutoff_time = current_time - 900  # 15분 이전 데이터 삭제
+        # 4. 오래된 캐시 정리
+        cutoff_time = current_time - 900
         alert_cache = {k: v for k, v in alert_cache.items() if v["timestamp"] > cutoff_time}
         recent_signals = {k: v for k, v in recent_signals.items() if v["time"] > cutoff_time}
         
-        log_debug("✅ 신규 알림 승인", 
-                 f"ID: {alert_id}, {symbol} {side} {action} ({strategy_name})")
+        log_debug("✅ 신규 알림 승인", f"ID: {alert_id}, {symbol} {side} {action} ({strategy_name})")
         return False
 
 def mark_alert_processed(alert_id):
@@ -310,7 +297,7 @@ def mark_alert_processed(alert_id):
             log_debug("✅ 알림 처리 완료", f"ID: {alert_id}")
 
 def get_total_collateral(force=False):
-    """순자산(Account Equity) 조회"""
+    """순자산 조회"""
     now = time.time()
     if not force and account_cache["time"] > now - 5 and account_cache["data"]:
         return account_cache["data"]
@@ -319,16 +306,14 @@ def get_total_collateral(force=False):
             unified_accounts = unified_api.list_unified_accounts()
             if hasattr(unified_accounts, 'unified_account_total_equity'):
                 equity = Decimal(str(unified_accounts.unified_account_total_equity))
-                log_debug("💰 Account Equity(순자산)", f"{equity} USDT")
                 account_cache.update({"time": now, "data": equity})
                 return equity
             elif hasattr(unified_accounts, 'equity'):
                 equity = Decimal(str(unified_accounts.equity))
-                log_debug("💰 Account Equity(순자산)", f"{equity} USDT")
                 account_cache.update({"time": now, "data": equity})
                 return equity
-        except Exception as e:
-            log_debug("⚠️ Unified Account 조회 실패", str(e))
+        except Exception:
+            pass
             
         try:
             from gate_api import WalletApi
@@ -336,15 +321,13 @@ def get_total_collateral(force=False):
             total_balance = wallet_api.get_total_balance(currency="USDT")
             if hasattr(total_balance, 'total'):
                 equity = Decimal(str(total_balance.total))
-                log_debug("💰 WalletApi 총 잔고", f"{equity} USDT")
                 account_cache.update({"time": now, "data": equity})
                 return equity
-        except Exception as e:
-            log_debug("⚠️ WalletApi 조회 실패", str(e))
+        except Exception:
+            pass
             
         acc = api.list_futures_accounts(SETTLE)
         available = Decimal(str(getattr(acc, 'available', '0')))
-        log_debug("💰 선물 계정 available", f"{available} USDT")
         account_cache.update({"time": now, "data": available})
         return available
     except Exception as e:
@@ -365,14 +348,11 @@ def get_price(symbol):
         return Decimal("0")
 
 def get_current_position_count(symbol):
-    """현재 포지션 개수 조회 (Gate.io API 기준)"""
+    """현재 포지션 개수 조회"""
     try:
         pos = api.get_position(SETTLE, symbol)
         size = Decimal(str(pos.size))
-        if size == 0:
-            return 0
-        # Gate.io는 단일 포지션이므로 1 반환
-        return 1
+        return 1 if size != 0 else 0
     except Exception as e:
         if "POSITION_NOT_FOUND" in str(e):
             return 0
@@ -381,14 +361,12 @@ def get_current_position_count(symbol):
 
 def calculate_position_size(symbol, strategy_type="standard"):
     """
-    순자산(Account Equity) 기반으로 포지션 크기 계산 (전략별 차등 적용)
-    🔥 5분 전략: 2배 수량 (최고 신뢰도)
-    🔥 3분 전략: 1배 수량 (기본)
-    🔥 백업 전략: 0.5배 수량 (보조)
+    🔥 전략별 차등 수량 계산
+    - 5M 전략: 2배 수량 (5분-3분-15초 삼중 확인)
+    - 3M 전략: 1배 수량 (3분-15초 이중 확인)
     """
     cfg = SYMBOL_CONFIG[symbol]
     
-    # 1. 순자산 조회 (전체 보유 자산)
     equity = get_total_collateral(force=True)
     price = get_price(symbol)
     
@@ -397,44 +375,36 @@ def calculate_position_size(symbol, strategy_type="standard"):
         return Decimal("0")
     
     try:
-        # 2. 🔥 전략별 포지션 크기 조정 (업데이트됨)
-        if "5m" in strategy_type.lower():
-            # 🔥 5분 전략: 2배 수량 (5분-3분-15초 삼중 확인이므로 매우 확실)
-            position_ratio = Decimal("2.0")
-            log_debug(f"🔥 5분 전략 감지 ({symbol})", "2배 수량 적용 (최고 신뢰도)")
-        elif "3m" in strategy_type.lower():
-            # 3분 전략: 기본 수량 (3분-15초 이중 확인)
-            position_ratio = Decimal("1.0")
-            log_debug(f"📊 3분 전략 감지 ({symbol})", "기본 수량 적용 (중간 신뢰도)")
-        elif "backup" in strategy_type.lower():
-            # 백업 전략: 50% 수량 (보조 전략)
-            position_ratio = Decimal("0.5")
-            log_debug(f"⚠️ 백업 전략 감지 ({symbol})", "50% 수량 적용 (낮은 신뢰도)")
+        # 🔥 전략별 포지션 배수
+        if "5M" in strategy_type.upper():
+            position_ratio = Decimal("2.0")  # 5분 전략: 2배
+            strategy_display = "🔥 5분 전략 (2배)"
+        elif "3M" in strategy_type.upper():
+            position_ratio = Decimal("1.0")  # 3분 전략: 기본
+            strategy_display = "📊 3분 전략 (1배)"
         else:
-            # 기본값
-            position_ratio = Decimal("1.0")
-            log_debug(f"🔧 기본 전략 ({symbol})", "표준 수량 적용")
+            position_ratio = Decimal("1.0")  # 기본값
+            strategy_display = "🔧 표준 전략 (1배)"
         
-        # 3. 조정된 순자산으로 수량 계산
+        log_debug(f"📈 전략 감지 ({symbol})", f"{strategy_display}")
+        
+        # 수량 계산
         adjusted_equity = equity * position_ratio
         raw_qty = adjusted_equity / (price * cfg["contract_size"])
-        
-        # 4. 거래소 규칙에 맞게 수량 조정
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         final_qty = max(qty, cfg["min_qty"])
         
-        # 5. 최소 주문 금액 체크
+        # 최소 주문 금액 체크
         order_value = final_qty * price * cfg["contract_size"]
         if order_value < cfg["min_notional"]:
             log_debug(f"⛔ 최소 주문 금액 미달 ({symbol})", f"{order_value} < {cfg['min_notional']} USDT")
             return Decimal("0")
         
-        # 6. 🔥 전략별 상세 로깅
+        # 상세 로깅
         current_count = get_current_position_count(symbol)
         log_debug(f"📊 수량 계산 완료 ({symbol})", 
                  f"전략: {strategy_type}, 순자산: {equity} USDT, "
-                 f"배수: {position_ratio}x, 조정순자산: {adjusted_equity} USDT, "
-                 f"가격: {price}, 최종수량: {final_qty}, "
+                 f"배수: {position_ratio}x, 최종수량: {final_qty}, "
                  f"투자금액: {order_value:.2f} USDT, 현재포지션: {current_count}/1")
         
         return final_qty
@@ -444,7 +414,7 @@ def calculate_position_size(symbol, strategy_type="standard"):
         return Decimal("0")
 
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
-    """주문 실행 (단일 진입)"""
+    """주문 실행"""
     acquired = position_lock.acquire(timeout=5)
     if not acquired:
         log_debug(f"⚠️ 주문 락 실패 ({symbol})", "타임아웃")
@@ -471,11 +441,10 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
         
         current_count = get_current_position_count(symbol)
         log_debug(f"📤 주문 시도 ({symbol})", 
-                 f"{side.upper()} {float(qty_dec)} 계약, 주문금액: {order_value:.2f} USDT, "
-                 f"단일 진입: {current_count + 1}/1")
+                 f"{side.upper()} {float(qty_dec)} 계약, 주문금액: {order_value:.2f} USDT")
         
         api.create_futures_order(SETTLE, order)
-        log_debug(f"✅ 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약 (단일 진입)")
+        log_debug(f"✅ 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약")
         
         time.sleep(2)
         update_position_state(symbol)
@@ -529,7 +498,7 @@ def update_position_state(symbol, timeout=5):
                 "value": value,
                 "margin": value,
                 "mode": "cross",
-                "count": 1  # Gate.io는 단일 포지션
+                "count": 1
             }
         else:
             position_state[symbol] = {
@@ -546,7 +515,7 @@ def update_position_state(symbol, timeout=5):
         position_lock.release()
 
 def close_position(symbol):
-    """포지션 청산 - 파인스크립트가 SL/TP/청산 신호를 보내거나 실시간 TP/SL 체크에서 실행"""
+    """포지션 청산"""
     acquired = position_lock.acquire(timeout=5)
     if not acquired:
         log_debug(f"⚠️ 청산 락 실패 ({symbol})", "타임아웃")
@@ -574,11 +543,11 @@ def close_position(symbol):
 def log_initial_status():
     """서버 시작시 초기 상태 로깅"""
     try:
-        log_debug("🚀 서버 시작", "파인스크립트 단일 진입 연동 모드 (심볼별 TP/SL) - 초기 상태 확인 중...")
+        log_debug("🚀 서버 시작", "5분+3분 이중 전략 모드 - 초기 상태 확인 중...")
         equity = get_total_collateral(force=True)
         log_debug("💰 총 자산(초기)", f"{equity} USDT")
         
-        # 🔥 심볼별 TP/SL 설정 로깅 (수정된 가중치)
+        # 심볼별 TP/SL 설정 로깅
         log_debug("🎯 심볼별 TP/SL 설정", "")
         for symbol in SYMBOL_CONFIG:
             multipliers = get_tpsl_multipliers(symbol)
@@ -615,15 +584,15 @@ def ping():
 
 @app.route("/", methods=["POST"])
 def webhook():
-    """🔥 심볼별 TP/SL 지원 웹훅 처리 - 단일 진입"""
+    """🔥 5분+3분 전략 웹훅 처리"""
     symbol = None
     alert_id = None
     raw_data = ""
     
     try:
-        log_debug("🔄 웹훅 시작", "파인스크립트 단일 진입 신호 수신 (심볼별 TP/SL)")
+        log_debug("🔄 웹훅 시작", "5분+3분 이중 전략 신호 수신")
         
-        # === 🔥 Raw 데이터 먼저 확인 ===
+        # Raw 데이터 확인
         try:
             raw_data = request.get_data(as_text=True)
             log_debug("📄 Raw 데이터", f"길이: {len(raw_data)}, 내용: {raw_data[:500]}...")
@@ -631,15 +600,14 @@ def webhook():
             log_debug("❌ Raw 데이터 읽기 실패", str(e))
             raw_data = ""
         
-        # 빈 데이터 체크
         if not raw_data or raw_data.strip() == "":
             log_debug("❌ 빈 데이터", "Raw 데이터가 비어있음")
             return jsonify({"error": "Empty data"}), 400
         
-        # === 🔥 메시지 파싱 (간단한 형태와 JSON 모두 지원) ===
+        # 메시지 파싱
         data = None
         
-        # 1차 시도: 간단한 파이프 구분 메시지 파싱
+        # 간단한 형태 파싱
         if raw_data.startswith("ENTRY:") or raw_data.startswith("EXIT:"):
             data = parse_simple_alert(raw_data.strip())
             if data:
@@ -648,25 +616,15 @@ def webhook():
                 log_debug("❌ 간단 메시지 파싱 실패", f"Raw: {raw_data[:100]}")
                 return jsonify({"error": "Simple message parsing failed"}), 400
         else:
-            # 2차 시도: JSON 파싱 (기존 방식)
+            # JSON 파싱
             try:
                 data = request.get_json(force=True)
                 if data is None:
                     data = json.loads(raw_data)
                 log_debug("✅ JSON 파싱 성공", "JSON 데이터 추출 완료")
-            except (json.JSONDecodeError, TypeError, ValueError) as e:
-                log_debug("❌ JSON 파싱 실패", f"오류: {str(e)}, Raw: {raw_data[:100]}")
-                if raw_data and len(raw_data.strip()) > 0:
-                    return jsonify({
-                        "error": "JSON parsing failed but data exists", 
-                        "raw_data": raw_data[:200],
-                        "suggestion": "데이터가 JSON 형식이 아닙니다. 간단한 메시지 형식(ENTRY:/EXIT:)을 사용하세요."
-                    }), 400
-                else:
-                    return jsonify({"error": "Empty or invalid JSON data"}), 400
             except Exception as e:
-                log_debug("❌ 예상치 못한 파싱 오류", f"오류: {str(e)}, Raw 데이터: {raw_data}")
-                return jsonify({"error": "Parsing error", "raw_data": raw_data[:200]}), 500
+                log_debug("❌ JSON 파싱 실패", f"오류: {str(e)}, Raw: {raw_data[:100]}")
+                return jsonify({"error": "JSON parsing failed", "raw_data": raw_data[:200]}), 400
                 
         if not data:
             log_debug("❌ 빈 파싱 결과", "파싱된 데이터가 비어있음")
@@ -674,9 +632,7 @@ def webhook():
             
         log_debug("📥 웹훅 데이터", json.dumps(data, indent=2, ensure_ascii=False, default=str))
         
-        # === 🔥 필드별 상세 검사 (심볼별 TP/SL 포함) ===
-        log_debug("🔍 데이터 검사", f"키들: {list(data.keys())}")
-        
+        # 필드 추출
         alert_id = data.get("id", "")
         raw_symbol = data.get("symbol", "")
         side = data.get("side", "").lower() if data.get("side") else ""
@@ -703,7 +659,7 @@ def webhook():
         
         log_debug("✅ 필수 필드 검증 통과", "모든 필드가 존재함")
         
-        # 🔥 강화된 심볼 변환
+        # 심볼 변환
         log_debug("🔍 심볼 정규화 시작", f"원본: '{raw_symbol}'")
         symbol = normalize_symbol(raw_symbol)
         
@@ -717,18 +673,18 @@ def webhook():
         
         log_debug("✅ 심볼 매핑 성공", f"'{raw_symbol}' -> '{symbol}'")
         
-        # 🔥 심볼별 TP/SL 설정 확인
+        # 심볼별 TP/SL 설정 확인
         multipliers = get_tpsl_multipliers(symbol)
         log_debug("🎯 심볼별 TP/SL 배수", f"{symbol}: TP={multipliers['tp']*100:.0f}%, SL={multipliers['sl']*100:.0f}%")
         
-        # === 🔥 단일 진입 중복 방지 체크 ===
+        # 중복 방지 체크
         if is_duplicate_alert(data):
             log_debug("🚫 중복 알림 차단", f"Symbol: {symbol}, Side: {side}, Action: {action}")
             return jsonify({"status": "duplicate_ignored", "message": "중복 알림 무시됨"})
         
         log_debug("✅ 중복 체크 통과", "신규 알림으로 확인됨")
         
-        # === 🔥 진입/청산 신호 처리 ===
+        # === 청산 신호 처리 ===
         if action == "exit":
             log_debug(f"🔄 청산 신호 처리 시작 ({symbol})", f"전략: {strategy_name}")
             
@@ -754,27 +710,22 @@ def webhook():
                 "tpsl_multipliers": multipliers
             })
         
-        # === 🔥 전략별 진입 신호 처리 (5분-3분-15초 추가) ===
+        # === 🔥 진입 신호 처리 (5분+3분 전략) ===
         if action == "entry" and side in ["long", "short"]:
-            log_debug(f"🎯 진입 신호 처리 시작 ({symbol})", 
-                     f"{side} 방향, 전략: {strategy_name}")
+            log_debug(f"🎯 진입 신호 처리 시작 ({symbol})", f"{side} 방향, 전략: {strategy_name}")
             
-            # 🔥 전략 타입 분석
+            # 전략 타입 분석
             if "5M_" in strategy_name.upper():
                 strategy_display = "🔥 5분 전략 (2배 수량)"
                 strategy_priority = "HIGH"
             elif "3M_" in strategy_name.upper():
                 strategy_display = "📊 3분 전략 (기본 수량)"
                 strategy_priority = "MEDIUM"
-            elif "BACKUP_" in strategy_name.upper():
-                strategy_display = "⚠️ 백업 전략 (50% 수량)"
-                strategy_priority = "LOW"
             else:
                 strategy_display = "🔧 표준 전략 (기본 수량)"
                 strategy_priority = "MEDIUM"
             
-            log_debug(f"📈 전략 분석 ({symbol})", 
-                     f"타입: {strategy_display}, 우선순위: {strategy_priority}")
+            log_debug(f"📈 전략 분석 ({symbol})", f"타입: {strategy_display}, 우선순위: {strategy_priority}")
             
             if not update_position_state(symbol, timeout=1):
                 log_debug(f"❌ 포지션 상태 조회 실패 ({symbol})", "")
@@ -785,7 +736,7 @@ def webhook():
             
             log_debug(f"📊 현재 상태 ({symbol})", f"현재: {current_side}, 요청: {desired_side}")
             
-            # 기존 포지션이 있으면 청산 후 진입 (단일 진입)
+            # 기존 포지션 처리 (단일 진입)
             if current_side:
                 if current_side == desired_side:
                     log_debug("⚠️ 같은 방향 포지션 존재", "기존 포지션 유지")
@@ -801,11 +752,10 @@ def webhook():
                     if not update_position_state(symbol):
                         log_debug("❌ 역포지션 후 상태 갱신 실패", "")
             
-            # 🔥 전략별 수량 계산
+            # 전략별 수량 계산
             log_debug(f"🧮 수량 계산 시작 ({symbol})", f"전략: {strategy_name}")
             qty = calculate_position_size(symbol, strategy_name)
-            log_debug(f"🧮 수량 계산 완료 ({symbol})", 
-                     f"{qty} 계약 ({strategy_display})")
+            log_debug(f"🧮 수량 계산 완료 ({symbol})", f"{qty} 계약 ({strategy_display})")
             
             if qty <= 0:
                 log_debug("❌ 수량 오류", f"계산된 수량: {qty}")
@@ -818,8 +768,7 @@ def webhook():
             if success and alert_id:
                 mark_alert_processed(alert_id)
             
-            log_debug(f"📨 최종 결과 ({symbol})", 
-                     f"주문 성공: {success}, {strategy_display}")
+            log_debug(f"📨 최종 결과 ({symbol})", f"주문 성공: {success}, {strategy_display}")
             
             return jsonify({
                 "status": "success" if success else "error", 
@@ -843,7 +792,6 @@ def webhook():
         error_msg = str(e)
         log_debug(f"❌ 웹훅 전체 실패 ({symbol or 'unknown'})", error_msg, exc_info=True)
         
-        # 오류 발생 시에도 중복 방지를 위해 ID 처리
         if alert_id:
             mark_alert_processed(alert_id)
             
@@ -855,7 +803,7 @@ def webhook():
 
 @app.route("/status", methods=["GET"])
 def status():
-    """서버 상태 조회 (단일 진입 + 심볼별 TP/SL 정보 포함)"""
+    """서버 상태 조회 (5분+3분 전략)"""
     try:
         equity = get_total_collateral(force=True)
         positions = {}
@@ -864,7 +812,7 @@ def status():
             if update_position_state(sym, timeout=1):
                 pos = position_state.get(sym, {})
                 if pos.get("side"):
-                    # 🔥 심볼별 TP/SL 정보 추가 (수정된 가중치)
+                    # 심볼별 TP/SL 정보 추가
                     multipliers = get_tpsl_multipliers(sym)
                     base_tp = 0.004  # 0.4%
                     base_sl = 0.0015  # 0.15%
@@ -883,7 +831,7 @@ def status():
                     })
                     positions[sym] = position_info
         
-        # 중복 방지 상태 정보 (단일 진입)
+        # 중복 방지 상태 정보
         with duplicate_prevention_lock:
             duplicate_stats = {
                 "alert_cache_size": len(alert_cache),
@@ -896,7 +844,7 @@ def status():
                 } for k, v in recent_signals.items()}
             }
         
-        # 🔥 심볼별 TP/SL 설정 정보 (수정된 가중치)
+        # 심볼별 TP/SL 설정 정보
         tpsl_settings = {}
         for symbol in SYMBOL_CONFIG:
             multipliers = get_tpsl_multipliers(symbol)
@@ -913,7 +861,7 @@ def status():
         
         return jsonify({
             "status": "running",
-            "mode": "pinescript_5m3m15s_enhanced_strategy",
+            "mode": "pinescript_5m3m_dual_strategy",
             "timestamp": datetime.now().isoformat(),
             "margin_balance": float(equity),
             "positions": positions,
@@ -926,8 +874,7 @@ def status():
                 "enhanced_5m_strategy": True,
                 "strategy_levels": {
                     "5m_strategy": {"multiplier": 2.0, "priority": "HIGH", "description": "5분-3분-15초 삼중확인"},
-                    "3m_strategy": {"multiplier": 1.0, "priority": "MEDIUM", "description": "3분-15초 이중확인"},
-                    "backup": {"multiplier": 0.5, "priority": "LOW", "description": "백업전략"}
+                    "3m_strategy": {"multiplier": 1.0, "priority": "MEDIUM", "description": "3분-15초 이중확인"}
                 },
                 "pyramiding": 1,
                 "entry_timeframe": "15S",
@@ -1024,7 +971,7 @@ def tpsl_settings():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# === 🔥 실시간 가격 모니터링 및 심볼별 TP/SL 처리 (Gate.io 기준) ===
+# === 🔥 실시간 가격 모니터링 및 심볼별 TP/SL 처리 ===
 async def send_ping(ws):
     """웹소켓 핑 전송"""
     while True:
@@ -1035,12 +982,12 @@ async def send_ping(ws):
         await asyncio.sleep(30)
 
 async def price_listener():
-    """실시간 가격 모니터링 및 심볼별 TP/SL 처리 (Gate.io 가격 기준)"""
+    """실시간 가격 모니터링 및 심볼별 TP/SL 처리"""
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     symbols = list(SYMBOL_CONFIG.keys())
     reconnect_delay = 5
     max_delay = 60
-    log_debug("📡 웹소켓 시작", f"Gate.io 가격 기준 심볼별 TP/SL 모니터링 - 심볼: {len(symbols)}개 (단일 진입)")
+    log_debug("📡 웹소켓 시작", f"Gate.io 가격 기준 심볼별 TP/SL 모니터링 - 심볼: {len(symbols)}개")
     
     while True:
         try:
@@ -1085,7 +1032,7 @@ async def price_listener():
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
 def process_ticker_data(ticker):
-    """Gate.io 실시간 가격으로 심볼별 TP/SL 체크 (수정된 가중치 적용)"""
+    """Gate.io 실시간 가격으로 심볼별 TP/SL 체크"""
     try:
         contract = ticker.get("contract")
         last = ticker.get("last")
@@ -1108,7 +1055,7 @@ def process_ticker_data(ticker):
             if not position_entry_price or size <= 0 or side not in ["buy", "sell"]:
                 return
             
-            # 🔥 심볼별 TP/SL 비율 적용 (수정된 가중치)
+            # 심볼별 TP/SL 비율 적용
             multipliers = get_tpsl_multipliers(contract)
             base_sl_pct = Decimal("0.0015")  # 기본 0.15%
             base_tp_pct = Decimal("0.004")   # 기본 0.4%
@@ -1161,20 +1108,22 @@ def backup_position_loop():
 if __name__ == "__main__":
     log_initial_status()
     
-    # 🔥 Gate.io 실시간 가격 모니터링으로 심볼별 TP/SL 처리
+    # Gate.io 실시간 가격 모니터링으로 심볼별 TP/SL 처리
     threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
     
     # 백업 포지션 상태 갱신
     threading.Thread(target=backup_position_loop, daemon=True).start()
     
     port = int(os.environ.get("PORT", 8080))
-    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (단일 진입 + 수정된 가중치 TP/SL)")
+    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (5분+3분 이중 전략)")
     log_debug("✅ TP/SL 가중치", "BTC 70%, ETH 80%, SOL 90%, 기타 100%")
     log_debug("✅ 기본 TP/SL", "TP 0.4%, SL 0.15%")
     log_debug("✅ 실제 TP/SL", "BTC 0.28%/0.105%, ETH 0.32%/0.12%, SOL 0.36%/0.135%")
     log_debug("🔥 실시간 TP/SL", "Gate.io 가격 기준 자동 TP/SL 처리")
     log_debug("✅ 진입신호", "파인스크립트 15초봉 극값 알림")
     log_debug("✅ 청산신호", "파인스크립트 1분봉 시그널 알림 + 실시간 TP/SL")
+    log_debug("🔥 5분 전략", "5분-3분-15초 삼중확인 → 2배 수량")
+    log_debug("📊 3분 전략", "3분-15초 이중확인 → 기본 수량")
     log_debug("✅ 진입 모드", "단일 진입 (Pyramiding=1)")
     log_debug("✅ 중복 방지", "완벽한 알림 시스템 연동")
     log_debug("✅ 심볼 매핑", "모든 형태 지원 (.P, PERP 등)")
