@@ -1105,6 +1105,11 @@ def process_ticker_data(ticker):
                              f"현재가:{price} <= TP:{tp} (진입가:{position_entry_price}, "
                              f"TP비율:{tp_pct*100:.3f}% [배수:{multipliers['tp']*100:.0f}%])")
                     close_position(contract)
+        finally:
+            position_lock.release()
+    except Exception:
+        pass
+
 def backup_position_loop():
     """백업 포지션 상태 갱신"""
     while True:
