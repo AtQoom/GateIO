@@ -1112,7 +1112,8 @@ def backup_position_loop():
             for sym in SYMBOL_CONFIG:
                 update_position_state(sym, timeout=1)
             time.sleep(300)  # 5분마다 상태 갱신
-        except Exception:
+        except Exception as e:
+            log_debug("❌ 백업 포지션 루프 오류", str(e))
             time.sleep(300)
 
 if __name__ == "__main__":
