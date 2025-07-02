@@ -18,7 +18,8 @@ CONFIG = {
     },
     "strategy": {
         "5m_multiplier": 2.0,      # 5분 전략: 2배 수량
-        "3m_multiplier": 1.0       # 3분 전략: 기본 수량
+        "3m_multiplier": 1.5,      # 3분 전략: 1.5배 수량 (기존 1.0 → 1.5)
+        "1m_multiplier": 1.0       # 1분 전략: 기본 수량 (새로 추가)
     },
     "api": {
         "settle": "usdt",
@@ -388,7 +389,7 @@ def get_current_position_count(symbol):
         return 0
 
 def calculate_position_size(symbol, strategy_type="standard"):
-    """전략별 차등 수량 계산"""
+    """전략별 차등 수량 계산 (3개 전략)"""
     cfg = SYMBOL_CONFIG[symbol]
     
     equity = get_total_collateral(force=True)
@@ -399,13 +400,16 @@ def calculate_position_size(symbol, strategy_type="standard"):
         return Decimal("0")
     
     try:
-        # 전략별 포지션 배수
+        # 전략별 포지션 배수 (3개 전략)
         if "5M" in strategy_type.upper():
             position_ratio = Decimal(str(CONFIG["strategy"]["5m_multiplier"]))
             strategy_display = "🔥 5분 전략 (2배)"
         elif "3M" in strategy_type.upper():
             position_ratio = Decimal(str(CONFIG["strategy"]["3m_multiplier"]))
-            strategy_display = "📊 3분 전략 (1배)"
+            strategy_display = "📊 3분 전략 (1.5배)"
+        elif "1M" in strategy_type.upper():
+            position_ratio = Decimal(str(CONFIG["strategy"]["1m_multiplier"]))
+            strategy_display = "⚡ 1분 전략 (1배)"
         else:
             position_ratio = Decimal("1.0")
             strategy_display = "🔧 표준 전략 (1배)"
@@ -568,7 +572,7 @@ def log_initial_status():
     """서버 시작시 초기 상태 로깅"""
     try:
         base_tp, base_sl = get_tpsl_values()
-        log_debug("🚀 서버 시작", "5분+3분 이중 전략 모드 - 초기 상태 확인 중...")
+        log_debug("🚀 서버 시작", "5분+3분+1분 삼중 전략 모드 - 초기 상태 확인 중...")
         equity = get_total_collateral(force=True)
         log_debug("💰 총 자산(초기)", f"{equity} USDT")
         
@@ -733,17 +737,20 @@ def webhook():
                 "tpsl_multipliers": multipliers
             })
         
-        # === 진입 신호 처리 (5분+3분 전략) ===
+        # === 진입 신호 처리 (5분+3분+1분 전략) ===
         if action == "entry" and side in ["long", "short"]:
             log_debug(f"🎯 진입 신호 처리 시작 ({symbol})", f"{side} 방향, 전략: {strategy_name}")
             
-            # 전략 타입 분석
+            # 전략 타입 분석 (3개 전략)
             if "5M_" in strategy_name.upper():
                 strategy_display = "🔥 5분 전략 (2배 수량)"
                 strategy_priority = "HIGH"
             elif "3M_" in strategy_name.upper():
-                strategy_display = "📊 3분 전략 (기본 수량)"
+                strategy_display = "📊 3분 전략 (1.5배 수량)"
                 strategy_priority = "MEDIUM"
+            elif "1M_" in strategy_name.upper():
+                strategy_display = "⚡ 1분 전략 (기본 수량)"
+                strategy_priority = "LOW"
             else:
                 strategy_display = "🔧 표준 전략 (기본 수량)"
                 strategy_priority = "MEDIUM"
@@ -883,7 +890,7 @@ def status():
         
         return jsonify({
             "status": "running",
-            "mode": "pinescript_5m3m_dual_strategy",
+            "mode": "pinescript_5m3m1m_triple_strategy",
             "timestamp": datetime.now().isoformat(),
             "margin_balance": float(equity),
             "positions": positions,
@@ -897,7 +904,8 @@ def status():
                 "enhanced_5m_strategy": True,
                 "strategy_levels": {
                     "5m_strategy": {"multiplier": CONFIG["strategy"]["5m_multiplier"], "priority": "HIGH", "description": "5분-3분-15초 삼중확인"},
-                    "3m_strategy": {"multiplier": CONFIG["strategy"]["3m_multiplier"], "priority": "MEDIUM", "description": "3분-15초 이중확인"}
+                    "3m_strategy": {"multiplier": CONFIG["strategy"]["3m_multiplier"], "priority": "MEDIUM", "description": "3분-15초 이중확인"},
+                    "1m_strategy": {"multiplier": CONFIG["strategy"]["1m_multiplier"], "priority": "LOW", "description": "1분-15초 빠른반응"}
                 },
                 "pyramiding": 1,
                 "entry_timeframe": "15S",
@@ -928,7 +936,8 @@ def get_config():
             "symbol_tpsl_multipliers": SYMBOL_TPSL_MULTIPLIERS,
             "strategy_multipliers": {
                 "5m_strategy": CONFIG["strategy"]["5m_multiplier"],
-                "3m_strategy": CONFIG["strategy"]["3m_multiplier"]
+                "3m_strategy": CONFIG["strategy"]["3m_multiplier"],
+                "1m_strategy": CONFIG["strategy"]["1m_multiplier"]
             }
         })
     except Exception as e:
@@ -1166,7 +1175,7 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 8080))
     base_tp, base_sl = get_tpsl_values()
-    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (5분+3분 이중 전략)")
+    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (5분+3분+1분 삼중 전략)")
     log_debug("✅ TP/SL 가중치", "BTC 70%, ETH 80%, SOL 90%, 기타 100%")
     log_debug("✅ 기본 TP/SL", f"TP {base_tp*100:.2f}%, SL {base_sl*100:.2f}%")
     log_debug("✅ 실제 TP/SL", f"BTC {base_tp*0.7*100:.2f}%/{base_sl*0.7*100:.2f}%, ETH {base_tp*0.8*100:.2f}%/{base_sl*0.8*100:.2f}%, SOL {base_tp*0.9*100:.2f}%/{base_sl*0.9*100:.2f}%")
@@ -1175,6 +1184,7 @@ if __name__ == "__main__":
     log_debug("✅ 청산신호", "파인스크립트 1분봉 시그널 알림 + 실시간 TP/SL")
     log_debug("🔥 5분 전략", f"5분-3분-15초 삼중확인 → {CONFIG['strategy']['5m_multiplier']}배 수량")
     log_debug("📊 3분 전략", f"3분-15초 이중확인 → {CONFIG['strategy']['3m_multiplier']}배 수량")
+    log_debug("⚡ 1분 전략", f"1분-15초 빠른반응 → {CONFIG['strategy']['1m_multiplier']}배 수량")
     log_debug("✅ 진입 모드", "단일 진입 (Pyramiding=1)")
     log_debug("✅ 중복 방지", "완벽한 알림 시스템 연동")
     log_debug("✅ 심볼 매핑", "모든 형태 지원 (.P, PERP 등)")
