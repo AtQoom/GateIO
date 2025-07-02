@@ -10,44 +10,38 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
 
-# ----------- 로그 필터 및 설정 -----------
-class CustomFilter(logging.Filter):
-    def filter(self, record):
-        filter_keywords = [
-            "실시간 가격", "티커 수신", "포지션 없음", "계정 필드",
-            "담보금 전환", "최종 선택", "전체 계정 정보",
-            "웹소켓 핑", "핑 전송", "핑 성공", "ping",
-            "Serving Flask app", "Debug mode", "WARNING: This is a development server"
-        ]
-        message = record.getMessage()
-        return not any(keyword in message for keyword in filter_keywords)
+# ----------- 설정 파일 (Config) -----------
+CONFIG = {
+    "trading": {
+        "base_tp_pct": 0.003,      # TP 0.3% (0.004 → 0.003)
+        "base_sl_pct": 0.0012      # SL 0.12% (0.0015 → 0.0012)
+    },
+    "strategy": {
+        "5m_multiplier": 2.0,      # 5분 전략: 2배 수량
+        "3m_multiplier": 1.0       # 3분 전략: 기본 수량
+    },
+    "api": {
+        "settle": "usdt",
+        "ping_interval": 30,
+        "reconnect_delay": 5,
+        "max_delay": 60
+    },
+    "duplicate_prevention": {
+        "cache_timeout": 300,      # 5분
+        "signal_timeout": 60,      # 1분
+        "cleanup_interval": 900    # 15분
+    }
+}
 
-werkzeug_logger = logging.getLogger('werkzeug')
-werkzeug_logger.setLevel(logging.ERROR)
+# 심볼별 TP/SL 가중치 설정
+SYMBOL_TPSL_MULTIPLIERS = {
+    "BTC_USDT": {"tp": 0.7, "sl": 0.7},    # BTC: 70%
+    "ETH_USDT": {"tp": 0.8, "sl": 0.8},    # ETH: 80%
+    "SOL_USDT": {"tp": 0.9, "sl": 0.9},    # SOL: 90%
+    # 기타 심볼은 기본값 (100%) 사용
+}
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_handler.addFilter(CustomFilter())
-formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s')
-console_handler.setFormatter(formatter)
-logger.handlers = []
-logger.addHandler(console_handler)
-
-def log_debug(tag, msg, exc_info=False):
-    logger.info(f"[{tag}] {msg}")
-    if exc_info:
-        logger.exception(msg)
-
-# ----------- 서버 설정 -----------
-app = Flask(__name__)
-
-API_KEY = os.environ.get("API_KEY", "")
-API_SECRET = os.environ.get("API_SECRET", "")
-SETTLE = "usdt"
-
-# 🔥 확장된 심볼 매핑 (모든 가능한 형태 지원)
+# 심볼 매핑 (확장된 형태 지원)
 SYMBOL_MAPPING = {
     # 기본 형태
     "BTCUSDT": "BTC_USDT",
@@ -86,93 +80,7 @@ SYMBOL_MAPPING = {
     "PEPE_USDT": "PEPE_USDT",
 }
 
-# 🔥 심볼별 TP/SL 배수 설정
-SYMBOL_TPSL_MULTIPLIERS = {
-    "BTC_USDT": {"tp": 0.7, "sl": 0.7},    # BTC: 70%
-    "ETH_USDT": {"tp": 0.8, "sl": 0.8},    # ETH: 80%
-    "SOL_USDT": {"tp": 0.9, "sl": 0.9},    # SOL: 90%
-    # 기타 심볼은 기본값 (100%) 사용
-}
-
-def get_tpsl_multipliers(symbol):
-    """심볼별 TP/SL 배수 반환"""
-    return SYMBOL_TPSL_MULTIPLIERS.get(symbol, {"tp": 1.0, "sl": 1.0})
-
-def parse_simple_alert(message):
-    """간단한 파이프 구분 메시지 파싱"""
-    try:
-        if message.startswith("ENTRY:"):
-            # ENTRY:long|BTCUSDT|5M_LONG|50000|1
-            parts = message.split("|")
-            if len(parts) >= 5:
-                return {
-                    "action": "entry",
-                    "side": parts[0].split(":")[1],
-                    "symbol": parts[1],
-                    "strategy": parts[2],
-                    "price": float(parts[3]),
-                    "position_count": int(parts[4]),
-                    "id": str(int(time.time())) + "_simple"
-                }
-        elif message.startswith("EXIT:"):
-            # EXIT:long|BTCUSDT|stop_loss|50500|1.2
-            parts = message.split("|")
-            if len(parts) >= 5:
-                return {
-                    "action": "exit",
-                    "side": parts[0].split(":")[1],
-                    "symbol": parts[1],
-                    "exit_reason": parts[2],
-                    "price": float(parts[3]),
-                    "pnl_pct": float(parts[4]),
-                    "id": str(int(time.time())) + "_simple"
-                }
-    except Exception as e:
-        log_debug("❌ 간단 메시지 파싱 실패", str(e))
-    return None
-
-def normalize_symbol(raw_symbol):
-    """🔥 강화된 심볼 정규화"""
-    if not raw_symbol:
-        log_debug("❌ 심볼 정규화", "입력 심볼이 비어있음")
-        return None
-    
-    symbol = str(raw_symbol).upper().strip()
-    log_debug("🔍 심볼 정규화 시작", f"원본: '{raw_symbol}' -> 정리: '{symbol}'")
-    
-    # 직접 매핑
-    if symbol in SYMBOL_MAPPING:
-        result = SYMBOL_MAPPING[symbol]
-        log_debug("✅ 직접 매핑 성공", f"'{symbol}' -> '{result}'")
-        return result
-    
-    # .P 제거 시도
-    if symbol.endswith('.P'):
-        base_symbol = symbol[:-2]
-        if base_symbol in SYMBOL_MAPPING:
-            result = SYMBOL_MAPPING[base_symbol]
-            log_debug("✅ .P 제거 후 매핑 성공", f"'{base_symbol}' -> '{result}'")
-            return result
-    
-    # PERP 제거 시도
-    if symbol.endswith('PERP'):
-        base_symbol = symbol[:-4]
-        if base_symbol in SYMBOL_MAPPING:
-            result = SYMBOL_MAPPING[base_symbol]
-            log_debug("✅ PERP 제거 후 매핑 성공", f"'{base_symbol}' -> '{result}'")
-            return result
-    
-    # : 이후 제거 시도
-    if ':' in symbol:
-        base_symbol = symbol.split(':')[0]
-        if base_symbol in SYMBOL_MAPPING:
-            result = SYMBOL_MAPPING[base_symbol]
-            log_debug("✅ : 제거 후 매핑 성공", f"'{base_symbol}' -> '{result}'")
-            return result
-    
-    log_debug("❌ 심볼 매핑 실패", f"'{symbol}' 매핑을 찾을 수 없음")
-    return None
-
+# 심볼별 계약 사양
 SYMBOL_CONFIG = {
     "BTC_USDT": {
         "min_qty": Decimal("1"),
@@ -218,6 +126,43 @@ SYMBOL_CONFIG = {
     },
 }
 
+# ----------- 로그 필터 및 설정 -----------
+class CustomFilter(logging.Filter):
+    def filter(self, record):
+        filter_keywords = [
+            "실시간 가격", "티커 수신", "포지션 없음", "계정 필드",
+            "담보금 전환", "최종 선택", "전체 계정 정보",
+            "웹소켓 핑", "핑 전송", "핑 성공", "ping",
+            "Serving Flask app", "Debug mode", "WARNING: This is a development server"
+        ]
+        message = record.getMessage()
+        return not any(keyword in message for keyword in filter_keywords)
+
+werkzeug_logger = logging.getLogger('werkzeug')
+werkzeug_logger.setLevel(logging.ERROR)
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.addFilter(CustomFilter())
+formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s')
+console_handler.setFormatter(formatter)
+logger.handlers = []
+logger.addHandler(console_handler)
+
+def log_debug(tag, msg, exc_info=False):
+    logger.info(f"[{tag}] {msg}")
+    if exc_info:
+        logger.exception(msg)
+
+# ----------- 서버 설정 -----------
+app = Flask(__name__)
+
+API_KEY = os.environ.get("API_KEY", "")
+API_SECRET = os.environ.get("API_SECRET", "")
+SETTLE = CONFIG["api"]["settle"]
+
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
@@ -227,10 +172,93 @@ position_state = {}
 position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
 
-# === 🔥 중복 방지 시스템 ===
+# === 중복 방지 시스템 ===
 alert_cache = {}
 recent_signals = {}
 duplicate_prevention_lock = threading.RLock()
+
+def get_tpsl_multipliers(symbol):
+    """심볼별 TP/SL 배수 반환"""
+    return SYMBOL_TPSL_MULTIPLIERS.get(symbol, {"tp": 1.0, "sl": 1.0})
+
+def get_tpsl_values():
+    """현재 TP/SL 값 반환"""
+    return CONFIG["trading"]["base_tp_pct"], CONFIG["trading"]["base_sl_pct"]
+
+def parse_simple_alert(message):
+    """간단한 파이프 구분 메시지 파싱"""
+    try:
+        if message.startswith("ENTRY:"):
+            # ENTRY:long|BTCUSDT|5M_LONG|50000|1
+            parts = message.split("|")
+            if len(parts) >= 5:
+                return {
+                    "action": "entry",
+                    "side": parts[0].split(":")[1],
+                    "symbol": parts[1],
+                    "strategy": parts[2],
+                    "price": float(parts[3]),
+                    "position_count": int(parts[4]),
+                    "id": str(int(time.time())) + "_simple"
+                }
+        elif message.startswith("EXIT:"):
+            # EXIT:long|BTCUSDT|stop_loss|50500|1.2
+            parts = message.split("|")
+            if len(parts) >= 5:
+                return {
+                    "action": "exit",
+                    "side": parts[0].split(":")[1],
+                    "symbol": parts[1],
+                    "exit_reason": parts[2],
+                    "price": float(parts[3]),
+                    "pnl_pct": float(parts[4]),
+                    "id": str(int(time.time())) + "_simple"
+                }
+    except Exception as e:
+        log_debug("❌ 간단 메시지 파싱 실패", str(e))
+    return None
+
+def normalize_symbol(raw_symbol):
+    """심볼 정규화"""
+    if not raw_symbol:
+        log_debug("❌ 심볼 정규화", "입력 심볼이 비어있음")
+        return None
+    
+    symbol = str(raw_symbol).upper().strip()
+    log_debug("🔍 심볼 정규화 시작", f"원본: '{raw_symbol}' -> 정리: '{symbol}'")
+    
+    # 직접 매핑
+    if symbol in SYMBOL_MAPPING:
+        result = SYMBOL_MAPPING[symbol]
+        log_debug("✅ 직접 매핑 성공", f"'{symbol}' -> '{result}'")
+        return result
+    
+    # .P 제거 시도
+    if symbol.endswith('.P'):
+        base_symbol = symbol[:-2]
+        if base_symbol in SYMBOL_MAPPING:
+            result = SYMBOL_MAPPING[base_symbol]
+            log_debug("✅ .P 제거 후 매핑 성공", f"'{base_symbol}' -> '{result}'")
+            return result
+    
+    # PERP 제거 시도
+    if symbol.endswith('PERP'):
+        base_symbol = symbol[:-4]
+        if base_symbol in SYMBOL_MAPPING:
+            result = SYMBOL_MAPPING[base_symbol]
+            log_debug("✅ PERP 제거 후 매핑 성공", f"'{base_symbol}' -> '{result}'")
+            return result
+    
+    # : 이후 제거 시도
+    if ':' in symbol:
+        base_symbol = symbol.split(':')[0]
+        if base_symbol in SYMBOL_MAPPING:
+            result = SYMBOL_MAPPING[base_symbol]
+            log_debug("✅ : 제거 후 매핑 성공", f"'{base_symbol}' -> '{result}'")
+            return result
+    
+    log_debug("❌ 심볼 매핑 실패", f"'{symbol}' 매핑을 찾을 수 없음")
+    return None
 
 def is_duplicate_alert(alert_data):
     """중복 방지 (단일 진입)"""
@@ -251,7 +279,7 @@ def is_duplicate_alert(alert_data):
             cache_entry = alert_cache[alert_id]
             time_diff = current_time - cache_entry["timestamp"]
             
-            if cache_entry["processed"] and time_diff < 300:
+            if cache_entry["processed"] and time_diff < CONFIG["duplicate_prevention"]["cache_timeout"]:
                 log_debug("🚫 중복 ID 차단", f"ID: {alert_id}, {time_diff:.1f}초 전 처리됨")
                 return True
         
@@ -264,7 +292,7 @@ def is_duplicate_alert(alert_data):
                 
                 if (recent["strategy"] == strategy_name and 
                     recent["action"] == "entry" and 
-                    time_diff < 60):
+                    time_diff < CONFIG["duplicate_prevention"]["signal_timeout"]):
                     log_debug("🚫 중복 진입 차단", 
                              f"{symbol} {side} {strategy_name} 신호가 {time_diff:.1f}초 전에 이미 처리됨")
                     return True
@@ -282,7 +310,7 @@ def is_duplicate_alert(alert_data):
             }
         
         # 4. 오래된 캐시 정리
-        cutoff_time = current_time - 900
+        cutoff_time = current_time - CONFIG["duplicate_prevention"]["cleanup_interval"]
         alert_cache = {k: v for k, v in alert_cache.items() if v["timestamp"] > cutoff_time}
         recent_signals = {k: v for k, v in recent_signals.items() if v["time"] > cutoff_time}
         
@@ -360,11 +388,7 @@ def get_current_position_count(symbol):
         return 0
 
 def calculate_position_size(symbol, strategy_type="standard"):
-    """
-    🔥 전략별 차등 수량 계산
-    - 5M 전략: 2배 수량 (5분-3분-15초 삼중 확인)
-    - 3M 전략: 1배 수량 (3분-15초 이중 확인)
-    """
+    """전략별 차등 수량 계산"""
     cfg = SYMBOL_CONFIG[symbol]
     
     equity = get_total_collateral(force=True)
@@ -375,15 +399,15 @@ def calculate_position_size(symbol, strategy_type="standard"):
         return Decimal("0")
     
     try:
-        # 🔥 전략별 포지션 배수
+        # 전략별 포지션 배수
         if "5M" in strategy_type.upper():
-            position_ratio = Decimal("2.0")  # 5분 전략: 2배
+            position_ratio = Decimal(str(CONFIG["strategy"]["5m_multiplier"]))
             strategy_display = "🔥 5분 전략 (2배)"
         elif "3M" in strategy_type.upper():
-            position_ratio = Decimal("1.0")  # 3분 전략: 기본
+            position_ratio = Decimal(str(CONFIG["strategy"]["3m_multiplier"]))
             strategy_display = "📊 3분 전략 (1배)"
         else:
-            position_ratio = Decimal("1.0")  # 기본값
+            position_ratio = Decimal("1.0")
             strategy_display = "🔧 표준 전략 (1배)"
         
         log_debug(f"📈 전략 감지 ({symbol})", f"{strategy_display}")
@@ -543,6 +567,7 @@ def close_position(symbol):
 def log_initial_status():
     """서버 시작시 초기 상태 로깅"""
     try:
+        base_tp, base_sl = get_tpsl_values()
         log_debug("🚀 서버 시작", "5분+3분 이중 전략 모드 - 초기 상태 확인 중...")
         equity = get_total_collateral(force=True)
         log_debug("💰 총 자산(초기)", f"{equity} USDT")
@@ -551,8 +576,6 @@ def log_initial_status():
         log_debug("🎯 심볼별 TP/SL 설정", "")
         for symbol in SYMBOL_CONFIG:
             multipliers = get_tpsl_multipliers(symbol)
-            base_tp = 0.004  # 0.4%
-            base_sl = 0.0015  # 0.15%
             actual_tp = base_tp * multipliers["tp"]
             actual_sl = base_sl * multipliers["sl"]
             
@@ -584,7 +607,7 @@ def ping():
 
 @app.route("/", methods=["POST"])
 def webhook():
-    """🔥 5분+3분 전략 웹훅 처리"""
+    """5분+3분 전략 웹훅 처리"""
     symbol = None
     alert_id = None
     raw_data = ""
@@ -710,7 +733,7 @@ def webhook():
                 "tpsl_multipliers": multipliers
             })
         
-        # === 🔥 진입 신호 처리 (5분+3분 전략) ===
+        # === 진입 신호 처리 (5분+3분 전략) ===
         if action == "entry" and side in ["long", "short"]:
             log_debug(f"🎯 진입 신호 처리 시작 ({symbol})", f"{side} 방향, 전략: {strategy_name}")
             
@@ -805,6 +828,7 @@ def webhook():
 def status():
     """서버 상태 조회 (5분+3분 전략)"""
     try:
+        base_tp, base_sl = get_tpsl_values()
         equity = get_total_collateral(force=True)
         positions = {}
         
@@ -814,8 +838,6 @@ def status():
                 if pos.get("side"):
                     # 심볼별 TP/SL 정보 추가
                     multipliers = get_tpsl_multipliers(sym)
-                    base_tp = 0.004  # 0.4%
-                    base_sl = 0.0015  # 0.15%
                     actual_tp = base_tp * multipliers["tp"]
                     actual_sl = base_sl * multipliers["sl"]
                     
@@ -848,13 +870,13 @@ def status():
         tpsl_settings = {}
         for symbol in SYMBOL_CONFIG:
             multipliers = get_tpsl_multipliers(symbol)
-            base_tp = 0.004
-            base_sl = 0.0015
+            actual_tp = base_tp * multipliers["tp"]
+            actual_sl = base_sl * multipliers["sl"]
             tpsl_settings[symbol] = {
                 "tp_multiplier": multipliers["tp"],
                 "sl_multiplier": multipliers["sl"],
-                "actual_tp_pct": base_tp * multipliers["tp"] * 100,
-                "actual_sl_pct": base_sl * multipliers["sl"] * 100,
+                "actual_tp_pct": actual_tp * 100,
+                "actual_sl_pct": actual_sl * 100,
                 "base_tp_pct": base_tp * 100,
                 "base_sl_pct": base_sl * 100
             }
@@ -868,13 +890,14 @@ def status():
             "duplicate_prevention": duplicate_stats,
             "symbol_mappings": SYMBOL_MAPPING,
             "tpsl_settings": tpsl_settings,
+            "config": CONFIG,
             "pinescript_features": {
                 "perfect_alerts": True,
                 "future_prediction": True,
                 "enhanced_5m_strategy": True,
                 "strategy_levels": {
-                    "5m_strategy": {"multiplier": 2.0, "priority": "HIGH", "description": "5분-3분-15초 삼중확인"},
-                    "3m_strategy": {"multiplier": 1.0, "priority": "MEDIUM", "description": "3분-15초 이중확인"}
+                    "5m_strategy": {"multiplier": CONFIG["strategy"]["5m_multiplier"], "priority": "HIGH", "description": "5분-3분-15초 삼중확인"},
+                    "3m_strategy": {"multiplier": CONFIG["strategy"]["3m_multiplier"], "priority": "MEDIUM", "description": "3분-15초 이중확인"}
                 },
                 "pyramiding": 1,
                 "entry_timeframe": "15S",
@@ -889,21 +912,81 @@ def status():
         log_debug("❌ 상태 조회 실패", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route("/debug", methods=["GET"])
-def debug_account():
-    """계정 디버깅 정보"""
+@app.route("/config", methods=["GET"])
+def get_config():
+    """현재 설정 조회"""
     try:
-        acc = api.list_futures_accounts(SETTLE)
-        debug_info = {
-            "raw_response": str(acc),
-            "total": str(getattr(acc, 'total', '없음')),
-            "available": str(getattr(acc, 'available', '없음')),
-            "margin_balance": str(getattr(acc, 'margin_balance', '없음')),
-            "equity": str(getattr(acc, 'equity', '없음')),
-        }
-        return jsonify(debug_info)
+        base_tp, base_sl = get_tpsl_values()
+        return jsonify({
+            "config": CONFIG,
+            "current_tpsl": {
+                "base_tp_pct": base_tp,
+                "base_sl_pct": base_sl,
+                "base_tp_percent": base_tp * 100,
+                "base_sl_percent": base_sl * 100
+            },
+            "symbol_tpsl_multipliers": SYMBOL_TPSL_MULTIPLIERS,
+            "strategy_multipliers": {
+                "5m_strategy": CONFIG["strategy"]["5m_multiplier"],
+                "3m_strategy": CONFIG["strategy"]["3m_multiplier"]
+            }
+        })
     except Exception as e:
-        return jsonify({"error": str(e)})
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/config/tpsl", methods=["POST"])
+def update_tpsl():
+    """TP/SL 설정 업데이트"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        # TP/SL 값 업데이트
+        if "base_tp_pct" in data:
+            tp_value = float(data["base_tp_pct"])
+            if 0.001 <= tp_value <= 0.02:  # 0.1% ~ 2% 범위
+                CONFIG["trading"]["base_tp_pct"] = tp_value
+                log_debug("⚙️ TP 설정 변경", f"새 TP: {tp_value*100:.3f}%")
+            else:
+                return jsonify({"error": "TP must be between 0.1% and 2%"}), 400
+        
+        if "base_sl_pct" in data:
+            sl_value = float(data["base_sl_pct"])
+            if 0.0005 <= sl_value <= 0.01:  # 0.05% ~ 1% 범위
+                CONFIG["trading"]["base_sl_pct"] = sl_value
+                log_debug("⚙️ SL 설정 변경", f"새 SL: {sl_value*100:.3f}%")
+            else:
+                return jsonify({"error": "SL must be between 0.05% and 1%"}), 400
+        
+        base_tp, base_sl = get_tpsl_values()
+        
+        # 심볼별 실제 TP/SL 계산
+        symbol_tpsl = {}
+        for symbol in SYMBOL_CONFIG:
+            multipliers = get_tpsl_multipliers(symbol)
+            symbol_tpsl[symbol] = {
+                "actual_tp_pct": base_tp * multipliers["tp"] * 100,
+                "actual_sl_pct": base_sl * multipliers["sl"] * 100
+            }
+        
+        log_debug("✅ TP/SL 설정 완료", f"TP: {base_tp*100:.3f}%, SL: {base_sl*100:.3f}%")
+        
+        return jsonify({
+            "status": "success",
+            "message": "TP/SL 설정이 업데이트되었습니다",
+            "new_config": {
+                "base_tp_pct": base_tp,
+                "base_sl_pct": base_sl,
+                "base_tp_percent": base_tp * 100,
+                "base_sl_percent": base_sl * 100
+            },
+            "symbol_tpsl": symbol_tpsl
+        })
+        
+    except Exception as e:
+        log_debug("❌ TP/SL 설정 실패", str(e))
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/test-symbol/<symbol>", methods=["GET"])
 def test_symbol_mapping(symbol):
@@ -912,8 +995,7 @@ def test_symbol_mapping(symbol):
     is_valid = normalized and normalized in SYMBOL_CONFIG
     multipliers = get_tpsl_multipliers(normalized) if normalized else {"tp": 1.0, "sl": 1.0}
     
-    base_tp = 0.004
-    base_sl = 0.0015
+    base_tp, base_sl = get_tpsl_values()
     
     return jsonify({
         "input": symbol,
@@ -940,38 +1022,7 @@ def clear_cache():
     log_debug("🗑️ 캐시 초기화", "모든 중복 방지 캐시가 초기화되었습니다")
     return jsonify({"status": "cache_cleared", "message": "중복 방지 캐시가 초기화되었습니다"})
 
-@app.route("/tpsl-settings", methods=["GET"])
-def tpsl_settings():
-    """심볼별 TP/SL 설정 조회"""
-    try:
-        base_tp = 0.004  # 0.4%
-        base_sl = 0.0015  # 0.15%
-        
-        settings = {}
-        for symbol in SYMBOL_CONFIG:
-            multipliers = get_tpsl_multipliers(symbol)
-            settings[symbol] = {
-                "tp_multiplier": multipliers["tp"],
-                "sl_multiplier": multipliers["sl"],
-                "base_tp_pct": base_tp * 100,
-                "base_sl_pct": base_sl * 100,
-                "actual_tp_pct": base_tp * multipliers["tp"] * 100,
-                "actual_sl_pct": base_sl * multipliers["sl"] * 100,
-                "is_custom": symbol in SYMBOL_TPSL_MULTIPLIERS
-            }
-        
-        return jsonify({
-            "base_settings": {
-                "tp_pct": base_tp * 100,
-                "sl_pct": base_sl * 100
-            },
-            "symbol_settings": settings,
-            "custom_symbols": list(SYMBOL_TPSL_MULTIPLIERS.keys())
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# === 🔥 실시간 가격 모니터링 및 심볼별 TP/SL 처리 ===
+# === 실시간 가격 모니터링 및 심볼별 TP/SL 처리 ===
 async def send_ping(ws):
     """웹소켓 핑 전송"""
     while True:
@@ -979,19 +1030,19 @@ async def send_ping(ws):
             await ws.ping()
         except Exception:
             break
-        await asyncio.sleep(30)
+        await asyncio.sleep(CONFIG["api"]["ping_interval"])
 
 async def price_listener():
     """실시간 가격 모니터링 및 심볼별 TP/SL 처리"""
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     symbols = list(SYMBOL_CONFIG.keys())
-    reconnect_delay = 5
-    max_delay = 60
+    reconnect_delay = CONFIG["api"]["reconnect_delay"]
+    max_delay = CONFIG["api"]["max_delay"]
     log_debug("📡 웹소켓 시작", f"Gate.io 가격 기준 심볼별 TP/SL 모니터링 - 심볼: {len(symbols)}개")
     
     while True:
         try:
-            async with websockets.connect(uri, ping_interval=30, ping_timeout=15) as ws:
+            async with websockets.connect(uri, ping_interval=CONFIG["api"]["ping_interval"], ping_timeout=15) as ws:
                 subscribe_msg = {
                     "time": int(time.time()),
                     "channel": "futures.tickers",
@@ -1000,7 +1051,7 @@ async def price_listener():
                 }
                 await ws.send(json.dumps(subscribe_msg))
                 ping_task = asyncio.create_task(send_ping(ws))
-                reconnect_delay = 5
+                reconnect_delay = CONFIG["api"]["reconnect_delay"]
                 
                 while True:
                     try:
@@ -1057,11 +1108,10 @@ def process_ticker_data(ticker):
             
             # 심볼별 TP/SL 비율 적용
             multipliers = get_tpsl_multipliers(contract)
-            base_sl_pct = Decimal("0.0015")  # 기본 0.15%
-            base_tp_pct = Decimal("0.004")   # 기본 0.4%
+            base_tp, base_sl = get_tpsl_values()
             
-            sl_pct = base_sl_pct * Decimal(str(multipliers["sl"]))
-            tp_pct = base_tp_pct * Decimal(str(multipliers["tp"]))
+            sl_pct = Decimal(str(base_sl)) * Decimal(str(multipliers["sl"]))
+            tp_pct = Decimal(str(base_tp)) * Decimal(str(multipliers["tp"]))
             
             if side == "buy":
                 sl = position_entry_price * (1 - sl_pct)
@@ -1115,20 +1165,21 @@ if __name__ == "__main__":
     threading.Thread(target=backup_position_loop, daemon=True).start()
     
     port = int(os.environ.get("PORT", 8080))
+    base_tp, base_sl = get_tpsl_values()
     log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (5분+3분 이중 전략)")
     log_debug("✅ TP/SL 가중치", "BTC 70%, ETH 80%, SOL 90%, 기타 100%")
-    log_debug("✅ 기본 TP/SL", "TP 0.4%, SL 0.15%")
-    log_debug("✅ 실제 TP/SL", "BTC 0.28%/0.105%, ETH 0.32%/0.12%, SOL 0.36%/0.135%")
+    log_debug("✅ 기본 TP/SL", f"TP {base_tp*100:.2f}%, SL {base_sl*100:.2f}%")
+    log_debug("✅ 실제 TP/SL", f"BTC {base_tp*0.7*100:.2f}%/{base_sl*0.7*100:.2f}%, ETH {base_tp*0.8*100:.2f}%/{base_sl*0.8*100:.2f}%, SOL {base_tp*0.9*100:.2f}%/{base_sl*0.9*100:.2f}%")
     log_debug("🔥 실시간 TP/SL", "Gate.io 가격 기준 자동 TP/SL 처리")
     log_debug("✅ 진입신호", "파인스크립트 15초봉 극값 알림")
     log_debug("✅ 청산신호", "파인스크립트 1분봉 시그널 알림 + 실시간 TP/SL")
-    log_debug("🔥 5분 전략", "5분-3분-15초 삼중확인 → 2배 수량")
-    log_debug("📊 3분 전략", "3분-15초 이중확인 → 기본 수량")
+    log_debug("🔥 5분 전략", f"5분-3분-15초 삼중확인 → {CONFIG['strategy']['5m_multiplier']}배 수량")
+    log_debug("📊 3분 전략", f"3분-15초 이중확인 → {CONFIG['strategy']['3m_multiplier']}배 수량")
     log_debug("✅ 진입 모드", "단일 진입 (Pyramiding=1)")
     log_debug("✅ 중복 방지", "완벽한 알림 시스템 연동")
     log_debug("✅ 심볼 매핑", "모든 형태 지원 (.P, PERP 등)")
     log_debug("✅ 실거래 전용", "백테스트 불가 (알림 기반)")
-    log_debug("🎯 추가 API", "GET /tpsl-settings - TP/SL 설정 조회")
+    log_debug("🎯 API 엔드포인트", "GET /config - 설정 조회, POST /config/tpsl - TP/SL 변경")
     log_debug("🎯 추가 API", "GET /test-symbol/<symbol> - 심볼 테스트")
     
     app.run(host="0.0.0.0", port=port, debug=False)
