@@ -13,18 +13,11 @@ from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, Unified
 # ----------- 설정 파일 (Config) -----------
 CONFIG = {
     "trading": {
-        "base_tp_pct": 0.003,      # 기본 TP (fallback)
-        "base_sl_pct": 0.0012,     # 기본 SL (fallback)
-        "strategy_tpsl": {
-            "1m": {"tp": 0.002, "sl": 0.001},   # 1분: TP 0.2%, SL 0.1%
-            "3m": {"tp": 0.003, "sl": 0.0012},  # 3분: TP 0.3%, SL 0.12%
-            "5m": {"tp": 0.004, "sl": 0.0015}   # 5분: TP 0.4%, SL 0.15%
-        }
-    },
-    "strategy": {
-        "5m_multiplier": 2.0,      # 5분 전략: 2배 수량
-        "3m_multiplier": 1.5,      # 3분 전략: 1.5배 수량
-        "1m_multiplier": 1.0       # 1분 전략: 기본 수량
+        # 파인스크립트 v6.1 기본값과 일치
+        "base_tp_pct": 0.005,      # 기본 익절률 0.5%
+        "base_sl_pct": 0.002,      # 기본 손절률 0.2%
+        "use_symbol_weights": True, # 심볼별 가중치 사용
+        "min_signal_strength": 0.8  # v6.1 강화된 최소 신호 강도
     },
     "api": {
         "settle": "usdt",
@@ -36,26 +29,42 @@ CONFIG = {
         "cache_timeout": 300,
         "signal_timeout": 60,
         "cleanup_interval": 900
+    },
+    "filters": {
+        "min_volatility": 0.5,     # 최소 변동성 %
+        "min_volume_ratio": 1.8,   # 최소 거래량 비율
+        "bb_long_threshold": 0.2,  # 볼린저 하단 20%
+        "bb_short_threshold": 0.8  # 볼린저 상단 80%
     }
 }
 
-# 심볼별 TP/SL 가중치 설정
-SYMBOL_TPSL_MULTIPLIERS = {
-    "BTC_USDT": {"tp": 0.7, "sl": 0.7},
-    "ETH_USDT": {"tp": 0.8, "sl": 0.8},
-    "SOL_USDT": {"tp": 0.9, "sl": 0.9},
+# 파인스크립트 v6.1의 심볼별 가중치 설정
+SYMBOL_WEIGHTS = {
+    "BTC_USDT": 0.6,   # 60%
+    "ETH_USDT": 0.7,   # 70%
+    "SOL_USDT": 0.8,   # 80%
+    "ADA_USDT": 1.0,   # 100%
+    "SUI_USDT": 1.0,   # 100%
+    "LINK_USDT": 1.0,  # 100%
+    "PEPE_USDT": 1.0,  # 100%
 }
 
-# 심볼 매핑
+# 심볼 매핑 (파인스크립트에서 사용하는 심볼들)
 SYMBOL_MAPPING = {
     "BTCUSDT": "BTC_USDT", "ETHUSDT": "ETH_USDT", "ADAUSDT": "ADA_USDT",
-    "SUIUSDT": "SUI_USDT", "LINKUSDT": "LINK_USDT", "SOLUSDT": "SOL_USDT", "PEPEUSDT": "PEPE_USDT",
+    "SUIUSDT": "SUI_USDT", "LINKUSDT": "LINK_USDT", "SOLUSDT": "SOL_USDT", 
+    "PEPEUSDT": "PEPE_USDT",
     "BTCUSDT.P": "BTC_USDT", "ETHUSDT.P": "ETH_USDT", "ADAUSDT.P": "ADA_USDT",
-    "SUIUSDT.P": "SUI_USDT", "LINKUSDT.P": "LINK_USDT", "SOLUSDT.P": "SOL_USDT", "PEPEUSDT.P": "PEPE_USDT",
+    "SUIUSDT.P": "SUI_USDT", "LINKUSDT.P": "LINK_USDT", "SOLUSDT.P": "SOL_USDT", 
+    "PEPEUSDT.P": "PEPE_USDT",
     "BTCUSDTPERP": "BTC_USDT", "ETHUSDTPERP": "ETH_USDT", "ADAUSDTPERP": "ADA_USDT",
-    "SUIUSDTPERP": "SUI_USDT", "LINKUSDTPERP": "LINK_USDT", "SOLUSDTPERP": "SOL_USDT", "PEPEUSDTPERP": "PEPE_USDT",
+    "SUIUSDTPERP": "SUI_USDT", "LINKUSDTPERP": "LINK_USDT", "SOLUSDTPERP": "SOL_USDT", 
+    "PEPEUSDTPERP": "PEPE_USDT",
     "BTC_USDT": "BTC_USDT", "ETH_USDT": "ETH_USDT", "ADA_USDT": "ADA_USDT",
-    "SUI_USDT": "SUI_USDT", "LINK_USDT": "LINK_USDT", "SOL_USDT": "SOL_USDT", "PEPE_USDT": "PEPE_USDT",
+    "SUI_USDT": "SUI_USDT", "LINK_USDT": "LINK_USDT", "SOL_USDT": "SOL_USDT", 
+    "PEPE_USDT": "PEPE_USDT",
+    # 파인스크립트에서 자주 사용하는 형태
+    "BTC": "BTC_USDT", "ETH": "ETH_USDT", "SOL": "SOL_USDT", "ADA": "ADA_USDT",
 }
 
 # 심볼별 계약 사양
@@ -114,40 +123,24 @@ position_strategy_info = {}  # 포지션별 전략 추적
 alert_cache = {}
 recent_signals = {}
 duplicate_prevention_lock = threading.RLock()
+entry_signals = {}  # 진입 신호 저장 (v6.1 추가)
 
 # ----------- 핵심 함수들 -----------
-def get_tpsl_multipliers(symbol):
-    """심볼별 TP/SL 배수 반환"""
-    return SYMBOL_TPSL_MULTIPLIERS.get(symbol, {"tp": 1.0, "sl": 1.0})
+def get_symbol_weight(symbol):
+    """파인스크립트 v6.1 심볼별 가중치 반환"""
+    return SYMBOL_WEIGHTS.get(symbol, 1.0)
 
-def get_strategy_tpsl(strategy_name):
-    """전략별 TP/SL 반환"""
-    try:
-        if "5M" in strategy_name.upper():
-            strategy_key = "5m"
-        elif "3M" in strategy_name.upper():
-            strategy_key = "3m"
-        elif "1M" in strategy_name.upper():
-            strategy_key = "1m"
-        else:
-            return {"tp": CONFIG["trading"]["base_tp_pct"], "sl": CONFIG["trading"]["base_sl_pct"]}
-        
-        strategy_tpsl = CONFIG["trading"]["strategy_tpsl"].get(strategy_key, {})
-        return {
-            "tp": strategy_tpsl.get("tp", CONFIG["trading"]["base_tp_pct"]),
-            "sl": strategy_tpsl.get("sl", CONFIG["trading"]["base_sl_pct"])
-        }
-    except Exception as e:
-        log_debug("❌ 전략별 TP/SL 조회 실패", str(e))
-        return {"tp": CONFIG["trading"]["base_tp_pct"], "sl": CONFIG["trading"]["base_sl_pct"]}
-
-def get_tpsl_values(strategy_name=None):
-    """현재 TP/SL 값 반환 (전략별)"""
-    if strategy_name:
-        strategy_tpsl = get_strategy_tpsl(strategy_name)
-        return strategy_tpsl["tp"], strategy_tpsl["sl"]
-    else:
-        return CONFIG["trading"]["base_tp_pct"], CONFIG["trading"]["base_sl_pct"]
+def calculate_weighted_tpsl(symbol):
+    """심볼별 가중치가 적용된 TP/SL 계산 (v6.1)"""
+    weight = get_symbol_weight(symbol)
+    base_tp = CONFIG["trading"]["base_tp_pct"]
+    base_sl = CONFIG["trading"]["base_sl_pct"]
+    
+    # 파인스크립트 v6.1과 동일한 계산
+    weighted_tp = base_tp * weight
+    weighted_sl = base_sl * weight
+    
+    return weighted_tp, weighted_sl
 
 def normalize_symbol(raw_symbol):
     """심볼 정규화"""
@@ -174,32 +167,45 @@ def normalize_symbol(raw_symbol):
     
     return None
 
-def parse_simple_alert(message):
-    """간단한 파이프 구분 메시지 파싱"""
+def parse_pinescript_alert(message):
+    """파인스크립트 v6.1 알림 파싱 (강화된 데이터 포함)"""
     try:
-        if message.startswith("ENTRY:"):
+        # JSON 형태 시도
+        if message.startswith('{') and message.endswith('}'):
+            return json.loads(message)
+        
+        # 간단한 파이프 구분 메시지 (하위 호환성)
+        if message.startswith("ENTRY:") or message.startswith("EXIT:"):
             parts = message.split("|")
-            if len(parts) >= 5:
+            if message.startswith("ENTRY:") and len(parts) >= 4:
+                action_side = parts[0].split(":")
                 return {
-                    "action": "entry", "side": parts[0].split(":")[1], "symbol": parts[1],
-                    "strategy": parts[2], "price": float(parts[3]), "position_count": int(parts[4]),
-                    "id": str(int(time.time())) + "_simple"
+                    "action": "entry",
+                    "side": action_side[1].lower(),
+                    "symbol": parts[1],
+                    "strategy": parts[2] if len(parts) > 2 else "Simple_Entry",
+                    "price": float(parts[3]) if len(parts) > 3 else 0,
+                    "signal_strength": float(parts[4]) if len(parts) > 4 else 0.8,
+                    "id": str(int(time.time())) + "_pinescript"
                 }
-        elif message.startswith("EXIT:"):
-            parts = message.split("|")
-            if len(parts) >= 5:
+            elif message.startswith("EXIT:") and len(parts) >= 4:
+                action_side = parts[0].split(":")
                 return {
-                    "action": "exit", "side": parts[0].split(":")[1], "symbol": parts[1],
-                    "exit_reason": parts[2], "price": float(parts[3]), "pnl_pct": float(parts[4]),
-                    "id": str(int(time.time())) + "_simple"
+                    "action": "exit",
+                    "side": action_side[1].lower(),
+                    "symbol": parts[1],
+                    "reason": parts[2] if len(parts) > 2 else "SIGNAL_EXIT",
+                    "price": float(parts[3]) if len(parts) > 3 else 0,
+                    "pnl": float(parts[4]) if len(parts) > 4 else 0,
+                    "id": str(int(time.time())) + "_pinescript"
                 }
     except Exception as e:
-        log_debug("❌ 간단 메시지 파싱 실패", str(e))
+        log_debug("❌ 파인스크립트 v6.1 메시지 파싱 실패", str(e))
     return None
 
-# ----------- 중복 방지 시스템 -----------
+# ----------- 중복 방지 시스템 (파인스크립트 v6.1 단일 진입 시스템과 동기화) -----------
 def is_duplicate_alert(alert_data):
-    """중복 방지 (단일 진입)"""
+    """중복 방지 (파인스크립트 v6.1 강화된 단일 진입 시스템)"""
     global alert_cache, recent_signals
     
     with duplicate_prevention_lock:
@@ -217,13 +223,14 @@ def is_duplicate_alert(alert_data):
             if cache_entry["processed"] and time_diff < CONFIG["duplicate_prevention"]["cache_timeout"]:
                 return True
         
-        # 같은 방향 신호 중복 확인
+        # 파인스크립트 v6.1 단일 진입 시스템과 동일한 로직
         if action == "entry":
             symbol_key = f"{symbol}_{side}"
             if symbol_key in recent_signals:
                 recent = recent_signals[symbol_key]
                 time_diff = current_time - recent["time"]
-                if (recent["strategy"] == strategy_name and recent["action"] == "entry" and time_diff < CONFIG["duplicate_prevention"]["signal_timeout"]):
+                # 같은 방향의 진입 신호 중복 방지
+                if recent["action"] == "entry" and time_diff < CONFIG["duplicate_prevention"]["signal_timeout"]:
                     return True
         
         # 캐시에 저장
@@ -231,7 +238,12 @@ def is_duplicate_alert(alert_data):
         
         if action == "entry":
             symbol_key = f"{symbol}_{side}"
-            recent_signals[symbol_key] = {"side": side, "time": current_time, "action": action, "strategy": strategy_name}
+            recent_signals[symbol_key] = {
+                "side": side, 
+                "time": current_time, 
+                "action": action, 
+                "strategy": strategy_name
+            }
         
         # 오래된 캐시 정리
         cutoff_time = current_time - CONFIG["duplicate_prevention"]["cleanup_interval"]
@@ -245,6 +257,46 @@ def mark_alert_processed(alert_id):
     with duplicate_prevention_lock:
         if alert_id in alert_cache:
             alert_cache[alert_id]["processed"] = True
+
+# ----------- v6.1 신호 검증 함수 -----------
+def validate_signal_strength(data):
+    """파인스크립트 v6.1 신호 강도 검증"""
+    signal_strength = float(data.get("signal_strength", 0))
+    min_strength = CONFIG["trading"]["min_signal_strength"]
+    
+    if signal_strength < min_strength:
+        log_debug("⚠️ 약한 신호", f"신호 강도: {signal_strength:.2f} < 최소: {min_strength}")
+        return False
+    
+    return True
+
+def validate_market_conditions(data):
+    """파인스크립트 v6.1 시장 조건 검증"""
+    # 추가 필터 검증 (파인스크립트에서 전송된 경우)
+    volatility = float(data.get("volatility", 1.0))
+    volume_ratio = float(data.get("volume_ratio", 1.0))
+    bb_position = float(data.get("bb_position", 0.5))
+    side = data.get("side", "").lower()
+    
+    # 변동성 체크
+    if volatility < CONFIG["filters"]["min_volatility"]:
+        log_debug("⚠️ 낮은 변동성", f"{volatility:.2f}% < 최소: {CONFIG['filters']['min_volatility']}%")
+        return False
+    
+    # 거래량 체크
+    if volume_ratio < CONFIG["filters"]["min_volume_ratio"]:
+        log_debug("⚠️ 낮은 거래량", f"{volume_ratio:.2f}x < 최소: {CONFIG['filters']['min_volume_ratio']}x")
+        return False
+    
+    # 볼린저밴드 위치 체크
+    if side == "long" and bb_position > CONFIG["filters"]["bb_long_threshold"]:
+        log_debug("⚠️ 볼린저 위치", f"롱 신호인데 BB 위치: {bb_position:.2f} > {CONFIG['filters']['bb_long_threshold']}")
+        return False
+    elif side == "short" and bb_position < CONFIG["filters"]["bb_short_threshold"]:
+        log_debug("⚠️ 볼린저 위치", f"숏 신호인데 BB 위치: {bb_position:.2f} < {CONFIG['filters']['bb_short_threshold']}")
+        return False
+    
+    return True
 
 # ----------- Gate.io API 함수들 -----------
 def get_total_collateral(force=False):
@@ -295,8 +347,8 @@ def get_current_position_count(symbol):
         log_debug(f"❌ 포지션 개수 조회 실패 ({symbol})", str(e))
         return 0
 
-def calculate_position_size(symbol, strategy_type="standard"):
-    """전략별 차등 수량 계산 (3개 전략)"""
+def calculate_position_size(symbol, strategy_type="Simple_Entry", signal_strength=0.8):
+    """파인스크립트 v6.1 전략에 맞는 포지션 사이즈 계산"""
     cfg = SYMBOL_CONFIG[symbol]
     equity = get_total_collateral(force=True)
     price = get_price(symbol)
@@ -305,19 +357,26 @@ def calculate_position_size(symbol, strategy_type="standard"):
         return Decimal("0")
     
     try:
-        # 전략별 포지션 배수
-        if "5M" in strategy_type.upper():
-            position_ratio = Decimal(str(CONFIG["strategy"]["5m_multiplier"]))
-            strategy_display = "🔥 5분 전략 (2배)"
-        elif "3M" in strategy_type.upper():
-            position_ratio = Decimal(str(CONFIG["strategy"]["3m_multiplier"]))
-            strategy_display = "📊 3분 전략 (1.5배)"
-        elif "1M" in strategy_type.upper():
-            position_ratio = Decimal(str(CONFIG["strategy"]["1m_multiplier"]))
-            strategy_display = "⚡ 1분 전략 (1배)"
+        # 파인스크립트 v6.1은 default_qty_value=100 (100% 자산 사용)
+        position_ratio = Decimal("1.0")
+        
+        # v6.1: 신호 강도에 따른 포지션 크기 조정
+        if signal_strength < 0.85:
+            position_ratio *= Decimal("0.8")  # 약한 신호는 80%만
+        elif signal_strength >= 0.9:
+            position_ratio *= Decimal("1.1")  # 강한 신호는 110%
+        
+        # 전략 표시
+        weight = get_symbol_weight(symbol)
+        weight_display = f"{int(weight * 100)}%"
+        if weight == 0.6:
+            strategy_display = f"⚡ BTC 가중치 단타 v6.1 ({weight_display})"
+        elif weight == 0.7:
+            strategy_display = f"⚡ ETH 가중치 단타 v6.1 ({weight_display})"
+        elif weight == 0.8:
+            strategy_display = f"⚡ SOL 가중치 단타 v6.1 ({weight_display})"
         else:
-            position_ratio = Decimal("1.0")
-            strategy_display = "🔧 표준 전략 (1배)"
+            strategy_display = f"⚡ 기본 가중치 단타 v6.1 ({weight_display})"
         
         # 수량 계산
         adjusted_equity = equity * position_ratio
@@ -381,7 +440,11 @@ def update_position_state(symbol, timeout=5):
             pos = api.get_position(SETTLE, symbol)
         except Exception as e:
             if "POSITION_NOT_FOUND" in str(e):
-                position_state[symbol] = {"price": None, "side": None, "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross", "count": 0}
+                position_state[symbol] = {
+                    "price": None, "side": None, "size": Decimal("0"), 
+                    "value": Decimal("0"), "margin": Decimal("0"), 
+                    "mode": "cross", "count": 0
+                }
                 return True
             else:
                 return False
@@ -391,9 +454,21 @@ def update_position_state(symbol, timeout=5):
             position_entry_price = Decimal(str(pos.entry_price))
             mark = Decimal(str(pos.mark_price))
             value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
-            position_state[symbol] = {"price": position_entry_price, "side": "buy" if size > 0 else "sell", "size": abs(size), "value": value, "margin": value, "mode": "cross", "count": 1}
+            position_state[symbol] = {
+                "price": position_entry_price, 
+                "side": "buy" if size > 0 else "sell", 
+                "size": abs(size), 
+                "value": value, 
+                "margin": value, 
+                "mode": "cross", 
+                "count": 1
+            }
         else:
-            position_state[symbol] = {"price": None, "side": None, "size": Decimal("0"), "value": Decimal("0"), "margin": Decimal("0"), "mode": "cross", "count": 0}
+            position_state[symbol] = {
+                "price": None, "side": None, "size": Decimal("0"), 
+                "value": Decimal("0"), "margin": Decimal("0"), 
+                "mode": "cross", "count": 0
+            }
         return True
     except Exception as e:
         return False
@@ -408,7 +483,7 @@ def close_position(symbol):
     try:
         api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
         
-        # 청산 후 정리
+        # 청산 후 정리 (파인스크립트 v6.1 가상 포지션 추적과 동일)
         with duplicate_prevention_lock:
             keys_to_remove = [k for k in recent_signals.keys() if k.startswith(symbol + "_")]
             for key in keys_to_remove:
@@ -416,6 +491,9 @@ def close_position(symbol):
         
         if symbol in position_strategy_info:
             del position_strategy_info[symbol]
+        
+        if symbol in entry_signals:
+            del entry_signals[symbol]
         
         time.sleep(1)
         update_position_state(symbol)
@@ -425,14 +503,21 @@ def close_position(symbol):
     finally:
         position_lock.release()
 
-# ----------- 웹훅 처리 -----------
+def calculate_profit_simple(entry_price, exit_price, side):
+    """단순 수익률 계산"""
+    if side == "long" or side == "buy":
+        return float((exit_price - entry_price) / entry_price * 100)
+    else:
+        return float((entry_price - exit_price) / entry_price * 100)
+
+# ----------- 웹훅 처리 (파인스크립트 v6.1 알림 처리) -----------
 @app.route("/ping", methods=["GET", "HEAD"])
 def ping():
     return "pong", 200
 
 @app.route("/", methods=["POST"])
 def webhook():
-    """5분+3분+1분 전략 웹훅 처리"""
+    """파인스크립트 v6.1 웹훅 처리 (강화된 심볼별 가중치 단타 전략)"""
     symbol = None
     alert_id = None
     raw_data = ""
@@ -447,10 +532,10 @@ def webhook():
         if not raw_data or raw_data.strip() == "":
             return jsonify({"error": "Empty data"}), 400
         
-        # 메시지 파싱
+        # 파인스크립트 메시지 파싱
         data = None
         if raw_data.startswith("ENTRY:") or raw_data.startswith("EXIT:"):
-            data = parse_simple_alert(raw_data.strip())
+            data = parse_pinescript_alert(raw_data.strip())
         else:
             try:
                 data = request.get_json(force=True)
@@ -467,7 +552,15 @@ def webhook():
         raw_symbol = data.get("symbol", "")
         side = data.get("side", "").lower() if data.get("side") else ""
         action = data.get("action", "").lower() if data.get("action") else ""
-        strategy_name = data.get("strategy", "")
+        strategy_name = data.get("strategy", "Simple_Entry")
+        signal_strength = float(data.get("signal_strength", 0.8))
+        signal_type = data.get("signal_type", "unknown")
+        
+        # v6.1 추가 데이터
+        rsi3_pred = float(data.get("rsi3_pred", 50))
+        rsi3_conf = float(data.get("rsi3_conf", 50))
+        rsi15s_pred = float(data.get("rsi15s_pred", 50))
+        rsi15s_conf = float(data.get("rsi15s_conf", 50))
         
         # 필수 필드 검증
         missing_fields = []
@@ -483,9 +576,9 @@ def webhook():
         if not symbol or symbol not in SYMBOL_CONFIG:
             return jsonify({"error": f"Symbol not supported: {raw_symbol}"}), 400
         
-        # 중복 방지 체크
+        # 중복 방지 체크 (파인스크립트 v6.1 단일 진입 시스템)
         if is_duplicate_alert(data):
-            return jsonify({"status": "duplicate_ignored", "message": "중복 알림 무시됨"})
+            return jsonify({"status": "duplicate_ignored", "message": "중복 알림 무시됨 (v6.1 단일 진입)"})
         
         # === 청산 신호 처리 ===
         if action == "exit":
@@ -494,364 +587,636 @@ def webhook():
             
             if not current_side:
                 success = True
+                log_debug(f"🔄 청산 신호 ({symbol})", f"포지션 없음 - 신호 무시")
             else:
                 success = close_position(symbol)
-                if success and symbol in position_strategy_info:
-                    del position_strategy_info[symbol]
-            
-            if success and alert_id:
-                mark_alert_processed(alert_id)
-                
-            return jsonify({"status": "success" if success else "error", "action": "exit", "symbol": symbol})
-        
-        # === 진입 신호 처리 ===
-        if action == "entry" and side in ["long", "short"]:
-            # 전략 타입 분석
-            if "5M_" in strategy_name.upper():
-                strategy_display = "🔥 5분 전략 (2배 수량)"
-                strategy_priority = "HIGH"
-            elif "3M_" in strategy_name.upper():
-                strategy_display = "📊 3분 전략 (1.5배 수량)"
-                strategy_priority = "MEDIUM"
-            elif "1M_" in strategy_name.upper():
-                strategy_display = "⚡ 1분 전략 (기본 수량)"
-                strategy_priority = "LOW"
-            else:
-                strategy_display = "🔧 표준 전략 (기본 수량)"
-                strategy_priority = "MEDIUM"
-            
-            if not update_position_state(symbol, timeout=1):
-                return jsonify({"status": "error", "message": "포지션 조회 실패"}), 500
-            
-            current_side = position_state.get(symbol, {}).get("side")
-            desired_side = "buy" if side == "long" else "sell"
-            
-            # 기존 포지션 처리
-            if current_side:
-                if current_side == desired_side:
-                    if alert_id:
-                        mark_alert_processed(alert_id)
-                    return jsonify({"status": "same_direction", "message": "기존 포지션과 같은 방향"})
-                else:
-                    if not close_position(symbol):
-                        return jsonify({"status": "error", "message": "역포지션 청산 실패"})
-                    time.sleep(3)
-                    if not update_position_state(symbol):
-                        pass
-            
-            # 수량 계산 및 주문 실행
-            qty = calculate_position_size(symbol, strategy_name)
-            if qty <= 0:
-                return jsonify({"status": "error", "message": "수량 계산 오류"})
-            
-            success = place_order(symbol, desired_side, qty)
-            
-            # 진입 성공시 전략 정보 저장
-            if success:
-                strategy_key = "5m" if "5M" in strategy_name.upper() else "3m" if "3M" in strategy_name.upper() else "1m"
-                position_strategy_info[symbol] = {"strategy": strategy_key, "entry_time": time.time(), "strategy_name": strategy_name}
-            
-            if success and alert_id:
-                mark_alert_processed(alert_id)
-            
-            return jsonify({"status": "success" if success else "error", "action": "entry", "symbol": symbol, "side": side, "qty": float(qty), "strategy": strategy_name, "strategy_display": strategy_display})
-        
-        return jsonify({"error": f"Invalid action: {action}"}), 400
-        
-    except Exception as e:
-        if alert_id:
-            mark_alert_processed(alert_id)
-        return jsonify({"status": "error", "message": str(e), "raw_data": raw_data[:200] if raw_data else "unavailable"}), 500
+                if success:
+                    exit_reason = data.get("reason", "SIGNAL_EXIT")
+                    pnl = float(data.get("pnl", 0))
+                    confidence = float(data.get("confidence", 0))
+                    
+                    log_debug(f"✅ 청산 완료 ({symbol})", 
+                             f"사유: {exit_reason}, PnL: {pnl:.2f}%, 신뢰도: {confidence:.2f}")
+                    
+                    if symbol in position_strategy_info:
+                       del position_strategy_info[symbol]
+           
+           if success and alert_id:
+               mark_alert_processed(alert_id)
+               
+           return jsonify({
+               "status": "success" if success else "error", 
+               "action": "exit", 
+               "symbol": symbol,
+               "reason": data.get("reason", "SIGNAL_EXIT"),
+               "pnl": float(data.get("pnl", 0))
+           })
+       
+       # === 진입 신호 처리 (v6.1 강화) ===
+       if action == "entry" and side in ["long", "short"]:
+           # v6.1 신호 검증
+           if not validate_signal_strength(data):
+               if alert_id:
+                   mark_alert_processed(alert_id)
+               return jsonify({
+                   "status": "rejected", 
+                   "reason": "weak_signal", 
+                   "signal_strength": signal_strength
+               })
+           
+           # v6.1 시장 조건 검증
+           if not validate_market_conditions(data):
+               if alert_id:
+                   mark_alert_processed(alert_id)
+               return jsonify({
+                   "status": "rejected", 
+                   "reason": "market_conditions",
+                   "filters": CONFIG["filters"]
+               })
+           
+           # 심볼별 가중치 정보
+           weight = get_symbol_weight(symbol)
+           weighted_tp, weighted_sl = calculate_weighted_tpsl(symbol)
+           
+           weight_display = f"{int(weight * 100)}%"
+           if weight == 0.6:
+               weight_info = f"🟠 BTC 가중치 ({weight_display})"
+           elif weight == 0.7:
+               weight_info = f"🟡 ETH 가중치 ({weight_display})"
+           elif weight == 0.8:
+               weight_info = f"🟢 SOL 가중치 ({weight_display})"
+           else:
+               weight_info = f"⚪ 기본 가중치 ({weight_display})"
+           
+           # v6.1 신호 타입 표시
+           signal_emoji = "🚀" if signal_type == "hybrid_enhanced" else "🔄" if signal_type == "backup_enhanced" else "📊"
+           
+           if not update_position_state(symbol, timeout=1):
+               return jsonify({"status": "error", "message": "포지션 조회 실패"}), 500
+           
+           current_side = position_state.get(symbol, {}).get("side")
+           desired_side = "buy" if side == "long" else "sell"
+           
+           # 기존 포지션 처리 (파인스크립트 v6.1 단일 진입 시스템)
+           if current_side:
+               if current_side == desired_side:
+                   if alert_id:
+                       mark_alert_processed(alert_id)
+                   log_debug(f"🔄 진입 신호 ({symbol})", f"기존 포지션과 같은 방향 - 신호 무시")
+                   return jsonify({"status": "same_direction", "message": "기존 포지션과 같은 방향"})
+               else:
+                   log_debug(f"🔄 역포지션 감지 ({symbol})", f"기존: {current_side} -> 새로운: {desired_side}")
+                   if not close_position(symbol):
+                       return jsonify({"status": "error", "message": "역포지션 청산 실패"})
+                   time.sleep(3)
+                   if not update_position_state(symbol):
+                       pass
+           
+           # v6.1 신호 강도 기반 수량 계산
+           qty = calculate_position_size(symbol, strategy_name, signal_strength)
+           if qty <= 0:
+               return jsonify({"status": "error", "message": "수량 계산 오류"})
+           
+           # 진입 시도
+           success = place_order(symbol, desired_side, qty)
+           
+           # 진입 성공시 상세 정보 저장
+           if success:
+               entry_time = time.time()
+               position_strategy_info[symbol] = {
+                   "strategy": "weighted_scalping_v6.1", 
+                   "entry_time": entry_time, 
+                   "strategy_name": strategy_name,
+                   "signal_strength": signal_strength,
+                   "signal_type": signal_type,
+                   "weight": weight,
+                   "rsi_data": {
+                       "rsi3_pred": rsi3_pred,
+                       "rsi3_conf": rsi3_conf,
+                       "rsi15s_pred": rsi15s_pred,
+                       "rsi15s_conf": rsi15s_conf
+                   }
+               }
+               
+               # v6.1 진입 신호 저장 (학습용)
+               entry_signals[symbol] = {
+                   "entry_time": datetime.now().isoformat(),
+                   "entry_price": float(get_price(symbol)),
+                   "side": side,
+                   "signal_strength": signal_strength,
+                   "signal_type": signal_type,
+                   "market_data": {
+                       "volatility": float(data.get("volatility", 0)),
+                       "volume_ratio": float(data.get("volume_ratio", 0)),
+                       "bb_position": float(data.get("bb_position", 0.5))
+                   }
+               }
+               
+               log_debug(f"✅ 진입 완료 ({symbol}) {signal_emoji}", 
+                        f"방향: {side.upper()}, 수량: {qty}, {weight_info}, "
+                        f"신호강도: {signal_strength:.2f}, 타입: {signal_type}, "
+                        f"TP: {weighted_tp*100:.3f}%, SL: {weighted_sl*100:.3f}%, "
+                        f"RSI3: {rsi3_conf:.1f}, RSI15s: {rsi15s_conf:.1f}")
+           else:
+               log_debug(f"❌ 진입 실패 ({symbol})", f"주문 실행 오류")
+           
+           if success and alert_id:
+               mark_alert_processed(alert_id)
+           
+           return jsonify({
+               "status": "success" if success else "error", 
+               "action": "entry", 
+               "symbol": symbol, 
+               "side": side, 
+               "qty": float(qty), 
+               "strategy": strategy_name,
+               "signal_type": signal_type,
+               "weight": weight,
+               "weight_display": weight_info,
+               "tp_pct": weighted_tp * 100,
+               "sl_pct": weighted_sl * 100,
+               "signal_strength": signal_strength,
+               "rsi_data": {
+                   "rsi3_conf": rsi3_conf,
+                   "rsi15s_conf": rsi15s_conf
+               }
+           })
+       
+       return jsonify({"error": f"Invalid action: {action}"}), 400
+       
+   except Exception as e:
+       if alert_id:
+           mark_alert_processed(alert_id)
+       return jsonify({
+           "status": "error", 
+           "message": str(e), 
+           "raw_data": raw_data[:200] if raw_data else "unavailable"
+       }), 500
 
 # ----------- API 엔드포인트들 -----------
 @app.route("/status", methods=["GET"])
 def status():
-    """서버 상태 조회"""
-    try:
-        equity = get_total_collateral(force=True)
-        positions = {}
-        
-        for sym in SYMBOL_CONFIG:
-            if update_position_state(sym, timeout=1):
-                pos = position_state.get(sym, {})
-                if pos.get("side"):
-                    multipliers = get_tpsl_multipliers(sym)
-                    strategy_info = position_strategy_info.get(sym, {})
-                    current_strategy = strategy_info.get("strategy", "3m")
-                    
-                    strategy_tpsl = CONFIG["trading"]["strategy_tpsl"].get(current_strategy, {})
-                    base_tp = strategy_tpsl.get("tp", CONFIG["trading"]["base_tp_pct"])
-                    base_sl = strategy_tpsl.get("sl", CONFIG["trading"]["base_sl_pct"])
-                    
-                    actual_tp = base_tp * multipliers["tp"]
-                    actual_sl = base_sl * multipliers["sl"]
-                    
-                    position_info = {k: float(v) if isinstance(v, Decimal) else v for k, v in pos.items()}
-                    position_info.update({
-                        "current_strategy": current_strategy,
-                        "strategy_display": {"5m": "🔥5분", "3m": "📊3분", "1m": "⚡1분"}.get(current_strategy, "🔧기본"),
-                        "actual_tp_pct": actual_tp * 100,
-                        "actual_sl_pct": actual_sl * 100,
-                    })
-                    positions[sym] = position_info
-        
-        # 전략별 TP/SL 설정 정보
-        tpsl_settings = {}
-        for symbol in SYMBOL_CONFIG:
-            multipliers = get_tpsl_multipliers(symbol)
-            strategy_info = {}
-            for strategy_key in ["1m", "3m", "5m"]:
-                strategy_tpsl = CONFIG["trading"]["strategy_tpsl"].get(strategy_key, {})
-                base_tp = strategy_tpsl.get("tp", CONFIG["trading"]["base_tp_pct"])
-                base_sl = strategy_tpsl.get("sl", CONFIG["trading"]["base_sl_pct"])
-                
-                strategy_info[f"{strategy_key}_strategy"] = {
-                    "base_tp_pct": base_tp * 100,
-                    "base_sl_pct": base_sl * 100,
-                    "actual_tp_pct": base_tp * multipliers["tp"] * 100,
-                    "actual_sl_pct": base_sl * multipliers["sl"] * 100
-                }
-            
-            tpsl_settings[symbol] = {"tp_multiplier": multipliers["tp"], "sl_multiplier": multipliers["sl"], "strategies": strategy_info}
-        
-        return jsonify({
-            "status": "running",
-            "mode": "pinescript_5m3m1m_triple_strategy",
-            "timestamp": datetime.now().isoformat(),
-            "margin_balance": float(equity),
-            "positions": positions,
-            "tpsl_settings": tpsl_settings,
-            "config": CONFIG,
-            "pinescript_features": {
-                "perfect_alerts": True,
-                "strategy_levels": {
-                    "5m_strategy": {"multiplier": CONFIG["strategy"]["5m_multiplier"], "priority": "HIGH", "description": "5분-3분-15초 삼중확인", "tp_pct": CONFIG["trading"]["strategy_tpsl"]["5m"]["tp"] * 100, "sl_pct": CONFIG["trading"]["strategy_tpsl"]["5m"]["sl"] * 100},
-                    "3m_strategy": {"multiplier": CONFIG["strategy"]["3m_multiplier"], "priority": "MEDIUM", "description": "3분-15초 이중확인", "tp_pct": CONFIG["trading"]["strategy_tpsl"]["3m"]["tp"] * 100, "sl_pct": CONFIG["trading"]["strategy_tpsl"]["3m"]["sl"] * 100},
-                    "1m_strategy": {"multiplier": CONFIG["strategy"]["1m_multiplier"], "priority": "LOW", "description": "1분-15초 빠른반응", "tp_pct": CONFIG["trading"]["strategy_tpsl"]["1m"]["tp"] * 100, "sl_pct": CONFIG["trading"]["strategy_tpsl"]["1m"]["sl"] * 100}
-                }
-            }
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+   """서버 상태 조회 (파인스크립트 v6.1 기반)"""
+   try:
+       equity = get_total_collateral(force=True)
+       positions = {}
+       
+       for sym in SYMBOL_CONFIG:
+           if update_position_state(sym, timeout=1):
+               pos = position_state.get(sym, {})
+               if pos.get("side"):
+                   weight = get_symbol_weight(sym)
+                   weighted_tp, weighted_sl = calculate_weighted_tpsl(sym)
+                   strategy_info = position_strategy_info.get(sym, {})
+                   
+                   position_info = {k: float(v) if isinstance(v, Decimal) else v for k, v in pos.items()}
+                   position_info.update({
+                       "symbol_weight": weight,
+                       "weight_display": f"{int(weight * 100)}%",
+                       "weighted_tp_pct": weighted_tp * 100,
+                       "weighted_sl_pct": weighted_sl * 100,
+                       "signal_strength": strategy_info.get("signal_strength", 0.8),
+                       "signal_type": strategy_info.get("signal_type", "unknown"),
+                       "strategy_name": strategy_info.get("strategy_name", "Simple_Entry"),
+                       "entry_time": strategy_info.get("entry_time", 0),
+                       "rsi_data": strategy_info.get("rsi_data", {})
+                   })
+                   positions[sym] = position_info
+       
+       # 심볼별 가중치 설정 정보
+       weight_settings = {}
+       for symbol in SYMBOL_CONFIG:
+           weight = get_symbol_weight(symbol)
+           weighted_tp, weighted_sl = calculate_weighted_tpsl(symbol)
+           
+           weight_settings[symbol] = {
+               "weight": weight,
+               "weight_display": f"{int(weight * 100)}%",
+               "base_tp_pct": CONFIG["trading"]["base_tp_pct"] * 100,
+               "base_sl_pct": CONFIG["trading"]["base_sl_pct"] * 100,
+               "weighted_tp_pct": weighted_tp * 100,
+               "weighted_sl_pct": weighted_sl * 100
+           }
+       
+       return jsonify({
+           "status": "running",
+           "mode": "pinescript_weighted_scalping_v6.1",
+           "timestamp": datetime.now().isoformat(),
+           "margin_balance": float(equity),
+           "positions": positions,
+           "weight_settings": weight_settings,
+           "config": CONFIG,
+           "pinescript_features": {
+               "strategy_name": "심볼별 가중치 단타 전략 v6.1 (강화)",
+               "symbol_weights": SYMBOL_WEIGHTS,
+               "base_tpsl": {
+                   "tp_pct": CONFIG["trading"]["base_tp_pct"] * 100,
+                   "sl_pct": CONFIG["trading"]["base_sl_pct"] * 100
+               },
+               "single_entry_system": True,
+               "hybrid_mode": True,
+               "real_time_tpsl": True,
+               "min_signal_strength": CONFIG["trading"]["min_signal_strength"],
+               "filters": CONFIG["filters"],
+               "supported_signals": ["Simple_Long", "Simple_Short", "hybrid_enhanced", "backup_enhanced"]
+           }
+       })
+   except Exception as e:
+       return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/config", methods=["GET"])
 def get_config():
-    """현재 설정 조회"""
-    try:
-        return jsonify({
-            "config": CONFIG,
-            "current_tpsl": {
-                "strategy_tpsl": {
-                    "1m": {"tp_pct": CONFIG["trading"]["strategy_tpsl"]["1m"]["tp"] * 100, "sl_pct": CONFIG["trading"]["strategy_tpsl"]["1m"]["sl"] * 100},
-                    "3m": {"tp_pct": CONFIG["trading"]["strategy_tpsl"]["3m"]["tp"] * 100, "sl_pct": CONFIG["trading"]["strategy_tpsl"]["3m"]["sl"] * 100},
-                    "5m": {"tp_pct": CONFIG["trading"]["strategy_tpsl"]["5m"]["tp"] * 100, "sl_pct": CONFIG["trading"]["strategy_tpsl"]["5m"]["sl"] * 100}
-                }
-            },
-            "symbol_tpsl_multipliers": SYMBOL_TPSL_MULTIPLIERS,
-            "strategy_multipliers": {"5m_strategy": CONFIG["strategy"]["5m_multiplier"], "3m_strategy": CONFIG["strategy"]["3m_multiplier"], "1m_strategy": CONFIG["strategy"]["1m_multiplier"]},
-            "active_positions": {symbol: info for symbol, info in position_strategy_info.items()}
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+   """현재 설정 조회 (파인스크립트 v6.1 설정 반영)"""
+   try:
+       return jsonify({
+           "config": CONFIG,
+           "symbol_weights": SYMBOL_WEIGHTS,
+           "base_tpsl": {
+               "tp_pct": CONFIG["trading"]["base_tp_pct"] * 100,
+               "sl_pct": CONFIG["trading"]["base_sl_pct"] * 100
+           },
+           "weighted_tpsl_by_symbol": {
+               symbol: {
+                   "weight": get_symbol_weight(symbol),
+                   "tp_pct": calculate_weighted_tpsl(symbol)[0] * 100,
+                   "sl_pct": calculate_weighted_tpsl(symbol)[1] * 100
+               } for symbol in SYMBOL_CONFIG
+           },
+           "active_positions": {symbol: info for symbol, info in position_strategy_info.items()},
+           "pinescript_version": "v6.1",
+           "strategy_description": "강화된 심볼별 가중치 단타 전략 (더 엄격한 조건, 추가 필터)",
+           "v6.1_features": {
+               "min_signal_strength": CONFIG["trading"]["min_signal_strength"],
+               "bollinger_filter": True,
+               "volume_profile_filter": True,
+               "rsi_acceleration_check": True,
+               "dynamic_position_sizing": True,
+               "enhanced_filters": CONFIG["filters"]
+           }
+       })
+   except Exception as e:
+       return jsonify({"error": str(e)}), 500
 
 @app.route("/test-symbol/<symbol>", methods=["GET"])
 def test_symbol_mapping(symbol):
-    """심볼 매핑 테스트"""
-    normalized = normalize_symbol(symbol)
-    is_valid = normalized and normalized in SYMBOL_CONFIG
-    multipliers = get_tpsl_multipliers(normalized) if normalized else {"tp": 1.0, "sl": 1.0}
-    
-    # 전략별 TP/SL 계산
-    strategy_results = {}
-    for strategy_key in ["1m", "3m", "5m"]:
-        strategy_tpsl = CONFIG["trading"]["strategy_tpsl"].get(strategy_key, {})
-        base_tp = strategy_tpsl.get("tp", CONFIG["trading"]["base_tp_pct"])
-        base_sl = strategy_tpsl.get("sl", CONFIG["trading"]["base_sl_pct"])
-        
-        strategy_results[strategy_key] = {
-            "tp_pct": base_tp * multipliers["tp"] * 100,
-            "sl_pct": base_sl * multipliers["sl"] * 100
-        }
-    
-    return jsonify({
-        "input": symbol, "normalized": normalized, "valid": is_valid,
-        "tpsl_multipliers": multipliers, "strategy_tpsl": strategy_results,
-        "all_mappings": {k: v for k, v in SYMBOL_MAPPING.items() if k.startswith(symbol.upper()[:3])}
-    })
+   """심볼 매핑 및 가중치 테스트"""
+   normalized = normalize_symbol(symbol)
+   is_valid = normalized and normalized in SYMBOL_CONFIG
+   
+   if normalized:
+       weight = get_symbol_weight(normalized)
+       weighted_tp, weighted_sl = calculate_weighted_tpsl(normalized)
+       
+       weight_info = {
+           "weight": weight,
+           "weight_display": f"{int(weight * 100)}%",
+           "base_tp_pct": CONFIG["trading"]["base_tp_pct"] * 100,
+           "base_sl_pct": CONFIG["trading"]["base_sl_pct"] * 100,
+           "weighted_tp_pct": weighted_tp * 100,
+           "weighted_sl_pct": weighted_sl * 100
+       }
+   else:
+       weight_info = None
+   
+   return jsonify({
+       "input": symbol, 
+       "normalized": normalized, 
+       "valid": is_valid,
+       "weight_info": weight_info,
+       "all_mappings": {k: v for k, v in SYMBOL_MAPPING.items() if k.startswith(symbol.upper()[:3])},
+       "pinescript_compatibility": "v6.1"
+   })
 
-# ----------- 실시간 TP/SL 모니터링 -----------
+# ----------- v6.1 추가 엔드포인트 -----------
+@app.route("/signal-stats", methods=["GET"])
+def signal_stats():
+   """신호 통계 (v6.1 추가)"""
+   try:
+       stats = {
+           "active_signals": len(entry_signals),
+           "signal_details": {},
+           "recent_signals": []
+       }
+       
+       # 최근 신호들
+       for symbol, signal in entry_signals.items():
+           entry_time = datetime.fromisoformat(signal["entry_time"])
+           holding_time = (datetime.now() - entry_time).total_seconds()
+           
+           stats["signal_details"][symbol] = {
+               "entry_time": signal["entry_time"],
+               "holding_time_seconds": holding_time,
+               "signal_strength": signal["signal_strength"],
+               "signal_type": signal["signal_type"],
+               "side": signal["side"],
+               "market_data": signal.get("market_data", {})
+           }
+       
+       # 최근 처리된 신호들
+       with duplicate_prevention_lock:
+           for key, signal in recent_signals.items():
+               stats["recent_signals"].append({
+                   "symbol_side": key,
+                   "time": datetime.fromtimestamp(signal["time"]).isoformat(),
+                   "strategy": signal.get("strategy", "unknown")
+               })
+       
+       return jsonify(stats)
+   except Exception as e:
+       return jsonify({"error": str(e)}), 500
+
+# ----------- 실시간 TP/SL 모니터링 (파인스크립트 v6.1 기반) -----------
 async def send_ping(ws):
-    """웹소켓 핑 전송"""
-    while True:
-        try:
-            await ws.ping()
-        except Exception:
-            break
-        await asyncio.sleep(CONFIG["api"]["ping_interval"])
+   """웹소켓 핑 전송"""
+   while True:
+       try:
+           await ws.ping()
+       except Exception:
+           break
+       await asyncio.sleep(CONFIG["api"]["ping_interval"])
 
 async def price_listener():
-    """실시간 가격 모니터링 및 전략별 TP/SL 처리"""
-    uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-    symbols = list(SYMBOL_CONFIG.keys())
-    reconnect_delay = CONFIG["api"]["reconnect_delay"]
-    max_delay = CONFIG["api"]["max_delay"]
-    
-    while True:
-        try:
-            async with websockets.connect(uri, ping_interval=CONFIG["api"]["ping_interval"], ping_timeout=15) as ws:
-                subscribe_msg = {"time": int(time.time()), "channel": "futures.tickers", "event": "subscribe", "payload": symbols}
-                await ws.send(json.dumps(subscribe_msg))
-                ping_task = asyncio.create_task(send_ping(ws))
-                reconnect_delay = CONFIG["api"]["reconnect_delay"]
-                
-                while True:
-                    try:
-                        msg = await asyncio.wait_for(ws.recv(), timeout=45)
-                        try:
-                            data = json.loads(msg)
-                        except json.JSONDecodeError:
-                            continue
-                        
-                        if not isinstance(data, dict) or data.get("event") == "subscribe":
-                            continue
-                            
-                        result = data.get("result")
-                        if not result:
-                            continue
-                            
-                        if isinstance(result, list):
-                            for item in result:
-                                if isinstance(item, dict):
-                                    process_ticker_data(item)
-                        elif isinstance(result, dict):
-                            process_ticker_data(result)
-                            
-                    except (asyncio.TimeoutError, websockets.ConnectionClosed):
-                        ping_task.cancel()
-                        break
-                    except Exception:
-                        continue
-        except Exception:
-            await asyncio.sleep(reconnect_delay)
-            reconnect_delay = min(reconnect_delay * 2, max_delay)
+   """실시간 가격 모니터링 및 심볼별 가중치 TP/SL 처리 (v6.1)"""
+   uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
+   symbols = list(SYMBOL_CONFIG.keys())
+   reconnect_delay = CONFIG["api"]["reconnect_delay"]
+   max_delay = CONFIG["api"]["max_delay"]
+   
+   while True:
+       try:
+           async with websockets.connect(uri, ping_interval=CONFIG["api"]["ping_interval"], ping_timeout=15) as ws:
+               subscribe_msg = {
+                   "time": int(time.time()), 
+                   "channel": "futures.tickers", 
+                   "event": "subscribe", 
+                   "payload": symbols
+               }
+               await ws.send(json.dumps(subscribe_msg))
+               ping_task = asyncio.create_task(send_ping(ws))
+               reconnect_delay = CONFIG["api"]["reconnect_delay"]
+               
+               while True:
+                   try:
+                       msg = await asyncio.wait_for(ws.recv(), timeout=45)
+                       try:
+                           data = json.loads(msg)
+                       except json.JSONDecodeError:
+                           continue
+                       
+                       if not isinstance(data, dict) or data.get("event") == "subscribe":
+                           continue
+                           
+                       result = data.get("result")
+                       if not result:
+                           continue
+                           
+                       if isinstance(result, list):
+                           for item in result:
+                               if isinstance(item, dict):
+                                   process_ticker_data(item)
+                       elif isinstance(result, dict):
+                           process_ticker_data(result)
+                           
+                   except (asyncio.TimeoutError, websockets.ConnectionClosed):
+                       ping_task.cancel()
+                       break
+                   except Exception:
+                       continue
+       except Exception:
+           await asyncio.sleep(reconnect_delay)
+           reconnect_delay = min(reconnect_delay * 2, max_delay)
 
 def process_ticker_data(ticker):
-    """Gate.io 실시간 가격으로 전략별 TP/SL 체크"""
-    try:
-        contract = ticker.get("contract")
-        last = ticker.get("last")
-        if not contract or not last or contract not in SYMBOL_CONFIG:
-            return
-            
-        price = Decimal(str(last).replace("E", "e")).normalize()
-        
-        acquired = position_lock.acquire(timeout=1)
-        if not acquired:
-            return
-            
-        try:
-            if not update_position_state(contract, timeout=1):
-                return
-                
-            pos = position_state.get(contract, {})
-            position_entry_price = pos.get("price")
-            size = pos.get("size", 0)
-            side = pos.get("side")
-            
-            if not position_entry_price or size <= 0 or side not in ["buy", "sell"]:
-                return
-            
-            # 포지션별 전략 정보 조회
-            strategy_info = position_strategy_info.get(contract, {})
-            strategy_key = strategy_info.get("strategy", "3m")
-            
-            # 전략별 TP/SL 비율 적용
-            strategy_tpsl = CONFIG["trading"]["strategy_tpsl"].get(strategy_key, {})
-            base_tp = strategy_tpsl.get("tp", CONFIG["trading"]["base_tp_pct"])
-            base_sl = strategy_tpsl.get("sl", CONFIG["trading"]["base_sl_pct"])
-            
-            # 심볼별 가중치 적용
-            multipliers = get_tpsl_multipliers(contract)
-            sl_pct = Decimal(str(base_sl)) * Decimal(str(multipliers["sl"]))
-            tp_pct = Decimal(str(base_tp)) * Decimal(str(multipliers["tp"]))
-            
-            strategy_display = {"5m": "🔥5분", "3m": "📊3분", "1m": "⚡1분"}.get(strategy_key, "🔧기본")
-            
-            if side == "buy":
-                sl = position_entry_price * (1 - sl_pct)
-                tp = position_entry_price * (1 + tp_pct)
-                if price <= sl:
-                    log_debug(f"🛑 SL 트리거 ({contract})", f"[{strategy_display}] 현재가:{price} <= SL:{sl} (SL비율:{sl_pct*100:.3f}%)")
-                    close_position(contract)
-                elif price >= tp:
-                    log_debug(f"🎯 TP 트리거 ({contract})", f"[{strategy_display}] 현재가:{price} >= TP:{tp} (TP비율:{tp_pct*100:.3f}%)")
-                    close_position(contract)
-            else:
-                sl = position_entry_price * (1 + sl_pct)
-                tp = position_entry_price * (1 - tp_pct)
-                if price >= sl:
-                    log_debug(f"🛑 SL 트리거 ({contract})", f"[{strategy_display}] 현재가:{price} >= SL:{sl} (SL비율:{sl_pct*100:.3f}%)")
-                    close_position(contract)
-                elif price <= tp:
-                    log_debug(f"🎯 TP 트리거 ({contract})", f"[{strategy_display}] 현재가:{price} <= TP:{tp} (TP비율:{tp_pct*100:.3f}%)")
-                    close_position(contract)
-        finally:
-            position_lock.release()
-    except Exception:
-        pass
+   """Gate.io 실시간 가격으로 심볼별 가중치 TP/SL 체크 (v6.1)"""
+   try:
+       contract = ticker.get("contract")
+       last = ticker.get("last")
+       if not contract or not last or contract not in SYMBOL_CONFIG:
+           return
+           
+       price = Decimal(str(last).replace("E", "e")).normalize()
+       
+       acquired = position_lock.acquire(timeout=1)
+       if not acquired:
+           return
+           
+       try:
+           if not update_position_state(contract, timeout=1):
+               return
+               
+           pos = position_state.get(contract, {})
+           position_entry_price = pos.get("price")
+           size = pos.get("size", 0)
+           side = pos.get("side")
+           
+           if not position_entry_price or size <= 0 or side not in ["buy", "sell"]:
+               return
+           
+           # 심볼별 가중치 TP/SL 계산 (파인스크립트 v6.1과 동일)
+           weight = get_symbol_weight(contract)
+           weighted_tp, weighted_sl = calculate_weighted_tpsl(contract)
+           
+           # 전략 정보 가져오기
+           strategy_info = position_strategy_info.get(contract, {})
+           signal_type = strategy_info.get("signal_type", "unknown")
+           signal_strength = strategy_info.get("signal_strength", 0.8)
+           
+           # 가중치 및 신호 타입 표시
+           weight_display = f"{int(weight * 100)}%"
+           if weight == 0.6:
+               weight_info = f"🟠BTC({weight_display})"
+           elif weight == 0.7:
+               weight_info = f"🟡ETH({weight_display})"
+           elif weight == 0.8:
+               weight_info = f"🟢SOL({weight_display})"
+           else:
+               weight_info = f"⚪기본({weight_display})"
+           
+           signal_emoji = "🚀" if signal_type == "hybrid_enhanced" else "🔄" if signal_type == "backup_enhanced" else "📊"
+           
+           if side == "buy":
+               sl = position_entry_price * (1 - Decimal(str(weighted_sl)))
+               tp = position_entry_price * (1 + Decimal(str(weighted_tp)))
+               if price <= sl:
+                   log_debug(f"🛑 SL 트리거 ({contract}) {signal_emoji}", 
+                            f"[{weight_info}] 현재가:{price} <= SL:{sl} (손절률:{weighted_sl*100:.3f}%)")
+                   close_position(contract)
+               elif price >= tp:
+                   log_debug(f"🎯 TP 트리거 ({contract}) {signal_emoji}", 
+                            f"[{weight_info}] 현재가:{price} >= TP:{tp} (익절률:{weighted_tp*100:.3f}%)")
+                   close_position(contract)
+           else:  # sell
+               sl = position_entry_price * (1 + Decimal(str(weighted_sl)))
+               tp = position_entry_price * (1 - Decimal(str(weighted_tp)))
+               if price >= sl:
+                   log_debug(f"🛑 SL 트리거 ({contract}) {signal_emoji}", 
+                            f"[{weight_info}] 현재가:{price} >= SL:{sl} (손절률:{weighted_sl*100:.3f}%)")
+                   close_position(contract)
+               elif price <= tp:
+                   log_debug(f"🎯 TP 트리거 ({contract}) {signal_emoji}", 
+                            f"[{weight_info}] 현재가:{price} <= TP:{tp} (익절률:{weighted_tp*100:.3f}%)")
+                   close_position(contract)
+       finally:
+           position_lock.release()
+   except Exception:
+       pass
 
 def backup_position_loop():
-    """백업 포지션 상태 갱신"""
-    while True:
-        try:
-            for sym in SYMBOL_CONFIG:
-                update_position_state(sym, timeout=1)
-            time.sleep(300)
-        except Exception:
-            time.sleep(300)
+   """백업 포지션 상태 갱신"""
+   while True:
+       try:
+           for sym in SYMBOL_CONFIG:
+               update_position_state(sym, timeout=1)
+           time.sleep(300)  # 5분마다 갱신
+       except Exception:
+           time.sleep(300)
 
 def log_initial_status():
-    """서버 시작시 초기 상태 로깅"""
-    try:
-        log_debug("🚀 서버 시작", "5분+3분+1분 삼중 전략 모드 (전략별 TP/SL)")
-        equity = get_total_collateral(force=True)
-        log_debug("💰 총 자산(초기)", f"{equity} USDT")
-        
-        # 전략별 TP/SL 설정 로깅
-        for strategy_key in ["1m", "3m", "5m"]:
-            strategy_tpsl = CONFIG["trading"]["strategy_tpsl"].get(strategy_key, {})
-            tp_pct = strategy_tpsl.get("tp", 0) * 100
-            sl_pct = strategy_tpsl.get("sl", 0) * 100
-            log_debug(f"📊 {strategy_key.upper()} 전략", f"TP: {tp_pct:.2f}%, SL: {sl_pct:.2f}%")
-        
-        for symbol in SYMBOL_CONFIG:
-            if not update_position_state(symbol, timeout=3):
-                continue
-            pos = position_state.get(symbol, {})
-            if pos.get("side"):
-                count = pos.get("count", 0)
-                log_debug(f"📊 초기 포지션 ({symbol})", f"방향: {pos['side']}, 수량: {pos['size']}, 포지션수: {count}/1")
-            else:
-                log_debug(f"📊 초기 포지션 ({symbol})", "포지션 없음")
-    except Exception as e:
-        log_debug("❌ 초기 상태 로깅 실패", str(e), exc_info=True)
+   """서버 시작시 초기 상태 로깅 (파인스크립트 v6.1 정보 포함)"""
+   try:
+       log_debug("🚀 서버 시작", "파인스크립트 심볼별 가중치 단타 전략 v6.1 (강화)")
+       equity = get_total_collateral(force=True)
+       log_debug("💰 총 자산(초기)", f"{equity} USDT")
+       
+       # 심볼별 가중치 설정 로깅
+       log_debug("⚙️ 심볼별 가중치", "BTC: 60%, ETH: 70%, SOL: 80%, 기타: 100%")
+       log_debug("📊 기본 TP/SL", f"TP: {CONFIG['trading']['base_tp_pct']*100:.1f}%, SL: {CONFIG['trading']['base_sl_pct']*100:.1f}%")
+       log_debug("🎯 최소 신호 강도", f"{CONFIG['trading']['min_signal_strength']:.2f}")
+       
+       # v6.1 필터 설정 로깅
+       log_debug("🔍 v6.1 필터", f"최소 변동성: {CONFIG['filters']['min_volatility']}%, "
+                                f"최소 거래량: {CONFIG['filters']['min_volume_ratio']}x, "
+                                f"BB 롱: <{CONFIG['filters']['bb_long_threshold']}, "
+                                f"BB 숏: >{CONFIG['filters']['bb_short_threshold']}")
+       
+       # 각 심볼별 실제 적용 TP/SL 로깅
+       for symbol in SYMBOL_CONFIG:
+           weight = get_symbol_weight(symbol)
+           weighted_tp, weighted_sl = calculate_weighted_tpsl(symbol)
+           log_debug(f"🎯 {symbol}", 
+                    f"가중치: {int(weight*100)}%, TP: {weighted_tp*100:.2f}%, SL: {weighted_sl*100:.2f}%")
+       
+       # 초기 포지션 상태 확인
+       for symbol in SYMBOL_CONFIG:
+           if not update_position_state(symbol, timeout=3):
+               continue
+           pos = position_state.get(symbol, {})
+           if pos.get("side"):
+               count = pos.get("count", 0)
+               log_debug(f"📊 초기 포지션 ({symbol})", 
+                        f"방향: {pos['side']}, 수량: {pos['size']}, 포지션수: {count}/1")
+           else:
+               log_debug(f"📊 초기 포지션 ({symbol})", "포지션 없음")
+               
+   except Exception as e:
+       log_debug("❌ 초기 상태 로깅 실패", str(e), exc_info=True)
+
+# ----------- 추가 유틸리티 엔드포인트 -----------
+@app.route("/pinescript-info", methods=["GET"])
+def pinescript_info():
+   """파인스크립트 전략 정보"""
+   return jsonify({
+       "strategy_name": "심볼별 가중치 단타 전략 v6.1 (강화)",
+       "version": "6.1",
+       "features": {
+           "symbol_weights": True,
+           "single_entry_system": True,
+           "hybrid_mode": True,
+           "real_time_tpsl": True,
+           "15s_confirmation": True,
+           "multi_timeframe": True,
+           "bollinger_filter": True,
+           "volume_profile": True,
+           "rsi_acceleration": True,
+           "min_volatility": True
+       },
+       "symbol_weights": SYMBOL_WEIGHTS,
+       "default_settings": {
+           "base_sl_pct": CONFIG["trading"]["base_sl_pct"] * 100,
+           "base_tp_pct": CONFIG["trading"]["base_tp_pct"] * 100,
+           "qty_value": 100,
+           "pyramiding": 1,
+           "min_signal_strength": CONFIG["trading"]["min_signal_strength"]
+       },
+       "filters": CONFIG["filters"],
+       "supported_alerts": {
+           "entry_formats": [
+               '{"action":"entry","side":"long","symbol":"SYMBOL","strategy":"Simple_Long","signal_strength":0.85,"signal_type":"hybrid_enhanced",...}',
+               '{"action":"entry","side":"short","symbol":"SYMBOL","strategy":"Simple_Short","signal_strength":0.82,"signal_type":"backup_enhanced",...}'
+           ],
+           "exit_formats": [
+               '{"action":"exit","side":"long","symbol":"SYMBOL","reason":"STOP_LOSS","pnl":-0.2,...}',
+               '{"action":"exit","side":"short","symbol":"SYMBOL","reason":"TAKE_PROFIT","pnl":0.5,...}'
+           ]
+       }
+   })
+
+@app.route("/weights", methods=["GET"])
+def get_weights():
+   """심볼별 가중치 상세 정보 (v6.1)"""
+   try:
+       weight_details = {}
+       for symbol in SYMBOL_CONFIG:
+           weight = get_symbol_weight(symbol)
+           weighted_tp, weighted_sl = calculate_weighted_tpsl(symbol)
+           
+           # 심볼 타입 분류
+           if "BTC" in symbol:
+               symbol_type = "🟠 Bitcoin"
+           elif "ETH" in symbol:
+               symbol_type = "🟡 Ethereum"
+           elif "SOL" in symbol:
+               symbol_type = "🟢 Solana"
+           else:
+               symbol_type = "⚪ Others"
+           
+           weight_details[symbol] = {
+               "symbol_type": symbol_type,
+               "weight": weight,
+               "weight_display": f"{int(weight * 100)}%",
+               "base_tp_pct": CONFIG["trading"]["base_tp_pct"] * 100,
+               "base_sl_pct": CONFIG["trading"]["base_sl_pct"] * 100,
+               "weighted_tp_pct": weighted_tp * 100,
+               "weighted_sl_pct": weighted_sl * 100,
+               "reduction_factor": f"{(1-weight)*100:.0f}% 감소" if weight < 1.0 else "감소 없음"
+           }
+       
+       return jsonify({
+           "pinescript_strategy": "심볼별 가중치 단타 전략 v6.1 (강화)",
+           "weight_system": {
+               "BTC": "60% (40% 감소)",
+               "ETH": "70% (30% 감소)", 
+               "SOL": "80% (20% 감소)",
+               "Others": "100% (감소 없음)"
+           },
+           "symbol_details": weight_details,
+           "v6.1_enhancements": {
+               "stricter_rsi": "롱 28, 숏 72 (더 극단적)",
+               "higher_volume": "1.8x 이상 거래량",
+               "bollinger_bands": "롱 <20%, 숏 >80%",
+               "min_volatility": "0.5% 이상",
+               "signal_strength": "0.8 이상만 진입"
+           }
+       })
+   except Exception as e:
+       return jsonify({"error": str(e)}), 500
 
 # ----------- 메인 실행 -----------
 if __name__ == "__main__":
-    log_initial_status()
-    
-    # 실시간 가격 모니터링
-    threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
-    
-    # 백업 포지션 상태 갱신
-    threading.Thread(target=backup_position_loop, daemon=True).start()
-    
-    port = int(os.environ.get("PORT", 8080))
-    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (전략별 TP/SL 적용)")
-    log_debug("✅ 전략별 TP/SL", "1분 0.2%/0.1%, 3분 0.3%/0.12%, 5분 0.4%/0.15%")
-    log_debug("🔥 실시간 TP/SL", "Gate.io 가격 기준 전략별 자동 TP/SL 처리")
-    log_debug("🔥 5분 전략", f"{CONFIG['strategy']['5m_multiplier']}배 수량, TP/SL: {CONFIG['trading']['strategy_tpsl']['5m']['tp']*100:.1f}%/{CONFIG['trading']['strategy_tpsl']['5m']['sl']*100:.1f}%")
-    log_debug("📊 3분 전략", f"{CONFIG['strategy']['3m_multiplier']}배 수량, TP/SL: {CONFIG['trading']['strategy_tpsl']['3m']['tp']*100:.1f}%/{CONFIG['trading']['strategy_tpsl']['3m']['sl']*100:.1f}%")
-    log_debug("⚡ 1분 전략", f"{CONFIG['strategy']['1m_multiplier']}배 수량, TP/SL: {CONFIG['trading']['strategy_tpsl']['1m']['tp']*100:.1f}%/{CONFIG['trading']['strategy_tpsl']['1m']['sl']*100:.1f}%")
-    
-    app.run(host="0.0.0.0", port=port, debug=False)
+   log_initial_status()
+   
+   # 실시간 가격 모니터링 (심볼별 가중치 TP/SL)
+   threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
+   
+   # 백업 포지션 상태 갱신
+   threading.Thread(target=backup_position_loop, daemon=True).start()
+   
+   port = int(os.environ.get("PORT", 8080))
+   log_debug("🚀 서버 시작", f"포트 {port}에서 실행")
+   log_debug("⚡ 파인스크립트 v6.1", "강화된 심볼별 가중치 단타 전략 연동")
+   log_debug("🎯 가중치 시스템", "BTC: 60%, ETH: 70%, SOL: 80%, 기타: 100%")
+   log_debug("🔥 실시간 TP/SL", f"기본 TP: {CONFIG['trading']['base_tp_pct']*100:.1f}%, SL: {CONFIG['trading']['base_sl_pct']*100:.1f}% (가중치 적용)")
+   log_debug("🛡️ 강화된 필터", f"신호강도 ≥{CONFIG['trading']['min_signal_strength']}, 볼린저/거래량/변동성 필터")
+   log_debug("📊 단일 진입 시스템", "파인스크립트 v6.1과 동일한 중복 방지")
+   
+   app.run(host="0.0.0.0", port=port, debug=False)
