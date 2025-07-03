@@ -521,18 +521,14 @@ def webhook():
     symbol = None
     alert_id = None
     raw_data = ""
-    
     try:
-        # Raw 데이터 확인
         try:
             raw_data = request.get_data(as_text=True)
         except Exception:
             raw_data = ""
-        
         if not raw_data or raw_data.strip() == "":
             return jsonify({"error": "Empty data"}), 400
-        
-        # 파인스크립트 메시지 파싱
+
         data = None
         if raw_data.startswith("ENTRY:") or raw_data.startswith("EXIT:"):
             data = parse_pinescript_alert(raw_data.strip())
@@ -543,11 +539,10 @@ def webhook():
                     data = json.loads(raw_data)
             except Exception:
                 return jsonify({"error": "JSON parsing failed"}), 400
-                
+
         if not data:
             return jsonify({"error": "Empty parsed data"}), 400
-        
-        # 필드 추출
+
         alert_id = data.get("id", "")
         raw_symbol = data.get("symbol", "")
         side = data.get("side", "").lower() if data.get("side") else ""
@@ -555,36 +550,31 @@ def webhook():
         strategy_name = data.get("strategy", "Simple_Entry")
         signal_strength = float(data.get("signal_strength", 0.8))
         signal_type = data.get("signal_type", "unknown")
-        
-        # v6.1 추가 데이터
+
         rsi3_pred = float(data.get("rsi3_pred", 50))
         rsi3_conf = float(data.get("rsi3_conf", 50))
         rsi15s_pred = float(data.get("rsi15s_pred", 50))
         rsi15s_conf = float(data.get("rsi15s_conf", 50))
-        
-        # 필수 필드 검증
+
         missing_fields = []
         if not raw_symbol: missing_fields.append("symbol")
         if not side: missing_fields.append("side")
         if not action: missing_fields.append("action")
-        
         if missing_fields:
             return jsonify({"error": f"Missing required fields: {missing_fields}"}), 400
-        
-        # 심볼 변환
+
         symbol = normalize_symbol(raw_symbol)
         if not symbol or symbol not in SYMBOL_CONFIG:
             return jsonify({"error": f"Symbol not supported: {raw_symbol}"}), 400
-        
-        # 중복 방지 체크 (파인스크립트 v6.1 단일 진입 시스템)
+
         if is_duplicate_alert(data):
             return jsonify({"status": "duplicate_ignored", "message": "중복 알림 무시됨 (v6.1 단일 진입)"})
-        
+
         # === 청산 신호 처리 ===
         if action == "exit":
             update_position_state(symbol, timeout=1)
             current_side = position_state.get(symbol, {}).get("side")
-            
+
             if not current_side:
                 success = True
                 log_debug(f"🔄 청산 신호 ({symbol})", f"포지션 없음 - 신호 무시")
@@ -594,164 +584,157 @@ def webhook():
                     exit_reason = data.get("reason", "SIGNAL_EXIT")
                     pnl = float(data.get("pnl", 0))
                     confidence = float(data.get("confidence", 0))
-                    
-                    log_debug(f"✅ 청산 완료 ({symbol})", 
-                             f"사유: {exit_reason}, PnL: {pnl:.2f}%, 신뢰도: {confidence:.2f}")
-                    
+                    log_debug(
+                        f"✅ 청산 완료 ({symbol})",
+                        f"사유: {exit_reason}, PnL: {pnl:.2f}%, 신뢰도: {confidence:.2f}"
+                    )
                     if symbol in position_strategy_info:
-                       del position_strategy_info[symbol]
-           
-           if success and alert_id:
-               mark_alert_processed(alert_id)
-               
-           return jsonify({
-               "status": "success" if success else "error", 
-               "action": "exit", 
-               "symbol": symbol,
-               "reason": data.get("reason", "SIGNAL_EXIT"),
-               "pnl": float(data.get("pnl", 0))
-           })
-       
-       # === 진입 신호 처리 (v6.1 강화) ===
-       if action == "entry" and side in ["long", "short"]:
-           # v6.1 신호 검증
-           if not validate_signal_strength(data):
-               if alert_id:
-                   mark_alert_processed(alert_id)
-               return jsonify({
-                   "status": "rejected", 
-                   "reason": "weak_signal", 
-                   "signal_strength": signal_strength
-               })
-           
-           # v6.1 시장 조건 검증
-           if not validate_market_conditions(data):
-               if alert_id:
-                   mark_alert_processed(alert_id)
-               return jsonify({
-                   "status": "rejected", 
-                   "reason": "market_conditions",
-                   "filters": CONFIG["filters"]
-               })
-           
-           # 심볼별 가중치 정보
-           weight = get_symbol_weight(symbol)
-           weighted_tp, weighted_sl = calculate_weighted_tpsl(symbol)
-           
-           weight_display = f"{int(weight * 100)}%"
-           if weight == 0.6:
-               weight_info = f"🟠 BTC 가중치 ({weight_display})"
-           elif weight == 0.7:
-               weight_info = f"🟡 ETH 가중치 ({weight_display})"
-           elif weight == 0.8:
-               weight_info = f"🟢 SOL 가중치 ({weight_display})"
-           else:
-               weight_info = f"⚪ 기본 가중치 ({weight_display})"
-           
-           # v6.1 신호 타입 표시
-           signal_emoji = "🚀" if signal_type == "hybrid_enhanced" else "🔄" if signal_type == "backup_enhanced" else "📊"
-           
-           if not update_position_state(symbol, timeout=1):
-               return jsonify({"status": "error", "message": "포지션 조회 실패"}), 500
-           
-           current_side = position_state.get(symbol, {}).get("side")
-           desired_side = "buy" if side == "long" else "sell"
-           
-           # 기존 포지션 처리 (파인스크립트 v6.1 단일 진입 시스템)
-           if current_side:
-               if current_side == desired_side:
-                   if alert_id:
-                       mark_alert_processed(alert_id)
-                   log_debug(f"🔄 진입 신호 ({symbol})", f"기존 포지션과 같은 방향 - 신호 무시")
-                   return jsonify({"status": "same_direction", "message": "기존 포지션과 같은 방향"})
-               else:
-                   log_debug(f"🔄 역포지션 감지 ({symbol})", f"기존: {current_side} -> 새로운: {desired_side}")
-                   if not close_position(symbol):
-                       return jsonify({"status": "error", "message": "역포지션 청산 실패"})
-                   time.sleep(3)
-                   if not update_position_state(symbol):
-                       pass
-           
-           # v6.1 신호 강도 기반 수량 계산
-           qty = calculate_position_size(symbol, strategy_name, signal_strength)
-           if qty <= 0:
-               return jsonify({"status": "error", "message": "수량 계산 오류"})
-           
-           # 진입 시도
-           success = place_order(symbol, desired_side, qty)
-           
-           # 진입 성공시 상세 정보 저장
-           if success:
-               entry_time = time.time()
-               position_strategy_info[symbol] = {
-                   "strategy": "weighted_scalping_v6.1", 
-                   "entry_time": entry_time, 
-                   "strategy_name": strategy_name,
-                   "signal_strength": signal_strength,
-                   "signal_type": signal_type,
-                   "weight": weight,
-                   "rsi_data": {
-                       "rsi3_pred": rsi3_pred,
-                       "rsi3_conf": rsi3_conf,
-                       "rsi15s_pred": rsi15s_pred,
-                       "rsi15s_conf": rsi15s_conf
-                   }
-               }
-               
-               # v6.1 진입 신호 저장 (학습용)
-               entry_signals[symbol] = {
-                   "entry_time": datetime.now().isoformat(),
-                   "entry_price": float(get_price(symbol)),
-                   "side": side,
-                   "signal_strength": signal_strength,
-                   "signal_type": signal_type,
-                   "market_data": {
-                       "volatility": float(data.get("volatility", 0)),
-                       "volume_ratio": float(data.get("volume_ratio", 0)),
-                       "bb_position": float(data.get("bb_position", 0.5))
-                   }
-               }
-               
-               log_debug(f"✅ 진입 완료 ({symbol}) {signal_emoji}", 
-                        f"방향: {side.upper()}, 수량: {qty}, {weight_info}, "
-                        f"신호강도: {signal_strength:.2f}, 타입: {signal_type}, "
-                        f"TP: {weighted_tp*100:.3f}%, SL: {weighted_sl*100:.3f}%, "
-                        f"RSI3: {rsi3_conf:.1f}, RSI15s: {rsi15s_conf:.1f}")
-           else:
-               log_debug(f"❌ 진입 실패 ({symbol})", f"주문 실행 오류")
-           
-           if success and alert_id:
-               mark_alert_processed(alert_id)
-           
-           return jsonify({
-               "status": "success" if success else "error", 
-               "action": "entry", 
-               "symbol": symbol, 
-               "side": side, 
-               "qty": float(qty), 
-               "strategy": strategy_name,
-               "signal_type": signal_type,
-               "weight": weight,
-               "weight_display": weight_info,
-               "tp_pct": weighted_tp * 100,
-               "sl_pct": weighted_sl * 100,
-               "signal_strength": signal_strength,
-               "rsi_data": {
-                   "rsi3_conf": rsi3_conf,
-                   "rsi15s_conf": rsi15s_conf
-               }
-           })
-       
-       return jsonify({"error": f"Invalid action: {action}"}), 400
-       
-   except Exception as e:
-       if alert_id:
-           mark_alert_processed(alert_id)
-       return jsonify({
-           "status": "error", 
-           "message": str(e), 
-           "raw_data": raw_data[:200] if raw_data else "unavailable"
-       }), 500
+                        del position_strategy_info[symbol]
+
+            if success and alert_id:
+                mark_alert_processed(alert_id)
+
+            return jsonify({
+                "status": "success" if success else "error",
+                "action": "exit",
+                "symbol": symbol,
+                "reason": data.get("reason", "SIGNAL_EXIT"),
+                "pnl": float(data.get("pnl", 0))
+            })
+
+        # === 진입 신호 처리 (v6.1 강화) ===
+        if action == "entry" and side in ["long", "short"]:
+            if not validate_signal_strength(data):
+                if alert_id:
+                    mark_alert_processed(alert_id)
+                return jsonify({
+                    "status": "rejected",
+                    "reason": "weak_signal",
+                    "signal_strength": signal_strength
+                })
+
+            if not validate_market_conditions(data):
+                if alert_id:
+                    mark_alert_processed(alert_id)
+                return jsonify({
+                    "status": "rejected",
+                    "reason": "market_conditions",
+                    "filters": CONFIG["filters"]
+                })
+
+            weight = get_symbol_weight(symbol)
+            weighted_tp, weighted_sl = calculate_weighted_tpsl(symbol)
+
+            weight_display = f"{int(weight * 100)}%"
+            if weight == 0.6:
+                weight_info = f"🟠 BTC 가중치 ({weight_display})"
+            elif weight == 0.7:
+                weight_info = f"🟡 ETH 가중치 ({weight_display})"
+            elif weight == 0.8:
+                weight_info = f"🟢 SOL 가중치 ({weight_display})"
+            else:
+                weight_info = f"⚪ 기본 가중치 ({weight_display})"
+
+            signal_emoji = "🚀" if signal_type == "hybrid_enhanced" else "🔄" if signal_type == "backup_enhanced" else "📊"
+
+            if not update_position_state(symbol, timeout=1):
+                return jsonify({"status": "error", "message": "포지션 조회 실패"}), 500
+
+            current_side = position_state.get(symbol, {}).get("side")
+            desired_side = "buy" if side == "long" else "sell"
+
+            if current_side:
+                if current_side == desired_side:
+                    if alert_id:
+                        mark_alert_processed(alert_id)
+                    log_debug(f"🔄 진입 신호 ({symbol})", f"기존 포지션과 같은 방향 - 신호 무시")
+                    return jsonify({"status": "same_direction", "message": "기존 포지션과 같은 방향"})
+                else:
+                    log_debug(f"🔄 역포지션 감지 ({symbol})", f"기존: {current_side} -> 새로운: {desired_side}")
+                    if not close_position(symbol):
+                        return jsonify({"status": "error", "message": "역포지션 청산 실패"})
+                    time.sleep(3)
+                    if not update_position_state(symbol):
+                        pass
+
+            qty = calculate_position_size(symbol, strategy_name, signal_strength)
+            if qty <= 0:
+                return jsonify({"status": "error", "message": "수량 계산 오류"})
+
+            success = place_order(symbol, desired_side, qty)
+
+            if success:
+                entry_time = time.time()
+                position_strategy_info[symbol] = {
+                    "strategy": "weighted_scalping_v6.1",
+                    "entry_time": entry_time,
+                    "strategy_name": strategy_name,
+                    "signal_strength": signal_strength,
+                    "signal_type": signal_type,
+                    "weight": weight,
+                    "rsi_data": {
+                        "rsi3_pred": rsi3_pred,
+                        "rsi3_conf": rsi3_conf,
+                        "rsi15s_pred": rsi15s_pred,
+                        "rsi15s_conf": rsi15s_conf
+                    }
+                }
+
+                entry_signals[symbol] = {
+                    "entry_time": datetime.now().isoformat(),
+                    "entry_price": float(get_price(symbol)),
+                    "side": side,
+                    "signal_strength": signal_strength,
+                    "signal_type": signal_type,
+                    "market_data": {
+                        "volatility": float(data.get("volatility", 0)),
+                        "volume_ratio": float(data.get("volume_ratio", 0)),
+                        "bb_position": float(data.get("bb_position", 0.5))
+                    }
+                }
+
+                log_debug(
+                    f"✅ 진입 완료 ({symbol}) {signal_emoji}",
+                    f"방향: {side.upper()}, 수량: {qty}, {weight_info}, "
+                    f"신호강도: {signal_strength:.2f}, 타입: {signal_type}, "
+                    f"TP: {weighted_tp*100:.3f}%, SL: {weighted_sl*100:.3f}%, "
+                    f"RSI3: {rsi3_conf:.1f}, RSI15s: {rsi15s_conf:.1f}"
+                )
+            else:
+                log_debug(f"❌ 진입 실패 ({symbol})", f"주문 실행 오류")
+
+            if success and alert_id:
+                mark_alert_processed(alert_id)
+
+            return jsonify({
+                "status": "success" if success else "error",
+                "action": "entry",
+                "symbol": symbol,
+                "side": side,
+                "qty": float(qty),
+                "strategy": strategy_name,
+                "signal_type": signal_type,
+                "weight": weight,
+                "weight_display": weight_info,
+                "tp_pct": weighted_tp * 100,
+                "sl_pct": weighted_sl * 100,
+                "signal_strength": signal_strength,
+                "rsi_data": {
+                    "rsi3_conf": rsi3_conf,
+                    "rsi15s_conf": rsi15s_conf
+                }
+            })
+
+        return jsonify({"error": f"Invalid action: {action}"}), 400
+
+    except Exception as e:
+        if alert_id:
+            mark_alert_processed(alert_id)
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "raw_data": raw_data[:200] if raw_data else "unavailable"
+        }), 500
 
 # ----------- API 엔드포인트들 -----------
 @app.route("/status", methods=["GET"])
