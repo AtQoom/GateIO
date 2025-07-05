@@ -464,7 +464,7 @@ def calculate_position_size(symbol, signal_type="none"):
         return Decimal("0")
 
 def place_order(symbol, side, qty, reduce_only=False, retry=3):
-    """주문 실행"""
+    """주문 실행 (같은 방향 추가 진입 지원)"""
     acquired = position_lock.acquire(timeout=5)
     if not acquired:
         log_debug(f"⚠️ 주문 락 실패 ({symbol})", "타임아웃")
@@ -487,7 +487,9 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
             return False
             
         size = float(qty_dec) if side == "buy" else -float(qty_dec)
-        order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=reduce_only)
+        
+        # reduce_only=False로 추가 진입 허용
+        order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=False)
         
         log_debug(f"📤 주문 시도 ({symbol})", 
                  f"{side.upper()} {float(qty_dec)} 계약, 주문금액: {order_value:.2f} USDT")
@@ -605,7 +607,7 @@ def log_initial_status():
         log_debug("📊 백업신호 범위", "TP: 0.15~0.3%, SL: 0.1~0.25%")
         log_debug("🔥 메인신호 범위", "TP: 0.2~0.4%, SL: 0.15~0.3%")
         log_debug("📈 변동성 계수", "0.8~1.5배 (15초봉 ATR/가격 비율 기반)")
-        log_debug("⚡ 진입 방식", "같은 방향 60초 쿨다운, 반대 방향 즉시 청산 후 진입")
+        log_debug("⚡ 진입 방식", "같은 방향 60초 쿨다운 후 추가 진입 가능, 반대 방향 즉시 청산 후 진입")
         
         for symbol in SYMBOL_CONFIG:
             if not update_position_state(symbol, timeout=3):
@@ -837,13 +839,10 @@ def webhook():
             # 기존 포지션 처리
             if current_side:
                 if current_side == desired_side:
-                    # 같은 방향 포지션이 이미 있음 (60초 쿨다운 통과했으므로 정상)
+                    # 같은 방향 포지션이 이미 있음 - 추가 진입 진행
                     log_debug("📍 같은 방향 포지션 존재", 
-                             f"기존 {current_side} 포지션 유지, 추가 진입 불가 (pyramiding=1)")
-                    return jsonify({
-                        "status": "same_direction", 
-                        "message": "기존 포지션과 같은 방향 - pyramiding=1으로 추가 진입 불가"
-                    })
+                             f"기존 {current_side} 포지션에 추가 진입 (60초 쿨다운 통과)")
+                    # 추가 진입을 위해 계속 진행
                 else:
                     # 반대 방향 포지션 - 즉시 청산 후 진입
                     log_debug("🔄 역포지션 처리 시작", f"현재: {current_side} → 목표: {desired_side}")
@@ -864,7 +863,8 @@ def webhook():
                 return jsonify({"status": "error", "message": "수량 계산 오류"})
             
             # 주문 실행
-            log_debug(f"📤 주문 실행 시작 ({symbol})", f"{desired_side} {qty} 계약")
+            log_debug(f"📤 주문 실행 시작 ({symbol})", 
+                     f"{desired_side} {qty} 계약 {'(추가 진입)' if current_side == desired_side else ''}")
             success = place_order(symbol, desired_side, qty)
             
             log_debug(f"📨 최종 결과 ({symbol})", f"주문 성공: {success}, {quantity_display}")
@@ -1212,6 +1212,6 @@ if __name__ == "__main__":
     log_debug("📈 변동성 계수", "15초봉 ATR/가격 비율로 0.8~1.5배 조정")
     log_debug("🔍 디버깅", "/test-alert 엔드포인트로 알림 형식 확인 가능")
     log_debug("📡 실시간 모니터링", "Gate.io WebSocket으로 동적 TP/SL 자동 처리")
-    log_debug("⚡ 진입 방식", "신호 발생시 계속 진입 (pyramiding=1, 최대 1개 포지션)")
+    log_debug("⚡ 진입 방식", "신호 발생시 계속 진입 (60초 쿨다운), 같은 방향 추가 진입 가능")
     
     app.run(host="0.0.0.0", port=port, debug=False)
