@@ -1191,6 +1191,7 @@ def backup_position_loop():
             log_debug("❌ 백업 포지션 루프 오류", str(e))
             time.sleep(300)
 
+# === 메인 실행 부분 ===
 if __name__ == "__main__":
     log_initial_status()
     
@@ -1201,7 +1202,7 @@ if __name__ == "__main__":
     threading.Thread(target=backup_position_loop, daemon=True).start()
     
     port = int(os.environ.get("PORT", 8080))
-    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (15초봉 ATR 기반 동적 TP/SL)")
+    log_debug("🚀 서버 시작", "포트 {}에서 실행 (15초봉 ATR 기반 동적 TP/SL)".format(port))
     log_debug("✅ 개선사항", "15초봉 ATR 기반 변동성 조정, 실시간 동적 TP/SL")
     log_debug("✅ TP/SL 가중치", "BTC 70%, ETH 80%, SOL 90%, 기타 100%")
     log_debug("✅ 신호 수량", "메인신호 50%, 백업신호 20%")
