@@ -102,7 +102,7 @@ def get_tpsl_multipliers(symbol):
     return SYMBOL_TPSL_MULTIPLIERS.get(symbol, {"tp": 1.0, "sl": 1.0})
 
 def calculate_dynamic_tpsl(symbol, atr_15s, signal_type):
-    """🔥 15초봉 ATR 기반 동적 TP/SL 계산"""
+    """🔥 15초봉 ATR 기반 동적 TP/SL 계산 (개선된 버전)"""
     try:
         # 심볼별 가중치
         multipliers = get_tpsl_multipliers(symbol)
@@ -112,18 +112,20 @@ def calculate_dynamic_tpsl(symbol, atr_15s, signal_type):
         if current_price <= 0:
             current_price = Decimal("1")
         
-        atr_ratio = Decimal(str(atr_15s)) / current_price
+        atr_15s_decimal = Decimal(str(atr_15s))
+        atr_ratio = atr_15s_decimal / current_price
         
-        # 변동성 계수 계산 (0.8 ~ 1.5)
-        # ATR이 가격의 0.1% 미만이면 낮은 변동성
-        # ATR이 가격의 0.3% 이상이면 높은 변동성
-        if atr_ratio < Decimal("0.001"):  # 0.1%
+        # 🔥 개선된 변동성 계수 계산 (0.8 ~ 1.5)
+        # 15초봉 기준으로 조정된 임계값
+        # ATR이 가격의 0.05% 미만이면 낮은 변동성
+        # ATR이 가격의 0.2% 이상이면 높은 변동성
+        if atr_ratio < Decimal("0.0005"):  # 0.05%
             volatility_factor = Decimal("0.8")
-        elif atr_ratio > Decimal("0.003"):  # 0.3%
+        elif atr_ratio > Decimal("0.002"):  # 0.2%
             volatility_factor = Decimal("1.5")
         else:
             # 선형 보간
-            volatility_factor = Decimal("0.8") + (atr_ratio - Decimal("0.001")) * Decimal("350")
+            volatility_factor = Decimal("0.8") + (atr_ratio - Decimal("0.0005")) / Decimal("0.0015") * Decimal("0.7")
             volatility_factor = min(max(volatility_factor, Decimal("0.8")), Decimal("1.5"))
         
         # 신호별 기본값 설정
@@ -149,15 +151,17 @@ def calculate_dynamic_tpsl(symbol, atr_15s, signal_type):
             final_sl = min(max(final_sl, Decimal("0.0015")), Decimal("0.003"))  # 0.15~0.3%
         
         log_debug(f"🎯 동적 TP/SL 계산 ({symbol})", 
-                 f"신호: {signal_type}, 15초ATR: {atr_15s:.4f}, "
-                 f"ATR비율: {atr_ratio*100:.3f}%, 변동성계수: {volatility_factor:.2f}, "
-                 f"최종 TP: {final_tp*100:.3f}%, SL: {final_sl*100:.3f}%")
+                 f"신호: {signal_type}, 15초ATR: {atr_15s:.6f}, 가격: {current_price:.2f}, "
+                 f"ATR비율: {atr_ratio*100:.4f}%, 변동성계수: {volatility_factor:.2f}")
+        log_debug(f"📊 최종 TP/SL ({symbol})", 
+                 f"TP: {final_tp*100:.3f}%, SL: {final_sl*100:.3f}%")
         
         return final_tp, final_sl
         
     except Exception as e:
         log_debug(f"❌ 동적 TP/SL 계산 실패 ({symbol})", str(e))
         # 실패시 기본값 반환
+        multipliers = get_tpsl_multipliers(symbol)
         base_tp = Decimal("0.0025")
         base_sl = Decimal("0.002")
         return base_tp * Decimal(str(multipliers["tp"])), base_sl * Decimal(str(multipliers["sl"]))
@@ -300,7 +304,7 @@ def get_dynamic_tpsl(symbol):
                    Decimal("0.002") * Decimal(str(multipliers["sl"]))
 
 def is_duplicate_alert(alert_data):
-    """중복 방지 - 60초 쿨다운만 사용"""
+    """중복 방지 - 같은 방향만 60초 쿨다운 적용"""
     global recent_signals
     
     with duplicate_prevention_lock:
@@ -311,16 +315,18 @@ def is_duplicate_alert(alert_data):
         
         log_debug("🔍 중복 체크", f"Symbol: {symbol}, Side: {side}, Action: {action}")
         
-        # 진입 신호만 60초 쿨다운 적용
+        # 진입 신호만 체크
         if action == "entry":
             symbol_key = f"{symbol}_{side}"
+            
+            # 같은 방향 신호에 대해서만 60초 쿨다운
             if symbol_key in recent_signals:
                 recent = recent_signals[symbol_key]
                 time_diff = current_time - recent["time"]
                 
                 if time_diff < 60:
                     log_debug("🚫 60초 쿨다운", 
-                             f"{symbol} {side} 신호가 {time_diff:.1f}초 전에 이미 처리됨")
+                             f"{symbol} {side} 같은 방향 신호가 {time_diff:.1f}초 전에 처리됨")
                     return True
             
             # 새로운 신호 기록
@@ -329,6 +335,13 @@ def is_duplicate_alert(alert_data):
                 "time": current_time,
                 "action": action
             }
+            
+            # 반대 방향 신호는 즉시 처리 가능하므로 기록만 업데이트
+            opposite_side = "short" if side == "long" else "long"
+            opposite_key = f"{symbol}_{opposite_side}"
+            if opposite_key in recent_signals:
+                log_debug("🔄 반대 방향 신호", f"기존 {opposite_side} 기록 제거")
+                del recent_signals[opposite_key]
         
         # 오래된 캐시 정리 (5분)
         cutoff_time = current_time - 300
@@ -588,11 +601,11 @@ def log_initial_status():
         equity = get_total_collateral(force=True)
         log_debug("💰 총 자산(초기)", f"{equity} USDT")
         
-        # 동적 TP/SL 설정 로깅
-        log_debug("🎯 동적 TP/SL 설정", "")
+        log_debug("🎯 동적 TP/SL 설정", "15초봉 ATR 기반")
         log_debug("📊 백업신호 범위", "TP: 0.15~0.3%, SL: 0.1~0.25%")
         log_debug("🔥 메인신호 범위", "TP: 0.2~0.4%, SL: 0.15~0.3%")
         log_debug("📈 변동성 계수", "0.8~1.5배 (15초봉 ATR/가격 비율 기반)")
+        log_debug("⚡ 진입 방식", "같은 방향 60초 쿨다운, 반대 방향 즉시 청산 후 진입")
         
         for symbol in SYMBOL_CONFIG:
             if not update_position_state(symbol, timeout=3):
@@ -824,9 +837,15 @@ def webhook():
             # 기존 포지션 처리
             if current_side:
                 if current_side == desired_side:
-                    log_debug("⚠️ 같은 방향 포지션 존재", "기존 포지션 유지")
-                    return jsonify({"status": "same_direction", "message": "기존 포지션과 같은 방향"})
+                    # 같은 방향 포지션이 이미 있음 (60초 쿨다운 통과했으므로 정상)
+                    log_debug("📍 같은 방향 포지션 존재", 
+                             f"기존 {current_side} 포지션 유지, 추가 진입 불가 (pyramiding=1)")
+                    return jsonify({
+                        "status": "same_direction", 
+                        "message": "기존 포지션과 같은 방향 - pyramiding=1으로 추가 진입 불가"
+                    })
                 else:
+                    # 반대 방향 포지션 - 즉시 청산 후 진입
                     log_debug("🔄 역포지션 처리 시작", f"현재: {current_side} → 목표: {desired_side}")
                     if not close_position(symbol, reason="reverse"):
                         log_debug("❌ 역포지션 청산 실패", "")
@@ -944,8 +963,8 @@ def status():
                     "backup": {"tp": "0.15-0.3%", "sl": "0.1-0.25%"},
                     "main": {"tp": "0.2-0.4%", "sl": "0.15-0.3%"}
                 },
-                "volatility_factor": "0.8-1.5x based on 15s ATR/Price ratio",
-                "alert_reception": "Enhanced with volatility data",
+                "volatility_factor": "0.8-1.5x based on 15s ATR/Price ratio (0.05%-0.2%)",
+                "alert_reception": "Enhanced with 15s ATR data",
                 "debugging": "Test endpoint available at /test-alert"
             },
             "pinescript_features": {
@@ -1182,12 +1201,17 @@ if __name__ == "__main__":
     threading.Thread(target=backup_position_loop, daemon=True).start()
     
     port = int(os.environ.get("PORT", 8080))
-    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (동적 TP/SL 모드)")
-    log_debug("✅ 개선사항", "알림 수신 강화, 디버깅 엔드포인트 추가, 요청 로깅 활성화")
+    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (15초봉 ATR 기반 동적 TP/SL)")
+    log_debug("✅ 개선사항", "15초봉 ATR 기반 변동성 조정, 실시간 동적 TP/SL")
     log_debug("✅ TP/SL 가중치", "BTC 70%, ETH 80%, SOL 90%, 기타 100%")
     log_debug("✅ 신호 수량", "메인신호 50%, 백업신호 20%")
-    log_debug("✅ 중복 방지", "60초 쿨다운으로 단일화")
+    log_debug("✅ 중복 방지", "같은 방향 60초 쿨다운, 반대 방향 즉시 청산 후 진입")
+    log_debug("🎯 동적 TP/SL", "15초봉 ATR 기반 자동 조정")
+    log_debug("📊 백업신호", "TP: 0.15~0.3%, SL: 0.1~0.25%")
+    log_debug("🔥 메인신호", "TP: 0.2~0.4%, SL: 0.15~0.3%")
+    log_debug("📈 변동성 계수", "15초봉 ATR/가격 비율로 0.8~1.5배 조정")
     log_debug("🔍 디버깅", "/test-alert 엔드포인트로 알림 형식 확인 가능")
-    log_debug("📡 실시간 모니터링", "Gate.io WebSocket으로 TP/SL 자동 처리")
+    log_debug("📡 실시간 모니터링", "Gate.io WebSocket으로 동적 TP/SL 자동 처리")
+    log_debug("⚡ 진입 방식", "신호 발생시 계속 진입 (pyramiding=1, 최대 1개 포지션)")
     
     app.run(host="0.0.0.0", port=port, debug=False)
