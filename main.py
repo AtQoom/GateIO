@@ -189,9 +189,6 @@ def normalize_symbol(raw_symbol):
     log_debug("🔍 디버깅", "/test-alert 엔드포인트로 알림 형식 확인 가능")
     log_debug("📡 실시간 모니터링", "Gate.io WebSocket으로 동적 TP/SL 자동 처리")
     
-    app.run(host="0.0.0.0", port=port, debug=False)직접 매핑 성공", f"'{symbol}' -> '{result}'")
-        return result
-    
     # .P 제거 시도
     if symbol.endswith('.P'):
         base_symbol = symbol[:-2]
