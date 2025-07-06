@@ -210,43 +210,43 @@ SYMBOL_CONFIG = {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("0.0001"),
-        "min_notional": Decimal("10")
+        "min_notional": Decimal("5")
     },
     "ETH_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("0.01"),
-        "min_notional": Decimal("10")
+        "min_notional": Decimal("5")
     },
     "ADA_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("10"),
-        "min_notional": Decimal("10")
+        "min_notional": Decimal("5")
     },
     "SUI_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("1"),
-        "min_notional": Decimal("10")
+        "min_notional": Decimal("5")
     },
     "LINK_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("1"),
-        "min_notional": Decimal("10")
+        "min_notional": Decimal("5")
     },
     "SOL_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("1"),
-        "min_notional": Decimal("10")
+        "min_notional": Decimal("5")
     },
     "PEPE_USDT": {
         "min_qty": Decimal("1"),
         "qty_step": Decimal("1"),
         "contract_size": Decimal("10000000"),
-        "min_notional": Decimal("10")
+        "min_notional": Decimal("5")
     },
 }
 
