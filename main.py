@@ -90,7 +90,7 @@ SYMBOL_MAPPING = {
 SYMBOL_TPSL_MULTIPLIERS = {
     "BTC_USDT": {"tp": 0.6, "sl": 0.6},    # BTC: 70%
     "ETH_USDT": {"tp": 0.7, "sl": 0.7},    # ETH: 80%
-    "SOL_USDT": {"tp": 0.8, "sl": 0.8},    # SOL: 90%
+    "SOL_USDT": {"tp": 0.8, "sl": 0.9},    # SOL: 90%
     # 기타 심볼은 기본값 (100%) 사용
 }
 
