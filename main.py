@@ -94,9 +94,6 @@ SYMBOL_TPSL_MULTIPLIERS = {
     # 기타 심볼은 기본값 (100%) 사용
 }
 
-# 🔥 동적 TP/SL을 위한 ATR 기준값 (제거)
-# ATR_BASELINE = {...}  # 더 이상 필요 없음
-
 def get_tpsl_multipliers(symbol):
     """심볼별 TP/SL 배수 반환"""
     return SYMBOL_TPSL_MULTIPLIERS.get(symbol, {"tp": 1.0, "sl": 1.0})
@@ -167,7 +164,7 @@ def calculate_dynamic_tpsl(symbol, atr_15s, signal_type):
         return base_tp * Decimal(str(multipliers["tp"])), base_sl * Decimal(str(multipliers["sl"]))
 
 def normalize_symbol(raw_symbol):
-    """🔥 강화된 심볼 정규화"""
+    """🔥 강화된 심볼 정규화 (수정됨)"""
     if not raw_symbol:
         log_debug("❌ 심볼 정규화", "입력 심볼이 비어있음")
         return None
@@ -178,16 +175,8 @@ def normalize_symbol(raw_symbol):
     # 직접 매핑
     if symbol in SYMBOL_MAPPING:
         result = SYMBOL_MAPPING[symbol]
-        log_debug("✅ 개선사항", "동적 TP/SL, ATR 기반 변동성 조정")
-    log_debug("✅ TP/SL 가중치", "BTC 70%, ETH 80%, SOL 90%, 기타 100%")
-    log_debug("✅ 신호 수량", "메인신호 50%, 백업신호 20%")
-    log_debug("✅ 중복 방지", "60초 쿨다운으로 단일화")
-    log_debug("🎯 동적 TP/SL", "15초봉 ATR 기반 자동 조정")
-    log_debug("📊 백업신호", "TP: 0.15~0.3%, SL: 0.1~0.25%")
-    log_debug("🔥 메인신호", "TP: 0.2~0.4%, SL: 0.15~0.3%")
-    log_debug("📈 변동성 계수", "15초봉 ATR/가격 비율로 0.8~1.5배 조정")
-    log_debug("🔍 디버깅", "/test-alert 엔드포인트로 알림 형식 확인 가능")
-    log_debug("📡 실시간 모니터링", "Gate.io WebSocket으로 동적 TP/SL 자동 처리")
+        log_debug("✅ 직접 매핑 성공", f"'{symbol}' -> '{result}'")
+        return result
     
     # .P 제거 시도
     if symbol.endswith('.P'):
@@ -593,18 +582,26 @@ def close_position(symbol, reason="manual"):
     finally:
         position_lock.release()
 
+def log_system_info():
+    """🔥 시스템 정보 로깅 (서버 시작 시 한 번만) - 신규 추가"""
+    log_debug("✅ 개선사항", "동적 TP/SL, ATR 기반 변동성 조정")
+    log_debug("✅ TP/SL 가중치", "BTC 70%, ETH 80%, SOL 90%, 기타 100%")
+    log_debug("✅ 신호 수량", "메인신호 50%, 백업신호 20%")
+    log_debug("✅ 중복 방지", "60초 쿨다운으로 단일화")
+    log_debug("🎯 동적 TP/SL", "15초봉 ATR 기반 자동 조정")
+    log_debug("📊 백업신호", "TP: 0.15~0.3%, SL: 0.1~0.25%")
+    log_debug("🔥 메인신호", "TP: 0.2~0.4%, SL: 0.15~0.3%")
+    log_debug("📈 변동성 계수", "15초봉 ATR/가격 비율로 0.8~1.5배 조정")
+    log_debug("🔍 디버깅", "/test-alert 엔드포인트로 알림 형식 확인 가능")
+    log_debug("📡 실시간 모니터링", "Gate.io WebSocket으로 동적 TP/SL 자동 처리")
+    log_debug("⚡ 진입 방식", "신호 발생시 계속 진입 (60초 쿨다운), 같은 방향 추가 진입 가능")
+
 def log_initial_status():
     """서버 시작시 초기 상태 로깅"""
     try:
         log_debug("🚀 서버 시작", "동적 TP/SL 모드 - 초기 상태 확인 중...")
         equity = get_total_collateral(force=True)
         log_debug("💰 총 자산(초기)", f"{equity} USDT")
-        
-        log_debug("🎯 동적 TP/SL 설정", "15초봉 ATR 기반")
-        log_debug("📊 백업신호 범위", "TP: 0.15~0.3%, SL: 0.1~0.25%")
-        log_debug("🔥 메인신호 범위", "TP: 0.2~0.4%, SL: 0.15~0.3%")
-        log_debug("📈 변동성 계수", "0.8~1.5배 (15초봉 ATR/가격 비율 기반)")
-        log_debug("⚡ 진입 방식", "같은 방향 60초 쿨다운 후 추가 진입 가능, 반대 방향 즉시 청산 후 진입")
         
         for symbol in SYMBOL_CONFIG:
             if not update_position_state(symbol, timeout=3):
@@ -946,23 +943,21 @@ def status():
         
         return jsonify({
             "status": "running",
-            "mode": "dynamic_tpsl",
+            "mode": "dynamic_tpsl_v6.4",
             "timestamp": datetime.now().isoformat(),
             "margin_balance": float(equity),
             "positions": positions,
             "duplicate_prevention": duplicate_stats,
             "symbol_mappings": SYMBOL_MAPPING,
             "dynamic_tpsl_storage": dynamic_tpsl_info,
-            "atr_baselines": "REMOVED - Using 15s ATR/Price ratio instead",
             "improvements": {
-                "dynamic_tpsl": "ATR-based dynamic TP/SL calculation",
+                "dynamic_tpsl": "15s ATR-based dynamic TP/SL calculation",
                 "tpsl_ranges": {
                     "backup": {"tp": "0.15-0.3%", "sl": "0.1-0.25%"},
                     "main": {"tp": "0.2-0.4%", "sl": "0.15-0.3%"}
                 },
-                "volatility_factor": "0.8-1.5x based on 15s ATR/Price ratio (0.05%-0.2%)",
-                "alert_reception": "Enhanced with 15s ATR data",
-                "debugging": "Test endpoint available at /test-alert"
+                "volatility_factor": "0.8-1.5x based on 15s ATR/Price ratio",
+                "position_management": "60s cooldown per direction, immediate reverse allowed"
             },
             "pinescript_features": {
                 "version": "v6.4",
@@ -1018,7 +1013,6 @@ def test_symbol_mapping(symbol):
         "input": symbol,
         "normalized": normalized,
         "valid": is_valid,
-        "atr_baseline": float(ATR_BASELINE.get(normalized, 0)) if normalized else 0,
         "dynamic_tpsl_tests": test_results if normalized else {},
         "all_mappings": {k: v for k, v in SYMBOL_MAPPING.items() if k.startswith(symbol.upper()[:3])}
     })
@@ -1191,6 +1185,7 @@ def backup_position_loop():
 # === 메인 실행 부분 ===
 if __name__ == "__main__":
     log_initial_status()
+    log_system_info()  # 🔥 시스템 정보는 시작 시 한 번만
     
     # Gate.io 실시간 가격 모니터링
     threading.Thread(target=lambda: asyncio.run(price_listener()), daemon=True).start()
@@ -1199,17 +1194,6 @@ if __name__ == "__main__":
     threading.Thread(target=backup_position_loop, daemon=True).start()
     
     port = int(os.environ.get("PORT", 8080))
-    log_debug("🚀 서버 시작", "포트 {}에서 실행 (15초봉 ATR 기반 동적 TP/SL)".format(port))
-    log_debug("✅ 개선사항", "15초봉 ATR 기반 변동성 조정, 실시간 동적 TP/SL")
-    log_debug("✅ TP/SL 가중치", "BTC 70%, ETH 80%, SOL 90%, 기타 100%")
-    log_debug("✅ 신호 수량", "메인신호 50%, 백업신호 20%")
-    log_debug("✅ 중복 방지", "같은 방향 60초 쿨다운, 반대 방향 즉시 청산 후 진입")
-    log_debug("🎯 동적 TP/SL", "15초봉 ATR 기반 자동 조정")
-    log_debug("📊 백업신호", "TP: 0.15~0.3%, SL: 0.1~0.25%")
-    log_debug("🔥 메인신호", "TP: 0.2~0.4%, SL: 0.15~0.3%")
-    log_debug("📈 변동성 계수", "15초봉 ATR/가격 비율로 0.8~1.5배 조정")
-    log_debug("🔍 디버깅", "/test-alert 엔드포인트로 알림 형식 확인 가능")
-    log_debug("📡 실시간 모니터링", "Gate.io WebSocket으로 동적 TP/SL 자동 처리")
-    log_debug("⚡ 진입 방식", "신호 발생시 계속 진입 (60초 쿨다운), 같은 방향 추가 진입 가능")
+    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (15초봉 ATR 기반 동적 TP/SL)")
     
     app.run(host="0.0.0.0", port=port, debug=False)
