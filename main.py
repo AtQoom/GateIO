@@ -88,9 +88,9 @@ SYMBOL_MAPPING = {
 
 # 🔥 심볼별 TP/SL 배수 설정 (파인스크립트와 일치)
 SYMBOL_TPSL_MULTIPLIERS = {
-    "BTC_USDT": {"tp": 0.7, "sl": 0.7},    # BTC: 70%
-    "ETH_USDT": {"tp": 0.8, "sl": 0.8},    # ETH: 80%
-    "SOL_USDT": {"tp": 0.9, "sl": 0.9},    # SOL: 90%
+    "BTC_USDT": {"tp": 0.6, "sl": 0.6},    # BTC: 70%
+    "ETH_USDT": {"tp": 0.7, "sl": 0.7},    # ETH: 80%
+    "SOL_USDT": {"tp": 0.8, "sl": 0.8},    # SOL: 90%
     # 기타 심볼은 기본값 (100%) 사용
 }
 
@@ -141,11 +141,11 @@ def calculate_dynamic_tpsl(symbol, atr_15s, signal_type):
         
         # 범위 제한
         if signal_type == "backup_enhanced":
-            final_tp = min(max(final_tp, Decimal("0.0015")), Decimal("0.003"))  # 0.15~0.3%
+            final_tp = min(max(final_tp, Decimal("0.002")), Decimal("0.003"))  # 0.15~0.3%
             final_sl = min(max(final_sl, Decimal("0.0015")), Decimal("0.003"))  # 0.1~0.25%
         else:
-            final_tp = min(max(final_tp, Decimal("0.002")), Decimal("0.004"))   # 0.2~0.4%
-            final_sl = min(max(final_sl, Decimal("0.0015")), Decimal("0.003"))  # 0.15~0.3%
+            final_tp = min(max(final_tp, Decimal("0.0025")), Decimal("0.004"))   # 0.2~0.4%
+            final_sl = min(max(final_sl, Decimal("0.002")), Decimal("0.003"))  # 0.15~0.3%
         
         log_debug(f"🎯 동적 TP/SL 계산 ({symbol})", 
                  f"신호: {signal_type}, 15초ATR: {atr_15s:.6f}, 가격: {current_price:.2f}, "
