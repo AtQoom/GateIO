@@ -142,7 +142,7 @@ def calculate_dynamic_tpsl(symbol, atr_15s, signal_type):
         # 범위 제한
         if signal_type == "backup_enhanced":
             final_tp = min(max(final_tp, Decimal("0.0015")), Decimal("0.003"))  # 0.15~0.3%
-            final_sl = min(max(final_sl, Decimal("0.001")), Decimal("0.0025"))  # 0.1~0.25%
+            final_sl = min(max(final_sl, Decimal("0.0015")), Decimal("0.003"))  # 0.1~0.25%
         else:
             final_tp = min(max(final_tp, Decimal("0.002")), Decimal("0.004"))   # 0.2~0.4%
             final_sl = min(max(final_sl, Decimal("0.0015")), Decimal("0.003"))  # 0.15~0.3%
