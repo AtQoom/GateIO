@@ -415,13 +415,13 @@ def calculate_position_size(symbol, signal_type="none"):
     try:
         # 신호별 포지션 배수
         if signal_type == "hybrid_enhanced":
-            position_ratio = Decimal("0.5")  # 메인신호: 50%
+            position_ratio = Decimal("1.0")  # 메인신호: 50%
             strategy_display = "🔥 메인신호 (50%)"
         elif signal_type == "backup_enhanced":
-            position_ratio = Decimal("0.2")  # 백업신호: 20%
+            position_ratio = Decimal("0.5")  # 백업신호: 20%
             strategy_display = "📊 백업신호 (20%)"
         else:
-            position_ratio = Decimal("0.5")  # 기본값: 50%
+            position_ratio = Decimal("0.8")  # 기본값: 50%
             strategy_display = "🔧 기본신호 (50%)"
         
         log_debug(f"📈 신호 타입 감지 ({symbol})", f"{strategy_display}")
