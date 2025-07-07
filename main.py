@@ -88,9 +88,9 @@ SYMBOL_MAPPING = {
 
 # 🔥 심볼별 TP/SL 배수 설정 (파인스크립트와 일치)
 SYMBOL_TPSL_MULTIPLIERS = {
-    "BTC_USDT": {"tp": 0.6, "sl": 0.6},    # BTC: 70%
-    "ETH_USDT": {"tp": 0.7, "sl": 0.7},    # ETH: 80%
-    "SOL_USDT": {"tp": 0.8, "sl": 0.9},    # SOL: 90%
+    "BTC_USDT": {"tp": 0.6, "sl": 0.6},    # BTC: 60%
+    "ETH_USDT": {"tp": 0.7, "sl": 0.7},    # ETH: 70%
+    "SOL_USDT": {"tp": 0.9, "sl": 0.9},    # SOL: 90%
     # 기타 심볼은 기본값 (100%) 사용
 }
 
@@ -99,7 +99,7 @@ def get_tpsl_multipliers(symbol):
     return SYMBOL_TPSL_MULTIPLIERS.get(symbol, {"tp": 1.0, "sl": 1.0})
 
 def calculate_dynamic_tpsl(symbol, atr_15s, signal_type):
-    """🔥 15초봉 ATR 기반 동적 TP/SL 계산 (개선된 버전)"""
+    """🔥 15초봉 ATR 기반 동적 TP/SL 계산 (파인스크립트 v6.5 기준)"""
     try:
         # 심볼별 가중치
         multipliers = get_tpsl_multipliers(symbol)
@@ -112,10 +112,7 @@ def calculate_dynamic_tpsl(symbol, atr_15s, signal_type):
         atr_15s_decimal = Decimal(str(atr_15s))
         atr_ratio = atr_15s_decimal / current_price
         
-        # 🔥 개선된 변동성 계수 계산 (0.8 ~ 1.5)
-        # 15초봉 기준으로 조정된 임계값
-        # ATR이 가격의 0.05% 미만이면 낮은 변동성
-        # ATR이 가격의 0.2% 이상이면 높은 변동성
+        # 🔥 변동성 계수 계산 (0.8 ~ 1.5)
         if atr_ratio < Decimal("0.0005"):  # 0.05%
             volatility_factor = Decimal("0.8")
         elif atr_ratio > Decimal("0.002"):  # 0.2%
@@ -125,27 +122,32 @@ def calculate_dynamic_tpsl(symbol, atr_15s, signal_type):
             volatility_factor = Decimal("0.8") + (atr_ratio - Decimal("0.0005")) / Decimal("0.0015") * Decimal("0.7")
             volatility_factor = min(max(volatility_factor, Decimal("0.8")), Decimal("1.5"))
         
-        # 신호별 기본값 설정
+        # 🔥 파인스크립트 v6.5 기준값
+        # 메인신호: TP 1.2배, SL 1.0배
+        # 백업신호: TP 0.8배, SL 0.8배
+        base_tp = Decimal("0.004")  # 0.4%
+        base_sl = Decimal("0.002")  # 0.2%
+        
         if signal_type == "backup_enhanced":
-            # 백업신호: 기본 TP 0.2%, SL 0.15%
-            base_tp = Decimal("0.002")   # 0.2%
-            base_sl = Decimal("0.0015")  # 0.15%
+            # 백업신호
+            tp_multiplier = Decimal("0.8")
+            sl_multiplier = Decimal("0.8")
         else:  # hybrid_enhanced 또는 기타
-            # 메인신호: 기본 TP 0.28%, SL 0.21%
-            base_tp = Decimal("0.0028")  # 0.28%
-            base_sl = Decimal("0.0021")  # 0.21%
+            # 메인신호
+            tp_multiplier = Decimal("1.2")
+            sl_multiplier = Decimal("1.0")
         
         # 최종 TP/SL 계산
-        final_tp = base_tp * volatility_factor * Decimal(str(multipliers["tp"]))
-        final_sl = base_sl * volatility_factor * Decimal(str(multipliers["sl"]))
+        final_tp = base_tp * tp_multiplier * volatility_factor * Decimal(str(multipliers["tp"]))
+        final_sl = base_sl * sl_multiplier * volatility_factor * Decimal(str(multipliers["sl"]))
         
         # 범위 제한
         if signal_type == "backup_enhanced":
-            final_tp = min(max(final_tp, Decimal("0.0018")), Decimal("0.003"))  # 0.15~0.3%
-            final_sl = min(max(final_sl, Decimal("0.0015")), Decimal("0.003"))  # 0.1~0.25%
+            final_tp = min(max(final_tp, Decimal("0.002")), Decimal("0.005"))   # 0.2~0.5%
+            final_sl = min(max(final_sl, Decimal("0.001")), Decimal("0.003"))   # 0.1~0.3%
         else:
-            final_tp = min(max(final_tp, Decimal("0.0025")), Decimal("0.004"))   # 0.2~0.4%
-            final_sl = min(max(final_sl, Decimal("0.0018")), Decimal("0.003"))  # 0.15~0.3%
+            final_tp = min(max(final_tp, Decimal("0.003")), Decimal("0.006"))   # 0.3~0.6%
+            final_sl = min(max(final_sl, Decimal("0.0015")), Decimal("0.004"))  # 0.15~0.4%
         
         log_debug(f"🎯 동적 TP/SL 계산 ({symbol})", 
                  f"신호: {signal_type}, 15초ATR: {atr_15s:.6f}, 가격: {current_price:.2f}, "
@@ -159,12 +161,16 @@ def calculate_dynamic_tpsl(symbol, atr_15s, signal_type):
         log_debug(f"❌ 동적 TP/SL 계산 실패 ({symbol})", str(e))
         # 실패시 기본값 반환
         multipliers = get_tpsl_multipliers(symbol)
-        base_tp = Decimal("0.0025")
-        base_sl = Decimal("0.002")
+        if signal_type == "backup_enhanced":
+            base_tp = Decimal("0.0032")  # 0.32% (0.4 * 0.8)
+            base_sl = Decimal("0.0016")  # 0.16% (0.2 * 0.8)
+        else:
+            base_tp = Decimal("0.0048")  # 0.48% (0.4 * 1.2)
+            base_sl = Decimal("0.002")   # 0.2%
         return base_tp * Decimal(str(multipliers["tp"])), base_sl * Decimal(str(multipliers["sl"]))
 
 def normalize_symbol(raw_symbol):
-    """🔥 강화된 심볼 정규화 (수정됨)"""
+    """🔥 강화된 심볼 정규화"""
     if not raw_symbol:
         log_debug("❌ 심볼 정규화", "입력 심볼이 비어있음")
         return None
@@ -259,9 +265,10 @@ position_state = {}
 position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
 
-# === 🔥 중복 방지 시스템 (단일화) ===
+# === 🔥 중복 방지 시스템 (15초로 변경) ===
 recent_signals = {}
 duplicate_prevention_lock = threading.RLock()
+COOLDOWN_SECONDS = 15  # 60초에서 15초로 변경
 
 # === 🔥 동적 TP/SL 저장소 ===
 dynamic_tpsl_storage = {}
@@ -286,11 +293,11 @@ def get_dynamic_tpsl(symbol):
         else:
             # 기본값 반환
             multipliers = get_tpsl_multipliers(symbol)
-            return Decimal("0.0025") * Decimal(str(multipliers["tp"])), \
+            return Decimal("0.0048") * Decimal(str(multipliers["tp"])), \
                    Decimal("0.002") * Decimal(str(multipliers["sl"]))
 
 def is_duplicate_alert(alert_data):
-    """중복 방지 - 같은 방향만 60초 쿨다운 적용"""
+    """중복 방지 - 같은 방향만 15초 쿨다운 적용"""
     global recent_signals
     
     with duplicate_prevention_lock:
@@ -305,13 +312,13 @@ def is_duplicate_alert(alert_data):
         if action == "entry":
             symbol_key = f"{symbol}_{side}"
             
-            # 같은 방향 신호에 대해서만 60초 쿨다운
+            # 같은 방향 신호에 대해서만 15초 쿨다운
             if symbol_key in recent_signals:
                 recent = recent_signals[symbol_key]
                 time_diff = current_time - recent["time"]
                 
-                if time_diff < 60:
-                    log_debug("🚫 60초 쿨다운", 
+                if time_diff < COOLDOWN_SECONDS:
+                    log_debug("🚫 15초 쿨다운", 
                              f"{symbol} {side} 같은 방향 신호가 {time_diff:.1f}초 전에 처리됨")
                     return True
             
@@ -401,7 +408,7 @@ def get_current_position_count(symbol):
         return 0
 
 def calculate_position_size(symbol, signal_type="none"):
-    """신호별 차등 수량 계산 (캐시 활용)"""
+    """신호별 차등 수량 계산 (메인 100%, 백업 30%)"""
     cfg = SYMBOL_CONFIG[symbol]
     
     # force=False로 변경하여 캐시 활용
@@ -413,21 +420,22 @@ def calculate_position_size(symbol, signal_type="none"):
         return Decimal("0")
     
     try:
-        # 신호별 포지션 배수
+        # 🔥 신호별 포지션 배수 (메인 100%, 백업 30%)
         if signal_type == "hybrid_enhanced":
-            position_ratio = Decimal("1.0")  # 메인신호: 50%
-            strategy_display = "🔥 메인신호 (50%)"
+            position_ratio = Decimal("2.0")  # 메인신호: 100% (기존 0.5배에서 2배로)
+            strategy_display = "🔥 메인신호 (100%)"
         elif signal_type == "backup_enhanced":
-            position_ratio = Decimal("0.5")  # 백업신호: 20%
-            strategy_display = "📊 백업신호 (20%)"
+            position_ratio = Decimal("0.6")  # 백업신호: 30% (기존 0.5배에서 0.6배로)
+            strategy_display = "📊 백업신호 (30%)"
         else:
-            position_ratio = Decimal("0.8")  # 기본값: 50%
-            strategy_display = "🔧 기본신호 (50%)"
+            position_ratio = Decimal("1.6")  # 기본값: 80%
+            strategy_display = "🔧 기본신호 (80%)"
         
         log_debug(f"📈 신호 타입 감지 ({symbol})", f"{strategy_display}")
         
-        # 수량 계산
-        adjusted_equity = equity * position_ratio
+        # 수량 계산 (기본 레버리지 0.5배 적용)
+        base_leverage = Decimal("0.5")
+        adjusted_equity = equity * position_ratio * base_leverage
         raw_qty = adjusted_equity / (price * cfg["contract_size"])
         qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
         final_qty = max(qty, cfg["min_qty"])
@@ -440,7 +448,7 @@ def calculate_position_size(symbol, signal_type="none"):
         
         log_debug(f"📊 수량 계산 완료 ({symbol})", 
                  f"신호타입: {signal_type}, 순자산: {equity} USDT, "
-                 f"배수: {position_ratio}x, 최종수량: {final_qty}, "
+                 f"실제비율: {position_ratio * base_leverage}x, 최종수량: {final_qty}, "
                  f"투자금액: {order_value:.2f} USDT")
         
         return final_qty
@@ -502,104 +510,25 @@ def place_order(symbol, side, qty, reduce_only=False, retry=3):
     finally:
         position_lock.release()
 
-def update_position_state(symbol, timeout=5):
-    """포지션 상태 업데이트"""
-    acquired = position_lock.acquire(timeout=timeout)
-    if not acquired:
-        return False
-    try:
-        try:
-            pos = api.get_position(SETTLE, symbol)
-        except Exception as e:
-            if "POSITION_NOT_FOUND" in str(e):
-                position_state[symbol] = {
-                    "price": None, "side": None,
-                    "size": Decimal("0"), "value": Decimal("0"),
-                    "margin": Decimal("0"), "mode": "cross",
-                    "count": 0
-                }
-                return True
-            else:
-                log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
-                return False
-                
-        size = Decimal(str(pos.size))
-        if size != 0:
-            position_entry_price = Decimal(str(pos.entry_price))
-            mark = Decimal(str(pos.mark_price))
-            value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
-            position_state[symbol] = {
-                "price": position_entry_price,
-                "side": "buy" if size > 0 else "sell",
-                "size": abs(size),
-                "value": value,
-                "margin": value,
-                "mode": "cross",
-                "count": 1
-            }
-        else:
-            position_state[symbol] = {
-                "price": None, "side": None,
-                "size": Decimal("0"), "value": Decimal("0"), 
-                "margin": Decimal("0"), "mode": "cross",
-                "count": 0
-            }
-        return True
-    except Exception as e:
-        log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e), exc_info=True)
-        return False
-    finally:
-        position_lock.release()
-
-def close_position(symbol, reason="manual"):
-    """포지션 청산"""
-    acquired = position_lock.acquire(timeout=5)
-    if not acquired:
-        log_debug(f"⚠️ 청산 락 실패 ({symbol})", "타임아웃")
-        return False
-    try:
-        log_debug(f"🔄 청산 시도 ({symbol})", f"이유: {reason}")
-        api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
-        log_debug(f"✅ 청산 완료 ({symbol})", "전체 포지션 청산")
-        
-        # 청산 후 관련 데이터 초기화
-        with duplicate_prevention_lock:
-            keys_to_remove = [k for k in recent_signals.keys() if k.startswith(symbol + "_")]
-            for key in keys_to_remove:
-                del recent_signals[key]
-        
-        # 동적 TP/SL 데이터도 삭제
-        with tpsl_lock:
-            if symbol in dynamic_tpsl_storage:
-                del dynamic_tpsl_storage[symbol]
-        
-        time.sleep(1)
-        update_position_state(symbol)
-        return True
-    except Exception as e:
-        log_debug(f"❌ 청산 실패 ({symbol})", str(e))
-        return False
-    finally:
-        position_lock.release()
-
 def log_system_info():
-    """🔥 시스템 정보 로깅 (서버 시작 시 한 번만) - 신규 추가"""
+    """🔥 시스템 정보 로깅 (서버 시작 시 한 번만)"""
+    log_debug("✅ 버전", "v6.5 - 15초 쿨다운, 수정된 TP/SL 배수")
     log_debug("✅ 개선사항", "동적 TP/SL, ATR 기반 변동성 조정")
-    log_debug("✅ TP/SL 가중치", "BTC 70%, ETH 80%, SOL 90%, 기타 100%")
-    log_debug("✅ 신호 수량", "메인신호 50%, 백업신호 20%")
-    log_debug("✅ 중복 방지", "60초 쿨다운으로 단일화")
+    log_debug("✅ TP/SL 가중치", "BTC 60%, ETH 70%, SOL 90%, 기타 100%")
+    log_debug("✅ 신호 수량", "메인신호 100%, 백업신호 30%")
+    log_debug("✅ 중복 방지", "15초 쿨다운으로 단일화")
     log_debug("🎯 동적 TP/SL", "15초봉 ATR 기반 자동 조정")
-    log_debug("📊 백업신호", "TP: 0.15~0.3%, SL: 0.1~0.25%")
-    log_debug("🔥 메인신호", "TP: 0.2~0.4%, SL: 0.15~0.3%")
+    log_debug("📊 백업신호", "TP: 0.32%, SL: 0.16% (기본값)")
+    log_debug("🔥 메인신호", "TP: 0.48%, SL: 0.2% (기본값)")
     log_debug("📈 변동성 계수", "15초봉 ATR/가격 비율로 0.8~1.5배 조정")
     log_debug("🔍 디버깅", "/test-alert 엔드포인트로 알림 형식 확인 가능")
     log_debug("📡 실시간 모니터링", "Gate.io WebSocket으로 동적 TP/SL 자동 처리")
-    log_debug("⚡ 진입 방식", "신호 발생시 계속 진입 (60초 쿨다운), 같은 방향 추가 진입 가능")
+    log_debug("⚡ 진입 방식", "신호 발생시 계속 진입 (15초 쿨다운), 같은 방향 추가 진입 가능")
 
 def log_initial_status():
     """서버 시작시 초기 상태 로깅"""
     try:
-        log_debug("🚀 서버 시작", "동적 TP/SL 모드 - 초기 상태 확인 중...")
+        log_debug("🚀 서버 시작", "동적 TP/SL 모드 v6.5 - 초기 상태 확인 중...")
         equity = get_total_collateral(force=True)
         log_debug("💰 총 자산(초기)", f"{equity} USDT")
         
@@ -772,7 +701,7 @@ def webhook():
         # 중복 방지 체크
         if is_duplicate_alert(data):
             log_debug("🚫 중복 알림 차단", f"Symbol: {symbol}, Side: {side}, Action: {action}")
-            return jsonify({"status": "duplicate_ignored", "message": "60초 쿨다운 중"})
+            return jsonify({"status": "duplicate_ignored", "message": "15초 쿨다운 중"})
         
         # === 청산 신호 처리 (executeExit 로직 추가) ===
         if action == "exit":
@@ -813,11 +742,11 @@ def webhook():
             
             # 신호 타입별 물량 표시
             if signal_type == "hybrid_enhanced":
-                quantity_display = "🔥 메인신호 (50%)"
+                quantity_display = "🔥 메인신호 (100%)"
             elif signal_type == "backup_enhanced":
-                quantity_display = "📊 백업신호 (20%)"
+                quantity_display = "📊 백업신호 (30%)"
             else:
-                quantity_display = "🔧 기본신호 (50%)"
+                quantity_display = "🔧 기본신호 (80%)"
             
             log_debug(f"📈 신호 분석 ({symbol})", f"타입: {quantity_display}")
             
@@ -835,7 +764,7 @@ def webhook():
                 if current_side == desired_side:
                     # 같은 방향 포지션이 이미 있음 - 추가 진입 진행
                     log_debug("📍 같은 방향 포지션 존재", 
-                             f"기존 {current_side} 포지션에 추가 진입 (60초 쿨다운 통과)")
+                             f"기존 {current_side} 포지션에 추가 진입 (15초 쿨다운 통과)")
                     # 추가 진입을 위해 계속 진행
                 else:
                     # 반대 방향 포지션 - 즉시 청산 후 진입
@@ -924,6 +853,7 @@ def status():
         with duplicate_prevention_lock:
             duplicate_stats = {
                 "recent_signals_size": len(recent_signals),
+                "cooldown_seconds": COOLDOWN_SECONDS,
                 "recent_signals": {k: {
                     "side": v["side"], 
                     "action": v["action"], 
@@ -943,7 +873,7 @@ def status():
         
         return jsonify({
             "status": "running",
-            "mode": "dynamic_tpsl_v6.4",
+            "mode": "dynamic_tpsl_v6.5",
             "timestamp": datetime.now().isoformat(),
             "margin_balance": float(equity),
             "positions": positions,
@@ -953,20 +883,29 @@ def status():
             "improvements": {
                 "dynamic_tpsl": "15s ATR-based dynamic TP/SL calculation",
                 "tpsl_ranges": {
-                    "backup": {"tp": "0.15-0.3%", "sl": "0.1-0.25%"},
-                    "main": {"tp": "0.2-0.4%", "sl": "0.15-0.3%"}
+                    "backup": {"tp": "0.32%", "sl": "0.16%"},
+                    "main": {"tp": "0.48%", "sl": "0.2%"}
                 },
                 "volatility_factor": "0.8-1.5x based on 15s ATR/Price ratio",
-                "position_management": "60s cooldown per direction, immediate reverse allowed"
+                "position_management": "15s cooldown per direction, immediate reverse allowed",
+                "position_sizes": {
+                    "main": "100%",
+                    "backup": "30%"
+                }
             },
             "pinescript_features": {
-                "version": "v6.4",
+                "version": "v6.5",
+                "cooldown": "15 seconds",
                 "volatility_in_alerts": True,
                 "signal_levels": {
-                    "hybrid_enhanced": {"quantity": "50%", "priority": "HIGH"},
-                    "backup_enhanced": {"quantity": "20%", "priority": "MEDIUM"}
+                    "hybrid_enhanced": {"quantity": "100%", "priority": "HIGH"},
+                    "backup_enhanced": {"quantity": "30%", "priority": "MEDIUM"}
                 },
-                "dynamic_tpsl": True
+                "dynamic_tpsl": True,
+                "tpsl_multipliers": {
+                    "main": {"tp": 1.2, "sl": 1.0},
+                    "backup": {"tp": 0.8, "sl": 0.8}
+                }
             }
         })
     except Exception as e:
@@ -1194,6 +1133,86 @@ if __name__ == "__main__":
     threading.Thread(target=backup_position_loop, daemon=True).start()
     
     port = int(os.environ.get("PORT", 8080))
-    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (15초봉 ATR 기반 동적 TP/SL)")
+    log_debug("🚀 서버 시작", f"포트 {port}에서 실행 (v6.5 - 15초 쿨다운, 백업신호 0.3배)")
     
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False).release()
+
+def update_position_state(symbol, timeout=5):
+    """포지션 상태 업데이트"""
+    acquired = position_lock.acquire(timeout=timeout)
+    if not acquired:
+        return False
+    try:
+        try:
+            pos = api.get_position(SETTLE, symbol)
+        except Exception as e:
+            if "POSITION_NOT_FOUND" in str(e):
+                position_state[symbol] = {
+                    "price": None, "side": None,
+                    "size": Decimal("0"), "value": Decimal("0"),
+                    "margin": Decimal("0"), "mode": "cross",
+                    "count": 0
+                }
+                return True
+            else:
+                log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e))
+                return False
+                
+        size = Decimal(str(pos.size))
+        if size != 0:
+            position_entry_price = Decimal(str(pos.entry_price))
+            mark = Decimal(str(pos.mark_price))
+            value = abs(size) * mark * SYMBOL_CONFIG[symbol]["contract_size"]
+            position_state[symbol] = {
+                "price": position_entry_price,
+                "side": "buy" if size > 0 else "sell",
+                "size": abs(size),
+                "value": value,
+                "margin": value,
+                "mode": "cross",
+                "count": 1
+            }
+        else:
+            position_state[symbol] = {
+                "price": None, "side": None,
+                "size": Decimal("0"), "value": Decimal("0"), 
+                "margin": Decimal("0"), "mode": "cross",
+                "count": 0
+            }
+        return True
+    except Exception as e:
+        log_debug(f"❌ 포지션 조회 실패 ({symbol})", str(e), exc_info=True)
+        return False
+    finally:
+        position_lock.release()
+
+def close_position(symbol, reason="manual"):
+    """포지션 청산"""
+    acquired = position_lock.acquire(timeout=5)
+    if not acquired:
+        log_debug(f"⚠️ 청산 락 실패 ({symbol})", "타임아웃")
+        return False
+    try:
+        log_debug(f"🔄 청산 시도 ({symbol})", f"이유: {reason}")
+        api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
+        log_debug(f"✅ 청산 완료 ({symbol})", "전체 포지션 청산")
+        
+        # 청산 후 관련 데이터 초기화
+        with duplicate_prevention_lock:
+            keys_to_remove = [k for k in recent_signals.keys() if k.startswith(symbol + "_")]
+            for key in keys_to_remove:
+                del recent_signals[key]
+        
+        # 동적 TP/SL 데이터도 삭제
+        with tpsl_lock:
+            if symbol in dynamic_tpsl_storage:
+                del dynamic_tpsl_storage[symbol]
+        
+        time.sleep(1)
+        update_position_state(symbol)
+        return True
+    except Exception as e:
+        log_debug(f"❌ 청산 실패 ({symbol})", str(e))
+        return False
+    finally:
+        position_lock
