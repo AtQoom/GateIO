@@ -581,7 +581,7 @@ if __name__ == "__main__":
     log_debug("🚀 서버 시작", "v6.5 - 15초 쿨다운, 메인 100%, 백업 30%")
     log_debug("📊 설정", f"심볼: {len(SYMBOL_CONFIG)}개")
     log_debug("✅ TP/SL", "메인: TP 1.2x/SL 1.0x, 백업: TP 0.8x/SL 0.8x")
-    log_debug("🎯 가중치", "BTC 60%, ETH 70%, SOL 90%, 기타 100%")
+    log_debug("🎯 가중치", "BTC 60%, ETH 70%, SOL 90%, 기타 100-130%")
     
     # 초기 상태
     equity = get_total_collateral(force=True)
