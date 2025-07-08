@@ -51,10 +51,10 @@ SYMBOL_CONFIG = {
     "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.6, "sl_mult": 0.6},
     "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.7, "sl_mult": 0.7},
     "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 0.9, "sl_mult": 0.9},
-    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.1, "sl_mult": 1.1},
-    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2},
-    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2},
-    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.3, "sl_mult": 1.3},
+    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
+    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
+    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
+    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
 }
 
 # === Gate.io API 클라이언트 ===
@@ -221,7 +221,7 @@ def is_duplicate(data):
         return False
 
 def calculate_position_size(symbol, signal_type):
-    """포지션 크기 계산"""
+    """포지션 크기 계산 (진입 횟수별 차등)"""
     cfg = SYMBOL_CONFIG[symbol]
     equity = get_total_collateral()
     price = get_price(symbol)
@@ -229,17 +229,25 @@ def calculate_position_size(symbol, signal_type):
     if equity <= 0 or price <= 0:
         return Decimal("0")
     
-    # 신호별 비율 (메인 100%, 백업 30%)
-    if signal_type == "hybrid_enhanced":
-        ratio = Decimal("2.0")  # 100% (기본 0.5배 고려)
-    elif signal_type == "backup_enhanced":
-        ratio = Decimal("0.6")  # 30% (기본 0.5배 고려)
+    # 현재 포지션 횟수 확인
+    entry_count = position_state.get(symbol, {}).get("entry_count", 0)
+    
+    # 진입 횟수별 비율 (20% → 50% → 100% → 200%)
+    if entry_count == 0:
+        ratio = Decimal("0.2")  # 첫 진입: 20%
+    elif entry_count == 1:
+        ratio = Decimal("0.5")  # 두번째: 50%
+    elif entry_count == 2:
+        ratio = Decimal("1.0")  # 세번째: 100%
+    elif entry_count >= 3:
+        ratio = Decimal("2.0")  # 네번째+: 200%
     else:
-        ratio = Decimal("1.6")  # 80%
+        ratio = Decimal("0.2")
+    
+    log_debug(f"📊 수량 계산 ({symbol})", f"진입 횟수: {entry_count + 1}, 비율: {ratio * 100}%")
     
     # 수량 계산
-    base_leverage = Decimal("0.5")
-    adjusted = equity * ratio * base_leverage
+    adjusted = equity * ratio
     raw_qty = adjusted / (price * cfg["contract_size"])
     qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
     final_qty = max(qty, cfg["min_qty"])
@@ -259,18 +267,34 @@ def update_position_state(symbol):
             size = Decimal(str(pos.size))
             
             if size != 0:
+                # 기존 진입 횟수 유지
+                existing_count = position_state.get(symbol, {}).get("entry_count", 0)
+                
                 position_state[symbol] = {
                     "price": Decimal(str(pos.entry_price)),
                     "side": "buy" if size > 0 else "sell",
                     "size": abs(size),
-                    "value": abs(size) * Decimal(str(pos.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
+                    "value": abs(size) * Decimal(str(pos.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"],
+                    "entry_count": existing_count  # 진입 횟수 유지
                 }
             else:
-                position_state[symbol] = {"price": None, "side": None, "size": Decimal("0"), "value": Decimal("0")}
+                position_state[symbol] = {
+                    "price": None, 
+                    "side": None, 
+                    "size": Decimal("0"), 
+                    "value": Decimal("0"),
+                    "entry_count": 0  # 포지션 없으면 초기화
+                }
             return True
         except Exception as e:
             if "POSITION_NOT_FOUND" in str(e):
-                position_state[symbol] = {"price": None, "side": None, "size": Decimal("0"), "value": Decimal("0")}
+                position_state[symbol] = {
+                    "price": None, 
+                    "side": None, 
+                    "size": Decimal("0"), 
+                    "value": Decimal("0"),
+                    "entry_count": 0
+                }
                 return True
             return False
 
@@ -288,7 +312,13 @@ def place_order(symbol, side, qty):
             order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=False)
             
             api.create_futures_order(SETTLE, order)
-            log_debug(f"✅ 주문 성공 ({symbol})", f"{side.upper()} {float(qty_dec)} 계약")
+            
+            # 진입 횟수 증가
+            current_count = position_state.get(symbol, {}).get("entry_count", 0)
+            position_state.setdefault(symbol, {})["entry_count"] = current_count + 1
+            
+            log_debug(f"✅ 주문 성공 ({symbol})", 
+                     f"{side.upper()} {float(qty_dec)} 계약 (진입 #{current_count + 1})")
             
             time.sleep(2)
             update_position_state(symbol)
@@ -304,6 +334,10 @@ def close_position(symbol, reason="manual"):
         try:
             api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
             log_debug(f"✅ 청산 완료 ({symbol})", f"이유: {reason}")
+            
+            # 진입 횟수 초기화
+            if symbol in position_state:
+                position_state[symbol]["entry_count"] = 0
             
             # 데이터 정리
             with signal_lock:
@@ -541,7 +575,7 @@ async def price_monitor():
             await asyncio.sleep(5)
 
 def check_tpsl(ticker):
-    """TP/SL 체크"""
+    """TP 체크 (SL 제거)"""
     try:
         symbol = ticker.get("contract")
         price = Decimal(str(ticker.get("last", "0")))
@@ -557,31 +591,26 @@ def check_tpsl(ticker):
             if not entry or not side:
                 return
             
-            tp, sl = get_tpsl(symbol)
+            tp, _ = get_tpsl(symbol)  # SL은 사용하지 않음
             
             if side == "buy":
                 if price >= entry * (1 + tp):
                     log_debug(f"🎯 TP 트리거 ({symbol})", f"가격: {price}, TP: {entry * (1 + tp)}")
                     close_position(symbol, "take_profit")
-                elif price <= entry * (1 - sl):
-                    log_debug(f"🛑 SL 트리거 ({symbol})", f"가격: {price}, SL: {entry * (1 - sl)}")
-                    close_position(symbol, "stop_loss")
             else:
                 if price <= entry * (1 - tp):
                     log_debug(f"🎯 TP 트리거 ({symbol})", f"가격: {price}, TP: {entry * (1 - tp)}")
                     close_position(symbol, "take_profit")
-                elif price >= entry * (1 + sl):
-                    log_debug(f"🛑 SL 트리거 ({symbol})", f"가격: {price}, SL: {entry * (1 + sl)}")
-                    close_position(symbol, "stop_loss")
     except:
         pass
 
 # === 메인 실행 ===
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v6.5 - 15초 쿨다운, 메인 100%, 백업 30%")
+    log_debug("🚀 서버 시작", "v6.5 - 진입별 수량: 20%→50%→100%→200%")
     log_debug("📊 설정", f"심볼: {len(SYMBOL_CONFIG)}개")
-    log_debug("✅ TP/SL", "메인: TP 1.2x/SL 1.0x, 백업: TP 0.8x/SL 0.8x")
-    log_debug("🎯 가중치", "BTC 60%, ETH 70%, SOL 90%, 기타 100-130%")
+    log_debug("✅ TP만 사용", "SL 비활성화, 파인스크립트 RSI 청산 활성")
+    log_debug("🎯 가중치", "BTC 60%, ETH 70%, SOL 90%, 기타 100%")
+    log_debug("📈 진입 전략", "최대 4회 진입, 단계별 수량 증가")
     
     # 초기 상태
     equity = get_total_collateral(force=True)
@@ -593,7 +622,7 @@ if __name__ == "__main__":
             pos = position_state.get(symbol, {})
             if pos.get("side"):
                 log_debug(f"📊 포지션 ({symbol})", 
-                         f"{pos['side']} {pos['size']} @ {pos['price']}")
+                         f"{pos['side']} {pos['size']} @ {pos['price']} (진입 #{pos.get('entry_count', 0)})")
     
     # 백업 루프 (5분마다 포지션 갱신)
     def backup_loop():
