@@ -109,7 +109,7 @@ def get_total_collateral(force=False):
                     equity = Decimal(str(getattr(unified, attr)))
                     account_cache.update({"time": now, "data": equity})
                     return equity
-        except:
+        except Exception:
             pass
         
         # Futures API로 폴백
@@ -168,7 +168,7 @@ def calculate_dynamic_tp(symbol, atr_15s, signal_type):
             tp = min(max(tp, Decimal("0.003")), Decimal("0.006"))
         
         return tp
-    except:
+    except Exception:
         # 실패시 기본값
         return Decimal("0.004")
 
@@ -400,7 +400,7 @@ def webhook():
                     import urllib.parse
                     decoded = urllib.parse.unquote(raw_data)
                     data = json.loads(decoded)
-                except:
+                except Exception:
                     pass
         
         if not data:
