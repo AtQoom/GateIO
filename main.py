@@ -48,13 +48,13 @@ SYMBOL_MAPPING = {
 
 # === 심볼별 설정 ===
 SYMBOL_CONFIG = {
-    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.6, "sl_mult": 0.6},
-    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.7, "sl_mult": 0.7},
-    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 0.9, "sl_mult": 0.9},
-    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
-    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
-    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
-    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
+    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.6},
+    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.7},
+    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 0.9},
+    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0},
+    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0},
+    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0},
+    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.0},
 }
 
 # === Gate.io API 클라이언트 ===
@@ -72,7 +72,7 @@ signal_lock = threading.RLock()
 tpsl_storage = {}
 tpsl_lock = threading.RLock()
 
-COOLDOWN_SECONDS = 15  # 15초 쿨다운
+COOLDOWN_SECONDS = 14  # 14초 쿨다운
 
 # === 핵심 함수들 ===
 def normalize_symbol(raw_symbol):
@@ -132,8 +132,8 @@ def get_price(symbol):
         log_debug(f"❌ 가격 조회 실패 ({symbol})", str(e))
         return Decimal("0")
 
-def calculate_dynamic_tpsl(symbol, atr_15s, signal_type):
-    """동적 TP/SL 계산 (15초봉 ATR 기반)"""
+def calculate_dynamic_tp(symbol, atr_15s, signal_type):
+    """동적 TP 계산 (15초봉 ATR 기반)"""
     try:
         cfg = SYMBOL_CONFIG[symbol]
         price = get_price(symbol)
@@ -149,51 +149,45 @@ def calculate_dynamic_tpsl(symbol, atr_15s, signal_type):
         else:
             vol_factor = Decimal("0.8") + (atr_ratio - Decimal("0.0005")) / Decimal("0.0015") * Decimal("0.7")
         
-        # 기본값 (파인스크립트 v6.5)
+        # 기본값 (파인스크립트 v6.6)
         base_tp = Decimal("0.004")  # 0.4%
-        base_sl = Decimal("0.002")  # 0.2%
         
         # 신호별 배수
         if signal_type == "backup_enhanced":
             tp_mult = Decimal("0.8")
-            sl_mult = Decimal("0.8")
         else:
             tp_mult = Decimal("1.2")
-            sl_mult = Decimal("1.0")
         
         # 최종 계산
         tp = base_tp * tp_mult * vol_factor * Decimal(str(cfg["tp_mult"]))
-        sl = base_sl * sl_mult * vol_factor * Decimal(str(cfg["sl_mult"]))
         
         # 범위 제한
         if signal_type == "backup_enhanced":
             tp = min(max(tp, Decimal("0.002")), Decimal("0.005"))
-            sl = min(max(sl, Decimal("0.001")), Decimal("0.003"))
         else:
             tp = min(max(tp, Decimal("0.003")), Decimal("0.006"))
-            sl = min(max(sl, Decimal("0.0015")), Decimal("0.004"))
         
-        return tp, sl
+        return tp
     except:
         # 실패시 기본값
-        return Decimal("0.004"), Decimal("0.002")
+        return Decimal("0.004")
 
-def store_tpsl(symbol, tp, sl):
-    """TP/SL 저장"""
+def store_tpsl(symbol, tp):
+    """TP 저장"""
     with tpsl_lock:
-        tpsl_storage[symbol] = {"tp": tp, "sl": sl, "time": time.time()}
+        tpsl_storage[symbol] = {"tp": tp, "time": time.time()}
 
-def get_tpsl(symbol):
-    """저장된 TP/SL 조회"""
+def get_tp(symbol):
+    """저장된 TP 조회"""
     with tpsl_lock:
         if symbol in tpsl_storage:
-            return tpsl_storage[symbol]["tp"], tpsl_storage[symbol]["sl"]
+            return tpsl_storage[symbol]["tp"]
     # 기본값
-    cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
-    return Decimal("0.004") * Decimal(str(cfg["tp_mult"])), Decimal("0.002") * Decimal(str(cfg["sl_mult"]))
+    cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0})
+    return Decimal("0.004") * Decimal(str(cfg["tp_mult"]))
 
 def is_duplicate(data):
-    """중복 신호 체크 (15초 쿨다운)"""
+    """중복 신호 체크 (14초 쿨다운)"""
     with signal_lock:
         now = time.time()
         symbol = data.get("symbol", "")
@@ -203,7 +197,7 @@ def is_duplicate(data):
         if action == "entry":
             key = f"{symbol}_{side}"
             
-            # 같은 방향 15초 체크
+            # 같은 방향 14초 체크
             if key in recent_signals:
                 if now - recent_signals[key]["time"] < COOLDOWN_SECONDS:
                     return True
@@ -232,13 +226,13 @@ def calculate_position_size(symbol, signal_type):
     # 현재 포지션 횟수 확인
     entry_count = position_state.get(symbol, {}).get("entry_count", 0)
     
-    # 진입 횟수별 비율 (20% → 50% → 100% → 200%)
+    # 진입 횟수별 비율 (20% → 30% → 70% → 200%)
     if entry_count == 0:
         ratio = Decimal("0.2")  # 첫 진입: 20%
     elif entry_count == 1:
-        ratio = Decimal("0.5")  # 두번째: 50%
+        ratio = Decimal("0.3")  # 두번째: 30%
     elif entry_count == 2:
-        ratio = Decimal("1.0")  # 세번째: 100%
+        ratio = Decimal("0.7")  # 세번째: 70%
     elif entry_count >= 3:
         ratio = Decimal("2.0")  # 네번째+: 200%
     else:
@@ -277,7 +271,7 @@ def update_position_state(symbol):
                     "size": abs(size),
                     "value": abs(size) * Decimal(str(pos.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"],
                     "entry_count": existing_count,
-                    "entry_time": existing_time  # 진입 시간 추가
+                    "entry_time": existing_time
                 }
             else:
                 position_state[symbol] = {
@@ -367,33 +361,6 @@ def close_position(symbol, reason="manual"):
 def ping():
     return "pong", 200
 
-@app.route("/test-alert", methods=["POST"])
-def test_alert():
-    """알림 테스트 (디버깅용)"""
-    try:
-        raw_data = request.get_data(as_text=True)
-        return jsonify({
-            "raw_data": raw_data[:1000],
-            "headers": dict(request.headers),
-            "content_type": request.content_type,
-            "is_json": request.is_json
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/debug", methods=["GET"])
-def debug_account():
-    """계정 디버깅"""
-    try:
-        acc = api.list_futures_accounts(SETTLE)
-        return jsonify({
-            "available": str(getattr(acc, 'available', '0')),
-            "total": str(getattr(acc, 'total', '0')),
-            "margin": str(getattr(acc, 'margin', '0'))
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 @app.route("/clear-cache", methods=["POST"])
 def clear_cache():
     """캐시 초기화"""
@@ -470,9 +437,9 @@ def webhook():
         
         # 진입 처리
         if action == "entry" and side in ["long", "short"]:
-            # 동적 TP/SL 계산
-            tp, sl = calculate_dynamic_tpsl(symbol, atr_15s, signal_type)
-            store_tpsl(symbol, tp, sl)
+            # 동적 TP 계산
+            tp = calculate_dynamic_tp(symbol, atr_15s, signal_type)
+            store_tpsl(symbol, tp)
             
             # 포지션 확인
             update_position_state(symbol)
@@ -500,10 +467,8 @@ def webhook():
                 "side": side,
                 "qty": float(qty),
                 "signal_type": signal_type,
-                "position_pct": "100%" if signal_type == "hybrid_enhanced" else "30%",
-                "dynamic_tpsl": {
+                "dynamic_tp": {
                     "tp_pct": float(tp) * 100,
-                    "sl_pct": float(sl) * 100,
                     "atr_15s": float(atr_15s)
                 }
             })
@@ -525,151 +490,12 @@ def status():
             update_position_state(sym)
             pos = position_state.get(sym, {})
             if pos.get("side"):
-                tp, sl = get_tpsl(sym)
+                tp = get_tp(sym)
                 positions[sym] = {
                     "side": pos["side"],
                     "size": float(pos["size"]),
                     "price": float(pos["price"]),
                     "value": float(pos["value"]),
                     "tp_pct": float(tp) * 100,
-                    "sl_pct": float(sl) * 100
+                    "entry_count": pos.get("entry_count", 0)
                 }
-        
-        return jsonify({
-            "status": "running",
-            "version": "v6.5",
-            "balance": float(equity),
-            "positions": positions,
-            "cooldown": COOLDOWN_SECONDS
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# === WebSocket 모니터링 ===
-async def price_monitor():
-    """실시간 가격 모니터링"""
-    uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-    symbols = list(SYMBOL_CONFIG.keys())
-    
-    while True:
-        try:
-            async with websockets.connect(uri) as ws:
-                # 구독
-                await ws.send(json.dumps({
-                    "time": int(time.time()),
-                    "channel": "futures.tickers",
-                    "event": "subscribe",
-                    "payload": symbols
-                }))
-                
-                # 메시지 처리
-                while True:
-                    msg = await asyncio.wait_for(ws.recv(), timeout=45)
-                    data = json.loads(msg)
-                    
-                    result = data.get("result")
-                    if not result:
-                        continue
-                    
-                    if isinstance(result, list):
-                        for item in result:
-                            check_tpsl(item)
-                    elif isinstance(result, dict):
-                        check_tpsl(result)
-                        
-        except Exception as e:
-            log_debug("웹소켓 오류", str(e))
-            await asyncio.sleep(5)
-
-def check_tpsl(ticker):
-    """TP 체크 (30분마다 10% 감소, 최소 0.12%)"""
-    try:
-        symbol = ticker.get("contract")
-        price = Decimal(str(ticker.get("last", "0")))
-        
-        if not symbol or symbol not in SYMBOL_CONFIG or price <= 0:
-            return
-        
-        with position_lock:
-            pos = position_state.get(symbol, {})
-            entry = pos.get("price")
-            side = pos.get("side")
-            entry_time = pos.get("entry_time")
-            
-            if not entry or not side or not entry_time:
-                return
-            
-            # 원본 TP 가져오기
-            original_tp, _ = get_tpsl(symbol)
-            
-            # 30분마다 10% 감소 계산
-            time_elapsed = time.time() - entry_time
-            periods_30min = int(time_elapsed / 1800)  # 30분 = 1800초
-            
-            # 감소 계산
-            decay_factor = max(0.3, 1 - (periods_30min * 0.1))  # 최소 30%
-            adjusted_tp = original_tp * Decimal(str(decay_factor))
-            
-            # 최소 0.12% 보장
-            min_tp = Decimal("0.0012")  # 0.12%
-            adjusted_tp = max(adjusted_tp, min_tp)
-            
-            # 디버깅용 로그 (30분마다 한번만)
-            if periods_30min > 0 and int(time_elapsed) % 1800 < 10:
-                log_debug(f"📉 TP 감소 ({symbol})", 
-                         f"경과: {periods_30min*30}분, 원본TP: {original_tp*100:.2f}%, "
-                         f"조정TP: {adjusted_tp*100:.2f}%")
-            
-            if side == "buy":
-                if price >= entry * (1 + adjusted_tp):
-                    log_debug(f"🎯 TP 트리거 ({symbol})", 
-                             f"가격: {price}, 조정TP: {entry * (1 + adjusted_tp)} "
-                             f"({adjusted_tp*100:.2f}%, {periods_30min*30}분 경과)")
-                    close_position(symbol, "take_profit")
-            else:
-                if price <= entry * (1 - adjusted_tp):
-                    log_debug(f"🎯 TP 트리거 ({symbol})", 
-                             f"가격: {price}, 조정TP: {entry * (1 - adjusted_tp)} "
-                             f"({adjusted_tp*100:.2f}%, {periods_30min*30}분 경과)")
-                    close_position(symbol, "take_profit")
-    except:
-        pass
-
-# === 메인 실행 ===
-if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v6.5 - 진입별 수량: 20%→50%→100%→200%")
-    log_debug("📊 설정", f"심볼: {len(SYMBOL_CONFIG)}개")
-    log_debug("✅ TP만 사용", "SL 비활성화, 파인스크립트 RSI 청산 활성")
-    log_debug("🎯 가중치", "BTC 60%, ETH 70%, SOL 90%, 기타 100%")
-    log_debug("📈 진입 전략", "최대 4회 진입, 단계별 수량 증가")
-    
-    # 초기 상태
-    equity = get_total_collateral(force=True)
-    log_debug("💰 초기 자산", f"{equity} USDT")
-    
-    # 초기 포지션 확인
-    for symbol in SYMBOL_CONFIG:
-        if update_position_state(symbol):
-            pos = position_state.get(symbol, {})
-            if pos.get("side"):
-                log_debug(f"📊 포지션 ({symbol})", 
-                         f"{pos['side']} {pos['size']} @ {pos['price']} (진입 #{pos.get('entry_count', 0)})")
-    
-    # 백업 루프 (5분마다 포지션 갱신)
-    def backup_loop():
-        while True:
-            try:
-                time.sleep(300)  # 5분
-                for symbol in SYMBOL_CONFIG:
-                    update_position_state(symbol)
-            except:
-                pass
-    
-    # 스레드 시작
-    threading.Thread(target=backup_loop, daemon=True).start()
-    threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
-    
-    # Flask 실행
-    port = int(os.environ.get("PORT", 8080))
-    log_debug("🌐 웹서버", f"포트 {port}에서 실행")
-    app.run(host="0.0.0.0", port=port, debug=False)
