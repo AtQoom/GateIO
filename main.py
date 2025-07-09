@@ -267,15 +267,17 @@ def update_position_state(symbol):
             size = Decimal(str(pos.size))
             
             if size != 0:
-                # 기존 진입 횟수 유지
+                # 기존 진입 횟수 및 시간 유지
                 existing_count = position_state.get(symbol, {}).get("entry_count", 0)
+                existing_time = position_state.get(symbol, {}).get("entry_time", time.time())
                 
                 position_state[symbol] = {
                     "price": Decimal(str(pos.entry_price)),
                     "side": "buy" if size > 0 else "sell",
                     "size": abs(size),
                     "value": abs(size) * Decimal(str(pos.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"],
-                    "entry_count": existing_count  # 진입 횟수 유지
+                    "entry_count": existing_count,
+                    "entry_time": existing_time  # 진입 시간 추가
                 }
             else:
                 position_state[symbol] = {
@@ -283,7 +285,8 @@ def update_position_state(symbol):
                     "side": None, 
                     "size": Decimal("0"), 
                     "value": Decimal("0"),
-                    "entry_count": 0  # 포지션 없으면 초기화
+                    "entry_count": 0,
+                    "entry_time": None
                 }
             return True
         except Exception as e:
@@ -293,7 +296,8 @@ def update_position_state(symbol):
                     "side": None, 
                     "size": Decimal("0"), 
                     "value": Decimal("0"),
-                    "entry_count": 0
+                    "entry_count": 0,
+                    "entry_time": None
                 }
                 return True
             return False
@@ -313,8 +317,10 @@ def place_order(symbol, side, qty):
             
             api.create_futures_order(SETTLE, order)
             
-            # 진입 횟수 증가
+            # 진입 횟수 증가 및 시간 기록
             current_count = position_state.get(symbol, {}).get("entry_count", 0)
+            if current_count == 0:  # 첫 진입시만 시간 기록
+                position_state.setdefault(symbol, {})["entry_time"] = time.time()
             position_state.setdefault(symbol, {})["entry_count"] = current_count + 1
             
             log_debug(f"✅ 주문 성공 ({symbol})", 
@@ -335,9 +341,10 @@ def close_position(symbol, reason="manual"):
             api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True))
             log_debug(f"✅ 청산 완료 ({symbol})", f"이유: {reason}")
             
-            # 진입 횟수 초기화
+            # 진입 횟수 및 시간 초기화
             if symbol in position_state:
                 position_state[symbol]["entry_count"] = 0
+                position_state[symbol]["entry_time"] = None
             
             # 데이터 정리
             with signal_lock:
@@ -575,7 +582,7 @@ async def price_monitor():
             await asyncio.sleep(5)
 
 def check_tpsl(ticker):
-    """TP 체크 (SL 제거)"""
+    """TP 체크 (30분마다 10% 감소, 최소 0.12%)"""
     try:
         symbol = ticker.get("contract")
         price = Decimal(str(ticker.get("last", "0")))
@@ -587,19 +594,43 @@ def check_tpsl(ticker):
             pos = position_state.get(symbol, {})
             entry = pos.get("price")
             side = pos.get("side")
+            entry_time = pos.get("entry_time")
             
-            if not entry or not side:
+            if not entry or not side or not entry_time:
                 return
             
-            tp, _ = get_tpsl(symbol)  # SL은 사용하지 않음
+            # 원본 TP 가져오기
+            original_tp, _ = get_tpsl(symbol)
+            
+            # 30분마다 10% 감소 계산
+            time_elapsed = time.time() - entry_time
+            periods_30min = int(time_elapsed / 1800)  # 30분 = 1800초
+            
+            # 감소 계산
+            decay_factor = max(0.3, 1 - (periods_30min * 0.1))  # 최소 30%
+            adjusted_tp = original_tp * Decimal(str(decay_factor))
+            
+            # 최소 0.12% 보장
+            min_tp = Decimal("0.0012")  # 0.12%
+            adjusted_tp = max(adjusted_tp, min_tp)
+            
+            # 디버깅용 로그 (30분마다 한번만)
+            if periods_30min > 0 and int(time_elapsed) % 1800 < 10:
+                log_debug(f"📉 TP 감소 ({symbol})", 
+                         f"경과: {periods_30min*30}분, 원본TP: {original_tp*100:.2f}%, "
+                         f"조정TP: {adjusted_tp*100:.2f}%")
             
             if side == "buy":
-                if price >= entry * (1 + tp):
-                    log_debug(f"🎯 TP 트리거 ({symbol})", f"가격: {price}, TP: {entry * (1 + tp)}")
+                if price >= entry * (1 + adjusted_tp):
+                    log_debug(f"🎯 TP 트리거 ({symbol})", 
+                             f"가격: {price}, 조정TP: {entry * (1 + adjusted_tp)} "
+                             f"({adjusted_tp*100:.2f}%, {periods_30min*30}분 경과)")
                     close_position(symbol, "take_profit")
             else:
-                if price <= entry * (1 - tp):
-                    log_debug(f"🎯 TP 트리거 ({symbol})", f"가격: {price}, TP: {entry * (1 - tp)}")
+                if price <= entry * (1 - adjusted_tp):
+                    log_debug(f"🎯 TP 트리거 ({symbol})", 
+                             f"가격: {price}, 조정TP: {entry * (1 - adjusted_tp)} "
+                             f"({adjusted_tp*100:.2f}%, {periods_30min*30}분 경과)")
                     close_position(symbol, "take_profit")
     except:
         pass
