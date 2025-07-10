@@ -214,7 +214,7 @@ def is_duplicate(data):
         
         return False
 
-def calculate_position_size(symbol, signal_type):
+def calculate_position_size(symbol, signal_type, data=None):
     """포지션 크기 계산 (진입 횟수별 차등)"""
     cfg = SYMBOL_CONFIG[symbol]
     equity = get_total_collateral()
@@ -223,8 +223,23 @@ def calculate_position_size(symbol, signal_type):
     if equity <= 0 or price <= 0:
         return Decimal("0")
     
-    # 현재 포지션 횟수 확인
-    entry_count = position_state.get(symbol, {}).get("entry_count", 0)
+    # 파인스크립트 상태 기반 계산 (우선순위)
+    if data and "strategy" in data:
+        strategy = data.get("strategy", "")
+        # Pyramid_Long/Short는 추가 진입을 의미
+        if "Pyramid" in strategy:
+            # 파인스크립트의 현재 포지션 수로 비율 결정
+            # 추가 정보가 있다면 사용, 없으면 서버 카운트 사용
+            entry_count = position_state.get(symbol, {}).get("entry_count", 0)
+            # Pyramid 신호는 최소 2차 진입
+            if entry_count == 0:
+                entry_count = 1
+        else:
+            # Simple_Long/Short는 항상 첫 진입
+            entry_count = 0
+    else:
+        # 기존 로직 (서버 자체 카운트)
+        entry_count = position_state.get(symbol, {}).get("entry_count", 0)
     
     # 진입 횟수별 비율 (20% → 30% → 70% → 200%)
     if entry_count == 0:
@@ -458,8 +473,8 @@ def webhook():
             if entry_count >= 4:
                 return jsonify({"status": "max_entries", "message": "Maximum 4 entries reached"})
             
-            # 수량 계산 및 주문
-            qty = calculate_position_size(symbol, signal_type)
+            # 수량 계산 및 주문 (data 전달)
+            qty = calculate_position_size(symbol, signal_type, data)
             if qty <= 0:
                 return jsonify({"status": "error", "message": "Invalid quantity"})
             
