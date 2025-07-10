@@ -72,7 +72,7 @@ signal_lock = threading.RLock()
 tpsl_storage = {}
 tpsl_lock = threading.RLock()
 
-COOLDOWN_SECONDS = 14  # 14초 쿨다운
+COOLDOWN_SECONDS = 14  # 14초 쿨다운 (파인스크립트는 15초)
 
 # === 핵심 함수들 ===
 def normalize_symbol(raw_symbol):
@@ -149,7 +149,7 @@ def calculate_dynamic_tp(symbol, atr_15s, signal_type):
         else:
             vol_factor = Decimal("0.8") + (atr_ratio - Decimal("0.0005")) / Decimal("0.0015") * Decimal("0.7")
         
-        # 기본값 (파인스크립트 v6.7)
+        # 기본값 (파인스크립트 v6.8)
         base_tp = Decimal("0.004")  # 0.4%
         
         # 신호별 배수
@@ -172,7 +172,7 @@ def calculate_dynamic_tp(symbol, atr_15s, signal_type):
         # 실패시 기본값
         return Decimal("0.004")
 
-def store_tpsl(symbol, tp):
+def store_tp(symbol, tp):
     """TP 저장"""
     with tpsl_lock:
         tpsl_storage[symbol] = {"tp": tp, "time": time.time()}
@@ -226,15 +226,17 @@ def calculate_position_size(symbol, signal_type):
     # 현재 포지션 횟수 확인
     entry_count = position_state.get(symbol, {}).get("entry_count", 0)
     
-    # 진입 횟수별 비율 (20% → 30% → 70% → 200% 이후 계속 200%)
+    # 진입 횟수별 비율 (20% → 30% → 70% → 200%)
     if entry_count == 0:
         ratio = Decimal("0.2")  # 첫 진입: 20%
     elif entry_count == 1:
         ratio = Decimal("0.3")  # 두번째: 30%
     elif entry_count == 2:
         ratio = Decimal("0.7")  # 세번째: 70%
-    else:  # 3회 이상
-        ratio = Decimal("2.0")  # 네번째 이후: 200%
+    elif entry_count >= 3:
+        ratio = Decimal("2.0")  # 네번째: 200%
+    else:
+        ratio = Decimal("0.2")
     
     log_debug(f"📊 수량 계산 ({symbol})", f"진입 횟수: {entry_count + 1}, 비율: {ratio * 100}%")
     
@@ -437,7 +439,7 @@ def webhook():
         if action == "entry" and side in ["long", "short"]:
             # 동적 TP 계산
             tp = calculate_dynamic_tp(symbol, atr_15s, signal_type)
-            store_tpsl(symbol, tp)
+            store_tp(symbol, tp)
             
             # 포지션 확인
             update_position_state(symbol)
@@ -449,6 +451,12 @@ def webhook():
                 if not close_position(symbol, "reverse"):
                     return jsonify({"status": "error", "message": "Failed to close opposite position"})
                 time.sleep(3)
+                update_position_state(symbol)
+            
+            # 최대 4회 진입 체크
+            entry_count = position_state.get(symbol, {}).get("entry_count", 0)
+            if entry_count >= 4:
+                return jsonify({"status": "max_entries", "message": "Maximum 4 entries reached"})
             
             # 수량 계산 및 주문
             qty = calculate_position_size(symbol, signal_type)
@@ -464,6 +472,7 @@ def webhook():
                 "symbol": symbol,
                 "side": side,
                 "qty": float(qty),
+                "entry_count": entry_count + 1,
                 "signal_type": signal_type,
                 "dynamic_tp": {
                     "tp_pct": float(tp) * 100,
@@ -500,7 +509,7 @@ def status():
         
         return jsonify({
             "status": "running",
-            "version": "v6.7",
+            "version": "v6.8",
             "balance": float(equity),
             "positions": positions,
             "cooldown": COOLDOWN_SECONDS
@@ -563,7 +572,7 @@ async def price_monitor():
         await asyncio.sleep(5)
 
 def check_tp(ticker):
-    """TP 체크 (30분마다 10% 감소, 최소 0.12%)"""
+    """TP 체크 (진입 10분 후부터 10분마다 5% 감소, 최소 TP 설정)"""
     try:
         symbol = ticker.get("contract")
         price = Decimal(str(ticker.get("last", "0")))
@@ -583,74 +592,161 @@ def check_tp(ticker):
             # 원본 TP 가져오기
             original_tp = get_tp(symbol)
             
-            # 30분마다 10% 감소 계산
+            # 진입 후 경과 시간 계산
             time_elapsed = time.time() - entry_time
-            periods_30min = int(time_elapsed / 1800)  # 30분 = 1800초
+            minutes_elapsed = time_elapsed / 60
             
-            # 감소 계산
-            decay_factor = max(0.3, 1 - (periods_30min * 0.1))  # 최소 30%
-            adjusted_tp = original_tp * Decimal(str(decay_factor))
+            # 10분 이후부터 감소 시작
+            if minutes_elapsed <= 10:
+                adjusted_tp = original_tp
+            else:
+                # 10분 후부터 10분마다 5% 감소
+                minutes_after_10 = minutes_elapsed - 10
+                periods_10min = int(minutes_after_10 / 10)
+                
+                # 감소 계산 (최소 30% 유지)
+                decay_factor = max(0.3, 1 - (periods_10min * 0.05))
+                adjusted_tp = original_tp * Decimal(str(decay_factor))
             
-            # 최소 0.12% 보장
-            min_tp = Decimal("0.0012")  # 0.12%
+            # 심볼별 최소 TP 설정
+            if symbol in ["BTC_USDT", "ETH_USDT", "SOL_USDT"]:
+                min_tp = Decimal("0.001")  # 0.1%
+            else:
+                min_tp = Decimal("0.0012")  # 0.12%
+            
             adjusted_tp = max(adjusted_tp, min_tp)
             
-            # 디버깅용 로그 (30분마다 한번만)
-            if periods_30min > 0 and int(time_elapsed) % 1800 < 10:
+            # 디버깅용 로그 (10분마다 한번만)
+            if minutes_elapsed > 10 and int(time_elapsed) % 600 < 10:
                 log_debug(f"📉 TP 감소 ({symbol})", 
-                         f"경과: {periods_30min*30}분, 원본TP: {original_tp*100:.2f}%, "
-                         f"조정TP: {adjusted_tp*100:.2f}%")
+                         f"경과: {int(minutes_elapsed)}분, 원본TP: {original_tp*100:.2f}%, "
+                         f"조정TP: {adjusted_tp*100:.2f}%, 최소TP: {min_tp*100:.2f}%")
             
+            # TP 체크
             if side == "buy":
-                if price >= entry * (1 + adjusted_tp):
+                tp_price = entry * (1 + adjusted_tp)
+                if price >= tp_price:
                     log_debug(f"🎯 TP 트리거 ({symbol})", 
-                             f"가격: {price}, 조정TP: {entry * (1 + adjusted_tp)} "
-                             f"({adjusted_tp*100:.2f}%, {periods_30min*30}분 경과)")
+                             f"가격: {price}, TP: {tp_price} "
+                             f"({adjusted_tp*100:.2f}%, {int(minutes_elapsed)}분 경과)")
                     close_position(symbol, "take_profit")
             else:
-                if price <= entry * (1 - adjusted_tp):
+                tp_price = entry * (1 - adjusted_tp)
+                if price <= tp_price:
                     log_debug(f"🎯 TP 트리거 ({symbol})", 
-                             f"가격: {price}, 조정TP: {entry * (1 - adjusted_tp)} "
-                             f"({adjusted_tp*100:.2f}%, {periods_30min*30}분 경과)")
+                             f"가격: {price}, TP: {tp_price} "
+                             f"({adjusted_tp*100:.2f}%, {int(minutes_elapsed)}분 경과)")
                     close_position(symbol, "take_profit")
-    except:
-        pass
+    except Exception as e:
+        log_debug(f"❌ TP 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e))
+
+# === 포지션 모니터링 ===
+def position_monitor():
+    """포지션 상태 주기적 모니터링"""
+    while True:
+        try:
+            time.sleep(300)  # 5분마다
+            
+            total_value = Decimal("0")
+            active_positions = []
+            
+            for symbol in SYMBOL_CONFIG:
+                if update_position_state(symbol):
+                    pos = position_state.get(symbol, {})
+                    if pos.get("side"):
+                        total_value += pos["value"]
+                        active_positions.append(f"{symbol}: {pos['side']} {pos['size']} @ {pos['price']}")
+            
+            if active_positions:
+                equity = get_total_collateral()
+                exposure_pct = (total_value / equity * 100) if equity > 0 else 0
+                log_debug("📊 포지션 현황", 
+                         f"활성: {len(active_positions)}개, "
+                         f"총 가치: {total_value:.2f} USDT, "
+                         f"노출도: {exposure_pct:.1f}%")
+                
+        except Exception as e:
+            log_debug("❌ 포지션 모니터링 오류", str(e))
+
+# === 시스템 상태 모니터링 ===
+def system_monitor():
+    """시스템 상태 주기적 체크"""
+    while True:
+        try:
+            time.sleep(3600)  # 1시간마다
+            
+            # 메모리 정리
+            with signal_lock:
+                now = time.time()
+                recent_signals.update({
+                    k: v for k, v in recent_signals.items() 
+                    if now - v["time"] < 3600
+                })
+            
+            with tpsl_lock:
+                now = time.time()
+                tpsl_storage.update({
+                    k: v for k, v in tpsl_storage.items() 
+                    if now - v["time"] < 86400
+                })
+            
+            # 시스템 상태 로그
+            log_debug("🔧 시스템 상태", 
+                     f"신호 캐시: {len(recent_signals)}개, "
+                     f"TP 저장소: {len(tpsl_storage)}개")
+            
+        except Exception as e:
+            log_debug("❌ 시스템 모니터링 오류", str(e))
 
 # === 메인 실행 ===
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v6.7 - 진입별 수량: 20%→30%→70%→200%")
-    log_debug("📊 설정", f"심볼: {len(SYMBOL_CONFIG)}개")
-    log_debug("✅ TP만 사용", "SL 비활성화, 파인스크립트 RSI 청산 활성")
+    log_debug("🚀 서버 시작", "v6.8 - 최대 4회 진입")
+    log_debug("📊 설정", f"심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초")
+    log_debug("✅ TP만 사용", "SL 제거, 파인스크립트 RSI 청산 활성")
     log_debug("🎯 가중치", "BTC 60%, ETH 70%, SOL 90%, 기타 100%")
-    log_debug("📈 진입 전략", "최대 4회 진입, 단계별 수량 증가")
+    log_debug("📈 진입 전략", "최대 4회 진입, 단계별 수량: 20%→30%→70%→200%")
+    log_debug("⏰ TP 감소", "진입 10분 후부터 10분마다 5%씩 감소")
+    log_debug("📉 최소 TP", "BTC/ETH/SOL: 0.1%, 기타: 0.12%")
+    log_debug("🔄 트레이딩뷰", "1/10 스케일 (2%→3%→7%→20%)")
     
     # 초기 상태
     equity = get_total_collateral(force=True)
-    log_debug("💰 초기 자산", f"{equity} USDT")
+    log_debug("💰 초기 자산", f"{equity:.2f} USDT")
     
     # 초기 포지션 확인
+    active_count = 0
     for symbol in SYMBOL_CONFIG:
         if update_position_state(symbol):
             pos = position_state.get(symbol, {})
             if pos.get("side"):
+                active_count += 1
                 log_debug(f"📊 포지션 ({symbol})", 
-                         f"{pos['side']} {pos['size']} @ {pos['price']} (진입 #{pos.get('entry_count', 0)})")
+                         f"{pos['side']} {pos['size']} @ {pos['price']} "
+                         f"(진입 #{pos.get('entry_count', 0)})")
     
-    # 백업 루프 (5분마다 포지션 갱신)
-    def backup_loop():
-        while True:
-            try:
-                time.sleep(300)  # 5분
-                for symbol in SYMBOL_CONFIG:
-                    update_position_state(symbol)
-            except:
-                pass
+    if active_count == 0:
+        log_debug("📊 포지션", "활성 포지션 없음")
     
     # 스레드 시작
-    threading.Thread(target=backup_loop, daemon=True).start()
-    threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
+    log_debug("🔄 백그라운드 작업", "시작...")
+    
+    # 포지션 모니터링 스레드
+    threading.Thread(target=position_monitor, daemon=True, name="PositionMonitor").start()
+    
+    # 시스템 모니터링 스레드
+    threading.Thread(target=system_monitor, daemon=True, name="SystemMonitor").start()
+    
+    # 웹소켓 가격 모니터링 스레드
+    threading.Thread(
+        target=lambda: asyncio.run(price_monitor()), 
+        daemon=True, 
+        name="PriceMonitor"
+    ).start()
     
     # Flask 실행
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹서버", f"포트 {port}에서 실행")
+    log_debug("✅ 준비 완료", "웹훅 대기중...")
+    
+    # Flask 서버 실행 (메인 스레드에서 실행)
     app.run(host="0.0.0.0", port=port, debug=False)
