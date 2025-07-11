@@ -587,73 +587,73 @@ async def price_monitor():
         await asyncio.sleep(5)
 
 def check_tp(ticker):
-    """TP 체크 (진입 10분 후부터 10분마다 5% 감소, 최소 TP 설정)"""
+    """TP/SL 체크 (TP: 진입 10분 후부터 10분마다 5% 감소, 최소 TP 설정, SL: 1% 고정)"""
     try:
         symbol = ticker.get("contract")
         price = Decimal(str(ticker.get("last", "0")))
-        
+
         if not symbol or symbol not in SYMBOL_CONFIG or price <= 0:
             return
-        
+
         with position_lock:
             pos = position_state.get(symbol, {})
             entry = pos.get("price")
             side = pos.get("side")
             entry_time = pos.get("entry_time")
-            
+
             if not entry or not side or not entry_time:
                 return
-            
-            # 원본 TP 가져오기
+
+            # --- TP 계산 (기존 로직) ---
             original_tp = get_tp(symbol)
-            
-            # 진입 후 경과 시간 계산
             time_elapsed = time.time() - entry_time
             minutes_elapsed = time_elapsed / 60
-            
-            # 10분 이후부터 감소 시작
+
             if minutes_elapsed <= 10:
                 adjusted_tp = original_tp
             else:
-                # 10분 후부터 10분마다 5% 감소
                 minutes_after_10 = minutes_elapsed - 10
                 periods_10min = int(minutes_after_10 / 10)
-                
-                # 감소 계산 (최소 30% 유지)
                 decay_factor = max(0.3, 1 - (periods_10min * 0.05))
                 adjusted_tp = original_tp * Decimal(str(decay_factor))
-            
-            # 심볼별 최소 TP 설정
+
             if symbol in ["BTC_USDT", "ETH_USDT", "SOL_USDT"]:
-                min_tp = Decimal("0.001")  # 0.1%
+                min_tp = Decimal("0.001")
             else:
-                min_tp = Decimal("0.0012")  # 0.12%
-            
+                min_tp = Decimal("0.0012")
             adjusted_tp = max(adjusted_tp, min_tp)
-            
-            # 디버깅용 로그 (10분마다 한번만)
-            if minutes_elapsed > 10 and int(time_elapsed) % 600 < 10:
-                log_debug(f"📉 TP 감소 ({symbol})", 
-                         f"경과: {int(minutes_elapsed)}분, 원본TP: {original_tp*100:.2f}%, "
-                         f"조정TP: {adjusted_tp*100:.2f}%, 최소TP: {min_tp*100:.2f}%")
-            
-            # TP 체크
+
+            # --- SL 계산 (고정 1%) ---
+            sl_pct = Decimal("0.01")  # 1%
+
+            # TP/SL 트리거 체크
+            tp_triggered = False
+            sl_triggered = False
+
             if side == "buy":
                 tp_price = entry * (1 + adjusted_tp)
+                sl_price = entry * (1 - sl_pct)
                 if price >= tp_price:
-                    log_debug(f"🎯 TP 트리거 ({symbol})", 
-                             f"가격: {price}, TP: {tp_price} "
-                             f"({adjusted_tp*100:.2f}%, {int(minutes_elapsed)}분 경과)")
-                    close_position(symbol, "take_profit")
+                    tp_triggered = True
+                elif price <= sl_price:
+                    sl_triggered = True
             else:
                 tp_price = entry * (1 - adjusted_tp)
+                sl_price = entry * (1 + sl_pct)
                 if price <= tp_price:
-                    log_debug(f"🎯 TP 트리거 ({symbol})", 
-                             f"가격: {price}, TP: {tp_price} "
-                             f"({adjusted_tp*100:.2f}%, {int(minutes_elapsed)}분 경과)")
-                    close_position(symbol, "take_profit")
+                    tp_triggered = True
+                elif price >= sl_price:
+                    sl_triggered = True
+
+            if tp_triggered:
+                log_debug(f"🎯 TP 트리거 ({symbol})", f"가격: {price}, TP: {tp_price} ({adjusted_tp*100:.2f}%, {int(minutes_elapsed)}분 경과)")
+                close_position(symbol, "take_profit")
+            elif sl_triggered:
+                log_debug(f"🛑 SL 트리거 ({symbol})", f"가격: {price}, SL: {sl_price} (1% 손절)")
+                close_position(symbol, "stop_loss")
+
     except Exception as e:
-        log_debug(f"❌ TP 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e))
+        log_debug(f"❌ TP/SL 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e))
 
 # === 포지션 모니터링 ===
 def position_monitor():
