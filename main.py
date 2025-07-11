@@ -74,6 +74,11 @@ tpsl_lock = threading.RLock()
 
 COOLDOWN_SECONDS = 14  # 14초 쿨다운 (파인스크립트는 15초)
 
+# === 진입별 조건 강화 설정 ===
+ENABLE_PROGRESSIVE_TIGHTENING = True  # 진입별 조건 강화 활성화
+TIGHTENING_FACTOR = 0.1  # 강화 비율 (10%)
+MAX_TIGHTENING_PCT = 0.3  # 최대 강화 비율 (30%)
+
 # === 핵심 함수들 ===
 def normalize_symbol(raw_symbol):
     """심볼 정규화"""
@@ -93,6 +98,14 @@ def normalize_symbol(raw_symbol):
                 return SYMBOL_MAPPING[base]
     
     return None
+
+def get_tightening_multiplier(entry_number):
+    """진입 횟수에 따른 강화 배수 계산"""
+    if not ENABLE_PROGRESSIVE_TIGHTENING:
+        return 1.0
+    
+    tightening = (entry_number - 1) * TIGHTENING_FACTOR
+    return min(1.0 + tightening, 1.0 + MAX_TIGHTENING_PCT)
 
 def get_total_collateral(force=False):
     """총 자산 조회"""
@@ -149,8 +162,8 @@ def calculate_dynamic_tp(symbol, atr_15s, signal_type):
         else:
             vol_factor = Decimal("0.8") + (atr_ratio - Decimal("0.0005")) / Decimal("0.0015") * Decimal("0.7")
         
-        # 기본값 (파인스크립트 v6.8)
-        base_tp = Decimal("0.004")  # 0.4%
+        # 기본값 (파인스크립트 v6.10)
+        base_tp = Decimal("0.005")  # 0.5%
         
         # 신호별 배수
         if signal_type == "backup_enhanced":
@@ -163,14 +176,14 @@ def calculate_dynamic_tp(symbol, atr_15s, signal_type):
         
         # 범위 제한
         if signal_type == "backup_enhanced":
-            tp = min(max(tp, Decimal("0.002")), Decimal("0.005"))
+            tp = min(max(tp, Decimal("0.003")), Decimal("0.005"))
         else:
-            tp = min(max(tp, Decimal("0.003")), Decimal("0.006"))
+            tp = min(max(tp, Decimal("0.004")), Decimal("0.006"))
         
         return tp
     except Exception:
         # 실패시 기본값
-        return Decimal("0.004")
+        return Decimal("0.005")
 
 def store_tp(symbol, tp):
     """TP 저장"""
@@ -184,7 +197,7 @@ def get_tp(symbol):
             return tpsl_storage[symbol]["tp"]
     # 기본값
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0})
-    return Decimal("0.004") * Decimal(str(cfg["tp_mult"]))
+    return Decimal("0.005") * Decimal(str(cfg["tp_mult"]))
 
 def is_duplicate(data):
     """중복 신호 체크 (14초 쿨다운)"""
@@ -223,15 +236,12 @@ def calculate_position_size(symbol, signal_type, data=None):
     if equity <= 0 or price <= 0:
         return Decimal("0")
     
-    # 파인스크립트 상태 기반 계산 (우선순위)
+    # 파인스크립트 상태 기반 계산
     if data and "strategy" in data:
         strategy = data.get("strategy", "")
         # Pyramid_Long/Short는 추가 진입을 의미
         if "Pyramid" in strategy:
-            # 파인스크립트의 현재 포지션 수로 비율 결정
-            # 추가 정보가 있다면 사용, 없으면 서버 카운트 사용
             entry_count = position_state.get(symbol, {}).get("entry_count", 0)
-            # Pyramid 신호는 최소 2차 진입
             if entry_count == 0:
                 entry_count = 1
         else:
@@ -253,7 +263,13 @@ def calculate_position_size(symbol, signal_type, data=None):
     else:
         ratio = Decimal("0.2")
     
-    log_debug(f"📊 수량 계산 ({symbol})", f"진입 횟수: {entry_count + 1}, 비율: {ratio * 100}%")
+    # 다음 진입 번호 및 강화 배수 계산
+    next_entry_number = entry_count + 1
+    tightening_mult = get_tightening_multiplier(next_entry_number)
+    
+    log_debug(f"📊 수량 계산 ({symbol})", 
+             f"진입 횟수: {next_entry_number}, 비율: {ratio * 100}%, "
+             f"강화 배수: {tightening_mult}")
     
     # 수량 계산
     adjusted = equity * ratio
@@ -433,6 +449,8 @@ def webhook():
         action = data.get("action", "").lower()
         signal_type = data.get("signal_type", "none")
         atr_15s = data.get("atr_15s", 0)
+        entry_number = data.get("entry_number", 1)  # 파인스크립트에서 전달받은 진입 번호
+        tightening_mult = data.get("tightening_mult", 1.0)  # 파인스크립트에서 전달받은 강화 배수
         
         # 심볼 정규화
         symbol = normalize_symbol(raw_symbol)
@@ -488,6 +506,8 @@ def webhook():
                 "side": side,
                 "qty": float(qty),
                 "entry_count": entry_count + 1,
+                "entry_number": entry_number,
+                "tightening_mult": tightening_mult,
                 "signal_type": signal_type,
                 "dynamic_tp": {
                     "tp_pct": float(tp) * 100,
@@ -513,21 +533,31 @@ def status():
             pos = position_state.get(sym, {})
             if pos.get("side"):
                 tp = get_tp(sym)
+                entry_count = pos.get("entry_count", 0)
+                next_entry_number = entry_count + 1
+                tightening_mult = get_tightening_multiplier(next_entry_number)
+                
                 positions[sym] = {
                     "side": pos["side"],
                     "size": float(pos["size"]),
                     "price": float(pos["price"]),
                     "value": float(pos["value"]),
                     "tp_pct": float(tp) * 100,
-                    "entry_count": pos.get("entry_count", 0)
+                    "entry_count": entry_count,
+                    "next_tightening": tightening_mult
                 }
         
         return jsonify({
             "status": "running",
-            "version": "v6.8",
+            "version": "v6.10",
             "balance": float(equity),
             "positions": positions,
-            "cooldown": COOLDOWN_SECONDS
+            "cooldown": COOLDOWN_SECONDS,
+            "progressive_tightening": {
+                "enabled": ENABLE_PROGRESSIVE_TIGHTENING,
+                "factor": TIGHTENING_FACTOR,
+                "max": MAX_TIGHTENING_PCT
+            }
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -587,7 +617,7 @@ async def price_monitor():
         await asyncio.sleep(5)
 
 def check_tp(ticker):
-    """TP/SL 체크 (TP: 진입 10분 후부터 10분마다 5% 감소, 최소 TP 설정, SL: 1% 고정)"""
+    """TP/SL 체크 (TP: 진입 10분 후부터 10분마다 5% 감소, 최소 TP 설정, SL: 0.8% 고정)"""
     try:
         symbol = ticker.get("contract")
         price = Decimal(str(ticker.get("last", "0")))
@@ -617,14 +647,12 @@ def check_tp(ticker):
                 decay_factor = max(0.3, 1 - (periods_10min * 0.05))
                 adjusted_tp = original_tp * Decimal(str(decay_factor))
 
-            if symbol in ["BTC_USDT", "ETH_USDT", "SOL_USDT"]:
-                min_tp = Decimal("0.001")
-            else:
-                min_tp = Decimal("0.0012")
+            # 최소 TP 설정
+            min_tp = Decimal("0.0015")  # 0.15%
             adjusted_tp = max(adjusted_tp, min_tp)
 
-            # --- SL 계산 (고정 1%) ---
-            sl_pct = Decimal("0.01")  # 1%
+            # --- SL 계산 (고정 0.8%) ---
+            sl_pct = Decimal("0.008")  # 0.8%
 
             # TP/SL 트리거 체크
             tp_triggered = False
@@ -649,7 +677,7 @@ def check_tp(ticker):
                 log_debug(f"🎯 TP 트리거 ({symbol})", f"가격: {price}, TP: {tp_price} ({adjusted_tp*100:.2f}%, {int(minutes_elapsed)}분 경과)")
                 close_position(symbol, "take_profit")
             elif sl_triggered:
-                log_debug(f"🛑 SL 트리거 ({symbol})", f"가격: {price}, SL: {sl_price} (1% 손절)")
+                log_debug(f"🛑 SL 트리거 ({symbol})", f"가격: {price}, SL: {sl_price} (0.8% 손절)")
                 close_position(symbol, "stop_loss")
 
     except Exception as e:
@@ -670,7 +698,12 @@ def position_monitor():
                     pos = position_state.get(symbol, {})
                     if pos.get("side"):
                         total_value += pos["value"]
-                        active_positions.append(f"{symbol}: {pos['side']} {pos['size']} @ {pos['price']}")
+                        entry_count = pos.get("entry_count", 0)
+                        next_tightening = get_tightening_multiplier(entry_count + 1)
+                        active_positions.append(
+                            f"{symbol}: {pos['side']} {pos['size']} @ {pos['price']} "
+                            f"(진입 #{entry_count}, 다음 강화 x{next_tightening:.1f})"
+                        )
             
             if active_positions:
                 equity = get_total_collateral()
@@ -679,6 +712,8 @@ def position_monitor():
                          f"활성: {len(active_positions)}개, "
                          f"총 가치: {total_value:.2f} USDT, "
                          f"노출도: {exposure_pct:.1f}%")
+                for pos_info in active_positions:
+                    log_debug("  └", pos_info)
                 
         except Exception as e:
             log_debug("❌ 포지션 모니터링 오류", str(e))
@@ -715,13 +750,15 @@ def system_monitor():
 
 # === 메인 실행 ===
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v6.8 - 최대 4회 진입")
+    log_debug("🚀 서버 시작", "v6.10 - 진입별 조건 강화")
     log_debug("📊 설정", f"심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초")
-    log_debug("✅ TP만 사용", "SL 제거, 파인스크립트 RSI 청산 활성")
+    log_debug("✅ TP/SL 사용", "TP: 동적, SL: 0.8% 고정")
     log_debug("🎯 가중치", "BTC 60%, ETH 70%, SOL 90%, PEPE 120%, 기타 100%")
     log_debug("📈 진입 전략", "최대 4회 진입, 단계별 수량: 20%→30%→70%→200%")
-    log_debug("⏰ TP 감소", "진입 10분 후부터 10분마다 5%씩 감소")
-    log_debug("📉 최소 TP", "BTC/ETH/SOL: 0.1%, 기타: 0.12%")
+    log_debug("🔒 조건 강화", f"활성화: {ENABLE_PROGRESSIVE_TIGHTENING}, "
+             f"강화율: {TIGHTENING_FACTOR*100}%/진입, "
+             f"최대: {MAX_TIGHTENING_PCT*100}%")
+    log_debug("⏰ TP 감소", "진입 10분 후부터 10분마다 5%씩 감소, 최소 0.15%")
     log_debug("🔄 트레이딩뷰", "1/10 스케일 (2%→3%→7%→20%)")
     
     # 초기 상태
@@ -735,9 +772,11 @@ if __name__ == "__main__":
             pos = position_state.get(symbol, {})
             if pos.get("side"):
                 active_count += 1
+                entry_count = pos.get("entry_count", 0)
+                next_tightening = get_tightening_multiplier(entry_count + 1)
                 log_debug(f"📊 포지션 ({symbol})", 
                          f"{pos['side']} {pos['size']} @ {pos['price']} "
-                         f"(진입 #{pos.get('entry_count', 0)})")
+                         f"(진입 #{entry_count}, 다음 강화 x{next_tightening:.1f})")
     
     if active_count == 0:
         log_debug("📊 포지션", "활성 포지션 없음")
