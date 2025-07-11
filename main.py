@@ -74,10 +74,8 @@ tpsl_lock = threading.RLock()
 
 COOLDOWN_SECONDS = 14  # 14초 쿨다운 (파인스크립트는 15초)
 
-# === 진입별 조건 강화 설정 ===
-ENABLE_PROGRESSIVE_TIGHTENING = True  # 진입별 조건 강화 활성화
-TIGHTENING_FACTOR = 0.1  # 강화 비율 (10%)
-MAX_TIGHTENING_PCT = 0.3  # 최대 강화 비율 (30%)
+# === 진입별 정보 (파인스크립트에서 전달받음) ===
+# 서버는 조건 강화를 하지 않고, 파인스크립트에서 이미 강화된 신호만 받음
 
 # === 핵심 함수들 ===
 def normalize_symbol(raw_symbol):
@@ -98,14 +96,6 @@ def normalize_symbol(raw_symbol):
                 return SYMBOL_MAPPING[base]
     
     return None
-
-def get_tightening_multiplier(entry_number):
-    """진입 횟수에 따른 강화 배수 계산"""
-    if not ENABLE_PROGRESSIVE_TIGHTENING:
-        return 1.0
-    
-    tightening = (entry_number - 1) * TIGHTENING_FACTOR
-    return min(1.0 + tightening, 1.0 + MAX_TIGHTENING_PCT)
 
 def get_total_collateral(force=False):
     """총 자산 조회"""
@@ -263,13 +253,11 @@ def calculate_position_size(symbol, signal_type, data=None):
     else:
         ratio = Decimal("0.2")
     
-    # 다음 진입 번호 및 강화 배수 계산
+    # 다음 진입 번호 (파인스크립트에서 전달받은 정보 활용)
     next_entry_number = entry_count + 1
-    tightening_mult = get_tightening_multiplier(next_entry_number)
     
     log_debug(f"📊 수량 계산 ({symbol})", 
-             f"진입 횟수: {next_entry_number}, 비율: {ratio * 100}%, "
-             f"강화 배수: {tightening_mult}")
+             f"진입 횟수: {next_entry_number}, 비율: {ratio * 100}%")
     
     # 수량 계산
     adjusted = equity * ratio
@@ -534,8 +522,6 @@ def status():
             if pos.get("side"):
                 tp = get_tp(sym)
                 entry_count = pos.get("entry_count", 0)
-                next_entry_number = entry_count + 1
-                tightening_mult = get_tightening_multiplier(next_entry_number)
                 
                 positions[sym] = {
                     "side": pos["side"],
@@ -543,8 +529,7 @@ def status():
                     "price": float(pos["price"]),
                     "value": float(pos["value"]),
                     "tp_pct": float(tp) * 100,
-                    "entry_count": entry_count,
-                    "next_tightening": tightening_mult
+                    "entry_count": entry_count
                 }
         
         return jsonify({
@@ -552,12 +537,7 @@ def status():
             "version": "v6.10",
             "balance": float(equity),
             "positions": positions,
-            "cooldown": COOLDOWN_SECONDS,
-            "progressive_tightening": {
-                "enabled": ENABLE_PROGRESSIVE_TIGHTENING,
-                "factor": TIGHTENING_FACTOR,
-                "max": MAX_TIGHTENING_PCT
-            }
+            "cooldown": COOLDOWN_SECONDS
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -699,10 +679,9 @@ def position_monitor():
                     if pos.get("side"):
                         total_value += pos["value"]
                         entry_count = pos.get("entry_count", 0)
-                        next_tightening = get_tightening_multiplier(entry_count + 1)
                         active_positions.append(
                             f"{symbol}: {pos['side']} {pos['size']} @ {pos['price']} "
-                            f"(진입 #{entry_count}, 다음 강화 x{next_tightening:.1f})"
+                            f"(진입 #{entry_count})"
                         )
             
             if active_positions:
@@ -750,14 +729,12 @@ def system_monitor():
 
 # === 메인 실행 ===
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v6.10 - 진입별 조건 강화")
+    log_debug("🚀 서버 시작", "v6.10 - 파인스크립트 진입별 강화 대응")
     log_debug("📊 설정", f"심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초")
     log_debug("✅ TP/SL 사용", "TP: 동적, SL: 0.8% 고정")
     log_debug("🎯 가중치", "BTC 60%, ETH 70%, SOL 90%, PEPE 120%, 기타 100%")
     log_debug("📈 진입 전략", "최대 4회 진입, 단계별 수량: 20%→30%→70%→200%")
-    log_debug("🔒 조건 강화", f"활성화: {ENABLE_PROGRESSIVE_TIGHTENING}, "
-             f"강화율: {TIGHTENING_FACTOR*100}%/진입, "
-             f"최대: {MAX_TIGHTENING_PCT*100}%")
+    log_debug("🔒 조건 강화", "파인스크립트에서 처리 (서버는 신호만 받음)")
     log_debug("⏰ TP 감소", "진입 10분 후부터 10분마다 5%씩 감소, 최소 0.15%")
     log_debug("🔄 트레이딩뷰", "1/10 스케일 (2%→3%→7%→20%)")
     
@@ -773,10 +750,9 @@ if __name__ == "__main__":
             if pos.get("side"):
                 active_count += 1
                 entry_count = pos.get("entry_count", 0)
-                next_tightening = get_tightening_multiplier(entry_count + 1)
                 log_debug(f"📊 포지션 ({symbol})", 
                          f"{pos['side']} {pos['size']} @ {pos['price']} "
-                         f"(진입 #{entry_count}, 다음 강화 x{next_tightening:.1f})")
+                         f"(진입 #{entry_count})")
     
     if active_count == 0:
         log_debug("📊 포지션", "활성 포지션 없음")
