@@ -718,7 +718,7 @@ if __name__ == "__main__":
     log_debug("🚀 서버 시작", "v6.8 - 최대 4회 진입")
     log_debug("📊 설정", f"심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초")
     log_debug("✅ TP만 사용", "SL 제거, 파인스크립트 RSI 청산 활성")
-    log_debug("🎯 가중치", "BTC 60%, ETH 70%, SOL 90%, 기타 100%")
+    log_debug("🎯 가중치", "BTC 60%, ETH 70%, SOL 90%, PEPE 120%, 기타 100%")
     log_debug("📈 진입 전략", "최대 4회 진입, 단계별 수량: 20%→30%→70%→200%")
     log_debug("⏰ TP 감소", "진입 10분 후부터 10분마다 5%씩 감소")
     log_debug("📉 최소 TP", "BTC/ETH/SOL: 0.1%, 기타: 0.12%")
