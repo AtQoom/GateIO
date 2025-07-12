@@ -1,3 +1,33 @@
+"""
+Gate.io 자동매매 서버 v6.10 - 파인스크립트 완전 대응
+
+실행 순서:
+1. 서버 초기화
+   - API 키 로드
+   - Flask 앱 생성
+   - 전역 변수 초기화
+   
+2. 웹훅 수신 (/webhook)
+   - 파인스크립트 알림 수신
+   - JSON 파싱 및 검증
+   - 심볼 정규화
+   
+3. 신호 처리
+   - 중복 신호 체크 (14초 쿨다운)
+   - 진입/청산 구분
+   
+4. 진입 처리
+   - 반대 포지션 청산
+   - TP/SL 계산 및 저장
+   - 포지션 크기 계산
+   - 주문 실행
+   
+5. 백그라운드 모니터링
+   - WebSocket 가격 모니터링
+   - TP/SL 체크 (15초마다 감소)
+   - 포지션 상태 업데이트
+"""
+
 import os
 import json
 import time
@@ -201,66 +231,7 @@ def get_price(symbol):
         return Decimal("0")
 
 # ========================================
-# 6. TP/SL 계산 함수
-# ========================================
-
-def calculate_dynamic_tp(symbol, atr_15s, signal_type):
-    """동적 TP 계산 (파인스크립트 v6.10과 완전 동일)"""
-    try:
-        cfg = SYMBOL_CONFIG[symbol]
-        price = get_price(symbol)
-        if price <= 0:
-            price = Decimal("1")
-        
-        # ATR 변동성 계수 (파인스크립트와 동일)
-        atr_ratio = Decimal(str(atr_15s)) / price
-        
-        if atr_ratio < Decimal("0.0005"):
-            vol_factor = Decimal("0.8")
-        elif atr_ratio > Decimal("0.002"):
-            vol_factor = Decimal("1.5")
-        else:
-            # 선형 보간
-            vol_factor = Decimal("0.8") + (atr_ratio - Decimal("0.0005")) / Decimal("0.0015") * Decimal("0.7")
-            vol_factor = min(max(vol_factor, Decimal("0.8")), Decimal("1.5"))
-        
-        # 기본 TP (파인스크립트: 0.6%)
-        base_tp = Decimal("0.006")
-        
-        # 신호별 배수 (파인스크립트 설정)
-        if signal_type == "backup_enhanced":
-            tp_mult = Decimal("1.0")  # backup_tp_multiplier 기본값
-        else:
-            tp_mult = Decimal("1.2")  # main_tp_multiplier 기본값
-        
-        # 최종 계산 (심볼 가중치 적용)
-        final_tp = base_tp * tp_mult * vol_factor * Decimal(str(cfg["tp_mult"]))
-        
-        # 범위 제한 (파인스크립트와 동일)
-        if signal_type == "backup_enhanced":
-            final_tp = min(max(final_tp, Decimal("0.006")), Decimal("0.008"))
-        else:
-            final_tp = min(max(final_tp, Decimal("0.008")), Decimal("0.01"))
-        
-        return final_tp
-        
-    except Exception:
-        # 실패시 기본값
-        cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0})
-        return Decimal("0.006") * Decimal(str(cfg["tp_mult"]))
-
-def calculate_sl_percentage(symbol, apply_sl_weight=True):
-    """손절률 계산 (파인스크립트 설정 반영)"""
-    base_sl = Decimal("0.008")  # 기본 0.8%
-    
-    if apply_sl_weight:
-        cfg = SYMBOL_CONFIG[symbol]
-        return base_sl * Decimal(str(cfg.get("sl_mult", 1.0)))
-    
-    return base_sl
-
-# ========================================
-# 7. TP/SL 저장 및 관리
+# 6. TP/SL 저장 및 관리
 # ========================================
 
 def store_tp_sl(symbol, tp, sl):
@@ -279,14 +250,14 @@ def get_tp_sl(symbol):
             data = tpsl_storage[symbol]
             return data["tp"], data["sl"]
     
-    # 기본값 반환
+    # 기본값 반환 (파인스크립트와 동일)
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
-    default_tp = Decimal("0.006") * Decimal(str(cfg["tp_mult"]))
-    default_sl = Decimal("0.008") * Decimal(str(cfg["sl_mult"]))
+    default_tp = Decimal("0.005") * Decimal(str(cfg["tp_mult"]))  # 0.5% * 가중치
+    default_sl = Decimal("0.02") * Decimal(str(cfg["sl_mult"]))   # 2% * 가중치
     return default_tp, default_sl
 
 # ========================================
-# 8. 중복 신호 체크
+# 7. 중복 신호 체크
 # ========================================
 
 def is_duplicate(data):
@@ -321,7 +292,7 @@ def is_duplicate(data):
         return False
 
 # ========================================
-# 9. 포지션 크기 계산
+# 8. 포지션 크기 계산
 # ========================================
 
 def calculate_position_size(symbol, signal_type, data=None):
@@ -345,18 +316,18 @@ def calculate_position_size(symbol, signal_type, data=None):
             entry_count = 1  # Pyramid은 최소 2차 진입
     
     # 진입 횟수별 비율 (파인스크립트와 동일)
-    # 파인스크립트: 2% → 3% → 7% → 20%
-    # 서버: 실제 20% → 30% → 70% → 200%
+    # 파인스크립트: 3% → 5% → 10% → 30%
+    # 서버: 실제 30% → 50% → 100% → 300%
     if entry_count == 0:
-        ratio = Decimal("0.2")   # 첫 진입: 20%
+        ratio = Decimal("0.3")   # 첫 진입: 30%
     elif entry_count == 1:
-        ratio = Decimal("0.3")   # 두번째: 30%
+        ratio = Decimal("0.5")   # 두번째: 50%
     elif entry_count == 2:
-        ratio = Decimal("0.7")   # 세번째: 70%
+        ratio = Decimal("1.0")   # 세번째: 100%
     elif entry_count >= 3:
-        ratio = Decimal("2.0")   # 네번째: 200%
+        ratio = Decimal("3.0")   # 네번째: 300%
     else:
-        ratio = Decimal("0.2")
+        ratio = Decimal("0.3")
     
     next_entry_number = entry_count + 1
     
@@ -377,7 +348,7 @@ def calculate_position_size(symbol, signal_type, data=None):
     return final_qty
 
 # ========================================
-# 10. 포지션 상태 관리
+# 9. 포지션 상태 관리
 # ========================================
 
 def update_position_state(symbol):
@@ -425,11 +396,19 @@ def update_position_state(symbol):
             return False
 
 # ========================================
-# 11. 주문 실행
+# 10. 주문 실행
 # ========================================
 
 def place_order(symbol, side, qty):
-    """주문 실행"""
+    """
+    주문 실행
+    
+    처리 순서:
+    1. 수량 검증 및 정규화
+    2. 주문 생성 및 실행
+    3. 진입 횟수 및 시간 기록
+    4. 포지션 상태 업데이트
+    """
     with position_lock:
         try:
             cfg = SYMBOL_CONFIG[symbol]
@@ -467,7 +446,15 @@ def place_order(symbol, side, qty):
             return False
 
 def close_position(symbol, reason="manual"):
-    """포지션 청산"""
+    """
+    포지션 청산
+    
+    처리 순서:
+    1. 청산 주문 실행
+    2. 진입 정보 초기화
+    3. 관련 데이터 정리
+    4. 포지션 상태 업데이트
+    """
     with position_lock:
         try:
             api.create_futures_order(
@@ -506,7 +493,7 @@ def close_position(symbol, reason="manual"):
             return False
 
 # ========================================
-# 12. Flask 라우트
+# 11. Flask 라우트
 # ========================================
 
 @app.route("/ping", methods=["GET", "HEAD"])
@@ -530,9 +517,20 @@ def log_request():
 
 @app.route("/", methods=["POST"])
 def webhook():
-    """파인스크립트 웹훅 처리"""
+    """
+    파인스크립트 웹훅 처리
+    
+    처리 순서:
+    1. 데이터 파싱 (JSON/Form/URL-encoded)
+    2. 필드 추출 및 검증
+    3. 심볼 정규화
+    4. 중복 신호 체크
+    5. 액션별 처리:
+       - exit: 포지션 청산
+       - entry: 새 포지션 진입
+    """
     try:
-        # 데이터 파싱
+        # ========== 1. 데이터 파싱 ==========
         raw_data = request.get_data(as_text=True)
         if not raw_data:
             return jsonify({"error": "Empty data"}), 400
@@ -564,7 +562,7 @@ def webhook():
                 }), 400
             return jsonify({"error": "Failed to parse data"}), 400
         
-        # 필드 추출
+        # ========== 2. 필드 추출 ==========
         raw_symbol = data.get("symbol", "")
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
@@ -572,31 +570,39 @@ def webhook():
         atr_15s = data.get("atr_15s", 0)
         entry_number = data.get("entry_number", 1)
         tightening_mult = data.get("tightening_mult", 1.0)
-        sl_pct = data.get("sl_pct", 0.8)  # 파인스크립트에서 전달받은 SL%
+        sl_pct = data.get("sl_pct", 0)  # 파인스크립트에서 전달받은 SL%
         
-        # 심볼 정규화
+        # ========== 3. 심볼 정규화 ==========
         symbol = normalize_symbol(raw_symbol)
         if not symbol or symbol not in SYMBOL_CONFIG:
             return jsonify({"error": f"Invalid symbol: {raw_symbol}"}), 400
         
-        # 중복 체크
+        # ========== 4. 중복 체크 ==========
         if is_duplicate(data):
             return jsonify({"status": "duplicate_ignored"}), 200
         
-        # 청산 처리
+        # ========== 5. 청산 처리 ==========
         if action == "exit":
+            # TP/SL 청산은 서버에서 처리하므로 무시
+            if data.get("reason") in ["take_profit", "stop_loss"]:
+                return jsonify({"status": "ignored", "reason": "tp_sl_handled_by_server"}), 200
+            
             update_position_state(symbol)
             if position_state.get(symbol, {}).get("side"):
                 close_position(symbol, data.get("reason", "signal"))
             return jsonify({"status": "success", "action": "exit"})
         
-        # 진입 처리
+        # ========== 6. 진입 처리 ==========
         if action == "entry" and side in ["long", "short"]:
-            # 동적 TP 계산
-            tp = calculate_dynamic_tp(symbol, atr_15s, signal_type)
+            # TP 계산 (기본 0.5% * 심볼 가중치)
+            tp = Decimal("0.005") * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
             
-            # SL 계산 (파인스크립트 sl_pct 사용)
-            sl = Decimal(str(sl_pct)) / 100
+            # SL 계산 (기본 2% * 심볼 가중치 또는 파인스크립트 전달값)
+            if sl_pct > 0:  # 파인스크립트에서 전달된 값이 있으면
+                sl = Decimal(str(sl_pct)) / 100
+            else:  # 없으면 기본값 사용
+                sl = Decimal("0.02") * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
+            
             store_tp_sl(symbol, tp, sl)
             
             # 포지션 확인
@@ -643,10 +649,7 @@ def webhook():
                 "entry_number": entry_number,
                 "tightening_mult": tightening_mult,
                 "signal_type": signal_type,
-                "dynamic_tp": {
-                    "tp_pct": float(tp) * 100,
-                    "atr_15s": float(atr_15s)
-                },
+                "tp_pct": float(tp) * 100,
                 "sl_pct": float(sl) * 100
             })
         
@@ -694,7 +697,7 @@ def status():
         return jsonify({"error": str(e)}), 500
 
 # ========================================
-# 13. WebSocket 모니터링
+# 12. WebSocket 모니터링
 # ========================================
 
 async def price_monitor():
@@ -751,7 +754,16 @@ async def price_monitor():
         await asyncio.sleep(5)
 
 def check_tp_sl(ticker):
-    """TP/SL 체크 (파인스크립트 로직 완전 반영)"""
+    """
+    TP/SL 체크 (15초마다 감소 로직)
+    
+    처리 순서:
+    1. 심볼/가격 검증
+    2. 포지션 정보 확인
+    3. 시간 경과 계산
+    4. TP/SL 감소 적용
+    5. 트리거 체크 및 청산 실행
+    """
     try:
         symbol = ticker.get("contract")
         price = Decimal(str(ticker.get("last", "0")))
@@ -768,25 +780,20 @@ def check_tp_sl(ticker):
             if not entry or not side or not entry_time:
                 return
 
-            # TP/SL 조회
-            original_tp, sl_pct = get_tp_sl(symbol)
+            # 원본 TP/SL 조회
+            original_tp, original_sl = get_tp_sl(symbol)
             
-            # 시간 경과 TP 감소 (파인스크립트 로직과 완전 동일)
+            # 시간 경과 계산 (초 단위)
             time_elapsed = time.time() - entry_time
-            minutes_elapsed = time_elapsed / 60
-
-            # 파인스크립트: 10분 후부터 10분마다 5%씩 감소, 최소 0.15%
-            if minutes_elapsed <= 10:
-                adjusted_tp = original_tp
-            else:
-                minutes_after_10 = minutes_elapsed - 10
-                periods_10min = int(minutes_after_10 / 10)
-                decay_factor = max(0.3, 1 - (periods_10min * 0.05))
-                adjusted_tp = original_tp * Decimal(str(decay_factor))
-
-            # 최소 TP 설정 (파인스크립트: tp_min_percent = 0.15%)
-            min_tp = Decimal("0.0015")  # 0.15%
-            adjusted_tp = max(adjusted_tp, min_tp)
+            periods_15s = int(time_elapsed / 15)  # 15초 단위
+            
+            # TP 감소: 0.5% → 0.1% (15초마다 0.005%씩 감소)
+            tp_reduction = Decimal(str(periods_15s)) * Decimal("0.00005")  # 0.005%
+            adjusted_tp = max(Decimal("0.001"), original_tp - tp_reduction)  # 최소 0.1%
+            
+            # SL 감소: 2% → 0.1% (15초마다 0.02%씩 감소)
+            sl_reduction = Decimal(str(periods_15s)) * Decimal("0.0002")  # 0.02%
+            adjusted_sl = max(Decimal("0.001"), original_sl - sl_reduction)  # 최소 0.1%
 
             # TP/SL 트리거 체크
             tp_triggered = False
@@ -794,14 +801,14 @@ def check_tp_sl(ticker):
 
             if side == "buy":
                 tp_price = entry * (1 + adjusted_tp)
-                sl_price = entry * (1 - sl_pct)
+                sl_price = entry * (1 - adjusted_sl)
                 if price >= tp_price:
                     tp_triggered = True
                 elif price <= sl_price:
                     sl_triggered = True
             else:
                 tp_price = entry * (1 - adjusted_tp)
-                sl_price = entry * (1 + sl_pct)
+                sl_price = entry * (1 + adjusted_sl)
                 if price <= tp_price:
                     tp_triggered = True
                 elif price >= sl_price:
@@ -809,18 +816,18 @@ def check_tp_sl(ticker):
 
             if tp_triggered:
                 log_debug(f"🎯 TP 트리거 ({symbol})", 
-                         f"가격: {price}, TP: {tp_price} ({adjusted_tp*100:.2f}%, {int(minutes_elapsed)}분 경과)")
+                         f"가격: {price}, TP: {tp_price} ({adjusted_tp*100:.2f}%, {periods_15s*15}초 경과)")
                 close_position(symbol, "take_profit")
             elif sl_triggered:
                 log_debug(f"🛑 SL 트리거 ({symbol})", 
-                         f"가격: {price}, SL: {sl_price} ({sl_pct*100:.1f}% 손절)")
+                         f"가격: {price}, SL: {sl_price} ({adjusted_sl*100:.2f}%, {periods_15s*15}초 경과)")
                 close_position(symbol, "stop_loss")
 
     except Exception as e:
         log_debug(f"❌ TP/SL 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e))
 
 # ========================================
-# 14. 백그라운드 모니터링 작업
+# 13. 백그라운드 모니터링 작업
 # ========================================
 
 def position_monitor():
@@ -887,10 +894,23 @@ def system_monitor():
             log_debug("❌ 시스템 모니터링 오류", str(e))
 
 # ========================================
-# 15. 메인 실행
+# 14. 메인 실행
 # ========================================
 
 if __name__ == "__main__":
+    """
+    서버 시작 및 초기화
+    
+    실행 순서:
+    1. 서버 설정 로그 출력
+    2. 초기 자산 및 포지션 확인
+    3. 백그라운드 스레드 시작
+       - 포지션 모니터링 (5분 주기)
+       - 시스템 모니터링 (1시간 주기)
+       - WebSocket 가격 모니터링 (실시간)
+    4. Flask 웹서버 시작
+    """
+    
     log_debug("🚀 서버 시작", "v6.10 - 파인스크립트 단계별 강화 완전 대응")
     log_debug("📊 설정", f"심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초")
     
@@ -903,13 +923,12 @@ if __name__ == "__main__":
         log_debug(f"  └ {symbol_name}", f"TP: {tp_weight*100}%, SL: {sl_weight*100}%")
     
     # 전략 설정 로그
-    log_debug("📈 기본 설정", "익절률: 0.6%, 손절률: 0.8%")
-    log_debug("🔄 TP 감소", "진입 10분 후부터 10분마다 5%씩 감소, 최소 0.15%")
-    log_debug("📊 진입 전략", "최대 4회 진입, 단계별 수량: 20%→30%→70%→200%")
-    log_debug("⚡ 신호 타입", "hybrid_enhanced(메인, TP x1.2) / backup_enhanced(백업, TP x1.0)")
-    log_debug("🎯 동적 TP", "ATR 기반 변동성 조정 (0.8~1.5배)")
-    log_debug("🔒 조건 강화", "파인스크립트에서 진입별 강화 처리")
-    log_debug("🔄 트레이딩뷰", "파인스크립트 수량: 2%→3%→7%→20% (실제의 1/10)")
+    log_debug("📈 기본 설정", "익절률: 0.5%, 손절률: 2%")
+    log_debug("🔄 TP/SL 감소", "15초마다 TP -0.01%, SL -0.03% (최소 0.1%)")
+    log_debug("📊 진입 전략", "최대 4회 진입, 단계별 수량: 30%→50%→100%→300%")
+    log_debug("⚡ 신호 타입", "hybrid_enhanced(메인) / backup_enhanced(백업)")
+    log_debug("🔒 조건 강화", "1차 추가: 1.3배, 2차 추가: 1.5배, 3차 추가: 1.6배")
+    log_debug("🔄 트레이딩뷰", "파인스크립트 수량: 3%→5%→10%→30% (실제의 1/10)")
     log_debug("⏱️ 쿨다운", f"{COOLDOWN_SECONDS}초 (파인스크립트: 15초)")
     
     # 초기 자산 확인
