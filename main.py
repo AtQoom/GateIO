@@ -787,13 +787,20 @@ def check_tp_sl(ticker):
             time_elapsed = time.time() - entry_time
             periods_15s = int(time_elapsed / 15)  # 15초 단위
             
-            # TP 감소: 0.5% → 0.1% (15초마다 0.005%씩 감소)
-            tp_reduction = Decimal(str(periods_15s)) * Decimal("0.00005")  # 0.005%
+            # 심볼별 가중치 가져오기
+            symbol_weight = Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
+            
+            # TP 감소: 심볼별 가중치 적용
+            # BTC(0.6): 15초마다 0.006% 감소, PEPE(1.2): 15초마다 0.012% 감소
+            tp_decay_weighted = Decimal("0.0001") * symbol_weight  # 0.01% * 가중치
+            tp_reduction = Decimal(str(periods_15s)) * tp_decay_weighted
             adjusted_tp = max(Decimal("0.001"), original_tp - tp_reduction)  # 최소 0.1%
             
-            # SL 감소: 2% → 0.1% (15초마다 0.02%씩 감소)
-            sl_reduction = Decimal(str(periods_15s)) * Decimal("0.0002")  # 0.02%
-            adjusted_sl = max(Decimal("0.001"), original_sl - sl_reduction)  # 최소 0.1%
+            # SL 감소: 심볼별 가중치 적용
+            # BTC(0.6): 15초마다 0.012% 감소, PEPE(1.2): 15초마다 0.024% 감소
+            sl_decay_weighted = Decimal("0.0002") * symbol_weight  # 0.02% * 가중치
+            sl_reduction = Decimal(str(periods_15s)) * sl_decay_weighted
+            adjusted_sl = max(Decimal("0.0008"), original_sl - sl_reduction)  # 최소 0.08%
 
             # TP/SL 트리거 체크
             tp_triggered = False
@@ -924,7 +931,7 @@ if __name__ == "__main__":
     
     # 전략 설정 로그
     log_debug("📈 기본 설정", "익절률: 0.5%, 손절률: 2%")
-    log_debug("🔄 TP/SL 감소", "15초마다 TP -0.005%, SL -0.02% (최소 0.1%)")
+    log_debug("🔄 TP/SL 감소", "15초마다 TP -0.01%*가중치, SL -0.02%*가중치 (최소 TP 0.1%, SL 0.08%)")
     log_debug("📊 진입 전략", "최대 4회 진입, 단계별 수량: 30%→50%→100%→300%")
     log_debug("⚡ 신호 타입", "hybrid_enhanced(메인) / backup_enhanced(백업)")
     log_debug("🔒 조건 강화", "1차 추가: 1.3배, 2차 추가: 1.5배, 3차 추가: 1.6배")
