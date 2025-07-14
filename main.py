@@ -798,7 +798,7 @@ def check_tp_sl(ticker):
             
             # SL 감소: 심볼별 가중치 적용
             # BTC(0.6): 15초마다 0.012% 감소, PEPE(1.2): 15초마다 0.024% 감소
-            sl_decay_weighted = Decimal("0.0001") * symbol_weight  # 0.01% * 가중치
+            sl_decay_weighted = Decimal("0.00015") * symbol_weight  # 0.015% * 가중치
             sl_reduction = Decimal(str(periods_15s)) * sl_decay_weighted
             adjusted_sl = max(Decimal("0.0008"), original_sl - sl_reduction)  # 최소 0.08%
 
