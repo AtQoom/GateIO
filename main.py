@@ -93,6 +93,8 @@ SYMBOL_MAPPING = {
     "SUIUSDT": "SUI_USDT", "SUIUSDT.P": "SUI_USDT", "SUIUSDTPERP": "SUI_USDT", "SUI_USDT": "SUI_USDT",
     "LINKUSDT": "LINK_USDT", "LINKUSDT.P": "LINK_USDT", "LINKUSDTPERP": "LINK_USDT", "LINK_USDT": "LINK_USDT",
     "PEPEUSDT": "PEPE_USDT", "PEPEUSDT.P": "PEPE_USDT", "PEPEUSDTPERP": "PEPE_USDT", "PEPE_USDT": "PEPE_USDT",
+    "XRPUSDT": "XRP_USDT", "XRPUSDT.P": "XRP_USDT", "XRPUSDTPERP": "XRP_USDT", "XRP_USDT": "XRP_USDT",
+    "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT", "DOGE_USDT": "DOGE_USDT",
 }
 
 # 심볼별 설정 (파인스크립트 v6.10 가중치 완전 반영)
@@ -152,6 +154,22 @@ SYMBOL_CONFIG = {
         "min_notional": Decimal("5"), 
         "tp_mult": 1.2,
         "sl_mult": 1.2
+    },
+    "XRP_USDT": {
+        "min_qty": Decimal("1"), 
+        "qty_step": Decimal("1"), 
+        "contract_size": Decimal("10"), 
+        "min_notional": Decimal("5"), 
+        "tp_mult": 1.0,
+        "sl_mult": 1.0
+    },
+       "DOGE_USDT": {
+        "min_qty": Decimal("1"), 
+        "qty_step": Decimal("1"), 
+        "contract_size": Decimal("10"), 
+        "min_notional": Decimal("5"), 
+        "tp_mult": 1.0,
+        "sl_mult": 1.0
     },
 }
 
