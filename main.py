@@ -270,8 +270,8 @@ def get_tp_sl(symbol):
     
     # 기본값 반환 (파인스크립트와 동일)
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
-    default_tp = Decimal("0.005") * Decimal(str(cfg["tp_mult"]))  # 0.5% * 가중치
-    default_sl = Decimal("0.02") * Decimal(str(cfg["sl_mult"]))   # 2% * 가중치
+    default_tp = Decimal("0.0049") * Decimal(str(cfg["tp_mult"]))  # 0.5% * 가중치
+    default_sl = Decimal("0.019") * Decimal(str(cfg["sl_mult"]))   # 2% * 가중치
     return default_tp, default_sl
 
 # ========================================
