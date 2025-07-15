@@ -334,18 +334,18 @@ def calculate_position_size(symbol, signal_type, data=None):
             entry_count = 1  # Pyramid은 최소 2차 진입
     
     # 진입 횟수별 비율 (파인스크립트와 동일)
-    # 파인스크립트: 1% → 2% → 5% → 12%
-    # 서버: 실제 10% → 20% → 50% → 120%
+    # 파인스크립트: 1.5% → 3% → 8% → 25%
+    # 서버: 실제 15% → 30% → 80% → 250%
     if entry_count == 0:
-        ratio = Decimal("0.1")   # 첫 진입: 10%
+        ratio = Decimal("0.15")   # 첫 진입: 15%
     elif entry_count == 1:
-        ratio = Decimal("0.2")   # 두번째: 20%
+        ratio = Decimal("0.3")   # 두번째: 30%
     elif entry_count == 2:
-        ratio = Decimal("0.5")   # 세번째: 50%
+        ratio = Decimal("0.8")   # 세번째: 80%
     elif entry_count >= 3:
-        ratio = Decimal("1.2")   # 네번째: 120%
+        ratio = Decimal("2.5")   # 네번째: 250%
     else:
-        ratio = Decimal("0.1")
+        ratio = Decimal("0.15")
     
     next_entry_number = entry_count + 1
     
