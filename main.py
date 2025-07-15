@@ -635,7 +635,7 @@ def webhook():
                         "status": "error", 
                         "message": "Failed to close opposite position"
                     })
-                time.sleep(3)
+                time.sleep(1)
                 update_position_state(symbol)
             
             # 최대 4회 진입 체크 (파인스크립트 pyramiding=4)
