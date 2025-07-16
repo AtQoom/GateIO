@@ -362,11 +362,11 @@ def calculate_position_size(symbol, signal_type, data=None):
     # 파인스크립트: 0.10% → 0.20% → 0.60% → 2.40% → 4.80%
     # 서버 실제: 1% → 2% → 6% → 24% → 48%
     entry_ratios = [
-        Decimal("0.01"),    # 1차: 1%
-        Decimal("0.02"),    # 2차: 2%
-        Decimal("0.06"),    # 3차: 6%
-        Decimal("0.24"),    # 4차: 24%
-        Decimal("0.48")     # 5차: 48%
+        Decimal("0.1"),    # 1차: 10%
+        Decimal("0.2"),    # 2차: 20%
+        Decimal("0.6"),    # 3차: 60%
+        Decimal("2.4"),    # 4차: 240%
+        Decimal("4.8")     # 5차: 480%
     ]
     
     if entry_count >= len(entry_ratios):
