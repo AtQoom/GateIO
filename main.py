@@ -1,31 +1,12 @@
 """
-Gate.io 자동매매 서버 v6.10 - 파인스크립트 완전 대응
+Gate.io 자동매매 서버 v6.10-v3 - 5단계 피라미딩 완전 대응
 
-실행 순서:
-1. 서버 초기화
-   - API 키 로드
-   - Flask 앱 생성
-   - 전역 변수 초기화
-   
-2. 웹훅 수신 (/webhook)
-   - 파인스크립트 알림 수신
-   - JSON 파싱 및 검증
-   - 심볼 정규화
-   
-3. 신호 처리
-   - 중복 신호 체크 (14초 쿨다운)
-   - 진입/청산 구분
-   
-4. 진입 처리
-   - 반대 포지션 청산
-   - TP/SL 계산 및 저장
-   - 포지션 크기 계산
-   - 주문 실행
-   
-5. 백그라운드 모니터링
-   - WebSocket 가격 모니터링
-   - TP/SL 체크 (15초마다 감소)
-   - 포지션 상태 업데이트
+주요 변경사항:
+1. 피라미딩 5회로 확대 (기존 4회 → 5회)
+2. 진입 비율 조정: 0.10→0.20→0.60→2.40→4.80 (파인스크립트와 동일)
+3. 서버 실제 비율: 1%→2%→6%→24%→48% (파인스크립트의 10배)
+4. 중복 신호 처리 강화 (2초 전 신호와 확정 신호 구분)
+5. TP/SL 감소는 매 진입마다 리셋 (파인스크립트와 동일)
 """
 
 import os
@@ -163,7 +144,7 @@ SYMBOL_CONFIG = {
         "tp_mult": 1.0,
         "sl_mult": 1.0
     },
-       "DOGE_USDT": {
+    "DOGE_USDT": {
         "min_qty": Decimal("1"), 
         "qty_step": Decimal("1"), 
         "contract_size": Decimal("10"), 
@@ -252,50 +233,94 @@ def get_price(symbol):
 # 6. TP/SL 저장 및 관리
 # ========================================
 
-def store_tp_sl(symbol, tp, sl):
-    """TP/SL 저장"""
+def store_tp_sl(symbol, tp, sl, entry_number):
+    """TP/SL 저장 (진입 단계별로 저장)"""
     with tpsl_lock:
-        tpsl_storage[symbol] = {
+        if symbol not in tpsl_storage:
+            tpsl_storage[symbol] = {}
+        
+        tpsl_storage[symbol][entry_number] = {
             "tp": tp, 
             "sl": sl, 
-            "time": time.time()
+            "time": time.time(),
+            "entry_time": time.time()  # 각 진입별 시간 저장
         }
 
-def get_tp_sl(symbol):
+def get_tp_sl(symbol, entry_number=None):
     """저장된 TP/SL 조회"""
     with tpsl_lock:
         if symbol in tpsl_storage:
-            data = tpsl_storage[symbol]
-            return data["tp"], data["sl"]
+            # 특정 진입 단계의 TP/SL 조회
+            if entry_number and entry_number in tpsl_storage[symbol]:
+                data = tpsl_storage[symbol][entry_number]
+                return data["tp"], data["sl"], data["entry_time"]
+            # 마지막 진입의 TP/SL 조회
+            elif tpsl_storage[symbol]:
+                latest_entry = max(tpsl_storage[symbol].keys())
+                data = tpsl_storage[symbol][latest_entry]
+                return data["tp"], data["sl"], data["entry_time"]
     
     # 기본값 반환 (파인스크립트와 동일)
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
-    default_tp = Decimal("0.0049") * Decimal(str(cfg["tp_mult"]))  # 0.5% * 가중치
-    default_sl = Decimal("0.019") * Decimal(str(cfg["sl_mult"]))   # 2% * 가중치
-    return default_tp, default_sl
+    default_tp = Decimal("0.005") * Decimal(str(cfg["tp_mult"]))  # 0.5% * 가중치
+    default_sl = Decimal("0.02") * Decimal(str(cfg["sl_mult"]))   # 2% * 가중치
+    return default_tp, default_sl, time.time()
 
 # ========================================
-# 7. 중복 신호 체크
+# 7. 중복 신호 체크 (강화된 버전)
 # ========================================
 
 def is_duplicate(data):
-    """중복 신호 체크 (14초 쿨다운)"""
+    """중복 신호 체크 (14초 쿨다운 + 신호 ID 체크)"""
     with signal_lock:
         now = time.time()
         symbol = data.get("symbol", "")
         side = data.get("side", "")
         action = data.get("action", "")
+        signal_id = data.get("id", "")
+        is_pre_signal = data.get("is_pre_signal", "false") == "true"
         
         if action == "entry":
-            key = f"{symbol}_{side}"
-            
-            # 같은 방향 14초 체크
-            if key in recent_signals:
-                if now - recent_signals[key]["time"] < COOLDOWN_SECONDS:
+            # 신호 ID 체크 (완전히 동일한 신호 방지)
+            if signal_id and signal_id in recent_signals:
+                signal_data = recent_signals[signal_id]
+                # 5초 이내 동일 신호는 무시
+                if now - signal_data["time"] < 5:
                     return True
             
-            # 기록
-            recent_signals[key] = {"time": now}
+            # 방향별 쿨다운 체크
+            key = f"{symbol}_{side}"
+            
+            # 같은 방향 신호 쿨다운 체크
+            if key in recent_signals:
+                last_signal = recent_signals[key]
+                time_diff = now - last_signal["time"]
+                
+                # 2초 전 신호와 확정 신호 구분
+                if is_pre_signal:
+                    # 2초 전 신호는 14초 쿨다운
+                    if time_diff < COOLDOWN_SECONDS:
+                        return True
+                else:
+                    # 확정 신호는 2초 전 신호 후 2-4초 이내만 허용
+                    if last_signal.get("is_pre_signal"):
+                        if time_diff < 2 or time_diff > 4:
+                            return True
+                    else:
+                        # 확정 신호끼리는 14초 쿨다운
+                        if time_diff < COOLDOWN_SECONDS:
+                            return True
+            
+            # 신호 기록
+            recent_signals[key] = {
+                "time": now,
+                "is_pre_signal": is_pre_signal,
+                "id": signal_id
+            }
+            
+            # 신호 ID도 별도 기록
+            if signal_id:
+                recent_signals[signal_id] = {"time": now}
             
             # 반대 방향 제거
             opposite = f"{symbol}_{'short' if side == 'long' else 'long'}"
@@ -314,7 +339,7 @@ def is_duplicate(data):
 # ========================================
 
 def calculate_position_size(symbol, signal_type, data=None):
-    """포지션 크기 계산 (파인스크립트 수량 비율 완전 반영)"""
+    """포지션 크기 계산 (5단계 피라미딩 완전 반영)"""
     cfg = SYMBOL_CONFIG[symbol]
     equity = get_total_collateral()
     price = get_price(symbol)
@@ -333,24 +358,26 @@ def calculate_position_size(symbol, signal_type, data=None):
         if "Pyramid" in strategy and entry_count == 0:
             entry_count = 1  # Pyramid은 최소 2차 진입
     
-    # 진입 횟수별 비율 (파인스크립트와 동일)
-    # 파인스크립트: 2% → 4% → 12% → 50%
-    # 서버: 실제 20% → 40% → 120% → 500%
-    if entry_count == 0:
-        ratio = Decimal("0.2")   # 첫 진입: 20%
-    elif entry_count == 1:
-        ratio = Decimal("0.4")   # 두번째: 40%
-    elif entry_count == 2:
-        ratio = Decimal("0.12")   # 세번째: 120%
-    elif entry_count >= 3:
-        ratio = Decimal("5.0")   # 네번째: 500%
-    else:
-        ratio = Decimal("0.15")
+    # 5단계 진입 비율 (파인스크립트의 10배)
+    # 파인스크립트: 0.10% → 0.20% → 0.60% → 2.40% → 4.80%
+    # 서버 실제: 1% → 2% → 6% → 24% → 48%
+    entry_ratios = [
+        Decimal("0.01"),    # 1차: 1%
+        Decimal("0.02"),    # 2차: 2%
+        Decimal("0.06"),    # 3차: 6%
+        Decimal("0.24"),    # 4차: 24%
+        Decimal("0.48")     # 5차: 48%
+    ]
     
+    if entry_count >= len(entry_ratios):
+        log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"진입 횟수: {entry_count}")
+        return Decimal("0")
+    
+    ratio = entry_ratios[entry_count]
     next_entry_number = entry_count + 1
     
     log_debug(f"📊 수량 계산 ({symbol})", 
-             f"진입 횟수: {next_entry_number}, 비율: {ratio * 100}%")
+             f"진입 횟수: {next_entry_number}/5, 비율: {ratio * 100}%")
     
     # 수량 계산
     adjusted = equity * ratio
@@ -398,6 +425,9 @@ def update_position_state(symbol):
                     "entry_count": 0,
                     "entry_time": None
                 }
+                # 포지션 청산시 TP/SL 저장소도 정리
+                with tpsl_lock:
+                    tpsl_storage.pop(symbol, None)
             return True
             
         except Exception as e:
@@ -417,7 +447,7 @@ def update_position_state(symbol):
 # 10. 주문 실행
 # ========================================
 
-def place_order(symbol, side, qty):
+def place_order(symbol, side, qty, entry_number):
     """
     주문 실행
     
@@ -446,14 +476,15 @@ def place_order(symbol, side, qty):
             
             api.create_futures_order(SETTLE, order)
             
-            # 진입 횟수 증가 및 시간 기록
+            # 진입 횟수 증가
             current_count = position_state.get(symbol, {}).get("entry_count", 0)
-            if current_count == 0:  # 첫 진입시만 시간 기록
-                position_state.setdefault(symbol, {})["entry_time"] = time.time()
             position_state.setdefault(symbol, {})["entry_count"] = current_count + 1
             
+            # 진입 시간 기록 (매 진입마다)
+            position_state[symbol]["entry_time"] = time.time()
+            
             log_debug(f"✅ 주문 성공 ({symbol})", 
-                     f"{side.upper()} {float(qty_dec)} 계약 (진입 #{current_count + 1})")
+                     f"{side.upper()} {float(qty_dec)} 계약 (진입 #{current_count + 1}/5)")
             
             time.sleep(2)
             update_position_state(symbol)
@@ -534,6 +565,7 @@ def log_request():
         log_debug("🌐 요청", f"{request.method} {request.path}")
 
 @app.route("/", methods=["POST"])
+@app.route("/webhook", methods=["POST"])
 def webhook():
     """
     파인스크립트 웹훅 처리
@@ -542,7 +574,7 @@ def webhook():
     1. 데이터 파싱 (JSON/Form/URL-encoded)
     2. 필드 추출 및 검증
     3. 심볼 정규화
-    4. 중복 신호 체크
+    4. 중복 신호 체크 (강화된 로직)
     5. 액션별 처리:
        - exit: 포지션 청산
        - entry: 새 포지션 진입
@@ -586,17 +618,21 @@ def webhook():
         action = data.get("action", "").lower()
         signal_type = data.get("signal_type", "none")
         atr_15s = data.get("atr_15s", 0)
-        entry_number = data.get("entry_number", 1)
-        tightening_mult = data.get("tightening_mult", 1.0)
-        sl_pct = data.get("sl_pct", 0)  # 파인스크립트에서 전달받은 SL%
+        entry_number = int(data.get("entry_number", 1))
+        tightening_mult = float(data.get("tightening_mult", 1.0))
+        sl_pct = float(data.get("sl_pct", 0))  # 파인스크립트에서 전달받은 SL%
+        is_pre_signal = str(data.get("is_pre_signal", "false")).lower()
+        signal_id = data.get("id", "")
         
         # ========== 3. 심볼 정규화 ==========
         symbol = normalize_symbol(raw_symbol)
         if not symbol or symbol not in SYMBOL_CONFIG:
             return jsonify({"error": f"Invalid symbol: {raw_symbol}"}), 400
         
-        # ========== 4. 중복 체크 ==========
+        # ========== 4. 중복 체크 (강화된 로직) ==========
         if is_duplicate(data):
+            log_debug(f"🔄 중복 신호 무시 ({symbol})", 
+                     f"{side} {action}, 2초전신호: {is_pre_signal}, ID: {signal_id}")
             return jsonify({"status": "duplicate_ignored"}), 200
         
         # ========== 5. 청산 처리 ==========
@@ -612,16 +648,9 @@ def webhook():
         
         # ========== 6. 진입 처리 ==========
         if action == "entry" and side in ["long", "short"]:
-            # TP 계산 (기본 0.5% * 심볼 가중치)
-            tp = Decimal("0.005") * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
-            
-            # SL 계산 (기본 2% * 심볼 가중치 또는 파인스크립트 전달값)
-            if sl_pct > 0:  # 파인스크립트에서 전달된 값이 있으면
-                sl = Decimal(str(sl_pct)) / 100
-            else:  # 없으면 기본값 사용
-                sl = Decimal("0.02") * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
-            
-            store_tp_sl(symbol, tp, sl)
+            # 진입 단계별 TP/SL 맵 (파인스크립트와 동일)
+            tp_map = [0.005, 0.0045, 0.0040, 0.0035, 0.0030]
+            sl_map = [0.02, 0.019, 0.018, 0.017, 0.016]
             
             # 포지션 확인
             update_position_state(symbol)
@@ -638,13 +667,40 @@ def webhook():
                 time.sleep(1)
                 update_position_state(symbol)
             
-            # 최대 4회 진입 체크 (파인스크립트 pyramiding=4)
+            # 최대 5회 진입 체크 (파인스크립트 pyramiding=5)
             entry_count = position_state.get(symbol, {}).get("entry_count", 0)
-            if entry_count >= 4:
+            if entry_count >= 5:
                 return jsonify({
                     "status": "max_entries", 
-                    "message": "Maximum 4 entries reached"
+                    "message": "Maximum 5 entries reached"
                 })
+            
+            # 진입 번호 계산 (파인스크립트에서 전달된 값 우선)
+            if entry_number > 0 and entry_number <= 5:
+                actual_entry_number = entry_number
+            else:
+                actual_entry_number = entry_count + 1
+            
+            # TP/SL 계산
+            entry_idx = actual_entry_number - 1
+            if entry_idx < len(tp_map):
+                # 심볼별 가중치 적용
+                symbol_weight = SYMBOL_CONFIG[symbol]["tp_mult"]
+                tp = Decimal(str(tp_map[entry_idx])) * Decimal(str(symbol_weight))
+                
+                # SL은 파인스크립트에서 전달된 값 우선, 없으면 기본값 사용
+                if sl_pct > 0:
+                    sl = Decimal(str(sl_pct)) / 100
+                else:
+                    sl = Decimal(str(sl_map[entry_idx])) * Decimal(str(symbol_weight))
+                
+                # TP/SL 저장 (진입 단계별로)
+                store_tp_sl(symbol, tp, sl, actual_entry_number)
+            else:
+                # 기본값 사용
+                tp = Decimal("0.005") * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
+                sl = Decimal("0.02") * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
+                store_tp_sl(symbol, tp, sl, actual_entry_number)
             
             # 수량 계산 및 주문
             qty = calculate_position_size(symbol, signal_type, data)
@@ -654,7 +710,7 @@ def webhook():
                     "message": "Invalid quantity"
                 })
             
-            success = place_order(symbol, desired, qty)
+            success = place_order(symbol, desired, qty, actual_entry_number)
             
             # 상세 응답
             return jsonify({
@@ -663,12 +719,14 @@ def webhook():
                 "symbol": symbol,
                 "side": side,
                 "qty": float(qty),
-                "entry_count": entry_count + 1,
-                "entry_number": entry_number,
+                "entry_count": entry_count + (1 if success else 0),
+                "entry_number": actual_entry_number,
                 "tightening_mult": tightening_mult,
                 "signal_type": signal_type,
                 "tp_pct": float(tp) * 100,
-                "sl_pct": float(sl) * 100
+                "sl_pct": float(sl) * 100,
+                "is_pre_signal": is_pre_signal,
+                "signal_id": signal_id
             })
         
         return jsonify({"error": "Invalid action"}), 400
@@ -688,26 +746,36 @@ def status():
             update_position_state(sym)
             pos = position_state.get(sym, {})
             if pos.get("side"):
-                tp, sl = get_tp_sl(sym)
+                # 모든 진입의 TP/SL 정보 수집
                 entry_count = pos.get("entry_count", 0)
+                tp_sl_info = []
+                
+                for i in range(1, entry_count + 1):
+                    tp, sl, entry_time = get_tp_sl(sym, i)
+                    tp_sl_info.append({
+                        "entry": i,
+                        "tp_pct": float(tp) * 100,
+                        "sl_pct": float(sl) * 100,
+                        "elapsed_seconds": int(time.time() - entry_time)
+                    })
                 
                 positions[sym] = {
                     "side": pos["side"],
                     "size": float(pos["size"]),
                     "price": float(pos["price"]),
                     "value": float(pos["value"]),
-                    "tp_pct": float(tp) * 100,
-                    "sl_pct": float(sl) * 100,
                     "entry_count": entry_count,
-                    "symbol_multiplier": SYMBOL_CONFIG[sym]["tp_mult"]
+                    "symbol_multiplier": SYMBOL_CONFIG[sym]["tp_mult"],
+                    "tp_sl_info": tp_sl_info
                 }
         
         return jsonify({
             "status": "running",
-            "version": "v6.10",
+            "version": "v6.10-v3",
             "balance": float(equity),
             "positions": positions,
             "cooldown": COOLDOWN_SECONDS,
+            "max_entries": 5,
             "symbol_weights": {sym: cfg["tp_mult"] for sym, cfg in SYMBOL_CONFIG.items()}
         })
         
@@ -773,13 +841,13 @@ async def price_monitor():
 
 def check_tp_sl(ticker):
     """
-    TP/SL 체크 (15초마다 감소 로직)
+    TP/SL 체크 (15초마다 감소 로직 - 매 진입마다 리셋)
     
     처리 순서:
     1. 심볼/가격 검증
     2. 포지션 정보 확인
-    3. 시간 경과 계산
-    4. TP/SL 감소 적용
+    3. 각 진입별 TP/SL 체크
+    4. 시간 경과에 따른 TP/SL 감소 적용
     5. 트리거 체크 및 청산 실행
     """
     try:
@@ -791,31 +859,31 @@ def check_tp_sl(ticker):
 
         with position_lock:
             pos = position_state.get(symbol, {})
-            entry = pos.get("price")
+            entry_price = pos.get("price")
             side = pos.get("side")
-            entry_time = pos.get("entry_time")
+            entry_count = pos.get("entry_count", 0)
 
-            if not entry or not side or not entry_time:
+            if not entry_price or not side or entry_count == 0:
                 return
 
-            # 원본 TP/SL 조회
-            original_tp, original_sl = get_tp_sl(symbol)
-            
-            # 시간 경과 계산 (초 단위)
-            time_elapsed = time.time() - entry_time
-            periods_15s = int(time_elapsed / 15)  # 15초 단위
-            
             # 심볼별 가중치 가져오기
             symbol_weight = Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
             
+            # 마지막 진입의 TP/SL 가져오기 (가장 최근 진입 기준)
+            original_tp, original_sl, entry_time = get_tp_sl(symbol, entry_count)
+            
+            # 시간 경과 계산 (마지막 진입 시점부터)
+            time_elapsed = time.time() - entry_time
+            periods_15s = int(time_elapsed / 15)  # 15초 단위
+            
             # TP 감소: 심볼별 가중치 적용
-            # BTC(0.6): 15초마다 0.006% 감소, PEPE(1.2): 15초마다 0.012% 감소
+            # 파인스크립트: tp_decay_amount = 0.006%
             tp_decay_weighted = Decimal("0.00006") * symbol_weight  # 0.006% * 가중치
             tp_reduction = Decimal(str(periods_15s)) * tp_decay_weighted
             adjusted_tp = max(Decimal("0.001"), original_tp - tp_reduction)  # 최소 0.1%
             
             # SL 감소: 심볼별 가중치 적용
-            # BTC(0.6): 15초마다 0.012% 감소, PEPE(1.2): 15초마다 0.024% 감소
+            # 파인스크립트: sl_decay_amount = 0.015%
             sl_decay_weighted = Decimal("0.00015") * symbol_weight  # 0.015% * 가중치
             sl_reduction = Decimal(str(periods_15s)) * sl_decay_weighted
             adjusted_sl = max(Decimal("0.0008"), original_sl - sl_reduction)  # 최소 0.08%
@@ -825,15 +893,15 @@ def check_tp_sl(ticker):
             sl_triggered = False
 
             if side == "buy":
-                tp_price = entry * (1 + adjusted_tp)
-                sl_price = entry * (1 - adjusted_sl)
+                tp_price = entry_price * (1 + adjusted_tp)
+                sl_price = entry_price * (1 - adjusted_sl)
                 if price >= tp_price:
                     tp_triggered = True
                 elif price <= sl_price:
                     sl_triggered = True
             else:
-                tp_price = entry * (1 - adjusted_tp)
-                sl_price = entry * (1 + adjusted_sl)
+                tp_price = entry_price * (1 - adjusted_tp)
+                sl_price = entry_price * (1 + adjusted_sl)
                 if price <= tp_price:
                     tp_triggered = True
                 elif price >= sl_price:
@@ -841,11 +909,13 @@ def check_tp_sl(ticker):
 
             if tp_triggered:
                 log_debug(f"🎯 TP 트리거 ({symbol})", 
-                         f"가격: {price}, TP: {tp_price} ({adjusted_tp*100:.2f}%, {periods_15s*15}초 경과)")
+                         f"가격: {price}, TP: {tp_price} ({adjusted_tp*100:.3f}%, "
+                         f"{periods_15s*15}초 경과, 진입 #{entry_count})")
                 close_position(symbol, "take_profit")
             elif sl_triggered:
                 log_debug(f"🛑 SL 트리거 ({symbol})", 
-                         f"가격: {price}, SL: {sl_price} ({adjusted_sl*100:.2f}%, {periods_15s*15}초 경과)")
+                         f"가격: {price}, SL: {sl_price} ({adjusted_sl*100:.3f}%, "
+                         f"{periods_15s*15}초 경과, 진입 #{entry_count})")
                 close_position(symbol, "stop_loss")
 
     except Exception as e:
@@ -873,7 +943,7 @@ def position_monitor():
                         tp_mult = SYMBOL_CONFIG[symbol]["tp_mult"]
                         active_positions.append(
                             f"{symbol}: {pos['side']} {pos['size']} @ {pos['price']} "
-                            f"(진입 #{entry_count}, 가중치: {tp_mult})"
+                            f"(진입 #{entry_count}/5, 가중치: {tp_mult})"
                         )
             
             if active_positions:
@@ -904,16 +974,18 @@ def system_monitor():
                 })
             
             with tpsl_lock:
-                now = time.time()
+                # TP/SL 저장소는 포지션이 있는 심볼만 유지
+                active_symbols = [sym for sym, pos in position_state.items() 
+                                 if pos.get("side")]
                 tpsl_storage.update({
                     k: v for k, v in tpsl_storage.items() 
-                    if now - v["time"] < 86400
+                    if k in active_symbols
                 })
             
             # 시스템 상태 로그
             log_debug("🔧 시스템 상태", 
                      f"신호 캐시: {len(recent_signals)}개, "
-                     f"TP/SL 저장소: {len(tpsl_storage)}개")
+                     f"TP/SL 저장소: {len(tpsl_storage)}개 심볼")
             
         except Exception as e:
             log_debug("❌ 시스템 모니터링 오류", str(e))
@@ -936,8 +1008,8 @@ if __name__ == "__main__":
     4. Flask 웹서버 시작
     """
     
-    log_debug("🚀 서버 시작", "v6.10 - 파인스크립트 단계별 강화 완전 대응")
-    log_debug("📊 설정", f"심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초")
+    log_debug("🚀 서버 시작", "v6.10-v3 - 5단계 피라미딩 완전 대응")
+    log_debug("📊 설정", f"심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초, 최대 진입: 5회")
     
     # 심볼별 가중치 로그
     log_debug("🎯 심볼별 가중치", "")
@@ -950,11 +1022,15 @@ if __name__ == "__main__":
     # 전략 설정 로그
     log_debug("📈 기본 설정", "익절률: 0.5%, 손절률: 2%")
     log_debug("🔄 TP/SL 감소", "15초마다 TP -0.006%*가중치, SL -0.015%*가중치 (최소 TP 0.1%, SL 0.08%)")
-    log_debug("📊 진입 전략", "최대 4회 진입, 단계별 수량: 20%→40%→120%→500%")
-    log_debug("⚡ 신호 타입", "hybrid_enhanced(메인) / backup_enhanced(백업)")
-    log_debug("🔒 조건 강화", "1차 추가: 1.3배, 2차 추가: 1.5배, 3차 추가: 1.6배")
-    log_debug("🔄 트레이딩뷰", "파인스크립트 수량: 1%→2%→5%→10% (실제의 1/10)")
+    log_debug("📊 진입 전략", "최대 5회 진입")
+    log_debug("💰 진입 비율", "1차: 1%, 2차: 2%, 3차: 6%, 4차: 24%, 5차: 48%")
+    log_debug("📉 단계별 TP", "1차: 0.5%, 2차: 0.45%, 3차: 0.4%, 4차: 0.35%, 5차: 0.3% (*가중치)")
+    log_debug("📉 단계별 SL", "1차: 2%, 2차: 1.9%, 3차: 1.8%, 4차: 1.7%, 5차: 1.6% (*가중치)")
+    log_debug("⚡ 신호 타입", "hybrid_enhanced(메인) / backup_enhanced(백업) / pyramid_engulfing(추가)")
+    log_debug("🔒 조건 강화", "2차: 1.3배, 3차: 1.5배, 4차: 1.6배, 5차: 1.8배")
+    log_debug("🔄 파인스크립트", "진입 비율: 0.1%→0.2%→0.6%→2.4%→4.8% (서버의 1/10)")
     log_debug("⏱️ 쿨다운", f"{COOLDOWN_SECONDS}초 (파인스크립트: 15초)")
+    log_debug("🎯 중복 처리", "신호 ID 체크 + 2초 전/확정 신호 구분")
     
     # 초기 자산 확인
     equity = get_total_collateral(force=True)
@@ -971,7 +1047,7 @@ if __name__ == "__main__":
                 tp_mult = SYMBOL_CONFIG[symbol]["tp_mult"]
                 log_debug(f"📊 포지션 ({symbol})", 
                          f"{pos['side']} {pos['size']} @ {pos['price']} "
-                         f"(진입 #{entry_count}, 가중치: {tp_mult})")
+                         f"(진입 #{entry_count}/5, 가중치: {tp_mult})")
     
     if active_count == 0:
         log_debug("📊 포지션", "활성 포지션 없음")
@@ -1003,7 +1079,7 @@ if __name__ == "__main__":
     # Flask 실행
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹서버", f"포트 {port}에서 실행")
-    log_debug("✅ 준비 완료", "파인스크립트 v6.10 웹훅 대기중...")
+    log_debug("✅ 준비 완료", "파인스크립트 v6.10-v3 웹훅 대기중...")
     
     # Flask 서버 실행 (메인 스레드에서 실행)
     app.run(host="0.0.0.0", port=port, debug=False)
