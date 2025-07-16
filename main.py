@@ -334,16 +334,16 @@ def calculate_position_size(symbol, signal_type, data=None):
             entry_count = 1  # Pyramid은 최소 2차 진입
     
     # 진입 횟수별 비율 (파인스크립트와 동일)
-    # 파인스크립트: 1.5% → 3% → 8% → 25%
-    # 서버: 실제 15% → 30% → 80% → 250%
+    # 파인스크립트: 2% → 4% → 12% → 50%
+    # 서버: 실제 20% → 40% → 120% → 500%
     if entry_count == 0:
-        ratio = Decimal("0.15")   # 첫 진입: 15%
+        ratio = Decimal("0.2")   # 첫 진입: 20%
     elif entry_count == 1:
-        ratio = Decimal("0.3")   # 두번째: 30%
+        ratio = Decimal("0.4")   # 두번째: 40%
     elif entry_count == 2:
-        ratio = Decimal("0.8")   # 세번째: 80%
+        ratio = Decimal("0.12")   # 세번째: 120%
     elif entry_count >= 3:
-        ratio = Decimal("2.5")   # 네번째: 250%
+        ratio = Decimal("5.0")   # 네번째: 500%
     else:
         ratio = Decimal("0.15")
     
@@ -950,7 +950,7 @@ if __name__ == "__main__":
     # 전략 설정 로그
     log_debug("📈 기본 설정", "익절률: 0.5%, 손절률: 2%")
     log_debug("🔄 TP/SL 감소", "15초마다 TP -0.006%*가중치, SL -0.015%*가중치 (최소 TP 0.1%, SL 0.08%)")
-    log_debug("📊 진입 전략", "최대 4회 진입, 단계별 수량: 15%→30%→80%→250%")
+    log_debug("📊 진입 전략", "최대 4회 진입, 단계별 수량: 20%→40%→120%→500%")
     log_debug("⚡ 신호 타입", "hybrid_enhanced(메인) / backup_enhanced(백업)")
     log_debug("🔒 조건 강화", "1차 추가: 1.3배, 2차 추가: 1.5배, 3차 추가: 1.6배")
     log_debug("🔄 트레이딩뷰", "파인스크립트 수량: 1%→2%→5%→10% (실제의 1/10)")
