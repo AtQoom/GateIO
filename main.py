@@ -263,7 +263,7 @@ def get_tp_sl(symbol, entry_number=None):
     # 기본값 반환 (파인스크립트와 동일)
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
     default_tp = Decimal("0.005") * Decimal(str(cfg["tp_mult"]))  # 0.5% * 가중치
-    default_sl = Decimal("0.02") * Decimal(str(cfg["sl_mult"]))   # 2% * 가중치
+    default_sl = Decimal("0.04") * Decimal(str(cfg["sl_mult"]))   # 4% * 가중치
     return default_tp, default_sl, time.time()
 
 # ========================================
@@ -650,7 +650,7 @@ def webhook():
         if action == "entry" and side in ["long", "short"]:
             # 진입 단계별 TP/SL 맵 (파인스크립트와 동일)
             tp_map = [0.006, 0.002, 0.0018, 0.0015, 0.0012]
-            sl_map = [0.023, 0.020, 0.019, 0.018, 0.017]
+            sl_map = [0.04, 0.030, 0.025, 0.020, 0.015]
             
             # 포지션 확인
             update_position_state(symbol)
@@ -883,8 +883,8 @@ def check_tp_sl(ticker):
             adjusted_tp = max(Decimal("0.0012"), original_tp - tp_reduction)  # 최소 0.1%
             
             # SL 감소: 심볼별 가중치 적용
-            # 파인스크립트: sl_decay_amount = 0.009%
-            sl_decay_weighted = Decimal("0.00009") * symbol_weight  # 0.009% * 가중치
+            # 파인스크립트: sl_decay_amount = 0.01%
+            sl_decay_weighted = Decimal("0.0001") * symbol_weight  # 0.01% * 가중치
             sl_reduction = Decimal(str(periods_15s)) * sl_decay_weighted
             adjusted_sl = max(Decimal("0.0009"), original_sl - sl_reduction)  # 최소 0.08%
 
