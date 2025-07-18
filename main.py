@@ -877,8 +877,8 @@ def check_tp_sl(ticker):
             periods_15s = int(time_elapsed / 15)  # 15초 단위
             
             # TP 감소: 심볼별 가중치 적용
-            # 파인스크립트: tp_decay_amount = 0.006%
-            tp_decay_weighted = Decimal("0.00006") * symbol_weight  # 0.006% * 가중치
+            # 파인스크립트: tp_decay_amount = 0.009%
+            tp_decay_weighted = Decimal("0.00009") * symbol_weight  # 0.009% * 가중치
             tp_reduction = Decimal(str(periods_15s)) * tp_decay_weighted
             adjusted_tp = max(Decimal("0.0012"), original_tp - tp_reduction)  # 최소 0.12%
             
@@ -1021,7 +1021,7 @@ if __name__ == "__main__":
     
     # 전략 설정 로그
     log_debug("📈 기본 설정", "익절률: 0.6%, 손절률: 4.0%")
-    log_debug("🔄 TP/SL 감소", "15초마다 TP -0.06%*가중치, SL -0.09%*가중치 (최소 TP 0.12%, SL 0.09%)")
+    log_debug("🔄 TP/SL 감소", "15초마다 TP -0.009%*가중치, SL -0.009%*가중치 (최소 TP 0.12%, SL 0.09%)")
     log_debug("📊 진입 전략", "최대 5회 진입")
     log_debug("💰 진입 비율", "1차: 1%, 2차: 2%, 3차: 6%, 4차: 24%, 5차: 48%")
     log_debug("📉 단계별 TP", "1차: 0.6%, 2차: 0.2%, 3차: 0.18%, 4차: 0.15%, 5차: 0.12% (*가중치)")
