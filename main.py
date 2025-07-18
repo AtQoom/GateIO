@@ -262,7 +262,7 @@ def get_tp_sl(symbol, entry_number=None):
     
     # 기본값 반환 (파인스크립트와 동일)
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
-    default_tp = Decimal("0.005") * Decimal(str(cfg["tp_mult"]))  # 0.5% * 가중치
+    default_tp = Decimal("0.006") * Decimal(str(cfg["tp_mult"]))  # 0.5% * 가중치
     default_sl = Decimal("0.04") * Decimal(str(cfg["sl_mult"]))   # 4% * 가중치
     return default_tp, default_sl, time.time()
 
@@ -650,7 +650,7 @@ def webhook():
         if action == "entry" and side in ["long", "short"]:
             # 진입 단계별 TP/SL 맵 (파인스크립트와 동일)
             tp_map = [0.006, 0.002, 0.0018, 0.0015, 0.0012]
-            sl_map = [0.04, 0.030, 0.025, 0.020, 0.015]
+            sl_map = [0.04, 0.035, 0.030, 0.025, 0.020]
             
             # 포지션 확인
             update_position_state(symbol)
@@ -699,7 +699,7 @@ def webhook():
             else:
                 # 기본값 사용
                 tp = Decimal("0.006") * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
-                sl = Decimal("0.023") * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
+                sl = Decimal("0.04") * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
                 store_tp_sl(symbol, tp, sl, actual_entry_number)
             
             # 수량 계산 및 주문
@@ -880,13 +880,13 @@ def check_tp_sl(ticker):
             # 파인스크립트: tp_decay_amount = 0.006%
             tp_decay_weighted = Decimal("0.00006") * symbol_weight  # 0.006% * 가중치
             tp_reduction = Decimal(str(periods_15s)) * tp_decay_weighted
-            adjusted_tp = max(Decimal("0.0012"), original_tp - tp_reduction)  # 최소 0.1%
+            adjusted_tp = max(Decimal("0.0012"), original_tp - tp_reduction)  # 최소 0.12%
             
             # SL 감소: 심볼별 가중치 적용
-            # 파인스크립트: sl_decay_amount = 0.01%
-            sl_decay_weighted = Decimal("0.0001") * symbol_weight  # 0.01% * 가중치
+            # 파인스크립트: sl_decay_amount = 0.009%
+            sl_decay_weighted = Decimal("0.00009") * symbol_weight  # 0.009% * 가중치
             sl_reduction = Decimal(str(periods_15s)) * sl_decay_weighted
-            adjusted_sl = max(Decimal("0.0009"), original_sl - sl_reduction)  # 최소 0.08%
+            adjusted_sl = max(Decimal("0.0009"), original_sl - sl_reduction)  # 최소 0.09%
 
             # TP/SL 트리거 체크
             tp_triggered = False
@@ -1020,12 +1020,12 @@ if __name__ == "__main__":
         log_debug(f"  └ {symbol_name}", f"TP: {tp_weight*100}%, SL: {sl_weight*100}%")
     
     # 전략 설정 로그
-    log_debug("📈 기본 설정", "익절률: 0.6%, 손절률: 2.3%")
-    log_debug("🔄 TP/SL 감소", "15초마다 TP -0.006%*가중치, SL -0.015%*가중치 (최소 TP 0.12%, SL 0.09%)")
+    log_debug("📈 기본 설정", "익절률: 0.6%, 손절률: 4.0%")
+    log_debug("🔄 TP/SL 감소", "15초마다 TP -0.06%*가중치, SL -0.09%*가중치 (최소 TP 0.12%, SL 0.09%)")
     log_debug("📊 진입 전략", "최대 5회 진입")
     log_debug("💰 진입 비율", "1차: 1%, 2차: 2%, 3차: 6%, 4차: 24%, 5차: 48%")
     log_debug("📉 단계별 TP", "1차: 0.6%, 2차: 0.2%, 3차: 0.18%, 4차: 0.15%, 5차: 0.12% (*가중치)")
-    log_debug("📉 단계별 SL", "1차: 2.3%, 2차: 2.0%, 3차: 1.9%, 4차: 1.8%, 5차: 1.7% (*가중치)")
+    log_debug("📉 단계별 SL", "1차: 4.0%, 2차: 3.5%, 3차: 3.0%, 4차: 2.5%, 5차: 2.0% (*가중치)")
     log_debug("⚡ 신호 타입", "hybrid_enhanced(메인) / backup_enhanced(백업) / pyramid_engulfing(추가)")
     log_debug("🔒 조건 강화", "2차: 1.2배, 3차: 1.3배, 4차: 1.4배, 5차: 1.5배")
     log_debug("🔄 파인스크립트", "진입 비율: 0.1%→0.2%→0.6%→2.4%→4.8% (서버의 1/10)")
