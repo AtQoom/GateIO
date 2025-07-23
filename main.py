@@ -340,7 +340,7 @@ def is_duplicate(data):
 # 8. 포지션 크기 계산
 # ========================================
 
-def calculate_position_size(symbol, signal_type, data=None):
+def calculate_position_size(symbol, signal_type, data, time_multiplier): # 👈 time_multiplier를 인자로 받도록 수정
     """포지션 크기 계산 (5단계 피라미딩 및 시간대 조절) - 수정됨"""
     cfg = SYMBOL_CONFIG[symbol]
     equity = get_total_collateral()
@@ -348,20 +348,13 @@ def calculate_position_size(symbol, signal_type, data=None):
     
     if equity <= 0 or price <= 0:
         return Decimal("0")
-
-    # 1. 시간대별 진입 배수 가져오기
-    time_multiplier = get_time_based_multiplier()
     
-    # 2. 현재 진입 횟수 확인
+    # 이 함수는 더 이상 get_time_based_multiplier()를 호출하지 않음
+    
     entry_count = position_state.get(symbol, {}).get("entry_count", 0)
     
-    # 3. 5단계 진입 비율 설정
     entry_ratios = [
-        Decimal("20"),     # 1차: 20%
-        Decimal("40"),     # 2차: 40% 
-        Decimal("120"),    # 3차: 120%
-        Decimal("480"),    # 4차: 480%
-        Decimal("960"),    # 5차: 960%
+        Decimal("20"), Decimal("40"), Decimal("120"), Decimal("480"), Decimal("960")
     ]
     
     if entry_count >= len(entry_ratios):
@@ -372,17 +365,14 @@ def calculate_position_size(symbol, signal_type, data=None):
     next_entry_number = entry_count + 1
     
     log_debug(f"📊 수량 계산 ({symbol})", 
-             f"진입 #{next_entry_number}/5, 기본 비율: {float(ratio)}%, 시간 배수: {time_multiplier}")
+             f"진입 #{next_entry_number}/5, 기본 비율: {float(ratio)}%, 고정 배수: {time_multiplier}") # 👈 로그 메시지 수정
     
-    # 4. 수량 계산 (시간대 배수 적용)
-    # 20% = 20/100 = 0.2
-    adjusted = equity * (ratio / 100) * time_multiplier  # 👈 여기에 배수 적용
+    adjusted = equity * (ratio / 100) * time_multiplier
     
     raw_qty = adjusted / (price * cfg["contract_size"])
     qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
     final_qty = max(qty, cfg["min_qty"])
     
-    # 5. 최소 주문금액 체크
     value = final_qty * price * cfg["contract_size"]
     if value < cfg["min_notional"]:
         log_debug(f"⚠️ 최소 주문금액 미달 ({symbol})", f"계산된 금액: {value:.2f}, 최소 금액: {cfg['min_notional']}")
@@ -445,8 +435,8 @@ def update_position_state(symbol):
 # 10. 주문 실행
 # ========================================
 
-def place_order(symbol, side, qty, entry_number):
-    """주문 실행 - 안정성 강화"""
+def place_order(symbol, side, qty, entry_number, time_multiplier): # 👈 time_multiplier를 인자로 받도록 수정
+    """주문 실행 - 안정성 강화 및 배수 저장"""
     with position_lock:
         try:
             cfg = SYMBOL_CONFIG[symbol]
@@ -458,27 +448,23 @@ def place_order(symbol, side, qty, entry_number):
             
             size = float(qty_dec) if side == "buy" else -float(qty_dec)
             
-            # 주문 금액 검증 강화            
             order_value = qty_dec * get_price(symbol) * cfg["contract_size"]            
-            if order_value > get_total_collateral() * Decimal("10"):  # 10배 초과 방지
+            if order_value > get_total_collateral() * Decimal("10"):
                 log_debug(f"⚠️ 과도한 주문 방지 ({symbol})", f"주문가: {order_value}, 자산: {get_total_collateral()}")
                 return False
 
-            order = FuturesOrder(
-                contract=symbol, 
-                size=size, 
-                price="0", 
-                tif="ioc", 
-                reduce_only=False
-            )
-            
+            order = FuturesOrder(contract=symbol, size=size, price="0", tif="ioc", reduce_only=False)
             api.create_futures_order(SETTLE, order)
             
-            # 진입 횟수 증가
             current_count = position_state.get(symbol, {}).get("entry_count", 0)
             position_state.setdefault(symbol, {})["entry_count"] = current_count + 1
             position_state[symbol]["entry_time"] = time.time()
             
+            # 👇 최초 진입 시에만 시간대 배수를 저장하는 로직
+            if current_count == 0:
+                position_state[symbol]['time_multiplier'] = time_multiplier
+                log_debug("💾 배수 저장", f"최초 진입({symbol}), 배수 {time_multiplier} 고정")
+
             log_debug(f"✅ 주문 성공 ({symbol})", 
                      f"{side.upper()} {float(qty_dec)} 계약 (진입 #{current_count + 1}/5)")
             
@@ -933,124 +919,110 @@ def worker(idx):
             time.sleep(1)  # 잠시 대기 후 재시작
 
 def handle_entry(data):
-    """진입 처리 로직 (워커 스레드에서 실행)"""
+    """진입 처리 로직 (워커 스레드에서 실행) - 수정 완료"""
     try:
-        # 필드 추출
+        # 1. 기본 정보 추출
         raw_symbol = data.get("symbol", "")
         side = data.get("side", "").lower()
-        action = data.get("action", "").lower()
-        signal_type = data.get("signal", "none")
-        entry_number = int(data.get("entry_num", 1))
-        
         symbol = normalize_symbol(raw_symbol)
+        
         if not symbol or symbol not in SYMBOL_CONFIG:
             log_debug(f"❌ 잘못된 심볼 ({raw_symbol})", "처리 중단")
             return
-        
-        # 진입 단계별 TP/SL
-        tp_map = [0.005, 0.0035, 0.003, 0.002, 0.0015]
-        sl_map = [0.04, 0.038, 0.035, 0.033, 0.03]
-        
-        # 포지션 확인
+            
+        # 2. 포지션 상태 업데이트 및 변수 정의
         update_position_state(symbol)
+        entry_count = position_state.get(symbol, {}).get("entry_count", 0)
         current = position_state.get(symbol, {}).get("side")
         desired = "buy" if side == "long" else "sell"
-        
-        # 반대 포지션 청산
+
+        # 3. 시간대 배수 결정 (핵심 로직)
+        entry_multiplier = Decimal("1.0") # 기본값
+        if entry_count == 0:
+            # 최초 진입: 현재 시간 기준으로 배수 결정
+            entry_multiplier = get_time_based_multiplier()
+        else:
+            # 추가 진입: 저장된 배수 사용 (없으면 1.0)
+            entry_multiplier = position_state.get(symbol, {}).get('time_multiplier', Decimal("1.0"))
+            log_debug("💾 배수 로드", f"추가 진입({symbol}), 고정된 배수 {entry_multiplier} 사용")
+
+        # 4. 진입 전 조건 체크 (반대포지션, 최대진입, 건너뛰기)
+        # 4-1. 반대 포지션 청산
         if current and current != desired:
             if not close_position(symbol, "reverse"):
                 log_debug(f"❌ 반대 포지션 청산 실패 ({symbol})", "진입 중단")
                 return
             time.sleep(1)
             update_position_state(symbol)
-        
-        # 최대 5회 진입 체크
-        entry_count = position_state.get(symbol, {}).get("entry_count", 0)
+            entry_count = 0 # 청산 후 최초 진입이므로 entry_count 초기화
+
+        # 4-2. 최대 5회 진입 체크
         if entry_count >= 5:
             log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"현재: {entry_count}/5")
             return
         
-        # 추가 진입 건너뛰기 로직
+        # 4-3. 추가 진입 건너뛰기 로직
         if entry_count > 0:
             if symbol not in pyramid_tracking:
-                pyramid_tracking[symbol] = {
-                    "signal_count": 0,
-                    "last_entered": False
-                }
+                pyramid_tracking[symbol] = {"signal_count": 0, "last_entered": False}
             
             tracking = pyramid_tracking[symbol]
             tracking["signal_count"] += 1
             signal_count = tracking["signal_count"]
             
-            # 가격 조건 체크
             current_price = get_price(symbol)
             avg_price = position_state[symbol]["price"]
-            price_ok = False
+            price_ok = (current == "buy" and current_price < avg_price) or \
+                       (current == "sell" and current_price > avg_price)
             
-            if current == "buy" and current_price < avg_price:
-                price_ok = True
-            elif current == "sell" and current_price > avg_price:
-                price_ok = True
-            
-            # 건너뛰기 로직
             should_skip = False
+            skip_reason = ""
             if signal_count == 1:
-                should_skip = True
-                skip_reason = "첫 번째 추가 진입 신호 건너뛰기"
+                should_skip, skip_reason = True, "첫 번째 추가 진입 신호 건너뛰기"
             elif signal_count == 2:
-                should_skip = not price_ok
-                skip_reason = "가격 조건 미충족" if should_skip else ""
+                if not price_ok: should_skip, skip_reason = True, "가격 조건 미충족"
             else:
                 if tracking["last_entered"]:
-                    should_skip = True
-                    skip_reason = "이전 진입함 - 건너뛰기"
-                else:
-                    should_skip = not price_ok
-                    skip_reason = "가격 조건 미충족" if should_skip else ""
-            
+                    should_skip, skip_reason = True, "이전 진입함 - 건너뛰기"
+                elif not price_ok:
+                    should_skip, skip_reason = True, "가격 조건 미충족"
+
             if should_skip:
                 tracking["last_entered"] = False
-                log_debug(f"⏭️ 추가 진입 건너뛰기 ({symbol})", 
-                         f"신호 #{signal_count}, 이유: {skip_reason}")
+                log_debug(f"⏭️ 추가 진입 건너뛰기 ({symbol})", f"신호 #{signal_count}, 이유: {skip_reason}")
                 return
             else:
                 tracking["last_entered"] = True
         
-        # 진입 번호 계산
-        if entry_number > 0 and entry_number <= 5:
-            actual_entry_number = entry_number
-        else:
-            actual_entry_number = entry_count + 1
+        # 5. 모든 조건 통과 후 실제 진입 실행
+        actual_entry_number = entry_count + 1
         
-        # TP/SL 계산
+        # 5-1. TP/SL 계산
+        tp_map = [0.005, 0.0035, 0.003, 0.002, 0.0015]
+        sl_map = [0.04, 0.038, 0.035, 0.033, 0.03]
         entry_idx = actual_entry_number - 1
         if entry_idx < len(tp_map):
             symbol_weight = SYMBOL_CONFIG[symbol]["tp_mult"]
             tp = Decimal(str(tp_map[entry_idx])) * Decimal(str(symbol_weight))
             sl = Decimal(str(sl_map[entry_idx])) * Decimal(str(symbol_weight))
             store_tp_sl(symbol, tp, sl, actual_entry_number)
-        else:
-            tp = Decimal("0.005") * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
-            sl = Decimal("0.04") * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
-            store_tp_sl(symbol, tp, sl, actual_entry_number)
         
-        # 수량 계산 및 주문
-        qty = calculate_position_size(symbol, signal_type, data)
+        # 5-2. 수량 계산 및 주문 실행
+        qty = calculate_position_size(symbol, data.get("signal", "none"), data, entry_multiplier)
         if qty <= 0:
             log_debug(f"❌ 수량 계산 실패 ({symbol})", "수량이 0 이하")
             return
         
-        success = place_order(symbol, desired, qty, actual_entry_number)
+        success = place_order(symbol, desired, qty, actual_entry_number, entry_multiplier)
         
         if success:
-            log_debug(f"✅ 워커 진입 성공 ({symbol})", 
-                     f"{side} {float(qty)} 계약, 진입 #{actual_entry_number}/5")
+            log_debug(f"✅ 워커 진입 성공 ({symbol})", f"{side} {float(qty)} 계약, 진입 #{actual_entry_number}/5")
         else:
             log_debug(f"❌ 워커 진입 실패 ({symbol})", f"{side} 주문 실패")
             
     except Exception as e:
-        log_debug(f"❌ handle_entry 오류 ({data.get('symbol', 'Unknown')})", str(e))
-
+        log_debug(f"❌ handle_entry 오류 ({data.get('symbol', 'Unknown')})", str(e), exc_info=True)
+        
 # ========================================
 # 14. 메인 실행
 # ========================================
