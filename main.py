@@ -261,7 +261,7 @@ def get_tp_sl(symbol, entry_number=None):
     
     # 기본값 반환
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
-    default_tp = Decimal("0.006") * Decimal(str(cfg["tp_mult"]))
+    default_tp = Decimal("0.005") * Decimal(str(cfg["tp_mult"]))
     default_sl = Decimal("0.04") * Decimal(str(cfg["sl_mult"]))
     return default_tp, default_sl, time.time()
 
@@ -599,7 +599,7 @@ def webhook():
         # ========== 6. 진입 처리 ==========
         if action == "entry" and side in ["long", "short"]:
             # 진입 단계별 TP/SL (파인스크립트와 동일)
-            tp_map = [0.006, 0.004, 0.003, 0.002, 0.0015]
+            tp_map = [0.005, 0.0035, 0.003, 0.002, 0.0015]
             sl_map = [0.04, 0.038, 0.035, 0.033, 0.03]
             
             # 포지션 확인
@@ -702,7 +702,7 @@ def webhook():
                 store_tp_sl(symbol, tp, sl, actual_entry_number)
             else:
                 # 기본값 사용
-                tp = Decimal("0.006") * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
+                tp = Decimal("0.005") * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
                 sl = Decimal("0.04") * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
                 store_tp_sl(symbol, tp, sl, actual_entry_number)
             
@@ -1018,10 +1018,10 @@ if __name__ == "__main__":
         log_debug(f"  └ {symbol_name}", f"TP/SL 가중치: {tp_weight*100}%")
     
     # 전략 설정 로그
-    log_debug("📈 기본 설정", "익절률: 0.6%, 손절률: 4.0%")
+    log_debug("📈 기본 설정", "익절률: 0.5%, 손절률: 4.0%")
     log_debug("🔄 TP/SL 감소", "15초마다 TP -0.002%*가중치, SL -0.004%*가중치")
     log_debug("📊 진입 비율", "1차: 20%, 2차: 40%, 3차: 120%, 4차: 480%, 5차: 960%")
-    log_debug("📉 단계별 TP", "1차: 0.6%, 2차: 0.4%, 3차: 0.3%, 4차: 0.2%, 5차: 0.15%")
+    log_debug("📉 단계별 TP", "1차: 0.5%, 2차: 0.35%, 3차: 0.3%, 4차: 0.2%, 5차: 0.15%")
     log_debug("📉 단계별 SL", "1차: 4.0%, 2차: 3.8%, 3차: 3.5%, 4차: 3.3%, 5차: 3.0%")
     log_debug("🔄 추가진입", "1차: 건너뛰기, 2차: 가격 유리시, 3차+: 이전 진입시 건너뛰기")
     
