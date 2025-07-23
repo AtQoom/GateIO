@@ -324,7 +324,7 @@ def is_duplicate(data):
 # ========================================
 
 def calculate_position_size(symbol, signal_type, data=None):
-    """포지션 크기 계산 (5단계 피라미딩)"""
+    """포지션 크기 계산 (5단계 피라미딩) - 수정됨"""
     cfg = SYMBOL_CONFIG[symbol]
     equity = get_total_collateral()
     price = get_price(symbol)
@@ -337,19 +337,13 @@ def calculate_position_size(symbol, signal_type, data=None):
     if symbol in position_state:
         entry_count = position_state[symbol].get("entry_count", 0)
     
-    # 전략명으로 판단
-    if data and "type" in data:
-        strategy = data.get("type", "")
-        if "Pyramid" in strategy and entry_count == 0:
-            entry_count = 1
-    
-    # 5단계 진입 비율 (파인스크립트의 10배)
+    # 수정된 5단계 진입 비율 (실제 20%부터)
     entry_ratios = [
-        Decimal("0.2"),    # 1차: 20%
-        Decimal("0.4"),    # 2차: 40%
-        Decimal("1.2"),    # 3차: 120%
-        Decimal("4.8"),    # 4차: 480%
-        Decimal("9.6"),    # 5차: 960%
+        Decimal("20"),     # 1차: 20%
+        Decimal("40"),     # 2차: 40% 
+        Decimal("120"),    # 3차: 120%
+        Decimal("480"),    # 4차: 480%
+        Decimal("960"),    # 5차: 960%
     ]
     
     if entry_count >= len(entry_ratios):
@@ -362,8 +356,8 @@ def calculate_position_size(symbol, signal_type, data=None):
     log_debug(f"📊 수량 계산 ({symbol})", 
              f"진입 #{next_entry_number}/5, 비율: {float(ratio)}%")
     
-    # 수량 계산
-    adjusted = equity * ratio / 100
+    # 수량 계산 (레버리지 1배 기준)
+    adjusted = equity * ratio / 100  # 20% = 20/100 = 0.2
     raw_qty = adjusted / (price * cfg["contract_size"])
     qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
     final_qty = max(qty, cfg["min_qty"])
