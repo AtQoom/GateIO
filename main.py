@@ -20,6 +20,7 @@ from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
+import queue
 
 # ========================================
 # 1. 로깅 설정
@@ -166,6 +167,8 @@ signal_lock = threading.RLock()
 tpsl_storage = {}
 tpsl_lock = threading.RLock()
 pyramid_tracking = {}  # 심볼별 추가 진입 추적
+task_q = queue.Queue(maxsize=50)      # 동시에 최대 50건 대기
+WORKER_COUNT = 6                      # 병렬 워커 스레드 수
 
 # ========================================
 # 5. 핵심 유틸리티 함수
@@ -567,12 +570,6 @@ def webhook():
         raw_symbol = data.get("symbol", "")
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
-        signal_type = data.get("signal", "none")
-        entry_number = int(data.get("entry_num", 1))
-        tp_pct = float(data.get("tp_pct", 0))
-        sl_pct = float(data.get("sl_pct", 0))
-        is_pre_signal = str(data.get("is_pre", "false")).lower()
-        signal_id = data.get("id", "")
         
         # ========== 3. 심볼 정규화 ==========
         symbol = normalize_symbol(raw_symbol)
@@ -581,11 +578,24 @@ def webhook():
         
         # ========== 4. 중복 체크 ==========
         if is_duplicate(data):
-            log_debug(f"🔄 중복 신호 무시 ({symbol})", 
-                     f"{side} {action}, 2초전: {is_pre_signal}, ID: {signal_id}")
+            log_debug(f"🔄 중복 신호 무시 ({symbol})", f"{side} {action}")
             return jsonify({"status": "duplicate_ignored"}), 200
+
+        # ========== 5. 진입 알림 ==========
+        if action == "entry" and side in ["long", "short"]:
+            try:
+                task_q.put_nowait(data)   # 큐에 넣기
+                log_debug(f"📝 큐 추가 ({symbol})", f"{side} 진입, 대기열: {task_q.qsize()}")
+                return jsonify({
+                    "status": "queued",
+                    "symbol": symbol,
+                    "side": side,
+                    "queue_size": task_q.qsize()
+                }), 200
+            except queue.Full:
+                return jsonify({"status": "queue_full"}), 429
         
-        # ========== 5. 청산 처리 ==========
+        # ========== 6. 청산 처리 ==========
         if action == "exit":
             # TP/SL 청산은 서버에서 처리하므로 무시
             if data.get("reason") in ["TP", "SL"]:
@@ -596,144 +606,7 @@ def webhook():
                 close_position(symbol, data.get("reason", "signal"))
             return jsonify({"status": "success", "action": "exit"})
         
-        # ========== 6. 진입 처리 ==========
-        if action == "entry" and side in ["long", "short"]:
-            # 진입 단계별 TP/SL (파인스크립트와 동일)
-            tp_map = [0.005, 0.0035, 0.003, 0.002, 0.0015]
-            sl_map = [0.04, 0.038, 0.035, 0.033, 0.03]
-            
-            # 포지션 확인
-            update_position_state(symbol)
-            current = position_state.get(symbol, {}).get("side")
-            desired = "buy" if side == "long" else "sell"
-            
-            # 반대 포지션 청산
-            if current and current != desired:
-                if not close_position(symbol, "reverse"):
-                    return jsonify({
-                        "status": "error", 
-                        "message": "Failed to close opposite position"
-                    })
-                time.sleep(1)
-                update_position_state(symbol)
-            
-            # 최대 5회 진입 체크
-            entry_count = position_state.get(symbol, {}).get("entry_count", 0)
-            if entry_count >= 5:
-                return jsonify({
-                    "status": "max_entries", 
-                    "message": "Maximum 5 entries reached"
-                })
-            
-            # 추가 진입 건너뛰기 로직
-            if entry_count > 0:  # 추가 진입인 경우
-                # 추가 진입 추적 정보 초기화
-                if symbol not in pyramid_tracking:
-                    pyramid_tracking[symbol] = {
-                        "signal_count": 0,
-                        "last_entered": False
-                    }
-                
-                tracking = pyramid_tracking[symbol]
-                
-                # 건너뛰기 로직 적용
-                should_skip = False
-                
-                # 추가 진입 신호 카운트 증가
-                tracking["signal_count"] += 1
-                signal_count = tracking["signal_count"]
-                
-                # 가격 조건 체크
-                current_price = get_price(symbol)
-                avg_price = position_state[symbol]["price"]
-                price_ok = False
-                
-                if current == "buy" and current_price < avg_price:
-                    price_ok = True
-                elif current == "sell" and current_price > avg_price:
-                    price_ok = True
-                
-                # 건너뛰기 로직
-                if signal_count == 1:  # 첫 번째 추가 진입 신호
-                    should_skip = True
-                    skip_reason = "첫 번째 추가 진입 신호 건너뛰기"
-                elif signal_count == 2:  # 두 번째 추가 진입 신호
-                    should_skip = not price_ok
-                    skip_reason = "가격 조건 미충족" if should_skip else ""
-                else:  # 세 번째 이후
-                    if tracking["last_entered"]:
-                        should_skip = True
-                        skip_reason = "이전 진입함 - 건너뛰기"
-                    else:
-                        should_skip = not price_ok
-                        skip_reason = "가격 조건 미충족" if should_skip else ""
-                
-                if should_skip:
-                    tracking["last_entered"] = False
-                    log_debug(f"⏭️ 추가 진입 건너뛰기 ({symbol})", 
-                             f"신호 #{signal_count}, 이유: {skip_reason}")
-                    return jsonify({
-                        "status": "skipped",
-                        "symbol": symbol,
-                        "signal_count": signal_count,
-                        "reason": skip_reason,
-                        "current_price": float(current_price),
-                        "avg_price": float(avg_price),
-                        "price_ok": price_ok
-                    })
-                else:
-                    tracking["last_entered"] = True
-            
-            # 진입 번호 계산
-            if entry_number > 0 and entry_number <= 5:
-                actual_entry_number = entry_number
-            else:
-                actual_entry_number = entry_count + 1
-            
-            # TP/SL 계산
-            entry_idx = actual_entry_number - 1
-            if entry_idx < len(tp_map):
-                # 심볼별 가중치 적용
-                symbol_weight = SYMBOL_CONFIG[symbol]["tp_mult"]
-                tp = Decimal(str(tp_map[entry_idx])) * Decimal(str(symbol_weight))
-                sl = Decimal(str(sl_map[entry_idx])) * Decimal(str(symbol_weight))
-                
-                # TP/SL 저장
-                store_tp_sl(symbol, tp, sl, actual_entry_number)
-            else:
-                # 기본값 사용
-                tp = Decimal("0.005") * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
-                sl = Decimal("0.04") * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
-                store_tp_sl(symbol, tp, sl, actual_entry_number)
-            
-            # 수량 계산 및 주문
-            qty = calculate_position_size(symbol, signal_type, data)
-            if qty <= 0:
-                return jsonify({
-                    "status": "error", 
-                    "message": "Invalid quantity"
-                })
-            
-            success = place_order(symbol, desired, qty, actual_entry_number)
-            
-            # 상세 응답
-            return jsonify({
-                "status": "success" if success else "error",
-                "action": "entry",
-                "symbol": symbol,
-                "side": side,
-                "qty": float(qty),
-                "entry_count": entry_count + (1 if success else 0),
-                "entry_number": actual_entry_number,
-                "signal_type": signal_type,
-                "tp_pct": float(tp) * 100,
-                "sl_pct": float(sl) * 100,
-                "is_pre_signal": is_pre_signal,
-                "signal_id": signal_id,
-                "pyramid_info": pyramid_tracking.get(symbol) if entry_count > 0 else None
-            })
-        
-        return jsonify({"error": "Invalid action"}), 400
+        return jsonify({"error": "Invalid action"}), 400     
         
     except Exception as e:
         log_debug("❌ 웹훅 오류", str(e), exc_info=True)
@@ -783,7 +656,17 @@ def status():
             "max_entries": 5,
             "symbol_weights": {sym: cfg["tp_mult"] for sym, cfg in SYMBOL_CONFIG.items()}
         })
-        
+
+@app.route("/queue-status", methods=["GET"])
+def queue_status():
+    """큐 상태 모니터링"""
+    try:
+        return jsonify({
+            "queue_size": task_q.qsize(),
+            "max_queue_size": task_q.maxsize,
+            "worker_count": WORKER_COUNT,
+            "queue_utilization": f"{(task_q.qsize() / task_q.maxsize) * 100:.1f}%"
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1001,6 +884,139 @@ def system_monitor():
             log_debug("❌ 시스템 모니터링 오류", str(e))
 
 # ========================================
+# 워커 스레드 정의
+# ========================================
+def worker(idx):
+    while True:
+        data = task_q.get()
+        try:
+            # 기존 webhook 안의 “진입 처리” 블록을 함수로 분리했다 치고
+            handle_entry(data)
+        except Exception as e:
+            log_debug(f"❌ Worker-{idx} 처리 오류", str(e))
+        finally:
+            task_q.task_done()
+
+def handle_entry(data):
+    """진입 처리 로직 (워커 스레드에서 실행)"""
+    try:
+        # 필드 추출
+        raw_symbol = data.get("symbol", "")
+        side = data.get("side", "").lower()
+        action = data.get("action", "").lower()
+        signal_type = data.get("signal", "none")
+        entry_number = int(data.get("entry_num", 1))
+        
+        symbol = normalize_symbol(raw_symbol)
+        if not symbol or symbol not in SYMBOL_CONFIG:
+            log_debug(f"❌ 잘못된 심볼 ({raw_symbol})", "처리 중단")
+            return
+        
+        # 진입 단계별 TP/SL
+        tp_map = [0.005, 0.0035, 0.003, 0.002, 0.0015]
+        sl_map = [0.04, 0.038, 0.035, 0.033, 0.03]
+        
+        # 포지션 확인
+        update_position_state(symbol)
+        current = position_state.get(symbol, {}).get("side")
+        desired = "buy" if side == "long" else "sell"
+        
+        # 반대 포지션 청산
+        if current and current != desired:
+            if not close_position(symbol, "reverse"):
+                log_debug(f"❌ 반대 포지션 청산 실패 ({symbol})", "진입 중단")
+                return
+            time.sleep(1)
+            update_position_state(symbol)
+        
+        # 최대 5회 진입 체크
+        entry_count = position_state.get(symbol, {}).get("entry_count", 0)
+        if entry_count >= 5:
+            log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"현재: {entry_count}/5")
+            return
+        
+        # 추가 진입 건너뛰기 로직
+        if entry_count > 0:
+            if symbol not in pyramid_tracking:
+                pyramid_tracking[symbol] = {
+                    "signal_count": 0,
+                    "last_entered": False
+                }
+            
+            tracking = pyramid_tracking[symbol]
+            tracking["signal_count"] += 1
+            signal_count = tracking["signal_count"]
+            
+            # 가격 조건 체크
+            current_price = get_price(symbol)
+            avg_price = position_state[symbol]["price"]
+            price_ok = False
+            
+            if current == "buy" and current_price < avg_price:
+                price_ok = True
+            elif current == "sell" and current_price > avg_price:
+                price_ok = True
+            
+            # 건너뛰기 로직
+            should_skip = False
+            if signal_count == 1:
+                should_skip = True
+                skip_reason = "첫 번째 추가 진입 신호 건너뛰기"
+            elif signal_count == 2:
+                should_skip = not price_ok
+                skip_reason = "가격 조건 미충족" if should_skip else ""
+            else:
+                if tracking["last_entered"]:
+                    should_skip = True
+                    skip_reason = "이전 진입함 - 건너뛰기"
+                else:
+                    should_skip = not price_ok
+                    skip_reason = "가격 조건 미충족" if should_skip else ""
+            
+            if should_skip:
+                tracking["last_entered"] = False
+                log_debug(f"⏭️ 추가 진입 건너뛰기 ({symbol})", 
+                         f"신호 #{signal_count}, 이유: {skip_reason}")
+                return
+            else:
+                tracking["last_entered"] = True
+        
+        # 진입 번호 계산
+        if entry_number > 0 and entry_number <= 5:
+            actual_entry_number = entry_number
+        else:
+            actual_entry_number = entry_count + 1
+        
+        # TP/SL 계산
+        entry_idx = actual_entry_number - 1
+        if entry_idx < len(tp_map):
+            symbol_weight = SYMBOL_CONFIG[symbol]["tp_mult"]
+            tp = Decimal(str(tp_map[entry_idx])) * Decimal(str(symbol_weight))
+            sl = Decimal(str(sl_map[entry_idx])) * Decimal(str(symbol_weight))
+            store_tp_sl(symbol, tp, sl, actual_entry_number)
+        else:
+            tp = Decimal("0.005") * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
+            sl = Decimal("0.04") * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
+            store_tp_sl(symbol, tp, sl, actual_entry_number)
+        
+        # 수량 계산 및 주문
+        qty = calculate_position_size(symbol, signal_type, data)
+        if qty <= 0:
+            log_debug(f"❌ 수량 계산 실패 ({symbol})", "수량이 0 이하")
+            return
+        
+        success = place_order(symbol, desired, qty, actual_entry_number)
+        
+        if success:
+            log_debug(f"✅ 워커 진입 성공 ({symbol})", 
+                     f"{side} {float(qty)} 계약, 진입 #{actual_entry_number}/5")
+        else:
+            log_debug(f"❌ 워커 진입 실패 ({symbol})", f"{side} 주문 실패")
+            
+    except Exception as e:
+        log_debug(f"❌ handle_entry 오류 ({data.get('symbol', 'Unknown')})", str(e))
+
+# ========================================
 # 14. 메인 실행
 # ========================================
 
@@ -1065,7 +1081,13 @@ if __name__ == "__main__":
         daemon=True, 
         name="PriceMonitor"
     ).start()
-    
+
+    # ① 워커 스레드 시작
+    for i in range(WORKER_COUNT):
+        t = threading.Thread(target=worker, args=(i,), daemon=True, name=f"Worker-{i}")
+        t.start()
+        log_debug("🔄 워커 시작", f"Worker-{i} 시작")
+        
     # Flask 실행
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹서버", f"포트 {port}에서 실행")
