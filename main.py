@@ -21,6 +21,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
 import queue
+import pytz
 
 # ========================================
 # 1. 로깅 설정
@@ -169,6 +170,7 @@ tpsl_lock = threading.RLock()
 pyramid_tracking = {}  # 심볼별 추가 진입 추적
 task_q = queue.Queue(maxsize=100)  # 동시 알림 대응력 향상
 WORKER_COUNT = min(6, max(2, os.cpu_count() * 2))                      # 병렬 워커 스레드 수
+KST = pytz.timezone('Asia/Seoul')  # 👈 이 줄을 추가합니다.
 
 # ========================================
 # 5. 핵심 유틸리티 함수
@@ -272,6 +274,18 @@ def get_tp_sl(symbol, entry_number=None):
 # 7. 중복 신호 체크
 # ========================================
 
+def get_time_based_multiplier():
+    """한국 시간 기준, 시간대별 진입 배수를 반환합니다."""
+    now_kst = datetime.now(KST)
+    hour = now_kst.hour
+
+    # 한국 시간 밤 10시(22)부터 아침 9시(08:59)까지는 50%만 진입
+    if hour >= 22 or hour < 9:
+        log_debug("⏰ 시간대 수량 조절", f"야간 시간({now_kst.strftime('%H:%M')}), 배수: 0.5 적용")
+        return Decimal("0.5")
+    
+    return Decimal("1.0")
+    
 def is_duplicate(data):
     """중복 신호 체크 - 완전 수정 버전"""
     with signal_lock:
@@ -327,20 +341,21 @@ def is_duplicate(data):
 # ========================================
 
 def calculate_position_size(symbol, signal_type, data=None):
-    """포지션 크기 계산 (5단계 피라미딩) - 수정됨"""
+    """포지션 크기 계산 (5단계 피라미딩 및 시간대 조절) - 수정됨"""
     cfg = SYMBOL_CONFIG[symbol]
     equity = get_total_collateral()
     price = get_price(symbol)
     
     if equity <= 0 or price <= 0:
         return Decimal("0")
+
+    # 1. 시간대별 진입 배수 가져오기
+    time_multiplier = get_time_based_multiplier()
     
-    # 현재 진입 횟수
-    entry_count = 0
-    if symbol in position_state:
-        entry_count = position_state[symbol].get("entry_count", 0)
+    # 2. 현재 진입 횟수 확인
+    entry_count = position_state.get(symbol, {}).get("entry_count", 0)
     
-    # 수정된 5단계 진입 비율 (실제 20%부터)
+    # 3. 5단계 진입 비율 설정
     entry_ratios = [
         Decimal("20"),     # 1차: 20%
         Decimal("40"),     # 2차: 40% 
@@ -357,17 +372,20 @@ def calculate_position_size(symbol, signal_type, data=None):
     next_entry_number = entry_count + 1
     
     log_debug(f"📊 수량 계산 ({symbol})", 
-             f"진입 #{next_entry_number}/5, 비율: {float(ratio)}%")
+             f"진입 #{next_entry_number}/5, 기본 비율: {float(ratio)}%, 시간 배수: {time_multiplier}")
     
-    # 수량 계산 (레버리지 1배 기준)
-    adjusted = equity * ratio / 100  # 20% = 20/100 = 0.2
+    # 4. 수량 계산 (시간대 배수 적용)
+    # 20% = 20/100 = 0.2
+    adjusted = equity * (ratio / 100) * time_multiplier  # 👈 여기에 배수 적용
+    
     raw_qty = adjusted / (price * cfg["contract_size"])
     qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
     final_qty = max(qty, cfg["min_qty"])
     
-    # 최소 주문금액 체크
+    # 5. 최소 주문금액 체크
     value = final_qty * price * cfg["contract_size"]
     if value < cfg["min_notional"]:
+        log_debug(f"⚠️ 최소 주문금액 미달 ({symbol})", f"계산된 금액: {value:.2f}, 최소 금액: {cfg['min_notional']}")
         return Decimal("0")
     
     return final_qty
