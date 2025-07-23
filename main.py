@@ -63,7 +63,7 @@ unified_api = UnifiedApi(client)
 # ========================================
 
 # 쿨다운 설정
-COOLDOWN_SECONDS = 14
+COOLDOWN_SECONDS = 12  # 14 → 12로 변경
 
 # 심볼 매핑
 SYMBOL_MAPPING = {
@@ -270,17 +270,20 @@ def get_tp_sl(symbol, entry_number=None):
 # ========================================
 
 def is_duplicate(data):
-    """중복 신호 체크 (14초 쿨다운 + 신호 ID)"""
+    """중복 신호 체크 - 완전 수정 버전"""
     with signal_lock:
         now = time.time()
         symbol = data.get("symbol", "")
         side = data.get("side", "")
         action = data.get("action", "")
         signal_id = data.get("id", "")
-        is_pre_signal = str(data.get("is_pre", "false")).lower() == "true"
+        
+        # 두 필드명 모두 지원
+        is_pre_raw = data.get("is_pre", data.get("is_pre_signal", "false"))
+        is_pre_signal = str(is_pre_raw).lower() == "true"
         
         if action == "entry":
-            # 신호 ID 체크
+            # 신호 ID 중복 체크 (먼저 체크)
             if signal_id and signal_id in recent_signals:
                 signal_data = recent_signals[signal_id]
                 if now - signal_data["time"] < 5:
@@ -293,25 +296,14 @@ def is_duplicate(data):
                 last_signal = recent_signals[key]
                 time_diff = now - last_signal["time"]
                 
-                # 2초 전 신호와 확정 신호 구분
-                if is_pre_signal:
-                    if time_diff < COOLDOWN_SECONDS:
-                        return True
-                else:
-                    if last_signal.get("is_pre_signal"):
-                        if time_diff < 2 or time_diff > 4:
-                            return True
-                    else:
-                        if time_diff < COOLDOWN_SECONDS:
-                            return True
+                # 단순 쿨다운만 적용 (12초)
+                if time_diff < 12:
+                    return True
             
             # 신호 기록
-            recent_signals[key] = {
-                "time": now,
-                "is_pre_signal": is_pre_signal,
-                "id": signal_id
-            }
+            recent_signals[key] = {"time": now, "id": signal_id}
             
+            # 신호 ID 기록
             if signal_id:
                 recent_signals[signal_id] = {"time": now}
             
