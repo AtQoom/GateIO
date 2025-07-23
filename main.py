@@ -167,8 +167,8 @@ signal_lock = threading.RLock()
 tpsl_storage = {}
 tpsl_lock = threading.RLock()
 pyramid_tracking = {}  # 심볼별 추가 진입 추적
-task_q = queue.Queue(maxsize=50)      # 동시에 최대 50건 대기
-WORKER_COUNT = 6                      # 병렬 워커 스레드 수
+task_q = queue.Queue(maxsize=100)  # 동시 알림 대응력 향상
+WORKER_COUNT = min(6, max(2, os.cpu_count() * 2))                      # 병렬 워커 스레드 수
 
 # ========================================
 # 5. 핵심 유틸리티 함수
@@ -428,16 +428,24 @@ def update_position_state(symbol):
 # ========================================
 
 def place_order(symbol, side, qty, entry_number):
-    """주문 실행"""
+    """주문 실행 - 안정성 강화"""
     with position_lock:
         try:
             cfg = SYMBOL_CONFIG[symbol]
             qty_dec = Decimal(str(qty)).quantize(cfg["qty_step"], rounding=ROUND_DOWN)
             
             if qty_dec < cfg["min_qty"]:
+                log_debug(f"⚠️ 최소 수량 미달 ({symbol})", f"계산: {qty_dec}, 최소: {cfg['min_qty']}")
                 return False
             
             size = float(qty_dec) if side == "buy" else -float(qty_dec)
+            
+            # 주문 금액 검증 강화            
+            order_value = qty_dec * get_price(symbol) * cfg["contract_size"]            
+            if order_value > get_total_collateral() * Decimal("10"):  # 10배 초과 방지
+                log_debug(f"⚠️ 과도한 주문 방지 ({symbol})", f"주문가: {order_value}, 자산: {get_total_collateral()}")
+                return False
+
             order = FuturesOrder(
                 contract=symbol, 
                 size=size, 
@@ -656,7 +664,10 @@ def status():
             "max_entries": 5,
             "symbol_weights": {sym: cfg["tp_mult"] for sym, cfg in SYMBOL_CONFIG.items()}
         })
-
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+        
 @app.route("/queue-status", methods=["GET"])
 def queue_status():
     """큐 상태 모니터링"""
@@ -887,15 +898,21 @@ def system_monitor():
 # 워커 스레드 정의
 # ========================================
 def worker(idx):
+    """향상된 워커 스레드"""
     while True:
-        data = task_q.get()
         try:
-            # 기존 webhook 안의 “진입 처리” 블록을 함수로 분리했다 치고
-            handle_entry(data)
+            data = task_q.get(timeout=1)  # 타임아웃 추가
+            try:
+                handle_entry(data)
+            except Exception as e:
+                log_debug(f"❌ Worker-{idx} 처리 오류", str(e))
+            finally:
+                task_q.task_done()
+        except queue.Empty:
+            continue  # 타임아웃 시 계속 실행
         except Exception as e:
-            log_debug(f"❌ Worker-{idx} 처리 오류", str(e))
-        finally:
-            task_q.task_done()
+            log_debug(f"❌ Worker-{idx} 심각한 오류", str(e))
+            time.sleep(1)  # 잠시 대기 후 재시작
 
 def handle_entry(data):
     """진입 처리 로직 (워커 스레드에서 실행)"""
@@ -1036,7 +1053,7 @@ if __name__ == "__main__":
     # 전략 설정 로그
     log_debug("📈 기본 설정", "익절률: 0.5%, 손절률: 4.0%")
     log_debug("🔄 TP/SL 감소", "15초마다 TP -0.002%*가중치, SL -0.004%*가중치")
-    log_debug("📊 진입 비율", "1차: 20%, 2차: 40%, 3차: 120%, 4차: 480%, 5차: 960%")
+    log_debug("📊 진입 비율", "1차: 20%, 2차: 40%, 3차: 120%, 4차: 480%, 5차: 960% (단계별)")
     log_debug("📉 단계별 TP", "1차: 0.5%, 2차: 0.35%, 3차: 0.3%, 4차: 0.2%, 5차: 0.15%")
     log_debug("📉 단계별 SL", "1차: 4.0%, 2차: 3.8%, 3차: 3.5%, 4차: 3.3%, 5차: 3.0%")
     log_debug("🔄 추가진입", "1차: 건너뛰기, 2차: 가격 유리시, 3차+: 이전 진입시 건너뛰기")
