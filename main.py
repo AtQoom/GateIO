@@ -928,85 +928,128 @@ def worker(idx):
             time.sleep(1)  # 잠시 대기 후 재시작
 
 def handle_entry(data):
-    """진입 처리 로직 (워커 스레드에서 실행) - 수정 완료"""
+    """진입 처리 로직 (5차 진입 특별 로직 추가)"""
     try:
-        # 1. 기본 정보 추출
+        # --- 필드 추출 (기존과 동일) ---
         raw_symbol = data.get("symbol", "")
         side = data.get("side", "").lower()
-        symbol = normalize_symbol(raw_symbol)
+        signal_type = data.get("signal", "none")
+        entry_number = int(data.get("entry_num", 1))
         
+        symbol = normalize_symbol(raw_symbol)
         if not symbol or symbol not in SYMBOL_CONFIG:
             log_debug(f"❌ 잘못된 심볼 ({raw_symbol})", "처리 중단")
             return
             
-        # 2. 포지션 상태 업데이트 및 변수 정의
+        # --- 포지션 상태 확인 (기존과 동일) ---
         update_position_state(symbol)
-        entry_count = position_state.get(symbol, {}).get("entry_count", 0)
-        current = position_state.get(symbol, {}).get("side")
+        pos = position_state.get(symbol, {})
+        current = pos.get("side")
         desired = "buy" if side == "long" else "sell"
+        entry_count = pos.get("entry_count", 0)
 
-        # 3. 시간대 배수 결정 (핵심 로직)
-        entry_multiplier = Decimal("1.0") # 기본값
-        if entry_count == 0:
-            # 최초 진입: 현재 시간 기준으로 배수 결정
-            entry_multiplier = get_time_based_multiplier()
-        else:
-            # 추가 진입: 저장된 배수 사용 (없으면 1.0)
-            entry_multiplier = position_state.get(symbol, {}).get('time_multiplier', Decimal("1.0"))
-            log_debug("💾 배수 로드", f"추가 진입({symbol}), 고정된 배수 {entry_multiplier} 사용")
-
-        # 4. 진입 전 조건 체크 (반대포지션, 최대진입, 건너뛰기)
-        # 4-1. 반대 포지션 청산
+        # --- 반대 포지션 청산 (기존과 동일) ---
         if current and current != desired:
             if not close_position(symbol, "reverse"):
                 log_debug(f"❌ 반대 포지션 청산 실패 ({symbol})", "진입 중단")
                 return
             time.sleep(1)
             update_position_state(symbol)
-            entry_count = 0 # 청산 후 최초 진입이므로 entry_count 초기화
+            entry_count = 0 # 포지션 초기화 후 entry_count도 0으로
 
-        # 4-2. 최대 5회 진입 체크
+        # --- 최대 진입 횟수 체크 (기존과 동일) ---
         if entry_count >= 5:
             log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"현재: {entry_count}/5")
             return
-        
-        # 4-3. 추가 진입 건너뛰기 로직
-        if entry_count > 0:
-            if symbol not in pyramid_tracking:
-                pyramid_tracking[symbol] = {"signal_count": 0, "last_entered": False}
-            
-            tracking = pyramid_tracking[symbol]
-            tracking["signal_count"] += 1
-            signal_count = tracking["signal_count"]
-            
-            current_price = get_price(symbol)
-            avg_price = position_state[symbol]["price"]
-            price_ok = (current == "buy" and current_price < avg_price) or \
-                       (current == "sell" and current_price > avg_price)
-            
-            should_skip = False
-            skip_reason = ""
-            if signal_count == 1:
-                should_skip, skip_reason = True, "첫 번째 추가 진입 신호 건너뛰기"
-            elif signal_count == 2:
-                if not price_ok: should_skip, skip_reason = True, "가격 조건 미충족"
-            else:
-                if tracking["last_entered"]:
-                    should_skip, skip_reason = True, "이전 진입함 - 건너뛰기"
-                elif not price_ok:
-                    should_skip, skip_reason = True, "가격 조건 미충족"
 
-            if should_skip:
-                tracking["last_entered"] = False
-                log_debug(f"⏭️ 추가 진입 건너뛰기 ({symbol})", f"신호 #{signal_count}, 이유: {skip_reason}")
-                return
+        # ===============================================
+        # ▼▼▼▼▼▼▼▼▼▼▼▼ 추가 진입 로직 (수정된 부분) ▼▼▼▼▼▼▼▼▼▼▼▼
+        # ===============================================
+        if entry_count > 0:
+            # --- 5차 진입 특별 조건 ---
+            if entry_count == 4:
+                log_debug(f"🔍 5차 진입 조건 확인 ({symbol})", "손절가 근접 여부 체크")
+                
+                entry_price = pos.get("price")
+                if not entry_price:
+                    log_debug(f"❌ 5차 진입 오류 ({symbol})", "포지션 정보 없음")
+                    return
+                
+                # 실시간 가격 및 시간-조정된 SL 가격 계산
+                current_price = get_price(symbol)
+                symbol_weight = Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
+                _, original_sl, entry_time = get_tp_sl(symbol, entry_count)
+                
+                time_elapsed = time.time() - entry_time
+                periods_15s = int(time_elapsed / 15)
+                
+                sl_decay_weighted = Decimal("0.00004") * symbol_weight
+                sl_reduction = Decimal(str(periods_15s)) * sl_decay_weighted
+                adjusted_sl = max(Decimal("0.0009"), original_sl - sl_reduction)
+                
+                sl_price = entry_price * (1 - adjusted_sl) if side == "long" else entry_price * (1 + adjusted_sl)
+
+                # 손절가에 얼마나 근접해야 진입할지 설정 (예: 0.1% 이내)
+                sl_proximity_threshold = Decimal("0.001")
+                
+                is_near_sl = False
+                if side == "long":
+                    # 현재가가 SL가보다 높고, SL가 대비 0.1% 이내 범위에 있을 때
+                    if current_price > sl_price and current_price < sl_price * (1 + sl_proximity_threshold):
+                        is_near_sl = True
+                else: # short
+                    # 현재가가 SL가보다 낮고, SL가 대비 0.1% 이내 범위에 있을 때
+                    if current_price < sl_price and current_price > sl_price * (1 - sl_proximity_threshold):
+                        is_near_sl = True
+                
+                log_debug(f"ℹ️ 5차 진입 분석 ({symbol})", f"현재가: {current_price}, SL가: {sl_price}, 근접조건: {is_near_sl}")
+
+                if not is_near_sl:
+                    log_debug(f"⏭️ 5차 진입 건너뛰기 ({symbol})", "손절가에 근접하지 않음")
+                    return
+
+            # --- 2, 3, 4차 진입 (기존 로직 유지) ---
             else:
-                tracking["last_entered"] = True
+                # 기존의 '추가 진입 건너뛰기' 로직 전체가 여기에 위치합니다.
+                if symbol not in pyramid_tracking:
+                    pyramid_tracking[symbol] = {"signal_count": 0, "last_entered": False}
+                
+                tracking = pyramid_tracking[symbol]
+                tracking["signal_count"] += 1
+                signal_count = tracking["signal_count"]
+                
+                current_price = get_price(symbol)
+                avg_price = pos["price"]
+                price_ok = (side == "long" and current_price < avg_price) or \
+                           (side == "short" and current_price > avg_price)
+
+                should_skip = False
+                skip_reason = ""
+                if signal_count == 1:
+                    should_skip, skip_reason = True, "첫 추가 신호 건너뛰기"
+                elif signal_count == 2:
+                    if not price_ok: should_skip, skip_reason = True, "가격 조건 미충족"
+                else:
+                    if tracking["last_entered"]:
+                        should_skip, skip_reason = True, "이전 신호에서 진입함"
+                    elif not price_ok:
+                        should_skip, skip_reason = True, "가격 조건 미충족"
+
+                if should_skip:
+                    tracking["last_entered"] = False
+                    log_debug(f"⏭️ 추가 진입 건너뛰기 ({symbol})", f"신호 #{signal_count}, 이유: {skip_reason}")
+                    return
+                else:
+                    tracking["last_entered"] = True
         
-        # 5. 모든 조건 통과 후 실제 진입 실행
+        # ===============================================
+        # ▲▲▲▲▲▲▲▲▲▲▲▲ 추가 진입 로직 (수정된 부분) ▲▲▲▲▲▲▲▲▲▲▲▲
+        # ===============================================
+
+        # --- 최종 진입 실행 (기존과 동일) ---
         actual_entry_number = entry_count + 1
         
-        # 5-1. TP/SL 계산
+        # TP/SL 계산 및 저장
         tp_map = [0.005, 0.0035, 0.003, 0.002, 0.0015]
         sl_map = [0.04, 0.038, 0.035, 0.033, 0.03]
         entry_idx = actual_entry_number - 1
@@ -1016,22 +1059,20 @@ def handle_entry(data):
             sl = Decimal(str(sl_map[entry_idx])) * Decimal(str(symbol_weight))
             store_tp_sl(symbol, tp, sl, actual_entry_number)
         
-        # 5-2. 수량 계산 및 주문 실행
-        qty = calculate_position_size(symbol, data.get("signal", "none"), data, entry_multiplier)
-        if qty <= 0:
-            log_debug(f"❌ 수량 계산 실패 ({symbol})", "수량이 0 이하")
-            return
-        
-        success = place_order(symbol, desired, qty, actual_entry_number, entry_multiplier)
-        
-        if success:
-            log_debug(f"✅ 워커 진입 성공 ({symbol})", f"{side} {float(qty)} 계약, 진입 #{actual_entry_number}/5")
+        # 수량 계산 및 주문
+        qty = calculate_position_size(symbol, signal_type, data)
+        if qty > 0:
+            success = place_order(symbol, desired, qty, actual_entry_number)
+            if success:
+                log_debug(f"✅ 워커 진입 성공 ({symbol})", f"{side} {float(qty)} 계약, 진입 #{actual_entry_number}/5")
+            else:
+                log_debug(f"❌ 워커 진입 실패 ({symbol})", f"{side} 주문 실패")
         else:
-            log_debug(f"❌ 워커 진입 실패 ({symbol})", f"{side} 주문 실패")
-            
+            log_debug(f"❌ 수량 계산 실패 ({symbol})", "수량이 0 이하")
+
     except Exception as e:
         log_debug(f"❌ handle_entry 오류 ({data.get('symbol', 'Unknown')})", str(e), exc_info=True)
-        
+       
 # ========================================
 # 14. 메인 실행
 # ========================================
