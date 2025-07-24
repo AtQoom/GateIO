@@ -78,6 +78,7 @@ SYMBOL_MAPPING = {
     "PEPEUSDT": "PEPE_USDT", "PEPEUSDT.P": "PEPE_USDT", "PEPEUSDTPERP": "PEPE_USDT", "PEPE_USDT": "PEPE_USDT",
     "XRPUSDT": "XRP_USDT", "XRPUSDT.P": "XRP_USDT", "XRPUSDTPERP": "XRP_USDT", "XRP_USDT": "XRP_USDT",
     "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT", "DOGE_USDT": "DOGE_USDT",
+    "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT", "ONDO_USDT": "ONDO_USDT",
 }
 
 # 심볼별 설정 (파인스크립트 v6.12 가중치 완전 반영)
@@ -153,6 +154,14 @@ SYMBOL_CONFIG = {
         "min_notional": Decimal("5"), 
         "tp_mult": 1.2,  # PEPE와 동일한 가중치
         "sl_mult": 1.2
+    },
+        "ONDO_USDT": {
+        "min_qty": Decimal("1"), 
+        "qty_step": Decimal("1"), 
+        "contract_size": Decimal("1"), 
+        "min_notional": Decimal("5"), 
+        "tp_mult": 1,  
+        "sl_mult": 1
     },
 }
 
