@@ -2,11 +2,11 @@
 Gate.io 자동매매 서버 v6.12 - 5단계 피라미딩 완전 대응
 
 주요 기능:
-1. 피라미딩 5회 진입 (0.2%→0.4%→1.2%→4.8%→9.6%)
+1. 피라미딩 5회 진입 (20%→40%→120%→480%→960%)
 2. 심볼별 가중치 적용 (BTC 0.5, ETH 0.6, SOL 0.8, PEPE/DOGE 1.2)
 3. 시간 경과 TP/SL 감소 (15초마다)
 4. 추가 진입 건너뛰기 로직
-5. 2초 전 신호 및 확정 신호 구분
+5. 시간대별 진입량 조절 (야간 50%)
 """
 
 import os
@@ -65,7 +65,7 @@ unified_api = UnifiedApi(client)
 # ========================================
 
 # 쿨다운 설정
-COOLDOWN_SECONDS = 12  # 14 → 12로 변경
+COOLDOWN_SECONDS = 12
 
 # 심볼 매핑
 SYMBOL_MAPPING = {
@@ -78,10 +78,9 @@ SYMBOL_MAPPING = {
     "PEPEUSDT": "PEPE_USDT", "PEPEUSDT.P": "PEPE_USDT", "PEPEUSDTPERP": "PEPE_USDT", "PEPE_USDT": "PEPE_USDT",
     "XRPUSDT": "XRP_USDT", "XRPUSDT.P": "XRP_USDT", "XRPUSDTPERP": "XRP_USDT", "XRP_USDT": "XRP_USDT",
     "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT", "DOGE_USDT": "DOGE_USDT",
-    "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT", "ONDO_USDT": "ONDO_USDT",
 }
 
-# 심볼별 설정 (파인스크립트 v6.12 가중치 완전 반영)
+# 심볼별 설정
 SYMBOL_CONFIG = {
     "BTC_USDT": {
         "min_qty": Decimal("1"), 
@@ -152,16 +151,8 @@ SYMBOL_CONFIG = {
         "qty_step": Decimal("1"), 
         "contract_size": Decimal("10"), 
         "min_notional": Decimal("5"), 
-        "tp_mult": 1.2,  # PEPE와 동일한 가중치
+        "tp_mult": 1.2,
         "sl_mult": 1.2
-    },
-        "ONDO_USDT": {
-        "min_qty": Decimal("1"), 
-        "qty_step": Decimal("1"), 
-        "contract_size": Decimal("1"), 
-        "min_notional": Decimal("5"), 
-        "tp_mult": 1,  
-        "sl_mult": 1
     },
 }
 
@@ -176,10 +167,10 @@ recent_signals = {}
 signal_lock = threading.RLock()
 tpsl_storage = {}
 tpsl_lock = threading.RLock()
-pyramid_tracking = {}  # 심볼별 추가 진입 추적
-task_q = queue.Queue(maxsize=100)  # 동시 알림 대응력 향상
-WORKER_COUNT = min(6, max(2, os.cpu_count() * 2))                      # 병렬 워커 스레드 수
-KST = pytz.timezone('Asia/Seoul')  # 👈 이 줄을 추가합니다.
+pyramid_tracking = {}
+task_q = queue.Queue(maxsize=100)
+WORKER_COUNT = min(6, max(2, os.cpu_count() * 2))
+KST = pytz.timezone('Asia/Seoul')
 
 # ========================================
 # 5. 핵심 유틸리티 함수
@@ -192,11 +183,9 @@ def normalize_symbol(raw_symbol):
     
     symbol = str(raw_symbol).upper().strip()
     
-    # 직접 매핑 확인
     if symbol in SYMBOL_MAPPING:
         return SYMBOL_MAPPING[symbol]
     
-    # 접미사 제거 후 재시도
     for suffix in ['.P', 'PERP']:
         if symbol.endswith(suffix):
             base = symbol[:-len(suffix)]
@@ -212,7 +201,6 @@ def get_total_collateral(force=False):
         return account_cache["data"]
     
     try:
-        # Unified API 시도
         try:
             unified = unified_api.list_unified_accounts()
             for attr in ['unified_account_total_equity', 'equity']:
@@ -223,7 +211,6 @@ def get_total_collateral(force=False):
         except Exception:
             pass
         
-        # Futures API로 폴백
         acc = api.list_futures_accounts(SETTLE)
         available = Decimal(str(getattr(acc, 'available', '0')))
         account_cache.update({"time": now, "data": available})
@@ -273,18 +260,17 @@ def get_tp_sl(symbol, entry_number=None):
                 data = tpsl_storage[symbol][latest_entry]
                 return data["tp"], data["sl"], data["entry_time"]
     
-    # 기본값 반환
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
     default_tp = Decimal("0.005") * Decimal(str(cfg["tp_mult"]))
     default_sl = Decimal("0.04") * Decimal(str(cfg["sl_mult"]))
     return default_tp, default_sl, time.time()
 
 # ========================================
-# 7. 중복 신호 체크
+# 7. 중복 신호 체크 및 시간대 조절
 # ========================================
 
 def get_time_based_multiplier():
-    """한국 시간 기준, 시간대별 진입 배수를 반환합니다."""
+    """한국 시간 기준, 시간대별 진입 배수를 반환"""
     now_kst = datetime.now(KST)
     hour = now_kst.hour
 
@@ -296,7 +282,7 @@ def get_time_based_multiplier():
     return Decimal("1.0")
     
 def is_duplicate(data):
-    """중복 신호 체크 - 완전 수정 버전"""
+    """중복 신호 체크"""
     with signal_lock:
         now = time.time()
         symbol = data.get("symbol", "")
@@ -304,40 +290,29 @@ def is_duplicate(data):
         action = data.get("action", "")
         signal_id = data.get("id", "")
         
-        # 두 필드명 모두 지원
-        is_pre_raw = data.get("is_pre", data.get("is_pre_signal", "false"))
-        is_pre_signal = str(is_pre_raw).lower() == "true"
-        
         if action == "entry":
-            # 신호 ID 중복 체크 (먼저 체크)
             if signal_id and signal_id in recent_signals:
                 signal_data = recent_signals[signal_id]
                 if now - signal_data["time"] < 5:
                     return True
             
-            # 방향별 쿨다운 체크
             key = f"{symbol}_{side}"
             
             if key in recent_signals:
                 last_signal = recent_signals[key]
                 time_diff = now - last_signal["time"]
                 
-                # 단순 쿨다운만 적용 (12초)
                 if time_diff < 12:
                     return True
             
-            # 신호 기록
             recent_signals[key] = {"time": now, "id": signal_id}
             
-            # 신호 ID 기록
             if signal_id:
                 recent_signals[signal_id] = {"time": now}
             
-            # 반대 방향 제거
             opposite = f"{symbol}_{'short' if side == 'long' else 'long'}"
             recent_signals.pop(opposite, None)
         
-        # 오래된 기록 정리
         recent_signals.update({
             k: v for k, v in recent_signals.items() 
             if now - v["time"] < 300
@@ -349,16 +324,14 @@ def is_duplicate(data):
 # 8. 포지션 크기 계산
 # ========================================
 
-def calculate_position_size(symbol, signal_type, data, time_multiplier): # 👈 time_multiplier를 인자로 받도록 수정
-    """포지션 크기 계산 (5단계 피라미딩 및 시간대 조절) - 수정됨"""
+def calculate_position_size(symbol, signal_type, data, time_multiplier):
+    """포지션 크기 계산 (5단계 피라미딩 및 시간대 조절)"""
     cfg = SYMBOL_CONFIG[symbol]
     equity = get_total_collateral()
     price = get_price(symbol)
     
     if equity <= 0 or price <= 0:
         return Decimal("0")
-    
-    # 이 함수는 더 이상 get_time_based_multiplier()를 호출하지 않음
     
     entry_count = position_state.get(symbol, {}).get("entry_count", 0)
     
@@ -374,7 +347,7 @@ def calculate_position_size(symbol, signal_type, data, time_multiplier): # 👈 
     next_entry_number = entry_count + 1
     
     log_debug(f"📊 수량 계산 ({symbol})", 
-             f"진입 #{next_entry_number}/5, 기본 비율: {float(ratio)}%, 고정 배수: {time_multiplier}") # 👈 로그 메시지 수정
+             f"진입 #{next_entry_number}/5, 기본 비율: {float(ratio)}%, 시간 배수: {time_multiplier}")
     
     adjusted = equity * (ratio / 100) * time_multiplier
     
@@ -401,7 +374,6 @@ def update_position_state(symbol):
             size = Decimal(str(pos.size))
             
             if size != 0:
-                # 기존 데이터 유지
                 existing_count = position_state.get(symbol, {}).get("entry_count", 0)
                 existing_time = position_state.get(symbol, {}).get("entry_time", time.time())
                 
@@ -444,8 +416,8 @@ def update_position_state(symbol):
 # 10. 주문 실행
 # ========================================
 
-def place_order(symbol, side, qty, entry_number, time_multiplier): # 👈 time_multiplier를 인자로 받도록 수정
-    """주문 실행 - 안정성 강화 및 배수 저장"""
+def place_order(symbol, side, qty, entry_number, time_multiplier):
+    """주문 실행"""
     with position_lock:
         try:
             cfg = SYMBOL_CONFIG[symbol]
@@ -469,7 +441,7 @@ def place_order(symbol, side, qty, entry_number, time_multiplier): # 👈 time_m
             position_state.setdefault(symbol, {})["entry_count"] = current_count + 1
             position_state[symbol]["entry_time"] = time.time()
             
-            # 👇 최초 진입 시에만 시간대 배수를 저장하는 로직
+            # 최초 진입 시에만 시간대 배수를 저장
             if current_count == 0:
                 position_state[symbol]['time_multiplier'] = time_multiplier
                 log_debug("💾 배수 저장", f"최초 진입({symbol}), 배수 {time_multiplier} 고정")
@@ -502,12 +474,10 @@ def close_position(symbol, reason="manual"):
             
             log_debug(f"✅ 청산 완료 ({symbol})", f"이유: {reason}")
             
-            # 진입 정보 초기화
             if symbol in position_state:
                 position_state[symbol]["entry_count"] = 0
                 position_state[symbol]["entry_time"] = None
             
-            # 관련 데이터 정리
             with signal_lock:
                 keys = [k for k in recent_signals.keys() if k.startswith(symbol + "_")]
                 for k in keys:
@@ -555,21 +525,17 @@ def log_request():
 def webhook():
     """웹훅 처리"""
     try:
-        # ========== 1. 데이터 파싱 ==========
         raw_data = request.get_data(as_text=True)
         if not raw_data:
             return jsonify({"error": "Empty data"}), 400
         
         data = None
         
-        # JSON 파싱 시도
         try:
             data = json.loads(raw_data)
         except json.JSONDecodeError:
-            # Form 데이터 시도
             if request.form:
                 data = request.form.to_dict()
-            # URL 디코딩 시도
             elif "&" not in raw_data and "=" not in raw_data:
                 try:
                     import urllib.parse
@@ -579,7 +545,6 @@ def webhook():
                     pass
         
         if not data:
-            # 트레이딩뷰 플레이스홀더 체크
             if "{{" in raw_data and "}}" in raw_data:
                 return jsonify({
                     "error": "TradingView placeholder detected",
@@ -587,25 +552,21 @@ def webhook():
                 }), 400
             return jsonify({"error": "Failed to parse data"}), 400
         
-        # ========== 2. 필드 추출 ==========
         raw_symbol = data.get("symbol", "")
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
         
-        # ========== 3. 심볼 정규화 ==========
         symbol = normalize_symbol(raw_symbol)
         if not symbol or symbol not in SYMBOL_CONFIG:
             return jsonify({"error": f"Invalid symbol: {raw_symbol}"}), 400
         
-        # ========== 4. 중복 체크 ==========
         if is_duplicate(data):
             log_debug(f"🔄 중복 신호 무시 ({symbol})", f"{side} {action}")
             return jsonify({"status": "duplicate_ignored"}), 200
 
-        # ========== 5. 진입 알림 ==========
         if action == "entry" and side in ["long", "short"]:
             try:
-                task_q.put_nowait(data)   # 큐에 넣기
+                task_q.put_nowait(data)
                 log_debug(f"📝 큐 추가 ({symbol})", f"{side} 진입, 대기열: {task_q.qsize()}")
                 return jsonify({
                     "status": "queued",
@@ -616,9 +577,7 @@ def webhook():
             except queue.Full:
                 return jsonify({"status": "queue_full"}), 429
         
-        # ========== 6. 청산 처리 ==========
         if action == "exit":
-            # TP/SL 청산은 서버에서 처리하므로 무시
             if data.get("reason") in ["TP", "SL"]:
                 return jsonify({"status": "ignored", "reason": "tp_sl_handled_by_server"}), 200
             
@@ -644,7 +603,6 @@ def status():
             update_position_state(sym)
             pos = position_state.get(sym, {})
             if pos.get("side"):
-                # 모든 진입의 TP/SL 정보 수집
                 entry_count = pos.get("entry_count", 0)
                 tp_sl_info = []
                 
@@ -706,7 +664,6 @@ async def price_monitor():
     while True:
         try:
             async with websockets.connect(uri) as ws:
-                # 구독
                 await ws.send(json.dumps({
                     "time": int(time.time()),
                     "channel": "futures.tickers",
@@ -716,22 +673,18 @@ async def price_monitor():
                 
                 log_debug("📡 웹소켓", f"구독 완료: {symbols}")
                 
-                # 메시지 처리
                 while True:
                     msg = await asyncio.wait_for(ws.recv(), timeout=45)
                     data = json.loads(msg)
                     
-                    # 에러 처리
                     if data.get("event") == "error":
                         log_debug("❌ 웹소켓 에러", data.get("message", "Unknown error"))
                         continue
                     
-                    # 구독 확인
                     if data.get("event") == "subscribe":
                         log_debug("✅ 구독 확인", data.get("channel", ""))
                         continue
                     
-                    # 가격 데이터 처리
                     result = data.get("result")
                     if not result:
                         continue
@@ -769,27 +722,21 @@ def check_tp_sl(ticker):
             if not entry_price or not side or entry_count == 0:
                 return
 
-            # 심볼별 가중치
             symbol_weight = Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
             
-            # 마지막 진입의 TP/SL 가져오기
             original_tp, original_sl, entry_time = get_tp_sl(symbol, entry_count)
             
-            # 시간 경과 계산
             time_elapsed = time.time() - entry_time
             periods_15s = int(time_elapsed / 15)
             
-            # TP 감소: 0.002% * 가중치
             tp_decay_weighted = Decimal("0.00002") * symbol_weight
             tp_reduction = Decimal(str(periods_15s)) * tp_decay_weighted
             adjusted_tp = max(Decimal("0.0012"), original_tp - tp_reduction)
             
-            # SL 감소: 0.004% * 가중치
             sl_decay_weighted = Decimal("0.00004") * symbol_weight
             sl_reduction = Decimal(str(periods_15s)) * sl_decay_weighted
             adjusted_sl = max(Decimal("0.0009"), original_sl - sl_reduction)
 
-            # TP/SL 트리거 체크
             tp_triggered = False
             sl_triggered = False
 
@@ -830,7 +777,7 @@ def position_monitor():
     """포지션 상태 주기적 모니터링"""
     while True:
         try:
-            time.sleep(300)  # 5분마다
+            time.sleep(300)
             
             total_value = Decimal("0")
             active_positions = []
@@ -843,7 +790,6 @@ def position_monitor():
                         entry_count = pos.get("entry_count", 0)
                         tp_mult = SYMBOL_CONFIG[symbol]["tp_mult"]
                         
-                        # 추가 진입 추적 정보
                         pyramid_info = ""
                         if symbol in pyramid_tracking:
                             tracking = pyramid_tracking[symbol]
@@ -871,9 +817,8 @@ def system_monitor():
     """시스템 상태 주기적 체크"""
     while True:
         try:
-            time.sleep(3600)  # 1시간마다
+            time.sleep(3600)
             
-            # 메모리 정리
             with signal_lock:
                 now = time.time()
                 recent_signals.update({
@@ -882,7 +827,6 @@ def system_monitor():
                 })
             
             with tpsl_lock:
-                # 활성 포지션만 유지
                 active_symbols = [sym for sym, pos in position_state.items() 
                                  if pos.get("side")]
                 tpsl_storage.update({
@@ -890,7 +834,6 @@ def system_monitor():
                     if k in active_symbols
                 })
             
-            # 추가 진입 추적 정보 정리
             active_symbols = [sym for sym, pos in position_state.items() 
                              if pos.get("side")]
             pyramid_tracking.update({
@@ -898,7 +841,6 @@ def system_monitor():
                 if k in active_symbols
             })
             
-            # 시스템 상태 로그
             log_debug("🔧 시스템 상태", 
                      f"신호 캐시: {len(recent_signals)}개, "
                      f"TP/SL 저장소: {len(tpsl_storage)}개 심볼, "
@@ -914,7 +856,7 @@ def worker(idx):
     """향상된 워커 스레드"""
     while True:
         try:
-            data = task_q.get(timeout=1)  # 타임아웃 추가
+            data = task_q.get(timeout=1)
             try:
                 handle_entry(data)
             except Exception as e:
@@ -922,134 +864,92 @@ def worker(idx):
             finally:
                 task_q.task_done()
         except queue.Empty:
-            continue  # 타임아웃 시 계속 실행
+            continue
         except Exception as e:
             log_debug(f"❌ Worker-{idx} 심각한 오류", str(e))
-            time.sleep(1)  # 잠시 대기 후 재시작
+            time.sleep(1)
 
 def handle_entry(data):
-    """진입 처리 로직 (5차 진입 특별 로직 추가)"""
+    """진입 처리 로직 (워커 스레드에서 실행) - 완전 수정됨"""
     try:
-        # --- 필드 추출 (기존과 동일) ---
+        # 1. 기본 정보 추출
         raw_symbol = data.get("symbol", "")
         side = data.get("side", "").lower()
-        signal_type = data.get("signal", "none")
-        entry_number = int(data.get("entry_num", 1))
-        
         symbol = normalize_symbol(raw_symbol)
+        
         if not symbol or symbol not in SYMBOL_CONFIG:
             log_debug(f"❌ 잘못된 심볼 ({raw_symbol})", "처리 중단")
             return
             
-        # --- 포지션 상태 확인 (기존과 동일) ---
+        # 2. 포지션 상태 업데이트 및 변수 정의
         update_position_state(symbol)
-        pos = position_state.get(symbol, {})
-        current = pos.get("side")
+        entry_count = position_state.get(symbol, {}).get("entry_count", 0)
+        current = position_state.get(symbol, {}).get("side")
         desired = "buy" if side == "long" else "sell"
-        entry_count = pos.get("entry_count", 0)
 
-        # --- 반대 포지션 청산 (기존과 동일) ---
+        # 3. 시간대 배수 결정
+        entry_multiplier = Decimal("1.0")
+        if entry_count == 0:
+            # 최초 진입: 현재 시간 기준으로 배수 결정
+            entry_multiplier = get_time_based_multiplier()
+        else:
+            # 추가 진입: 저장된 배수 사용
+            entry_multiplier = position_state.get(symbol, {}).get('time_multiplier', Decimal("1.0"))
+            log_debug("💾 배수 로드", f"추가 진입({symbol}), 고정된 배수 {entry_multiplier} 사용")
+
+        # 4. 진입 전 조건 체크
+        # 4-1. 반대 포지션 청산
         if current and current != desired:
             if not close_position(symbol, "reverse"):
                 log_debug(f"❌ 반대 포지션 청산 실패 ({symbol})", "진입 중단")
                 return
             time.sleep(1)
             update_position_state(symbol)
-            entry_count = 0 # 포지션 초기화 후 entry_count도 0으로
+            entry_count = 0
 
-        # --- 최대 진입 횟수 체크 (기존과 동일) ---
+        # 4-2. 최대 5회 진입 체크
         if entry_count >= 5:
             log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"현재: {entry_count}/5")
             return
-
-        # ===============================================
-        # ▼▼▼▼▼▼▼▼▼▼▼▼ 추가 진입 로직 (수정된 부분) ▼▼▼▼▼▼▼▼▼▼▼▼
-        # ===============================================
-        if entry_count > 0:
-            # --- 5차 진입 특별 조건 ---
-            if entry_count == 4:
-                log_debug(f"🔍 5차 진입 조건 확인 ({symbol})", "손절가 근접 여부 체크")
-                
-                entry_price = pos.get("price")
-                if not entry_price:
-                    log_debug(f"❌ 5차 진입 오류 ({symbol})", "포지션 정보 없음")
-                    return
-                
-                # 실시간 가격 및 시간-조정된 SL 가격 계산
-                current_price = get_price(symbol)
-                symbol_weight = Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
-                _, original_sl, entry_time = get_tp_sl(symbol, entry_count)
-                
-                time_elapsed = time.time() - entry_time
-                periods_15s = int(time_elapsed / 15)
-                
-                sl_decay_weighted = Decimal("0.00004") * symbol_weight
-                sl_reduction = Decimal(str(periods_15s)) * sl_decay_weighted
-                adjusted_sl = max(Decimal("0.0009"), original_sl - sl_reduction)
-                
-                sl_price = entry_price * (1 - adjusted_sl) if side == "long" else entry_price * (1 + adjusted_sl)
-
-                # 손절가에 얼마나 근접해야 진입할지 설정 (예: 0.1% 이내)
-                sl_proximity_threshold = Decimal("0.001")
-                
-                is_near_sl = False
-                if side == "long":
-                    # 현재가가 SL가보다 높고, SL가 대비 0.1% 이내 범위에 있을 때
-                    if current_price > sl_price and current_price < sl_price * (1 + sl_proximity_threshold):
-                        is_near_sl = True
-                else: # short
-                    # 현재가가 SL가보다 낮고, SL가 대비 0.1% 이내 범위에 있을 때
-                    if current_price < sl_price and current_price > sl_price * (1 - sl_proximity_threshold):
-                        is_near_sl = True
-                
-                log_debug(f"ℹ️ 5차 진입 분석 ({symbol})", f"현재가: {current_price}, SL가: {sl_price}, 근접조건: {is_near_sl}")
-
-                if not is_near_sl:
-                    log_debug(f"⏭️ 5차 진입 건너뛰기 ({symbol})", "손절가에 근접하지 않음")
-                    return
-
-            # --- 2, 3, 4차 진입 (기존 로직 유지) ---
-            else:
-                # 기존의 '추가 진입 건너뛰기' 로직 전체가 여기에 위치합니다.
-                if symbol not in pyramid_tracking:
-                    pyramid_tracking[symbol] = {"signal_count": 0, "last_entered": False}
-                
-                tracking = pyramid_tracking[symbol]
-                tracking["signal_count"] += 1
-                signal_count = tracking["signal_count"]
-                
-                current_price = get_price(symbol)
-                avg_price = pos["price"]
-                price_ok = (side == "long" and current_price < avg_price) or \
-                           (side == "short" and current_price > avg_price)
-
-                should_skip = False
-                skip_reason = ""
-                if signal_count == 1:
-                    should_skip, skip_reason = True, "첫 추가 신호 건너뛰기"
-                elif signal_count == 2:
-                    if not price_ok: should_skip, skip_reason = True, "가격 조건 미충족"
-                else:
-                    if tracking["last_entered"]:
-                        should_skip, skip_reason = True, "이전 신호에서 진입함"
-                    elif not price_ok:
-                        should_skip, skip_reason = True, "가격 조건 미충족"
-
-                if should_skip:
-                    tracking["last_entered"] = False
-                    log_debug(f"⏭️ 추가 진입 건너뛰기 ({symbol})", f"신호 #{signal_count}, 이유: {skip_reason}")
-                    return
-                else:
-                    tracking["last_entered"] = True
         
-        # ===============================================
-        # ▲▲▲▲▲▲▲▲▲▲▲▲ 추가 진입 로직 (수정된 부분) ▲▲▲▲▲▲▲▲▲▲▲▲
-        # ===============================================
+        # 4-3. 추가 진입 건너뛰기 로직
+        if entry_count > 0:
+            if symbol not in pyramid_tracking:
+                pyramid_tracking[symbol] = {"signal_count": 0, "last_entered": False}
+            
+            tracking = pyramid_tracking[symbol]
+            tracking["signal_count"] += 1
+            signal_count = tracking["signal_count"]
+            
+            current_price = get_price(symbol)
+            avg_price = position_state[symbol]["price"]
+            price_ok = (current == "buy" and current_price < avg_price) or \
+                       (current == "sell" and current_price > avg_price)
+            
+            should_skip = False
+            skip_reason = ""
+            if signal_count == 1:
+                should_skip, skip_reason = True, "첫 번째 추가 진입 신호 건너뛰기"
+            elif signal_count == 2:
+                if not price_ok: 
+                    should_skip, skip_reason = True, "가격 조건 미충족"
+            else:
+                if tracking["last_entered"]:
+                    should_skip, skip_reason = True, "이전 진입함 - 건너뛰기"
+                elif not price_ok:
+                    should_skip, skip_reason = True, "가격 조건 미충족"
 
-        # --- 최종 진입 실행 (기존과 동일) ---
+            if should_skip:
+                tracking["last_entered"] = False
+                log_debug(f"⏭️ 추가 진입 건너뛰기 ({symbol})", f"신호 #{signal_count}, 이유: {skip_reason}")
+                return
+            else:
+                tracking["last_entered"] = True
+        
+        # 5. 모든 조건 통과 후 실제 진입 실행
         actual_entry_number = entry_count + 1
         
-        # TP/SL 계산 및 저장
+        # 5-1. TP/SL 계산
         tp_map = [0.005, 0.0035, 0.003, 0.002, 0.0015]
         sl_map = [0.04, 0.038, 0.035, 0.033, 0.03]
         entry_idx = actual_entry_number - 1
@@ -1059,20 +959,22 @@ def handle_entry(data):
             sl = Decimal(str(sl_map[entry_idx])) * Decimal(str(symbol_weight))
             store_tp_sl(symbol, tp, sl, actual_entry_number)
         
-        # 수량 계산 및 주문
-        qty = calculate_position_size(symbol, signal_type, data)
-        if qty > 0:
-            success = place_order(symbol, desired, qty, actual_entry_number)
-            if success:
-                log_debug(f"✅ 워커 진입 성공 ({symbol})", f"{side} {float(qty)} 계약, 진입 #{actual_entry_number}/5")
-            else:
-                log_debug(f"❌ 워커 진입 실패 ({symbol})", f"{side} 주문 실패")
-        else:
+        # 5-2. 수량 계산 및 주문 실행
+        qty = calculate_position_size(symbol, data.get("signal", "none"), data, entry_multiplier)
+        if qty <= 0:
             log_debug(f"❌ 수량 계산 실패 ({symbol})", "수량이 0 이하")
-
+            return
+        
+        success = place_order(symbol, desired, qty, actual_entry_number, entry_multiplier)
+        
+        if success:
+            log_debug(f"✅ 워커 진입 성공 ({symbol})", f"{side} {float(qty)} 계약, 진입 #{actual_entry_number}/5")
+        else:
+            log_debug(f"❌ 워커 진입 실패 ({symbol})", f"{side} 주문 실패")
+            
     except Exception as e:
         log_debug(f"❌ handle_entry 오류 ({data.get('symbol', 'Unknown')})", str(e), exc_info=True)
-       
+        
 # ========================================
 # 14. 메인 실행
 # ========================================
@@ -1097,6 +999,7 @@ if __name__ == "__main__":
     log_debug("📉 단계별 TP", "1차: 0.5%, 2차: 0.35%, 3차: 0.3%, 4차: 0.2%, 5차: 0.15%")
     log_debug("📉 단계별 SL", "1차: 4.0%, 2차: 3.8%, 3차: 3.5%, 4차: 3.3%, 5차: 3.0%")
     log_debug("🔄 추가진입", "1차: 건너뛰기, 2차: 가격 유리시, 3차+: 이전 진입시 건너뛰기")
+    log_debug("⏰ 시간대 조절", "야간(22:00-09:00) 50% 진입, 주간 100% 진입")
     
     # 초기 자산 확인
     equity = get_total_collateral(force=True)
@@ -1139,7 +1042,7 @@ if __name__ == "__main__":
         name="PriceMonitor"
     ).start()
 
-    # ① 워커 스레드 시작
+    # 워커 스레드 시작
     for i in range(WORKER_COUNT):
         t = threading.Thread(target=worker, args=(i,), daemon=True, name=f"Worker-{i}")
         t.start()
