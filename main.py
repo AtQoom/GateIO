@@ -324,40 +324,63 @@ def is_duplicate(data):
 # 8. 포지션 크기 계산
 # ========================================
 
-def calculate_position_size(symbol, signal_type, data, time_multiplier):
-    """포지션 크기 계산 (5단계 피라미딩 및 시간대 조절)"""
+def calculate_position_size(symbol, signal_type, data=None, entry_multiplier=Decimal("1.0")):
+    """포지션 크기 계산 (손절직전 가중치 포함)"""
     cfg = SYMBOL_CONFIG[symbol]
     equity = get_total_collateral()
     price = get_price(symbol)
     
     if equity <= 0 or price <= 0:
+        log_debug(f"⚠️ 계산 불가 ({symbol})", f"자산: {equity}, 가격: {price}")
         return Decimal("0")
     
-    entry_count = position_state.get(symbol, {}).get("entry_count", 0)
+    # 현재 진입 횟수
+    entry_count = 0
+    if symbol in position_state:
+        entry_count = position_state[symbol].get("entry_count", 0)
     
     entry_ratios = [
-        Decimal("20"), Decimal("40"), Decimal("120"), Decimal("480"), Decimal("960")
+        Decimal("20"), Decimal("40"), Decimal("120"), 
+        Decimal("480"), Decimal("960")
     ]
     
     if entry_count >= len(entry_ratios):
         log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"진입 횟수: {entry_count}")
         return Decimal("0")
     
+    # 👇 손절 직전 진입 가중치 체크
+    is_sl_rescue = signal_type == "sl_rescue" or (data and ("SL_Rescue" in data.get("type", "")))
+    
     ratio = entry_ratios[entry_count]
     next_entry_number = entry_count + 1
     
-    log_debug(f"📊 수량 계산 ({symbol})", 
-             f"진입 #{next_entry_number}/5, 기본 비율: {float(ratio)}%, 시간 배수: {time_multiplier}")
+    # 손절 직전이면 50% 추가 가중치 적용
+    if is_sl_rescue:
+        ratio = ratio * Decimal("1.5")  # 150% 적용
+        log_debug(f"🚨 손절직전 가중치 적용 ({symbol})", f"기본 → 150% 증량")
     
-    adjusted = equity * (ratio / 100) * time_multiplier
+    # 정밀도 향상을 위한 단계별 계산
+    ratio_decimal = ratio / Decimal("100")
+    position_value = equity * ratio_decimal * entry_multiplier
+    contract_value = price * cfg["contract_size"]
+    raw_qty = position_value / contract_value
     
-    raw_qty = adjusted / (price * cfg["contract_size"])
-    qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
-    final_qty = max(qty, cfg["min_qty"])
+    # 수량 조정
+    qty_adjusted = (raw_qty / cfg["qty_step"]).quantize(Decimal('1'), rounding=ROUND_DOWN)
+    final_qty = qty_adjusted * cfg["qty_step"]
+    final_qty = max(final_qty, cfg["min_qty"])
     
+    # 로그에 상세 정보 추가
+    weight_info = "가중(+50%)" if is_sl_rescue else "일반"
+    log_debug(f"📊 수량 계산 상세 ({symbol})", 
+             f"진입 #{next_entry_number}/5, 비율: {float(ratio)}% ({weight_info}), "
+             f"자산: {equity}, 포지션가치: {position_value}, "
+             f"계약가치: {contract_value}, 최종수량: {final_qty}")
+    
+    # 최소 주문금액 체크
     value = final_qty * price * cfg["contract_size"]
     if value < cfg["min_notional"]:
-        log_debug(f"⚠️ 최소 주문금액 미달 ({symbol})", f"계산된 금액: {value:.2f}, 최소 금액: {cfg['min_notional']}")
+        log_debug(f"⚠️ 최소 주문금액 미달 ({symbol})", f"계산값: {value}, 최소: {cfg['min_notional']}")
         return Decimal("0")
     
     return final_qty
@@ -376,6 +399,7 @@ def update_position_state(symbol):
             if size != 0:
                 existing_count = position_state.get(symbol, {}).get("entry_count", 0)
                 existing_time = position_state.get(symbol, {}).get("entry_time", time.time())
+                existing_sl_count = position_state.get(symbol, {}).get("sl_entry_count", 0)  # 👈 이 부분 누락됨
                 
                 position_state[symbol] = {
                     "price": Decimal(str(pos.entry_price)),
@@ -383,7 +407,9 @@ def update_position_state(symbol):
                     "size": abs(size),
                     "value": abs(size) * Decimal(str(pos.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"],
                     "entry_count": existing_count,
-                    "entry_time": existing_time
+                    "entry_time": existing_time,
+                    "sl_entry_count": existing_sl_count  
+                }
                 }
             else:
                 position_state[symbol] = {
@@ -392,7 +418,8 @@ def update_position_state(symbol):
                     "size": Decimal("0"), 
                     "value": Decimal("0"),
                     "entry_count": 0,
-                    "entry_time": None
+                    "entry_time": None,
+                    "sl_entry_count": 0 
                 }
                 pyramid_tracking.pop(symbol, None)
                 return True
@@ -458,26 +485,23 @@ def place_order(symbol, side, qty, entry_number, time_multiplier):
             return False
 
 def close_position(symbol, reason="manual"):
-    """포지션 청산"""
+    """포지션 청산 (손절직전 카운터 리셋 포함)"""
     with position_lock:
         try:
             api.create_futures_order(
                 SETTLE, 
-                FuturesOrder(
-                    contract=symbol, 
-                    size=0, 
-                    price="0", 
-                    tif="ioc", 
-                    close=True
-                )
+                FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True)
             )
             
             log_debug(f"✅ 청산 완료 ({symbol})", f"이유: {reason}")
             
+            # 👇 이 부분에 sl_entry_count 리셋 추가
             if symbol in position_state:
                 position_state[symbol]["entry_count"] = 0
                 position_state[symbol]["entry_time"] = None
+                position_state[symbol]["sl_entry_count"] = 0  # 👈 주석 제거하고 실제 적용
             
+            # 관련 데이터 정리
             with signal_lock:
                 keys = [k for k in recent_signals.keys() if k.startswith(symbol + "_")]
                 for k in keys:
@@ -870,35 +894,30 @@ def worker(idx):
             time.sleep(1)
 
 def handle_entry(data):
-    """진입 처리 로직 (워커 스레드에서 실행) - 완전 수정됨"""
+    """진입 처리 로직 (손절 직전 진입 가중치 포함)"""
     try:
-        # 1. 기본 정보 추출
+        # 1-6. 기본 정보 추출 및 조건 체크 (기존과 동일)
         raw_symbol = data.get("symbol", "")
         side = data.get("side", "").lower()
-        symbol = normalize_symbol(raw_symbol)
+        signal_type = data.get("signal", "none")
+        entry_type = data.get("type", "")
         
+        symbol = normalize_symbol(raw_symbol)
         if not symbol or symbol not in SYMBOL_CONFIG:
             log_debug(f"❌ 잘못된 심볼 ({raw_symbol})", "처리 중단")
             return
             
-        # 2. 포지션 상태 업데이트 및 변수 정의
         update_position_state(symbol)
         entry_count = position_state.get(symbol, {}).get("entry_count", 0)
         current = position_state.get(symbol, {}).get("side")
         desired = "buy" if side == "long" else "sell"
 
-        # 3. 시간대 배수 결정
         entry_multiplier = Decimal("1.0")
         if entry_count == 0:
-            # 최초 진입: 현재 시간 기준으로 배수 결정
             entry_multiplier = get_time_based_multiplier()
         else:
-            # 추가 진입: 저장된 배수 사용
             entry_multiplier = position_state.get(symbol, {}).get('time_multiplier', Decimal("1.0"))
-            log_debug("💾 배수 로드", f"추가 진입({symbol}), 고정된 배수 {entry_multiplier} 사용")
 
-        # 4. 진입 전 조건 체크
-        # 4-1. 반대 포지션 청산
         if current and current != desired:
             if not close_position(symbol, "reverse"):
                 log_debug(f"❌ 반대 포지션 청산 실패 ({symbol})", "진입 중단")
@@ -907,13 +926,15 @@ def handle_entry(data):
             update_position_state(symbol)
             entry_count = 0
 
-        # 4-2. 최대 5회 진입 체크
         if entry_count >= 5:
             log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"현재: {entry_count}/5")
             return
         
-        # 4-3. 추가 진입 건너뛰기 로직
-        if entry_count > 0:
+        # 6. 손절 직전 진입 vs 기존 추가 진입 구분
+        is_sl_rescue = "SL_Rescue" in entry_type or signal_type == "sl_rescue"
+        
+        if entry_count > 0 and not is_sl_rescue:
+            # 기존 추가 진입 로직 (동일)
             if symbol not in pyramid_tracking:
                 pyramid_tracking[symbol] = {"signal_count": 0, "last_entered": False}
             
@@ -946,21 +967,87 @@ def handle_entry(data):
             else:
                 tracking["last_entered"] = True
         
-        # 5. 모든 조건 통과 후 실제 진입 실행
+        elif is_sl_rescue:
+            # 손절 직전 진입 로직
+            sl_entry_count = position_state.get(symbol, {}).get("sl_entry_count", 0)
+            if sl_entry_count >= 3:
+                log_debug(f"⚠️ 손절직전 최대 진입 도달 ({symbol})", f"현재: {sl_entry_count}/3")
+                return
+            
+            # 손절가 근접 조건 재검증
+            entry_price = position_state[symbol]["price"]
+            current_price = get_price(symbol)
+            symbol_weight = Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
+            _, original_sl, entry_time = get_tp_sl(symbol, entry_count)
+            
+            time_elapsed = time.time() - entry_time
+            periods_15s = int(time_elapsed / 15)
+            
+            sl_decay_weighted = Decimal("0.00004") * symbol_weight
+            sl_reduction = Decimal(str(periods_15s)) * sl_decay_weighted
+            adjusted_sl = max(Decimal("0.0009"), original_sl - sl_reduction)
+            
+            sl_price = entry_price * (1 - adjusted_sl) if side == "long" else entry_price * (1 + adjusted_sl)
+            sl_proximity_threshold = Decimal("0.0005")  # 0.05%
+            
+            is_near_sl = False
+            if side == "long":
+                if current_price > sl_price and current_price < sl_price * (1 + sl_proximity_threshold):
+                    is_near_sl = True
+            else:
+                if current_price < sl_price and current_price > sl_price * (1 - sl_proximity_threshold):
+                    is_near_sl = True
+            
+            if not is_near_sl:
+                log_debug(f"⏭️ 손절직전 조건 불충족 ({symbol})", "손절가에 충분히 근접하지 않음")
+                return
+            
+            # 손절 직전 카운터 증가
+            position_state[symbol]["sl_entry_count"] = sl_entry_count + 1
+            log_debug(f"🚨 손절직전 진입 ({symbol})", f"#{sl_entry_count + 1}/3회, 손절가: {sl_price}, 현재가: {current_price}")
+        
+        # 7. 모든 조건 통과 후 실제 진입 실행
         actual_entry_number = entry_count + 1
         
-        # 5-1. TP/SL 계산
-        tp_map = [0.005, 0.0035, 0.003, 0.002, 0.0015]
-        sl_map = [0.04, 0.038, 0.035, 0.033, 0.03]
-        entry_idx = actual_entry_number - 1
-        if entry_idx < len(tp_map):
-            symbol_weight = SYMBOL_CONFIG[symbol]["tp_mult"]
-            tp = Decimal(str(tp_map[entry_idx])) * Decimal(str(symbol_weight))
-            sl = Decimal(str(sl_map[entry_idx])) * Decimal(str(symbol_weight))
-            store_tp_sl(symbol, tp, sl, actual_entry_number)
+        # 7-1. TP/SL 계산 (손절 직전은 기존 TP/SL 유지)
+        if not is_sl_rescue:
+            tp_map = [0.005, 0.0035, 0.003, 0.002, 0.0015]
+            sl_map = [0.04, 0.038, 0.035, 0.033, 0.03]
+            entry_idx = actual_entry_number - 1
+            if entry_idx < len(tp_map):
+                symbol_weight = SYMBOL_CONFIG[symbol]["tp_mult"]
+                tp = Decimal(str(tp_map[entry_idx])) * Decimal(str(symbol_weight))
+                sl = Decimal(str(sl_map[entry_idx])) * Decimal(str(symbol_weight))
+                store_tp_sl(symbol, tp, sl, actual_entry_number)
         
-        # 5-2. 수량 계산 및 주문 실행
-        qty = calculate_position_size(symbol, data.get("signal", "none"), data, entry_multiplier)
+        # 7-2. 👇 수량 계산 (손절 직전은 50% 추가 가중치 적용)
+        if is_sl_rescue:
+            # 손절 직전 진입: 기존 비율 + 50% 추가 (총 150%)
+            ratios = [Decimal("20"), Decimal("40"), Decimal("120"), Decimal("480"), Decimal("960")]
+            entry_idx = actual_entry_number - 1
+            if entry_idx < len(ratios):
+                base_ratio = ratios[entry_idx]
+                # 50% 추가 가중치 적용 (총 150%)
+                enhanced_ratio = base_ratio * Decimal("1.5")
+                
+                equity = get_total_collateral()
+                price = get_price(symbol)
+                cfg = SYMBOL_CONFIG[symbol]
+                
+                adjusted = equity * (enhanced_ratio / 100) * entry_multiplier
+                raw_qty = adjusted / (price * cfg["contract_size"])
+                qty = (raw_qty // cfg["qty_step"]) * cfg["qty_step"]
+                qty = max(qty, cfg["min_qty"])
+                
+                log_debug(f"🚨 손절직전 수량 계산 ({symbol})", 
+                         f"기본비율: {float(base_ratio)}%, 가중비율: {float(enhanced_ratio)}% (+50%), "
+                         f"배수: {entry_multiplier}, 최종수량: {qty}")
+            else:
+                qty = Decimal("0")
+        else:
+            # 기존 추가 진입: 일반 수량 계산
+            qty = calculate_position_size(symbol, data.get("signal", "none"), data, entry_multiplier)
+        
         if qty <= 0:
             log_debug(f"❌ 수량 계산 실패 ({symbol})", "수량이 0 이하")
             return
@@ -968,13 +1055,15 @@ def handle_entry(data):
         success = place_order(symbol, desired, qty, actual_entry_number, entry_multiplier)
         
         if success:
-            log_debug(f"✅ 워커 진입 성공 ({symbol})", f"{side} {float(qty)} 계약, 진입 #{actual_entry_number}/5")
+            entry_desc = "손절직전(+50%)" if is_sl_rescue else "일반"
+            log_debug(f"✅ 워커 진입 성공 ({symbol})", 
+                     f"{side} {float(qty)} 계약, 진입 #{actual_entry_number}/5 ({entry_desc})")
         else:
             log_debug(f"❌ 워커 진입 실패 ({symbol})", f"{side} 주문 실패")
             
     except Exception as e:
         log_debug(f"❌ handle_entry 오류 ({data.get('symbol', 'Unknown')})", str(e), exc_info=True)
-        
+
 # ========================================
 # 14. 메인 실행
 # ========================================
