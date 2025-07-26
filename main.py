@@ -60,7 +60,7 @@ ENTRY_RATIOS = [Decimal(x) for x in ("0.20 0.40 1.2 4.8 9.6".split())]
 TP_LEVELS = [Decimal(x) for x in ("0.005 0.0035 0.003 0.002 0.0015".split())]
 SL_LEVELS = [Decimal(x) for x in ("0.04 0.038 0.035 0.033 0.03".split())]
 
-# ✅ 심볼 설정 복원 (기존 서버 코드 기준 + PineScript 가중치 적용)
+# 심볼 설정 (가중치, 계약 크기 등)
 SYMBOL_CONFIG = {
     "BTC_USDT":  {"contract_size": Decimal("0.0001"), "min_qty": Decimal("1"), "qty_step": Decimal("1"), "weight": Decimal("0.5"), "min_notional": Decimal("5")},
     "ETH_USDT":  {"contract_size": Decimal("0.01"),   "min_qty": Decimal("1"), "qty_step": Decimal("1"), "weight": Decimal("0.6"), "min_notional": Decimal("5")},
@@ -261,8 +261,7 @@ def calculate_position_size(symbol, is_sl_rescue):
     raw_qty = position_value / (price * cfg["contract_size"])
     qty_adjusted = (raw_qty / cfg["qty_step"]).quantize(Decimal('1'), rounding=ROUND_DOWN) * cfg["qty_step"]
     
-    # 최소 주문 금액 체크
-    if qty_adjusted < cfg["min_qty"] or (qty_adjusted * price * cfg["contract_size"]) < cfg["min_notional"]:
+    if qty_adjusted < cfg["min_qty"] or (qty_adjusted * price * cfg["contract_size"]) < cfg.get("min_notional", Decimal("5")):
         return Decimal("0")
     return qty_adjusted
 
@@ -272,7 +271,6 @@ def place_order(symbol, side, qty, is_sl_rescue):
             size = float(qty) if side == "buy" else -float(qty)
             api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=size, tif="ioc"))
             
-            # 상태 업데이트
             current_state = position_state.get(symbol, {"entry_count": 0, "sl_entry_count": 0})
             new_entry_count = current_state["entry_count"] + 1
             position_state[symbol] = {
@@ -280,7 +278,7 @@ def place_order(symbol, side, qty, is_sl_rescue):
                 "entry_count": new_entry_count,
                 "sl_entry_count": current_state.get("sl_entry_count", 0) + (1 if is_sl_rescue else 0),
             }
-            if not is_sl_rescue: # SL-Rescue 시에는 기존 TP/SL 유지를 위해 새로 저장하지 않음
+            if not is_sl_rescue:
                 store_tp_sl(symbol, new_entry_count)
             
             logger.info(f"[주문 성공] {symbol} {side.upper()} {qty} (진입 #{new_entry_count}/5, SL-Rescue: {is_sl_rescue})")
@@ -312,14 +310,25 @@ def handle_entry(data):
     if qty > 0:
         place_order(symbol, desired_side, qty, is_sl_rescue)
 
+# 🔧 수정된 워커 함수
 def worker(idx):
+    """워커 스레드: 큐에서 작업을 가져와 처리"""
     while not shutdown_event.is_set():
         try:
+            # 1. 큐에서 작업 가져오기 (타임아웃 시 queue.Empty 발생)
             data = task_q.get(timeout=1)
+        except queue.Empty:
+            # 큐가 비어있으면 다음 루프로 넘어감
+            continue
+
+        try:
+            # 2. 가져온 작업 처리
             handle_entry(data)
-        except queue.Empty: continue
-        except Exception as e: logger.error(f"[Worker-{idx} 오류] {e}")
-        finally: task_q.task_done()
+        except Exception as e:
+            logger.error(f"[Worker-{idx} 작업 처리 오류] 데이터: {data}, 오류: {e}")
+        finally:
+            # 3. 작업이 성공하든 실패하든, 가져온 작업은 완료 처리
+            task_q.task_done()
 
 # ========================================
 # 9. 실시간 모니터링 (WebSocket)
@@ -404,10 +413,6 @@ def status():
 def shutdown_handler(signum, frame):
     logger.info("종료 신호 수신, 정리 중...")
     shutdown_event.set()
-    # 모든 워커 스레드가 종료될 때까지 잠시 대기
-    for thread in threading.enumerate():
-        if thread.name.startswith("Worker"):
-            thread.join(timeout=2)
     sys.exit(0)
 
 if __name__ == "__main__":
