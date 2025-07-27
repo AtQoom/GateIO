@@ -229,7 +229,7 @@ def calculate_position_size(symbol, is_sl_rescue):
         position_value *= Decimal("1.5")
     raw_qty = position_value / (price * cfg["contract_size"])
     qty_adjusted = (raw_qty / cfg["qty_step"]).quantize(Decimal('1'), rounding=ROUND_DOWN) * cfg["qty_step"]
-    if qty_adjusted < cfg["min_qty"] or (qty_adjusted * price * cfg["contract_size"]) < cfg["min_notional"]:
+    if qty_adjusted < cfg["min_qty"] or (qty_adjusted * price * cfg["contract_size"]) < cfg.get("min_notional", Decimal("5")):
         logger.warning(f"[{symbol}] 주문 건너뜀: 최소 주문 수량/금액 미달 (계산된 수량: {qty_adjusted})")
         return Decimal("0")
     return qty_adjusted
@@ -240,19 +240,20 @@ def place_order(symbol, side, qty, is_sl_rescue):
             size = float(qty) if side == "buy" else -float(qty)
             api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=size, tif="ioc"))
             
-            # ✅ 안정성 강화: 주문 후 잠시 대기하고 거래소 상태를 다시 확인하여 동기화
             time.sleep(2)
             update_position_state(symbol)
             
-            # 상태가 성공적으로 업데이트 되었다면, 카운터 증가 및 TP/SL 저장
             if position_state.get(symbol, {}).get("size", 0) > 0:
-                current_state = position_state[symbol]
-                new_entry_count = current_state["entry_count"] + 1
+                # 진입 성공 후 상태 업데이트
+                current_state = position_state.get(symbol, {"entry_count": 0})
+                new_entry_count = current_state.get("entry_count", 0) + 1
                 position_state[symbol]["entry_count"] = new_entry_count
+                
                 if is_sl_rescue:
                     position_state[symbol]["sl_entry_count"] = current_state.get("sl_entry_count", 0) + 1
                 else:
                     store_tp_sl(symbol, new_entry_count)
+                    
                 logger.info(f"[주문 성공] {symbol} {side.upper()} {qty} (진입 #{new_entry_count}/5, SL-Rescue: {is_sl_rescue})")
                 return True
             else:
@@ -283,14 +284,12 @@ def handle_entry(data):
     if qty > 0:
         place_order(symbol, desired_side, qty, is_sl_rescue)
 
-# ✅ 안정성 강화된 워커 함수
 def worker(idx):
     while not shutdown_event.is_set():
         try:
             data = task_q.get(timeout=1)
         except queue.Empty:
             continue
-
         try:
             handle_entry(data)
         except Exception as e:
