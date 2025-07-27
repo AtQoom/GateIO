@@ -52,15 +52,12 @@ api = FuturesApi(ApiClient(config))
 # ========================================
 # 2. PineScript v6.12 전략 상수
 # ========================================
-COOLDOWN_SECONDS = 10  # 사용자 요청에 따라 10초로 설정 (PineScript는 15초)
+COOLDOWN_SECONDS = 10  # 사용자 요청에 따라 10초로 설정
 
-# 5단계 진입 비율 (%)
 ENTRY_RATIOS = [Decimal(x) for x in ("0.20 0.40 1.2 4.8 9.6".split())]
-# 5단계 TP/SL 레벨 (비율)
 TP_LEVELS = [Decimal(x) for x in ("0.005 0.0035 0.003 0.002 0.0015".split())]
 SL_LEVELS = [Decimal(x) for x in ("0.04 0.038 0.035 0.033 0.03".split())]
 
-# 심볼 설정 (가중치, 계약 크기 등)
 SYMBOL_CONFIG = {
     "BTC_USDT":  {"contract_size": Decimal("0.0001"), "min_qty": Decimal("1"), "qty_step": Decimal("1"), "weight": Decimal("0.5"), "min_notional": Decimal("5")},
     "ETH_USDT":  {"contract_size": Decimal("0.01"),   "min_qty": Decimal("1"), "qty_step": Decimal("1"), "weight": Decimal("0.6"), "min_notional": Decimal("5")},
@@ -73,7 +70,6 @@ SYMBOL_CONFIG = {
     "XRP_USDT":  {"contract_size": Decimal("10"),     "min_qty": Decimal("1"), "qty_step": Decimal("1"), "weight": Decimal("1.0"), "min_notional": Decimal("5")},
 }
 
-# 심볼 정규화 매핑 (모든 종류의 심볼 이름 지원)
 MAP = {k.replace("_USDT", ""): k for k in SYMBOL_CONFIG}
 MAP.update({s: s for s in SYMBOL_CONFIG})
 MAP.update({s.replace("_USDT", "USDT"): s for s in SYMBOL_CONFIG})
@@ -129,35 +125,24 @@ def is_duplicate_signal(data):
         now = time.time()
         signal_id = data.get("id", "")
         key = f"{data['symbol']}_{data['side']}"
-        
-        if signal_id and signal_id in recent_signals and now - recent_signals[signal_id] < 5:
-            return True
-        if key in recent_signals and now - recent_signals[key] < COOLDOWN_SECONDS:
-            return True
-            
+        if signal_id and signal_id in recent_signals and now - recent_signals[signal_id] < 5: return True
+        if key in recent_signals and now - recent_signals[key] < COOLDOWN_SECONDS: return True
         recent_signals[key] = now
-        if signal_id:
-            recent_signals[signal_id] = now
-        
+        if signal_id: recent_signals[signal_id] = now
         for k in list(recent_signals.keys()):
-            if now - recent_signals[k] > 300:
-                del recent_signals[k]
+            if now - recent_signals[k] > 300: del recent_signals[k]
         return False
 
 # ========================================
-# 5. TP/SL 관리 (PineScript v6.12 완벽 호환)
+# 5. TP/SL 관리
 # ========================================
 def store_tp_sl(symbol, entry_number):
     with tpsl_lock:
         idx = min(entry_number - 1, len(TP_LEVELS) - 1)
         weight = SYMBOL_CONFIG[symbol]["weight"]
-        
         base_tp = TP_LEVELS[idx] * weight
         base_sl = SL_LEVELS[idx] * weight
-        
-        tpsl_storage.setdefault(symbol, {})[entry_number] = {
-            "base_tp": base_tp, "base_sl": base_sl, "entry_time": time.time()
-        }
+        tpsl_storage.setdefault(symbol, {})[entry_number] = {"base_tp": base_tp, "base_sl": base_sl, "entry_time": time.time()}
         logger.info(f"[TP/SL 저장] {symbol} #{entry_number}: TP={base_tp:.4%}, SL={base_sl:.4%}")
 
 def get_tp_sl_with_decay(symbol):
@@ -167,21 +152,16 @@ def get_tp_sl_with_decay(symbol):
         if not entry_count or symbol not in tpsl_storage or entry_count not in tpsl_storage[symbol]:
             weight = SYMBOL_CONFIG.get(symbol, {}).get("weight", Decimal("1.0"))
             return Decimal("0.006") * weight, Decimal("0.04") * weight, time.time()
-        
         data = tpsl_storage[symbol][entry_count]
-
     seconds_passed = time.time() - data["entry_time"]
     periods = int(seconds_passed / 15)
     weight = SYMBOL_CONFIG[symbol]["weight"]
-    
     tp = max(Decimal("0.0012"), data["base_tp"] - (Decimal("0.00002") * weight * periods))
     sl = max(Decimal("0.0009"), data["base_sl"] - (Decimal("0.00004") * weight * periods))
-    
     return tp, sl, data["entry_time"]
 
 def clear_tp_sl(symbol):
-    with tpsl_lock:
-        tpsl_storage.pop(symbol, None)
+    with tpsl_lock: tpsl_storage.pop(symbol, None)
 
 # ========================================
 # 6. 포지션 관리 및 조건 체크
@@ -194,12 +174,9 @@ def update_position_state(symbol):
             if size != 0:
                 existing_state = position_state.get(symbol, {})
                 position_state[symbol] = {
-                    "price": Decimal(str(p.entry_price)),
-                    "side": "buy" if size > 0 else "sell",
-                    "size": abs(size),
-                    "entry_count": existing_state.get("entry_count", 0),
-                    "sl_entry_count": existing_state.get("sl_entry_count", 0),
-                    "entry_time": existing_state.get("entry_time", time.time())
+                    "price": Decimal(str(p.entry_price)), "side": "buy" if size > 0 else "sell",
+                    "size": abs(size), "entry_count": existing_state.get("entry_count", 0),
+                    "sl_entry_count": existing_state.get("sl_entry_count", 0)
                 }
             else:
                 position_state[symbol] = {"entry_count": 0, "sl_entry_count": 0, "size": Decimal("0")}
@@ -212,18 +189,14 @@ def is_sl_rescue_condition(symbol):
         pos = position_state.get(symbol)
         if not pos or pos.get("size", 0) == 0 or pos.get("entry_count", 0) >= 5 or pos.get("sl_entry_count", 0) >= 3:
             return False
-        
         current_price = get_price(symbol)
         if current_price <= 0: return False
-        
         avg_price = pos["price"]
         side = pos["side"]
         _, sl_pct, _ = get_tp_sl_with_decay(symbol)
-        
         sl_price = avg_price * (1 - sl_pct) if side == "buy" else avg_price * (1 + sl_pct)
         is_near_sl = abs(current_price - sl_price) / sl_price <= Decimal("0.0005")
         is_underwater = (side == "buy" and current_price < avg_price) or (side == "sell" and current_price > avg_price)
-        
         if is_near_sl and is_underwater:
             logger.info(f"[SL-Rescue 조건] {symbol} 충족: SL가 근접 및 평가손 상태")
         return is_near_sl and is_underwater
@@ -248,20 +221,16 @@ def calculate_position_size(symbol, is_sl_rescue):
     equity = get_total_collateral()
     price = get_price(symbol)
     if equity <= 0 or price <= 0: return Decimal("0")
-    
     entry_count = position_state.get(symbol, {}).get("entry_count", 0)
     if entry_count >= 5: return Decimal("0")
-    
     ratio = ENTRY_RATIOS[entry_count] / Decimal("100")
     position_value = equity * ratio
-    
     if is_sl_rescue:
         position_value *= Decimal("1.5")
-    
     raw_qty = position_value / (price * cfg["contract_size"])
     qty_adjusted = (raw_qty / cfg["qty_step"]).quantize(Decimal('1'), rounding=ROUND_DOWN) * cfg["qty_step"]
-    
-    if qty_adjusted < cfg["min_qty"] or (qty_adjusted * price * cfg["contract_size"]) < cfg.get("min_notional", Decimal("5")):
+    if qty_adjusted < cfg["min_qty"] or (qty_adjusted * price * cfg["contract_size"]) < cfg["min_notional"]:
+        logger.warning(f"[{symbol}] 주문 건너뜀: 최소 주문 수량/금액 미달 (계산된 수량: {qty_adjusted})")
         return Decimal("0")
     return qty_adjusted
 
@@ -271,20 +240,24 @@ def place_order(symbol, side, qty, is_sl_rescue):
             size = float(qty) if side == "buy" else -float(qty)
             api.create_futures_order(SETTLE, FuturesOrder(contract=symbol, size=size, tif="ioc"))
             
-            current_state = position_state.get(symbol, {"entry_count": 0, "sl_entry_count": 0})
-            new_entry_count = current_state["entry_count"] + 1
-            position_state[symbol] = {
-                **current_state,
-                "entry_count": new_entry_count,
-                "sl_entry_count": current_state.get("sl_entry_count", 0) + (1 if is_sl_rescue else 0),
-            }
-            if not is_sl_rescue:
-                store_tp_sl(symbol, new_entry_count)
-            
-            logger.info(f"[주문 성공] {symbol} {side.upper()} {qty} (진입 #{new_entry_count}/5, SL-Rescue: {is_sl_rescue})")
+            # ✅ 안정성 강화: 주문 후 잠시 대기하고 거래소 상태를 다시 확인하여 동기화
             time.sleep(2)
             update_position_state(symbol)
-            return True
+            
+            # 상태가 성공적으로 업데이트 되었다면, 카운터 증가 및 TP/SL 저장
+            if position_state.get(symbol, {}).get("size", 0) > 0:
+                current_state = position_state[symbol]
+                new_entry_count = current_state["entry_count"] + 1
+                position_state[symbol]["entry_count"] = new_entry_count
+                if is_sl_rescue:
+                    position_state[symbol]["sl_entry_count"] = current_state.get("sl_entry_count", 0) + 1
+                else:
+                    store_tp_sl(symbol, new_entry_count)
+                logger.info(f"[주문 성공] {symbol} {side.upper()} {qty} (진입 #{new_entry_count}/5, SL-Rescue: {is_sl_rescue})")
+                return True
+            else:
+                 logger.error(f"[주문 실패] {symbol}: 주문 후 포지션이 확인되지 않음")
+                 return False
         except Exception as e:
             logger.error(f"[주문 실패] {symbol}: {e}")
             return False
@@ -310,24 +283,19 @@ def handle_entry(data):
     if qty > 0:
         place_order(symbol, desired_side, qty, is_sl_rescue)
 
-# 🔧 수정된 워커 함수
+# ✅ 안정성 강화된 워커 함수
 def worker(idx):
-    """워커 스레드: 큐에서 작업을 가져와 처리"""
     while not shutdown_event.is_set():
         try:
-            # 1. 큐에서 작업 가져오기 (타임아웃 시 queue.Empty 발생)
             data = task_q.get(timeout=1)
         except queue.Empty:
-            # 큐가 비어있으면 다음 루프로 넘어감
             continue
 
         try:
-            # 2. 가져온 작업 처리
             handle_entry(data)
         except Exception as e:
             logger.error(f"[Worker-{idx} 작업 처리 오류] 데이터: {data}, 오류: {e}")
         finally:
-            # 3. 작업이 성공하든 실패하든, 가져온 작업은 완료 처리
             task_q.task_done()
 
 # ========================================
@@ -380,10 +348,8 @@ def webhook():
     try:
         data = request.get_json(force=True)
         if not data: return jsonify({"error": "No data"}), 400
-        
         symbol_name = data.get("symbol")
         if not normalize_symbol(symbol_name): return jsonify({"error": f"Invalid symbol: {symbol_name}"}), 400
-        
         action = data.get("action", "").lower()
         if action == "entry":
             if is_duplicate_signal(data): return jsonify({"status": "duplicate_ignored"}), 200
@@ -402,8 +368,7 @@ def status():
     return jsonify({
         "status": "running", "version": "v6.12",
         "balance": float(get_total_collateral(True)),
-        "positions": {s: {k: str(v) if isinstance(v, Decimal) else v for k, v in d.items()} 
-                      for s, d in position_state.items() if d.get("size", 0) > 0},
+        "positions": {s: {k: str(v) if isinstance(v, Decimal) else v for k, v in d.items()} for s, d in position_state.items() if d.get("size", 0) > 0},
         "queue_size": task_q.qsize(),
     })
 
