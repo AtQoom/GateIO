@@ -3,6 +3,7 @@
 """
 Gate.io 자동매매 서버 v6.12 - 모든 기능 유지, 코드 정리 및 최적화, API 재시도 로직 추가
 이전처럼 통합 계정 조회 오류(E501 등) 시 즉시 선물 계정 자산으로 폴백하도록 수정
+ImportError: cannot import name 'gate_api_exceptions' 해결
 
 주요 기능:
 1. 5단계 피라미딩 (20%→40%→120%→480%→960%)
@@ -26,10 +27,12 @@ import logging
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi, gate_api_exceptions
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi 
+# 🔧 수정: gate_api_exceptions 임포트 오류 해결
+from gate_api import exceptions as gate_api_exceptions # gate_api_exceptions를 gate_api.exceptions에서 임포트
 import queue
 import pytz
-import urllib.parse # webhook 파싱을 위해 추가
+import urllib.parse 
 
 # ========================================
 # 1. 로깅 설정
@@ -158,9 +161,11 @@ def get_total_collateral(force=False):
 
     equity = Decimal("0")
     
-    # 🔧 수정: 통합 계정 조회 시 특정 오류(E501/USER_NOT_FOUND) 발생 시 즉시 선물 계정으로 폴백
+    # 🔧 수정: 통합 계정 조회 시 E501 (USER_NOT_FOUND) 또는 일반적인 API 에러 발생 시 즉시 선물 계정으로 폴백
+    unified_account_checked = False
     try:
         unified = _get_api_response(unified_api.list_unified_accounts) # E501 발생 시 여기서 예외 발생 후 바로 except로 이동
+        unified_account_checked = True # 통합 계정 조회 시도됨
         if unified:
             for attr in ['unified_account_total_equity', 'equity']:
                 if hasattr(unified, attr):
@@ -178,6 +183,7 @@ def get_total_collateral(force=False):
         log_debug("❌ 통합 계정 조회 중 일반 오류", str(e), exc_info=True)
     
     # 통합 계정 조회 실패 시 (또는 오류 발생 시) 선물 계정으로 폴백
+    # unified_account_checked 플래그는 필요 없으므로 제거
     acc = _get_api_response(api.list_futures_accounts, SETTLE)
     if acc:
         equity = Decimal(str(getattr(acc, 'available', '0')))
