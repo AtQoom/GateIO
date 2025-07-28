@@ -4,6 +4,7 @@
 Gate.io 자동매매 서버 v6.12 - 모든 기능 유지, 코드 정리 및 최적화, API 재시도 로직 추가
 통합 계정 조회 로직 제거. 이전처럼 선물 계정 자산만 조회하도록 수정.
 SL 임계값 0.01%로 변경 및 UnboundLocalError 해결.
+Pine Script와 쿨다운 연동 강화.
 
 주요 기능:
 1. 5단계 피라미딩 (20%→40%→120%→480%→960%)
@@ -17,6 +18,7 @@ SL 임계값 0.01%로 변경 및 UnboundLocalError 해결.
 9. 통합 계정 관련 API 호출 제거 (이전 동작 방식 재현)
 10. SL 임계값 0.01%로 변경
 11. check_tp_sl 함수의 UnboundLocalError 해결
+12. 웹훅 쿨다운 로직 강화
 """
 
 import os
@@ -75,7 +77,8 @@ unified_api = UnifiedApi(client) # 통합 계정 API (자산 조회용) - 이 �
 # 3. 상수 및 설정
 # ========================================
 
-COOLDOWN_SECONDS = 14 # 서버측 신호 쿨다운 (파인스크립트와 연동) - Pine Script 15초 쿨다운과 일치
+# 🔧 수정: 사용자 요청에 따라 서버 쿨다운을 14초로 설정
+COOLDOWN_SECONDS = 14 # 서버측 신호 쿨다운 (알림 발송 오차 감안 14초)
 KST = pytz.timezone('Asia/Seoul') # 한국 시간대 설정
 
 # 심볼 매핑: TradingView/Gate.io에서 사용하는 다양한 심볼 명칭을 내부 표준 심볼명으로 통일
@@ -219,28 +222,41 @@ def is_duplicate(data):
     with signal_lock:
         now = time.time()
         symbol_id = f"{data.get('symbol', '')}_{data.get('side', '')}"
-        signal_id_from_pine = data.get("id", "")
+        
+        # Pine Script에서 보낸 'id' 필드를 고유 식별자로 사용 (timenow + bar_index 포함)
+        signal_unique_id = data.get("id", "") 
+        
+        # Pine Script에서 보낸 'time' 필드를 쿨다운 계산에 활용 (밀리초 -> 초 변환)
+        signal_time_from_pine = data.get("time") 
+        if signal_time_from_pine:
+            signal_time_seconds = signal_time_from_pine / 1000 
+        else:
+            signal_time_seconds = now # 'time' 필드가 없으면 현재 서버 시간 사용 (하위 호환성)
 
-        # 1. PineScript ID를 통한 빠른 중복 체크 (5초 이내)
-        if signal_id_from_pine and recent_signals.get(signal_id_from_pine) and (now - recent_signals[signal_id_from_pine]["time"] < 5):
-            log_debug(f"🔄 중복 신호 무시 ({data.get('symbol', '')})", f"PineScript ID '{signal_id_from_pine}' 5초 이내 중복.")
+        # 1. 고유 ID 기반 쿨다운 체크 (동일한 신호의 즉각적인 중복 방지)
+        # 이전에 같은 ID로 처리된 적이 있고, COOLDOWN_SECONDS 이내라면 중복으로 간주
+        if signal_unique_id and recent_signals.get(signal_unique_id) and \
+           (now - recent_signals[signal_unique_id]["last_processed_time"] < COOLDOWN_SECONDS):
+            log_debug(f"🔄 중복 신호 무시 ({data.get('symbol', '')})", f"고유 ID '{signal_unique_id}' 쿨다운({COOLDOWN_SECONDS}초) 중.")
+            return True
+        
+        # 2. 심볼+방향 기반 쿨다운 체크 (동일 심볼/방향의 연속 신호 방지)
+        # 만약 파인스크립트 ID가 없거나 (하위 호환성), 여러 개의 유니크 ID가 짧은 시간 내에 전송될 경우 대비
+        if recent_signals.get(symbol_id) and \
+           (now - recent_signals[symbol_id]["last_processed_time"] < COOLDOWN_SECONDS): 
+            log_debug(f"🔄 중복 신호 무시 ({data.get('symbol', '')})", f"'{symbol_id}' 쿨다운({COOLDOWN_SECONDS}초) 중. (마지막 처리: {datetime.fromtimestamp(recent_signals[symbol_id]['last_processed_time']).strftime('%H:%M:%S')}, 현재: {datetime.fromtimestamp(now).strftime('%H:%M:%S')})")
             return True
 
-        # 2. 심볼+방향 기반 쿨다운 체크
-        if recent_signals.get(symbol_id) and (now - recent_signals[symbol_id]["time"] < COOLDOWN_SECONDS): # COOLDOWN_SECONDS 전역 변수 사용
-            log_debug(f"🔄 중복 신호 무시 ({data.get('symbol', '')})", f"'{symbol_id}' 쿨다운({COOLDOWN_SECONDS}초) 중.")
-            return True
-
-        # 신규 신호로 기록
-        recent_signals[symbol_id] = {"time": now, "id": signal_id_from_pine}
-        if signal_id_from_pine:
-            recent_signals[signal_id_from_pine] = {"time": now}
+        # 신규 신호로 기록: 처리된 시간을 now로 기록. Pine Script ID와 심볼+방향 모두 업데이트.
+        recent_signals[symbol_id] = {"last_processed_time": now}
+        if signal_unique_id:
+            recent_signals[signal_unique_id] = {"last_processed_time": now}
         
         # 반대 방향 포지션의 쿨다운 정보는 제거 (새로운 진입 시 반대 방향 쿨다운 리셋)
         recent_signals.pop(f"{data.get('symbol', '')}_{'short' if data.get('side') == 'long' else 'long'}", None)
         
         # 오래된 신호 기록 정리 (5분 이상된 기록 삭제)
-        recent_signals.update({k: v for k, v in recent_signals.items() if now - v["time"] < 300})
+        recent_signals.update({k: v for k, v in recent_signals.items() if now - v["last_processed_time"] < 300})
         return False
 
 # ========================================
@@ -334,7 +350,7 @@ def is_sl_rescue_condition(symbol):
         # 시간 감쇠 적용된 SL 가격 계산 (PineScript 로직과 동일)
         original_tp, original_sl, entry_start_time = get_tp_sl(symbol, pos["entry_count"])
         
-        # 🔧 수정: SL 임계값 0.01%로 변경 (Decimal("0.0001"))
+        # 🔧 SL 임계값 0.01%로 설정
         sl_proximity_threshold = Decimal("0.0001") # 사용자 요청: 0.01% 임계값
         
         time_elapsed = time.time() - entry_start_time
@@ -404,7 +420,11 @@ def close_position(symbol, reason="manual"):
         pyramid_tracking.pop(symbol, None)
         tpsl_storage.pop(symbol, None)
         with signal_lock: # 해당 심볼의 최근 신호 기록도 초기화
-            for k in [k for k in recent_signals.keys() if k.startswith(symbol + "_")]: recent_signals.pop(k)
+            # 🔧 수정: 심볼+방향 ID 및 고유 ID 모두 제거
+            keys_to_remove = [k for k in recent_signals.keys() 
+                              if k.startswith(symbol + "_") or k.startswith(symbol)] # 'symbol_name_timenow_bar_index' 형태도 포함
+            for k in keys_to_remove:
+                recent_signals.pop(k)
         
         time.sleep(1)
         update_position_state(symbol)
@@ -517,7 +537,7 @@ def status():
                 }
         
         return jsonify({
-            "status": "running", "version": "v6.12_sl_0_01pct_error_fixed", "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
+            "status": "running", "version": "v6.12_sl_0_01pct_cooldown_14s_fixed", "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": positions, "cooldown_seconds": COOLDOWN_SECONDS,
             "max_entries_per_symbol": 5, "max_sl_rescue_per_position": 3,
             "sl_rescue_proximity_threshold": float(Decimal("0.0001")) * 100, # 0.01%로 표시
@@ -694,16 +714,16 @@ def handle_entry(data):
     actual_entry_number = entry_count + 1
     
     # TP/SL 저장 (SL-Rescue는 기존 포지션의 TP/SL을 따라감)
-    if not is_sl_rescue_signal:
-        tp_map = [Decimal("0.005"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002"), Decimal("0.0015")]
-        sl_map = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
-        
-        if actual_entry_number <= len(tp_map): # 배열 범위 확인
-            tp = tp_map[actual_entry_number - 1] * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
-            sl = sl_map[actual_entry_number - 1] * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
-            store_tp_sl(symbol, tp, sl, actual_entry_number)
-            log_debug(f"💾 TP/SL 저장 ({symbol})", f"진입 #{actual_entry_number}/5, TP: {tp*100:.3f}%, SL: {sl*100:.3f}%")
-        else: log_debug(f"⚠️ TP/SL 저장 오류 ({symbol})", f"진입 단계 {actual_entry_number}에 대한 TP/SL 맵이 없습니다.")
+    # 🔧 수정: is_sl_rescue_signal 여부와 관계없이 TP/SL 갱신
+    tp_map = [Decimal("0.005"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002"), Decimal("0.0015")]
+    sl_map = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
+    
+    if actual_entry_number <= len(tp_map): # 배열 범위 확인
+        tp = tp_map[actual_entry_number - 1] * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
+        sl = sl_map[actual_entry_number - 1] * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
+        store_tp_sl(symbol, tp, sl, actual_entry_number)
+        log_debug(f"💾 TP/SL 저장 ({symbol})", f"진입 #{actual_entry_number}/5, TP: {tp*100:.3f}%, SL: {sl*100:.3f}%")
+    else: log_debug(f"⚠️ TP/SL 저장 오류 ({symbol})", f"진입 단계 {actual_entry_number}에 대한 TP/SL 맵이 없습니다.")
     
     qty = calculate_position_size(symbol, signal_type, entry_multiplier)
     if qty <= 0: log_debug(f"❌ 수량 계산 실패 ({symbol})", "계산 수량 0 이하. 주문하지 않음."); return
@@ -717,7 +737,7 @@ def handle_entry(data):
 # ========================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.12 (SL 임계값 0.01% 및 UnboundLocalError 해결) - 실행 중...")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.12 (SL 임계값 0.01%, 쿨다운 및 오류 수정) - 실행 중...")
     log_debug("📊 현재 설정", f"감시 심볼: {len(SYMBOL_CONFIG)}개, 서버 쿨다운: {COOLDOWN_SECONDS}초, 최대 피라미딩 진입: 5회")
     
     # 설정 로깅
