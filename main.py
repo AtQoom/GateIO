@@ -321,7 +321,7 @@ def update_position_state(symbol):
             return True # 포지션 닫힘
 
 def is_sl_rescue_condition(symbol):
-    """손절 직전 추가 진입 (SL-Rescue) 조건 평가 (파인스크립트 0.05% 임계값 반영)"""
+    """손절 직전 추가 진입 (SL-Rescue) 조건 평가 (파인스크립트 0.01% 임계값 반영)"""
     with position_lock:
         pos = position_state.get(symbol)
         if not pos or pos["size"] == 0 or pos["entry_count"] >= 5 or pos["sl_entry_count"] >= 3:
@@ -342,7 +342,7 @@ def is_sl_rescue_condition(symbol):
         
         sl_price = avg_price * (1 - current_sl_pct_adjusted) if side == "buy" else avg_price * (1 + current_sl_pct_adjusted)
         
-        sl_proximity_threshold = Decimal("0.0002") # 0.02% 임계값
+        sl_proximity_threshold = Decimal("0.0001") # 0.01% 임계값
         
         # SL 가격 근접 및 손실 상태 확인
         is_near_sl = abs(current_price - sl_price) / sl_price <= sl_proximity_threshold
