@@ -342,7 +342,7 @@ def is_sl_rescue_condition(symbol):
         
         sl_price = avg_price * (1 - current_sl_pct_adjusted) if side == "buy" else avg_price * (1 + current_sl_pct_adjusted)
         
-        sl_proximity_threshold = Decimal("0.0005") # 0.05% 임계값
+        sl_proximity_threshold = Decimal("0.0002") # 0.02% 임계값
         
         # SL 가격 근접 및 손실 상태 확인
         is_near_sl = abs(current_price - sl_price) / sl_price <= sl_proximity_threshold
