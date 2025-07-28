@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Gate.io 자동매매 서버 v6.12 - 모든 기능 유지, 코드 정리 및 최적화, API 재시도 로직 추가
-이전처럼 통합 계정 조회 오류(E501 등) 시 즉시 선물 계정 자산으로 폴백하도록 수정
-ImportError: cannot import name 'gate_api_exceptions' 해결
+**통합 계정 조회 로직 제거. 이전처럼 선물 계정 자산만 조회하도록 수정.**
 
 주요 기능:
 1. 5단계 피라미딩 (20%→40%→120%→480%→960%)
@@ -14,7 +13,7 @@ ImportError: cannot import name 'gate_api_exceptions' 해결
 6. TradingView 웹훅 기반 자동 주문
 7. 실시간 WebSocket을 통한 TP/SL 모니터링 및 자동 청산
 8. API 호출 시 일시적 오류에 대한 재시도 로직
-9. 통합 계정 조회 실패 시 즉시 선물 계정 자산으로 폴백 (이전 동작 방식 재현)
+9. **통합 계정 관련 API 호출 제거** (이전 동작 방식 재현)
 """
 
 import os
@@ -28,7 +27,6 @@ from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi 
-# 🔧 수정: gate_api_exceptions 임포트 오류 해결
 from gate_api import exceptions as gate_api_exceptions # gate_api_exceptions를 gate_api.exceptions에서 임포트
 import queue
 import pytz
@@ -68,7 +66,7 @@ SETTLE = "usdt" # 선물 계정의 정산 통화
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)      # 선물 거래 API
-unified_api = UnifiedApi(client) # 통합 계정 API (자산 조회용)
+unified_api = UnifiedApi(client) # 통합 계정 API (자산 조회용) - 이 객체는 더 이상 get_total_collateral에서 사용되지 않음
 
 # ========================================
 # 3. 상수 및 설정
@@ -121,7 +119,7 @@ task_q = queue.Queue(maxsize=100) # 웹훅 요청을 비동기 워커 스레드�
 WORKER_COUNT = min(6, max(2, os.cpu_count() * 2)) # 병렬 처리를 위한 워커 스레드 수 (CPU 코어 수 기반)
 
 # ========================================
-# 5. 핵심 유틸리티 함수 (API 재시도 로직 추가)
+# 5. 핵심 유틸리티 함수 (API 재시도 로직 포함)
 # ========================================
 
 def _get_api_response(api_call, *args, **kwargs):
@@ -135,6 +133,8 @@ def _get_api_response(api_call, *args, **kwargs):
             if isinstance(e, gate_api_exceptions.ApiException):
                 error_msg = f"API Error {e.status}: {e.reason}"
                 # 특정 에러 (예: E501 USER_NOT_FOUND)는 재시도 없이 바로 예외 발생
+                # 이 에러는 get_total_collateral 함수에서 통합 계정 조회 실패 시 처리되므로,
+                # 여기서는 재시도를 건너뛰고 바로 예외를 상위로 전파
                 if e.status == 501 and "USER_NOT_FOUND" in e.reason.upper():
                     log_debug("❌ 치명적 API 오류 (재시도 안함)", error_msg)
                     raise # 통합 계정 조회 시 발생하는 E501은 재시도하지 않고 바로 상위로 전파
@@ -154,42 +154,20 @@ def normalize_symbol(raw_symbol):
     return SYMBOL_MAPPING.get(symbol) or SYMBOL_MAPPING.get(symbol.replace('.P', '').replace('PERP', ''))
 
 def get_total_collateral(force=False):
-    """총 자산 조회 (캐싱 적용)"""
+    """총 자산 조회 (캐싱 적용) - **통합 계정 조회 로직 제거**"""
     now = time.time()
     if not force and account_cache["time"] > now - 30 and account_cache["data"]:
         return account_cache["data"] # 캐싱된 데이터 반환
 
     equity = Decimal("0")
     
-    # 🔧 수정: 통합 계정 조회 시 E501 (USER_NOT_FOUND) 또는 일반적인 API 에러 발생 시 즉시 선물 계정으로 폴백
-    unified_account_checked = False
-    try:
-        unified = _get_api_response(unified_api.list_unified_accounts) # E501 발생 시 여기서 예외 발생 후 바로 except로 이동
-        unified_account_checked = True # 통합 계정 조회 시도됨
-        if unified:
-            for attr in ['unified_account_total_equity', 'equity']:
-                if hasattr(unified, attr):
-                    equity = Decimal(str(getattr(unified, attr)))
-                    if equity > 0: # 유효한 값이면 사용
-                        log_debug("✅ 통합 계정 자산 조회", f"성공: {equity:.2f} USDT")
-                        account_cache.update({"time": now, "data": equity})
-                        return equity
-        # 통합 계정 조회 결과가 없거나 0인 경우 (Unified Account가 활성화되지 않은 경우 등)
-        log_debug("⚠️ 통합 계정 자산 조회 실패", "통합 계정 정보가 없거나 자산이 0입니다. 선물 계정 자산으로 폴백합니다.")
-    except gate_api_exceptions.ApiException as e:
-        # _get_api_response에서 발생한 ApiException이 여기에 잡힘. 특히 E501 USER_NOT_FOUND는 여기서 처리.
-        log_debug("❌ 통합 계정 조회 건너뛰기", f"통합 계정 조회 중 오류 발생 ({e.status}: {e.reason}). 선물 계정 자산으로 폴백합니다.")
-    except Exception as e:
-        log_debug("❌ 통합 계정 조회 중 일반 오류", str(e), exc_info=True)
-    
-    # 통합 계정 조회 실패 시 (또는 오류 발생 시) 선물 계정으로 폴백
-    # unified_account_checked 플래그는 필요 없으므로 제거
+    # 🔧 수정: 통합 계정 조회 로직 완전히 제거. 이전처럼 선물 계정만 조회
     acc = _get_api_response(api.list_futures_accounts, SETTLE)
     if acc:
         equity = Decimal(str(getattr(acc, 'available', '0')))
         log_debug("✅ 선물 계정 자산 조회", f"성공: {equity:.2f} USDT")
     else:
-        log_debug("❌ 선물 계정 자산 조회도 실패", "자산 정보를 가져올 수 없습니다.")
+        log_debug("❌ 선물 계정 자산 조회 실패", "자산 정보를 가져올 수 없습니다.")
     
     account_cache.update({"time": now, "data": equity}) # 캐시 업데이트
     return equity
@@ -536,7 +514,7 @@ def status():
                 }
         
         return jsonify({
-            "status": "running", "version": "v6.12_e501_direct_fallback", "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
+            "status": "running", "version": "v6.12_no_unified_account", "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": positions, "cooldown_seconds": COOLDOWN_SECONDS,
             "max_entries_per_symbol": 5, "max_sl_rescue_per_position": 3,
             "sl_rescue_proximity_threshold": float(Decimal("0.0005")) * 100,
@@ -731,7 +709,7 @@ def handle_entry(data):
 # ========================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.12 (재시도 로직 적용 최종 버전) - 실행 중...")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.12 (통합 계정 조회 로직 제거 최종 버전) - 실행 중...")
     log_debug("📊 현재 설정", f"감시 심볼: {len(SYMBOL_CONFIG)}개, 서버 쿨다운: {COOLDOWN_SECONDS}초, 최대 피라미딩 진입: 5회")
     
     # 설정 로깅
@@ -750,9 +728,7 @@ if __name__ == "__main__":
     log_debug("💰 초기 자산 확인", f"{equity:.2f} USDT" if equity > 0 else "자산 조회 실패 또는 잔고 부족. API 키 확인 필요.")
     
     initial_active_positions = []
-    # SYMBOL_CONFIG의 각 심볼에 대해 초기 포지션 상태를 로드
     for symbol in SYMBOL_CONFIG: 
-        # update_position_state는 이미 재시도 로직이 적용된 _get_api_response를 사용하므로 여기서 추가적인 try-except는 필요 없음
         update_position_state(symbol) 
         pos = position_state.get(symbol, {})
         if pos.get("side"):
@@ -772,7 +748,7 @@ if __name__ == "__main__":
         log_debug(f"⚙️ 워커-{i} 시작", f"워커 스레드 {i} 실행 중.")
         
     # Flask 웹 서버 실행
-    port = int(os.environ.get("PORT", 8080)) # 환경 변수에서 포트 가져오기 (기본 8080)
+    port = int(os.environ.get("PORT", 8080)) 
     log_debug("🌐 웹 서버 시작", f"Flask 웹 서버가 0.0.0.0:{port}에서 실행됩니다.")
     log_debug("✅ 준비 완료", "웹훅 신호를 기다리는 중입니다. (TradingView 알림 설정 확인)")
     log_debug("🔍 테스트 및 상태 확인 방법", f"POST http://localhost:{port}/webhook 으로 웹훅 테스트, GET http://localhost:{port}/status 로 서버 상태 확인.")
