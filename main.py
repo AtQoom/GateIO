@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.12 - 기존 계산 방식 + 최소 수량 보장
+Gate.io 자동매매 서버 v6.12 - 기존 계산 방식 + 최소 수량 보장 + 손절직전 진입 개선
 
 주요 기능:
 1. 5단계 피라미딩 (기존 방식: 20%→40%→120%→480%→960%)
-2. 손절직전 진입 (SL_Rescue) - 150% 가중치, 최대 3회
+2. 손절직전 진입 (SL_Rescue) - 150% 가중치, 최대 3회, 개선된 감지 로직
 3. 최소 수량 미달 시 자동으로 최소 수량으로 주문
 4. 심볼별 가중치 적용 및 시간 감쇠 TP/SL
 """
@@ -78,7 +78,7 @@ SYMBOL_MAPPING = {
     "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT", "DOGE_USDT": "DOGE_USDT", "DOGE": "DOGE_USDT",
 }
 
-# ✅ 기존 설정 복원
+# 기존 설정 복원
 SYMBOL_CONFIG = {
     "BTC_USDT": {
         "min_qty": Decimal("1"), 
@@ -131,7 +131,7 @@ SYMBOL_CONFIG = {
     "PEPE_USDT": {
         "min_qty": Decimal("1"), 
         "qty_step": Decimal("1"), 
-        "contract_size": Decimal("10000000"),  # ✅ 기존 값으로 복원
+        "contract_size": Decimal("10000000"),  # 기존 값으로 복원
         "min_notional": Decimal("5"), 
         "tp_mult": 1.2,
         "sl_mult": 1.2
@@ -336,7 +336,7 @@ def calculate_position_size(symbol, signal_type, data=None, entry_multiplier=Dec
     if symbol in position_state:
         entry_count = position_state[symbol].get("entry_count", 0)
     
-    # ✅ 기존 방식 복원: 20%, 40%, 120%, 480%, 960%
+    # 기존 방식 복원: 20%, 40%, 120%, 480%, 960%
     entry_ratios = [
         Decimal("20"), Decimal("40"), Decimal("120"), 
         Decimal("480"), Decimal("960")
@@ -357,7 +357,7 @@ def calculate_position_size(symbol, signal_type, data=None, entry_multiplier=Dec
         ratio = ratio * Decimal("1.5")
         log_debug(f"🚨 손절직전 가중치 적용 ({symbol})", f"기본 → 150% 증량")
     
-    # ✅ 기존 계산 방식 유지
+    # 기존 계산 방식 유지
     ratio_decimal = ratio / Decimal("100")
     position_value = equity * ratio_decimal * entry_multiplier
     contract_value = price * cfg["contract_size"]
@@ -367,7 +367,7 @@ def calculate_position_size(symbol, signal_type, data=None, entry_multiplier=Dec
     qty_adjusted = (raw_qty / cfg["qty_step"]).quantize(Decimal('1'), rounding=ROUND_DOWN)
     calculated_qty = qty_adjusted * cfg["qty_step"]
     
-    # ✅ 중요: 최소 수량 보장
+    # 중요: 최소 수량 보장
     final_qty = max(calculated_qty, cfg["min_qty"])
     
     # 로그에 상세 정보 추가
@@ -443,6 +443,33 @@ def update_position_state(symbol):
             log_debug(f"❌ 포지션 업데이트 실패 ({symbol})", str(e))
             return False
 
+# 개선된 손절직전 조건 체크
+def is_sl_rescue_condition(symbol):
+    with position_lock:
+        pos = position_state.get(symbol)
+        if not pos or pos.get("size", 0) == 0 or pos.get("entry_count", 0) >= 5 or pos.get("sl_entry_count", 0) >= 3:
+            return False
+        
+        current_price = get_price(symbol)
+        if current_price <= 0: return False
+        
+        avg_price = pos["price"]
+        side = pos["side"]
+        _, sl_pct, _ = get_tp_sl(symbol, pos.get("entry_count", 0))
+        
+        sl_price = avg_price * (1 - sl_pct) if side == "buy" else avg_price * (1 + sl_pct)
+        
+        # 수정: 범위를 0.2%로 확대하고 위아래 모두 포함
+        sl_proximity_threshold = Decimal("0.002")  # 0.05% → 0.2%
+        is_near_sl = abs(current_price - sl_price) / sl_price <= sl_proximity_threshold
+        
+        is_underwater = (side == "buy" and current_price < avg_price) or (side == "sell" and current_price > avg_price)
+        
+        if is_near_sl and is_underwater:
+            log_debug(f"🚨 SL-Rescue 조건 충족 ({symbol})", 
+                     f"손절가: {sl_price}, 현재가: {current_price}, 차이: {abs(current_price - sl_price) / sl_price * 100:.3f}%")
+        return is_near_sl and is_underwater
+
 # ========================================
 # 10. 주문 실행
 # ========================================
@@ -454,7 +481,7 @@ def place_order(symbol, side, qty, entry_number, time_multiplier):
             cfg = SYMBOL_CONFIG[symbol]
             qty_dec = Decimal(str(qty)).quantize(cfg["qty_step"], rounding=ROUND_DOWN)
             
-            # ✅ 최소 수량 보장
+            # 최소 수량 보장
             if qty_dec < cfg["min_qty"]:
                 qty_dec = cfg["min_qty"]
                 log_debug(f"💡 최소 수량 적용 ({symbol})", f"계산: {qty} → 적용: {qty_dec}")
@@ -792,7 +819,51 @@ def check_tp_sl(ticker):
         log_debug(f"❌ TP/SL 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e))
 
 # ========================================
-# 워커 스레드 정의
+# 13. 백그라운드 모니터링
+# ========================================
+
+def position_monitor():
+    """포지션 상태 주기적 모니터링"""
+    while True:
+        try:
+            time.sleep(300)
+            
+            total_value = Decimal("0")
+            active_positions = []
+            
+            for symbol in SYMBOL_CONFIG:
+                if update_position_state(symbol):
+                    pos = position_state.get(symbol, {})
+                    if pos.get("side"):
+                        total_value += pos["value"]
+                        entry_count = pos.get("entry_count", 0)
+                        tp_mult = SYMBOL_CONFIG[symbol]["tp_mult"]
+                        
+                        pyramid_info = ""
+                        if symbol in pyramid_tracking:
+                            tracking = pyramid_tracking[symbol]
+                            pyramid_info = f", 신호: {tracking['signal_count']}회"
+                        
+                        active_positions.append(
+                            f"{symbol}: {pos['side']} {pos['size']} @ {pos['price']} "
+                            f"(진입 #{entry_count}/5, 가중치: {tp_mult}{pyramid_info})"
+                        )
+            
+            if active_positions:
+                equity = get_total_collateral()
+                exposure_pct = (total_value / equity * 100) if equity > 0 else 0
+                log_debug("📊 포지션 현황", 
+                         f"활성: {len(active_positions)}개, "
+                         f"총 가치: {total_value:.2f} USDT, "
+                         f"노출도: {exposure_pct:.1f}%")
+                for pos_info in active_positions:
+                    log_debug("  └", pos_info)
+                
+        except Exception as e:
+            log_debug("❌ 포지션 모니터링 오류", str(e))
+
+# ========================================
+# 14. 워커 스레드 정의
 # ========================================
 
 def worker(idx):
@@ -895,6 +966,11 @@ def handle_entry(data):
                 log_debug(f"⚠️ 손절직전 최대 진입 도달 ({symbol})", f"현재: {sl_entry_count}/3")
                 return
             
+            # 손절직전 조건 재검증
+            if not is_sl_rescue_condition(symbol):
+                log_debug(f"⏭️ 손절직전 조건 불충족 ({symbol})", "손절가에 충분히 근접하지 않음")
+                return
+            
             # 손절 직전 카운터 증가
             position_state[symbol]["sl_entry_count"] = sl_entry_count + 1
             log_debug(f"🚨 손절직전 진입 ({symbol})", f"#{sl_entry_count + 1}/3회")
@@ -934,13 +1010,13 @@ def handle_entry(data):
         log_debug(f"❌ handle_entry 오류 ({data.get('symbol', 'Unknown')})", str(e), exc_info=True)
 
 # ========================================
-# 14. 메인 실행
+# 15. 메인 실행
 # ========================================
 
 if __name__ == "__main__":
     """서버 시작"""
     
-    log_debug("🚀 서버 시작", "v6.12 - 기존 계산 방식 + 최소 수량 보장")
+    log_debug("🚀 서버 시작", "v6.12 - 기존 계산 방식 + 최소 수량 보장 + 손절직전 진입 개선")
     log_debug("📊 설정", f"심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초, 최대 진입: 5회")
     
     # 심볼별 가중치 로그
@@ -956,6 +1032,7 @@ if __name__ == "__main__":
     log_debug("📊 진입 비율", "1차: 20%, 2차: 40%, 3차: 120%, 4차: 480%, 5차: 960% (기존 방식)")
     log_debug("📉 단계별 TP", "1차: 0.5%, 2차: 0.35%, 3차: 0.3%, 4차: 0.2%, 5차: 0.15%")
     log_debug("📉 단계별 SL", "1차: 4.0%, 2차: 3.8%, 3차: 3.5%, 4차: 3.3%, 5차: 3.0%")
+    log_debug("🚨 손절직전 진입", "범위: 0.2%, 가중치: 150%, 최대: 3회")
     log_debug("💡 최소 수량", "계산 수량이 최소 수량보다 작으면 자동으로 최소 수량으로 주문")
     
     # 초기 자산 확인
@@ -983,6 +1060,12 @@ if __name__ == "__main__":
     
     # 백그라운드 작업 시작
     log_debug("🔄 백그라운드 작업", "시작...")
+    
+    threading.Thread(
+        target=position_monitor, 
+        daemon=True, 
+        name="PositionMonitor"
+    ).start()
     
     threading.Thread(
         target=lambda: asyncio.run(price_monitor()), 
