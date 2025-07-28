@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Gate.io 자동매매 서버 v6.12 - 모든 기능 유지, 코드 정리 및 최적화, API 재시도 로직 추가
+이전처럼 통합 계정 조회 오류(E501 등) 시 즉시 선물 계정 자산으로 폴백하도록 수정
 
 주요 기능:
 1. 5단계 피라미딩 (20%→40%→120%→480%→960%)
@@ -12,6 +13,7 @@ Gate.io 자동매매 서버 v6.12 - 모든 기능 유지, 코드 정리 및 최�
 6. TradingView 웹훅 기반 자동 주문
 7. 실시간 WebSocket을 통한 TP/SL 모니터링 및 자동 청산
 8. API 호출 시 일시적 오류에 대한 재시도 로직
+9. 통합 계정 조회 실패 시 즉시 선물 계정 자산으로 폴백 (이전 동작 방식 재현)
 """
 
 import os
@@ -24,7 +26,7 @@ import logging
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi, gate_api_exceptions
 import queue
 import pytz
 import urllib.parse # webhook 파싱을 위해 추가
@@ -126,13 +128,21 @@ def _get_api_response(api_call, *args, **kwargs):
         try:
             return api_call(*args, **kwargs)
         except Exception as e:
+            # gate_api_exceptions.ApiException인 경우 status와 reason을 확인
+            if isinstance(e, gate_api_exceptions.ApiException):
+                error_msg = f"API Error {e.status}: {e.reason}"
+                # 특정 에러 (예: E501 USER_NOT_FOUND)는 재시도 없이 바로 예외 발생
+                if e.status == 501 and "USER_NOT_FOUND" in e.reason.upper():
+                    log_debug("❌ 치명적 API 오류 (재시도 안함)", error_msg)
+                    raise # 통합 계정 조회 시 발생하는 E501은 재시도하지 않고 바로 상위로 전파
+            else:
+                error_msg = str(e)
+
             if attempt < max_retries - 1:
-                # 재시도 전 로그 메시지 (스택 트레이스 없이)
-                log_debug("⚠️ API 호출 재시도", f"시도 {attempt + 1}/{max_retries}: {e}. 잠시 후 재시도합니다.")
+                log_debug("⚠️ API 호출 재시도", f"시도 {attempt + 1}/{max_retries}: {error_msg}. 잠시 후 재시도합니다.")
                 time.sleep(2 ** attempt) # 지수 백오프 (1, 2, 4초 대기)
             else:
-                # 모든 재시도 실패 시 최종 로그 메시지 (스택 트레이스 포함)
-                log_debug("❌ API 호출 최종 실패", str(e), exc_info=True)
+                log_debug("❌ API 호출 최종 실패", error_msg, exc_info=True)
     return None # 모든 재시도 실패 시 None 반환
 
 def normalize_symbol(raw_symbol):
@@ -147,18 +157,33 @@ def get_total_collateral(force=False):
         return account_cache["data"] # 캐싱된 데이터 반환
 
     equity = Decimal("0")
-    # 통합 계정 자산 조회 시도
-    unified = _get_api_response(unified_api.list_unified_accounts)
-    if unified:
-        for attr in ['unified_account_total_equity', 'equity']: # 가능한 속성 확인
-            if hasattr(unified, attr):
-                equity = Decimal(str(getattr(unified, attr)))
-                break
     
-    if equity == Decimal("0"): # 통합 계정 조회 실패 시 선물 계정으로 폴백
-        acc = _get_api_response(api.list_futures_accounts, SETTLE)
-        if acc:
-            equity = Decimal(str(getattr(acc, 'available', '0')))
+    # 🔧 수정: 통합 계정 조회 시 특정 오류(E501/USER_NOT_FOUND) 발생 시 즉시 선물 계정으로 폴백
+    try:
+        unified = _get_api_response(unified_api.list_unified_accounts) # E501 발생 시 여기서 예외 발생 후 바로 except로 이동
+        if unified:
+            for attr in ['unified_account_total_equity', 'equity']:
+                if hasattr(unified, attr):
+                    equity = Decimal(str(getattr(unified, attr)))
+                    if equity > 0: # 유효한 값이면 사용
+                        log_debug("✅ 통합 계정 자산 조회", f"성공: {equity:.2f} USDT")
+                        account_cache.update({"time": now, "data": equity})
+                        return equity
+        # 통합 계정 조회 결과가 없거나 0인 경우 (Unified Account가 활성화되지 않은 경우 등)
+        log_debug("⚠️ 통합 계정 자산 조회 실패", "통합 계정 정보가 없거나 자산이 0입니다. 선물 계정 자산으로 폴백합니다.")
+    except gate_api_exceptions.ApiException as e:
+        # _get_api_response에서 발생한 ApiException이 여기에 잡힘. 특히 E501 USER_NOT_FOUND는 여기서 처리.
+        log_debug("❌ 통합 계정 조회 건너뛰기", f"통합 계정 조회 중 오류 발생 ({e.status}: {e.reason}). 선물 계정 자산으로 폴백합니다.")
+    except Exception as e:
+        log_debug("❌ 통합 계정 조회 중 일반 오류", str(e), exc_info=True)
+    
+    # 통합 계정 조회 실패 시 (또는 오류 발생 시) 선물 계정으로 폴백
+    acc = _get_api_response(api.list_futures_accounts, SETTLE)
+    if acc:
+        equity = Decimal(str(getattr(acc, 'available', '0')))
+        log_debug("✅ 선물 계정 자산 조회", f"성공: {equity:.2f} USDT")
+    else:
+        log_debug("❌ 선물 계정 자산 조회도 실패", "자산 정보를 가져올 수 없습니다.")
     
     account_cache.update({"time": now, "data": equity}) # 캐시 업데이트
     return equity
@@ -505,7 +530,7 @@ def status():
                 }
         
         return jsonify({
-            "status": "running", "version": "v6.12_retries", "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
+            "status": "running", "version": "v6.12_e501_direct_fallback", "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": positions, "cooldown_seconds": COOLDOWN_SECONDS,
             "max_entries_per_symbol": 5, "max_sl_rescue_per_position": 3,
             "sl_rescue_proximity_threshold": float(Decimal("0.0005")) * 100,
