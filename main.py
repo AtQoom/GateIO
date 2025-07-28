@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Gate.io 자동매매 서버 v6.12 - 모든 기능 유지, 코드 정리 및 최적화, API 재시도 로직 추가
-**통합 계정 조회 로직 제거. 이전처럼 선물 계정 자산만 조회하도록 수정.**
+통합 계정 조회 로직 제거. 이전처럼 선물 계정 자산만 조회하도록 수정.
+SL 임계값 0.01%로 변경 및 UnboundLocalError 해결.
 
 주요 기능:
 1. 5단계 피라미딩 (20%→40%→120%→480%→960%)
@@ -13,7 +14,9 @@ Gate.io 자동매매 서버 v6.12 - 모든 기능 유지, 코드 정리 및 최�
 6. TradingView 웹훅 기반 자동 주문
 7. 실시간 WebSocket을 통한 TP/SL 모니터링 및 자동 청산
 8. API 호출 시 일시적 오류에 대한 재시도 로직
-9. **통합 계정 관련 API 호출 제거** (이전 동작 방식 재현)
+9. 통합 계정 관련 API 호출 제거 (이전 동작 방식 재현)
+10. SL 임계값 0.01%로 변경
+11. check_tp_sl 함수의 UnboundLocalError 해결
 """
 
 import os
@@ -72,7 +75,7 @@ unified_api = UnifiedApi(client) # 통합 계정 API (자산 조회용) - 이 �
 # 3. 상수 및 설정
 # ========================================
 
-COOLDOWN_SECONDS = 10 # 서버측 신호 쿨다운 (파인스크립트와 연동)
+COOLDOWN_SECONDS = 14 # 서버측 신호 쿨다운 (파인스크립트와 연동) - Pine Script 15초 쿨다운과 일치
 KST = pytz.timezone('Asia/Seoul') # 한국 시간대 설정
 
 # 심볼 매핑: TradingView/Gate.io에서 사용하는 다양한 심볼 명칭을 내부 표준 심볼명으로 통일
@@ -133,8 +136,6 @@ def _get_api_response(api_call, *args, **kwargs):
             if isinstance(e, gate_api_exceptions.ApiException):
                 error_msg = f"API Error {e.status}: {e.reason}"
                 # 특정 에러 (예: E501 USER_NOT_FOUND)는 재시도 없이 바로 예외 발생
-                # 이 에러는 get_total_collateral 함수에서 통합 계정 조회 실패 시 처리되므로,
-                # 여기서는 재시도를 건너뛰고 바로 예외를 상위로 전파
                 if e.status == 501 and "USER_NOT_FOUND" in e.reason.upper():
                     log_debug("❌ 치명적 API 오류 (재시도 안함)", error_msg)
                     raise # 통합 계정 조회 시 발생하는 E501은 재시도하지 않고 바로 상위로 전파
@@ -161,7 +162,7 @@ def get_total_collateral(force=False):
 
     equity = Decimal("0")
     
-    # 🔧 수정: 통합 계정 조회 로직 완전히 제거. 이전처럼 선물 계정만 조회
+    # 통합 계정 조회 로직 완전히 제거. 이전처럼 선물 계정만 조회
     acc = _get_api_response(api.list_futures_accounts, SETTLE)
     if acc:
         equity = Decimal(str(getattr(acc, 'available', '0')))
@@ -226,7 +227,7 @@ def is_duplicate(data):
             return True
 
         # 2. 심볼+방향 기반 쿨다운 체크
-        if recent_signals.get(symbol_id) and (now - recent_signals[symbol_id]["time"] < COOLDOWN_SECONDS):
+        if recent_signals.get(symbol_id) and (now - recent_signals[symbol_id]["time"] < COOLDOWN_SECONDS): # COOLDOWN_SECONDS 전역 변수 사용
             log_debug(f"🔄 중복 신호 무시 ({data.get('symbol', '')})", f"'{symbol_id}' 쿨다운({COOLDOWN_SECONDS}초) 중.")
             return True
 
@@ -332,24 +333,26 @@ def is_sl_rescue_condition(symbol):
         
         # 시간 감쇠 적용된 SL 가격 계산 (PineScript 로직과 동일)
         original_tp, original_sl, entry_start_time = get_tp_sl(symbol, pos["entry_count"])
+        
+        # 🔧 수정: SL 임계값 0.01%로 변경 (Decimal("0.0001"))
+        sl_proximity_threshold = Decimal("0.0001") # 사용자 요청: 0.01% 임계값
+        
         time_elapsed = time.time() - entry_start_time
         periods_15s = int(time_elapsed / 15)
         
         sl_decay_amt_ps, sl_min_pct_ps = Decimal("0.004") / 100, Decimal("0.09") / 100
         symbol_weight_sl = Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
         sl_reduction = Decimal(str(periods_15s)) * (sl_decay_amt_ps * symbol_weight_sl)
-        current_sl_pct_adjusted = max(sl_min_pct_ps, original_sl - sl_reduction)
+        adjusted_sl = max(sl_min_pct_ps, original_sl - sl_reduction)
         
-        sl_price = avg_price * (1 - current_sl_pct_adjusted) if side == "buy" else avg_price * (1 + current_sl_pct_adjusted)
-        
-        sl_proximity_threshold = Decimal("0.0001") # 0.01% 임계값
+        sl_price = avg_price * (1 - adjusted_sl) if side == "buy" else avg_price * (1 + adjusted_sl)
         
         # SL 가격 근접 및 손실 상태 확인
         is_near_sl = abs(current_price - sl_price) / sl_price <= sl_proximity_threshold
         is_underwater = (side == "buy" and current_price < avg_price) or (side == "sell" and current_price > avg_price)
         
         if is_near_sl and is_underwater:
-            log_debug(f"🚨 SL-Rescue 조건 충족 ({symbol})", f"현재가: {current_price:.8f}, 손절가: {sl_price:.8f}, 차이: {abs(current_price - sl_price) / sl_price * 100:.4f}% (<{sl_proximity_threshold*100:.2f}%), 현재 손절률: {current_sl_pct_adjusted*100:.2f}%")
+            log_debug(f"🚨 SL-Rescue 조건 충족 ({symbol})", f"현재가: {current_price:.8f}, 손절가: {sl_price:.8f}, 차이: {abs(current_price - sl_price) / sl_price * 100:.4f}% (<{sl_proximity_threshold*100:.2f}%), 현재 손절률: {adjusted_sl*100:.2f}%")
         return is_near_sl and is_underwater
 
 # ========================================
@@ -514,10 +517,10 @@ def status():
                 }
         
         return jsonify({
-            "status": "running", "version": "v6.12_no_unified_account", "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
+            "status": "running", "version": "v6.12_sl_0_01pct_error_fixed", "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": positions, "cooldown_seconds": COOLDOWN_SECONDS,
             "max_entries_per_symbol": 5, "max_sl_rescue_per_position": 3,
-            "sl_rescue_proximity_threshold": float(Decimal("0.0005")) * 100,
+            "sl_rescue_proximity_threshold": float(Decimal("0.0001")) * 100, # 0.01%로 표시
             "pyramiding_entry_ratios": [float(r) for r in [Decimal("20"), Decimal("40"), Decimal("120"), Decimal("480"), Decimal("960")]],
             "symbol_weights": {sym: {"tp_mult": cfg["tp_mult"], "sl_mult": cfg["sl_mult"]} for sym, cfg in SYMBOL_CONFIG.items()},
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
@@ -567,11 +570,16 @@ def check_tp_sl(ticker):
         with position_lock:
             pos = position_state.get(symbol, {})
             entry_price, side, entry_count = pos.get("price"), pos.get("side"), pos.get("entry_count", 0)
-            if not entry_price or not side or entry_count == 0: return # 활성 포지션 없음
+            if not entry_price or not side or entry_count == 0:
+                # 활성 포지션이 없거나 유효하지 않으면 여기서 바로 반환
+                return
             
             symbol_weight_tp, symbol_weight_sl = Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"])), Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
             original_tp, original_sl, entry_start_time = get_tp_sl(symbol, entry_count)
-            time_elapsed, periods_15s = time.time() - entry_start_time, int(time_elapsed / 15)
+            
+            # 🔧 수정: time_elapsed와 periods_15s를 별도로 계산하여 UnboundLocalError 방지
+            time_elapsed = time.time() - entry_start_time
+            periods_15s = int(time_elapsed / 15)
             
             # TP/SL 시간 감쇠 계산 (PineScript v6.12 로직 반영)
             tp_decay_amt_ps, tp_min_pct_ps = Decimal("0.002") / 100, Decimal("0.12") / 100
@@ -709,7 +717,7 @@ def handle_entry(data):
 # ========================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.12 (통합 계정 조회 로직 제거 최종 버전) - 실행 중...")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.12 (SL 임계값 0.01% 및 UnboundLocalError 해결) - 실행 중...")
     log_debug("📊 현재 설정", f"감시 심볼: {len(SYMBOL_CONFIG)}개, 서버 쿨다운: {COOLDOWN_SECONDS}초, 최대 피라미딩 진입: 5회")
     
     # 설정 로깅
@@ -719,7 +727,7 @@ if __name__ == "__main__":
                        ("📊 피라미딩 진입 비율", "1차: 20%, 2차: 40%, 3차: 120%, 4차: 480%, 5차: 960% (자산 대비)"),
                        ("📉 단계별 TP (가중치 적용 전)", "1차: 0.5%, 2차: 0.35%, 3차: 0.3%, 4차: 0.2%, 5차: 0.15%"),
                        ("📉 단계별 SL (가중치 적용 전)", "1차: 4.0%, 2차: 3.8%, 3차: 3.5%, 4차: 3.3%, 5차: 3.0%"),
-                       ("🚨 손절직전 진입 (SL-Rescue)", f"범위: {Decimal('0.0005')*100:.2f}%, 수량 가중치: 150%, 최대 진입: 3회 (다른 조건 무시)"),
+                       ("🚨 손절직전 진입 (SL-Rescue)", f"범위: {Decimal('0.0001')*100:.2f}%, 수량 가중치: 150%, 최대 진입: 3회 (다른 조건 무시)"),
                        ("💡 최소 수량/명목 금액 보장", "계산 수량이 최소 규격 미달 시 자동으로 조정하여 주문.")]:
         log_debug(label, data)
     
