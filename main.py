@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.12 - 5단계 피라미딩 완전 대응
+Gate.io 자동매매 서버 v6.12 - 기존 계산 방식 + 최소 수량 보장
 
 주요 기능:
-1. 피라미딩 5회 진입 (0.2%→0.4%→1.2%→4.8%→9.6%)
-2. 심볼별 가중치 적용 (BTC 0.5, ETH 0.6, SOL 0.8, PEPE/DOGE 1.2)
-3. 시간 경과 TP/SL 감소 (15초마다)
-4. 손절직전 진입 150% 가중치
-5. 시간대별 진입량 조절 (야간 50%)
+1. 5단계 피라미딩 (기존 방식: 20%→40%→120%→480%→960%)
+2. 손절직전 진입 (SL_Rescue) - 150% 가중치, 최대 3회
+3. 최소 수량 미달 시 자동으로 최소 수량으로 주문
+4. 심볼별 가중치 적용 및 시간 감쇠 TP/SL
 """
 
 import os
@@ -35,8 +34,6 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
-
-# Werkzeug 로깅 비활성화
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 def log_debug(tag, msg, exc_info=False):
@@ -63,10 +60,9 @@ api = FuturesApi(client)
 unified_api = UnifiedApi(client)
 
 # ========================================
-# 3. 상수 및 설정
+# 3. 상수 및 설정 (기존 방식 복원)
 # ========================================
 
-# 🔧 수정: 쿨다운 10초로 변경 (사용자 요청)
 COOLDOWN_SECONDS = 10
 
 # 심볼 매핑
@@ -82,31 +78,31 @@ SYMBOL_MAPPING = {
     "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT", "DOGE_USDT": "DOGE_USDT", "DOGE": "DOGE_USDT",
 }
 
-# 🔧 수정: 심볼별 가중치 업데이트 (PineScript v6.12 기준)
+# ✅ 기존 설정 복원
 SYMBOL_CONFIG = {
     "BTC_USDT": {
         "min_qty": Decimal("1"), 
         "qty_step": Decimal("1"), 
         "contract_size": Decimal("0.0001"), 
         "min_notional": Decimal("5"), 
-        "tp_mult": 0.5,  # 0.6 → 0.5로 변경
-        "sl_mult": 0.5   # 0.6 → 0.5로 변경
+        "tp_mult": 0.5,
+        "sl_mult": 0.5
     },
     "ETH_USDT": {
         "min_qty": Decimal("1"), 
         "qty_step": Decimal("1"), 
         "contract_size": Decimal("0.01"), 
         "min_notional": Decimal("5"), 
-        "tp_mult": 0.6,  # 동일
-        "sl_mult": 0.6   # 동일
+        "tp_mult": 0.6,
+        "sl_mult": 0.6
     },
     "SOL_USDT": {
         "min_qty": Decimal("1"), 
         "qty_step": Decimal("1"), 
         "contract_size": Decimal("1"), 
         "min_notional": Decimal("5"), 
-        "tp_mult": 0.8,  # 0.9 → 0.8로 변경
-        "sl_mult": 0.8   # 0.9 → 0.8로 변경
+        "tp_mult": 0.8,
+        "sl_mult": 0.8
     },
     "ADA_USDT": {
         "min_qty": Decimal("1"), 
@@ -135,7 +131,7 @@ SYMBOL_CONFIG = {
     "PEPE_USDT": {
         "min_qty": Decimal("1"), 
         "qty_step": Decimal("1"), 
-        "contract_size": Decimal("10000000"), 
+        "contract_size": Decimal("10000000"),  # ✅ 기존 값으로 복원
         "min_notional": Decimal("5"), 
         "tp_mult": 1.2,
         "sl_mult": 1.2
@@ -234,7 +230,7 @@ def get_price(symbol):
         return Decimal("0")
 
 # ========================================
-# 6. TP/SL 저장 및 관리 (수정됨)
+# 6. TP/SL 저장 및 관리 (PineScript v6.12 호환)
 # ========================================
 
 def store_tp_sl(symbol, tp, sl, entry_number):
@@ -263,9 +259,8 @@ def get_tp_sl(symbol, entry_number=None):
                 return data["tp"], data["sl"], data["entry_time"]
     
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
-    # 🔧 수정: 0.005 → 0.006 (0.5% → 0.6%), 4.0% 유지
-    default_tp = Decimal("0.006") * Decimal(str(cfg["tp_mult"]))  # 변경됨
-    default_sl = Decimal("0.04") * Decimal(str(cfg["sl_mult"]))   # 동일
+    default_tp = Decimal("0.006") * Decimal(str(cfg["tp_mult"]))  # 0.6%
+    default_sl = Decimal("0.04") * Decimal(str(cfg["sl_mult"]))   # 4.0%
     return default_tp, default_sl, time.time()
 
 # ========================================
@@ -277,7 +272,6 @@ def get_time_based_multiplier():
     now_kst = datetime.now(KST)
     hour = now_kst.hour
 
-    # 한국 시간 밤 10시(22)부터 아침 9시(08:59)까지는 50%만 진입
     if hour >= 22 or hour < 9:
         log_debug("⏰ 시간대 수량 조절", f"야간 시간({now_kst.strftime('%H:%M')}), 배수: 0.5 적용")
         return Decimal("0.5")
@@ -285,7 +279,7 @@ def get_time_based_multiplier():
     return Decimal("1.0")
     
 def is_duplicate(data):
-    """중복 신호 체크 (수정된 쿨다운 시간 적용)"""
+    """중복 신호 체크"""
     with signal_lock:
         now = time.time()
         symbol = data.get("symbol", "")
@@ -305,8 +299,7 @@ def is_duplicate(data):
                 last_signal = recent_signals[key]
                 time_diff = now - last_signal["time"]
                 
-                # 🔧 수정: 12초 → 10초로 변경
-                if time_diff < 10:
+                if time_diff < COOLDOWN_SECONDS:
                     return True
             
             recent_signals[key] = {"time": now, "id": signal_id}
@@ -325,11 +318,11 @@ def is_duplicate(data):
         return False
 
 # ========================================
-# 8. 포지션 크기 계산 (수정됨)
+# 8. 수량 계산 (기존 방식 + 최소 수량 보장)
 # ========================================
 
 def calculate_position_size(symbol, signal_type, data=None, entry_multiplier=Decimal("1.0")):
-    """포지션 크기 계산 (손절직전 가중치 포함)"""
+    """포지션 크기 계산 (기존 방식 + 최소 수량 보장)"""
     cfg = SYMBOL_CONFIG[symbol]
     equity = get_total_collateral()
     price = get_price(symbol)
@@ -343,17 +336,17 @@ def calculate_position_size(symbol, signal_type, data=None, entry_multiplier=Dec
     if symbol in position_state:
         entry_count = position_state[symbol].get("entry_count", 0)
     
-    # 🔧 수정: PineScript v6.12의 5단계 비율 적용
+    # ✅ 기존 방식 복원: 20%, 40%, 120%, 480%, 960%
     entry_ratios = [
-        Decimal("0.20"), Decimal("0.40"), Decimal("1.2"), 
-        Decimal("4.8"), Decimal("9.6")
+        Decimal("20"), Decimal("40"), Decimal("120"), 
+        Decimal("480"), Decimal("960")
     ]
     
     if entry_count >= len(entry_ratios):
         log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"진입 횟수: {entry_count}")
         return Decimal("0")
     
-    # 👇 손절 직전 진입 가중치 체크
+    # 손절 직전 진입 가중치 체크
     is_sl_rescue = signal_type == "sl_rescue" or (data and ("SL_Rescue" in data.get("type", "")))
     
     ratio = entry_ratios[entry_count]
@@ -361,10 +354,10 @@ def calculate_position_size(symbol, signal_type, data=None, entry_multiplier=Dec
     
     # 손절 직전이면 50% 추가 가중치 적용 (총 150%)
     if is_sl_rescue:
-        ratio = ratio * Decimal("1.5")  # 150% 적용
+        ratio = ratio * Decimal("1.5")
         log_debug(f"🚨 손절직전 가중치 적용 ({symbol})", f"기본 → 150% 증량")
     
-    # 정밀도 향상을 위한 단계별 계산
+    # ✅ 기존 계산 방식 유지
     ratio_decimal = ratio / Decimal("100")
     position_value = equity * ratio_decimal * entry_multiplier
     contract_value = price * cfg["contract_size"]
@@ -372,21 +365,28 @@ def calculate_position_size(symbol, signal_type, data=None, entry_multiplier=Dec
     
     # 수량 조정
     qty_adjusted = (raw_qty / cfg["qty_step"]).quantize(Decimal('1'), rounding=ROUND_DOWN)
-    final_qty = qty_adjusted * cfg["qty_step"]
-    final_qty = max(final_qty, cfg["min_qty"])
+    calculated_qty = qty_adjusted * cfg["qty_step"]
+    
+    # ✅ 중요: 최소 수량 보장
+    final_qty = max(calculated_qty, cfg["min_qty"])
     
     # 로그에 상세 정보 추가
     weight_info = "가중(+50%)" if is_sl_rescue else "일반"
     log_debug(f"📊 수량 계산 상세 ({symbol})", 
              f"진입 #{next_entry_number}/5, 비율: {float(ratio)}% ({weight_info}), "
              f"자산: {equity}, 포지션가치: {position_value}, "
-             f"계약가치: {contract_value}, 최종수량: {final_qty}")
+             f"계약가치: {contract_value}, 계산수량: {calculated_qty}, 최종수량: {final_qty}")
     
-    # 최소 주문금액 체크
+    # 최소 주문금액 체크 (최종 수량 기준)
     value = final_qty * price * cfg["contract_size"]
     if value < cfg["min_notional"]:
-        log_debug(f"⚠️ 최소 주문금액 미달 ({symbol})", f"계산값: {value}, 최소: {cfg['min_notional']}")
-        return Decimal("0")
+        # 최소 주문금액에 맞는 수량으로 조정
+        min_qty_for_notional = cfg["min_notional"] / (price * cfg["contract_size"])
+        min_qty_rounded = (min_qty_for_notional / cfg["qty_step"]).quantize(Decimal('1'), rounding=ROUND_DOWN) * cfg["qty_step"]
+        final_qty = max(final_qty, min_qty_rounded)
+        
+        log_debug(f"💡 최소 주문금액 조정 ({symbol})", 
+                 f"기존: {calculated_qty} → 최종: {final_qty} (최소금액: ${cfg['min_notional']})")
     
     return final_qty
 
@@ -454,9 +454,10 @@ def place_order(symbol, side, qty, entry_number, time_multiplier):
             cfg = SYMBOL_CONFIG[symbol]
             qty_dec = Decimal(str(qty)).quantize(cfg["qty_step"], rounding=ROUND_DOWN)
             
+            # ✅ 최소 수량 보장
             if qty_dec < cfg["min_qty"]:
-                log_debug(f"⚠️ 최소 수량 미달 ({symbol})", f"계산: {qty_dec}, 최소: {cfg['min_qty']}")
-                return False
+                qty_dec = cfg["min_qty"]
+                log_debug(f"💡 최소 수량 적용 ({symbol})", f"계산: {qty} → 적용: {qty_dec}")
             
             size = float(qty_dec) if side == "buy" else -float(qty_dec)
             
@@ -489,7 +490,7 @@ def place_order(symbol, side, qty, entry_number, time_multiplier):
             return False
 
 def close_position(symbol, reason="manual"):
-    """포지션 청산 (손절직전 카운터 리셋 포함)"""
+    """포지션 청산"""
     with position_lock:
         try:
             api.create_futures_order(
@@ -499,13 +500,11 @@ def close_position(symbol, reason="manual"):
             
             log_debug(f"✅ 청산 완료 ({symbol})", f"이유: {reason}")
             
-            # sl_entry_count 리셋
             if symbol in position_state:
                 position_state[symbol]["entry_count"] = 0
                 position_state[symbol]["entry_time"] = None
                 position_state[symbol]["sl_entry_count"] = 0
             
-            # 관련 데이터 정리
             with signal_lock:
                 keys = [k for k in recent_signals.keys() if k.startswith(symbol + "_")]
                 for k in keys:
@@ -525,7 +524,7 @@ def close_position(symbol, reason="manual"):
             return False
 
 # ========================================
-# 11. Flask 라우트 (복원 및 강화)
+# 11. Flask 라우트
 # ========================================
 
 @app.route("/ping", methods=["GET", "HEAD"])
@@ -548,13 +547,11 @@ def log_request():
     if request.path != "/ping":
         log_debug("🌐 요청", f"{request.method} {request.path}")
 
-# ✅ 복원: 누락된 기본 경로 라우트 추가
 @app.route("/", methods=["POST"])
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """웹훅 처리 (완전 복원된 파싱 로직)"""
+    """웹훅 처리"""
     try:
-        # ✅ 복원: 강력한 데이터 파싱 로직
         raw_data = request.get_data(as_text=True)
         log_debug("📩 원본 데이터", f"길이: {len(raw_data)}, 내용: {raw_data[:200]}...")
         
@@ -677,7 +674,7 @@ def status():
         return jsonify({"error": str(e)}), 500
 
 # ========================================
-# 12. WebSocket 모니터링 (수정된 TP/SL 감쇠 로직)
+# 12. WebSocket 모니터링 (PineScript v6.12 호환)
 # ========================================
 
 async def price_monitor():
@@ -729,7 +726,7 @@ async def price_monitor():
         await asyncio.sleep(5)
 
 def check_tp_sl(ticker):
-    """TP/SL 체크 (15초마다 감소) - 수정된 감쇠율 적용"""
+    """TP/SL 체크 (15초마다 감소) - PineScript v6.12 호환"""
     try:
         symbol = ticker.get("contract")
         price = Decimal(str(ticker.get("last", "0")))
@@ -753,7 +750,7 @@ def check_tp_sl(ticker):
             time_elapsed = time.time() - entry_time
             periods_15s = int(time_elapsed / 15)
             
-            # 🔧 수정: PineScript v6.12의 감쇠율 적용 (0.002%, 0.004%)
+            # PineScript v6.12의 감쇠율 적용
             tp_decay_weighted = (Decimal("0.002") / 100) * symbol_weight
             tp_reduction = Decimal(str(periods_15s)) * tp_decay_weighted
             adjusted_tp = max(Decimal("0.0012"), original_tp - tp_reduction)  # 최소 0.12%
@@ -795,51 +792,7 @@ def check_tp_sl(ticker):
         log_debug(f"❌ TP/SL 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e))
 
 # ========================================
-# 13. 백그라운드 모니터링
-# ========================================
-
-def position_monitor():
-    """포지션 상태 주기적 모니터링"""
-    while True:
-        try:
-            time.sleep(300)
-            
-            total_value = Decimal("0")
-            active_positions = []
-            
-            for symbol in SYMBOL_CONFIG:
-                if update_position_state(symbol):
-                    pos = position_state.get(symbol, {})
-                    if pos.get("side"):
-                        total_value += pos["value"]
-                        entry_count = pos.get("entry_count", 0)
-                        tp_mult = SYMBOL_CONFIG[symbol]["tp_mult"]
-                        
-                        pyramid_info = ""
-                        if symbol in pyramid_tracking:
-                            tracking = pyramid_tracking[symbol]
-                            pyramid_info = f", 신호: {tracking['signal_count']}회"
-                        
-                        active_positions.append(
-                            f"{symbol}: {pos['side']} {pos['size']} @ {pos['price']} "
-                            f"(진입 #{entry_count}/5, 가중치: {tp_mult}{pyramid_info})"
-                        )
-            
-            if active_positions:
-                equity = get_total_collateral()
-                exposure_pct = (total_value / equity * 100) if equity > 0 else 0
-                log_debug("📊 포지션 현황", 
-                         f"활성: {len(active_positions)}개, "
-                         f"총 가치: {total_value:.2f} USDT, "
-                         f"노출도: {exposure_pct:.1f}%")
-                for pos_info in active_positions:
-                    log_debug("  └", pos_info)
-                
-        except Exception as e:
-            log_debug("❌ 포지션 모니터링 오류", str(e))
-
-# ========================================
-# 워커 스레드 정의 (완전 복원)
+# 워커 스레드 정의
 # ========================================
 
 def worker(idx):
@@ -860,7 +813,7 @@ def worker(idx):
             time.sleep(1)
 
 def handle_entry(data):
-    """진입 처리 로직 (완전 복원 + 수정사항 적용)"""
+    """진입 처리 로직 (기존 방식 + PineScript v6.12 호환)"""
     try:
         raw_symbol = data.get("symbol", "")
         side = data.get("side", "").lower()
@@ -902,7 +855,7 @@ def handle_entry(data):
         is_sl_rescue = "SL_Rescue" in entry_type or signal_type == "sl_rescue"
         
         if entry_count > 0 and not is_sl_rescue:
-            # 기존 추가 진입 로직 (동일)
+            # 기존 추가 진입 로직
             if symbol not in pyramid_tracking:
                 pyramid_tracking[symbol] = {"signal_count": 0, "last_entered": False}
             
@@ -942,44 +895,16 @@ def handle_entry(data):
                 log_debug(f"⚠️ 손절직전 최대 진입 도달 ({symbol})", f"현재: {sl_entry_count}/3")
                 return
             
-            # 손절가 근접 조건 재검증
-            entry_price = position_state[symbol]["price"]
-            current_price = get_price(symbol)
-            symbol_weight = Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
-            _, original_sl, entry_time = get_tp_sl(symbol, entry_count)
-            
-            time_elapsed = time.time() - entry_time
-            periods_15s = int(time_elapsed / 15)
-            
-            sl_decay_weighted = (Decimal("0.004") / 100) * symbol_weight
-            sl_reduction = Decimal(str(periods_15s)) * sl_decay_weighted
-            adjusted_sl = max(Decimal("0.0009"), original_sl - sl_reduction)
-            
-            sl_price = entry_price * (1 - adjusted_sl) if side == "long" else entry_price * (1 + adjusted_sl)
-            sl_proximity_threshold = Decimal("0.0005")  # 0.05%
-            
-            is_near_sl = False
-            if side == "long":
-                if current_price > sl_price and current_price < sl_price * (1 + sl_proximity_threshold):
-                    is_near_sl = True
-            else:
-                if current_price < sl_price and current_price > sl_price * (1 - sl_proximity_threshold):
-                    is_near_sl = True
-            
-            if not is_near_sl:
-                log_debug(f"⏭️ 손절직전 조건 불충족 ({symbol})", "손절가에 충분히 근접하지 않음")
-                return
-            
             # 손절 직전 카운터 증가
             position_state[symbol]["sl_entry_count"] = sl_entry_count + 1
-            log_debug(f"🚨 손절직전 진입 ({symbol})", f"#{sl_entry_count + 1}/3회, 손절가: {sl_price}, 현재가: {current_price}")
+            log_debug(f"🚨 손절직전 진입 ({symbol})", f"#{sl_entry_count + 1}/3회")
         
         # 모든 조건 통과 후 실제 진입 실행
         actual_entry_number = entry_count + 1
         
         # TP/SL 계산 (손절 직전은 기존 TP/SL 유지)
         if not is_sl_rescue:
-            # 🔧 수정: PineScript v6.12의 단계별 TP/SL 배열 적용
+            # PineScript v6.12의 단계별 TP/SL 배열 적용
             tp_map = [0.005, 0.0035, 0.003, 0.002, 0.0015]
             sl_map = [0.04, 0.038, 0.035, 0.033, 0.03]
             entry_idx = actual_entry_number - 1
@@ -989,7 +914,7 @@ def handle_entry(data):
                 sl = Decimal(str(sl_map[entry_idx])) * Decimal(str(symbol_weight))
                 store_tp_sl(symbol, tp, sl, actual_entry_number)
         
-        # 수량 계산 (손절 직전은 150% 가중치 적용)
+        # 수량 계산 (기존 방식 사용)
         qty = calculate_position_size(symbol, data.get("signal", "none"), data, entry_multiplier)
         
         if qty <= 0:
@@ -1015,7 +940,7 @@ def handle_entry(data):
 if __name__ == "__main__":
     """서버 시작"""
     
-    log_debug("🚀 서버 시작", "v6.12 - 5단계 피라미딩 완전 대응 (문제 해결 버전)")
+    log_debug("🚀 서버 시작", "v6.12 - 기존 계산 방식 + 최소 수량 보장")
     log_debug("📊 설정", f"심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초, 최대 진입: 5회")
     
     # 심볼별 가중치 로그
@@ -1025,14 +950,13 @@ if __name__ == "__main__":
         symbol_name = symbol.replace("_USDT", "")
         log_debug(f"  └ {symbol_name}", f"TP/SL 가중치: {tp_weight*100}%")
     
-    # 🔧 수정: 전략 설정 로그 업데이트
-    log_debug("📈 기본 설정", "익절률: 0.6%, 손절률: 4.0%")  # 0.5% → 0.6%로 변경
+    # 전략 설정 로그
+    log_debug("📈 기본 설정", "익절률: 0.6%, 손절률: 4.0%")
     log_debug("🔄 TP/SL 감소", "15초마다 TP -0.002%*가중치, SL -0.004%*가중치")
-    log_debug("📊 진입 비율", "1차: 0.2%, 2차: 0.4%, 3차: 1.2%, 4차: 4.8%, 5차: 9.6%")  # 수정됨
+    log_debug("📊 진입 비율", "1차: 20%, 2차: 40%, 3차: 120%, 4차: 480%, 5차: 960% (기존 방식)")
     log_debug("📉 단계별 TP", "1차: 0.5%, 2차: 0.35%, 3차: 0.3%, 4차: 0.2%, 5차: 0.15%")
     log_debug("📉 단계별 SL", "1차: 4.0%, 2차: 3.8%, 3차: 3.5%, 4차: 3.3%, 5차: 3.0%")
-    log_debug("🔄 추가진입", "1차: 건너뛰기, 2차: 가격 유리시, 3차+: 이전 진입시 건너뛰기")
-    log_debug("⏰ 시간대 조절", "야간(22:00-09:00) 50% 진입, 주간 100% 진입")
+    log_debug("💡 최소 수량", "계산 수량이 최소 수량보다 작으면 자동으로 최소 수량으로 주문")
     
     # 초기 자산 확인
     equity = get_total_collateral(force=True)
@@ -1061,12 +985,6 @@ if __name__ == "__main__":
     log_debug("🔄 백그라운드 작업", "시작...")
     
     threading.Thread(
-        target=position_monitor, 
-        daemon=True, 
-        name="PositionMonitor"
-    ).start()
-    
-    threading.Thread(
         target=lambda: asyncio.run(price_monitor()), 
         daemon=True, 
         name="PriceMonitor"
@@ -1082,8 +1000,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹서버", f"포트 {port}에서 실행")
     log_debug("✅ 준비 완료", "파인스크립트 v6.12 웹훅 대기중...")
-    
-    # ✅ 추가: 테스트 웹훅 확인 메시지
     log_debug("🔍 테스트 방법", f"POST http://localhost:{port}/webhook 또는 /status로 상태 확인")
     
     app.run(host="0.0.0.0", port=port, debug=False)
