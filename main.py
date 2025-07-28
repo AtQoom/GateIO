@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.12 - 모든 기능 유지, 코드 정리 및 최적화
+Gate.io 자동매매 서버 v6.12 - 모든 기능 유지, 코드 정리 및 최적화, API 재시도 로직 추가
 
 주요 기능:
 1. 5단계 피라미딩 (20%→40%→120%→480%→960%)
@@ -11,6 +11,7 @@ Gate.io 자동매매 서버 v6.12 - 모든 기능 유지, 코드 정리 및 최�
 5. 야간 시간 진입 수량 조절 (0.5배)
 6. TradingView 웹훅 기반 자동 주문
 7. 실시간 WebSocket을 통한 TP/SL 모니터링 및 자동 청산
+8. API 호출 시 일시적 오류에 대한 재시도 로직
 """
 
 import os
@@ -26,6 +27,7 @@ from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
 import queue
 import pytz
+import urllib.parse # webhook 파싱을 위해 추가
 
 # ========================================
 # 1. 로깅 설정
@@ -114,16 +116,24 @@ task_q = queue.Queue(maxsize=100) # 웹훅 요청을 비동기 워커 스레드�
 WORKER_COUNT = min(6, max(2, os.cpu_count() * 2)) # 병렬 처리를 위한 워커 스레드 수 (CPU 코어 수 기반)
 
 # ========================================
-# 5. 핵심 유틸리티 함수
+# 5. 핵심 유틸리티 함수 (API 재시도 로직 추가)
 # ========================================
 
 def _get_api_response(api_call, *args, **kwargs):
-    """API 호출을 캡슐화하고 예외를 처리하는 헬퍼 함수"""
-    try:
-        return api_call(*args, **kwargs)
-    except Exception as e:
-        log_debug("❌ API 호출 실패", str(e), exc_info=True)
-        return None
+    """API 호출을 캡슐화하고 예외 처리 및 재시도 로직을 포함합니다."""
+    max_retries = 3 # 최대 재시도 횟수
+    for attempt in range(max_retries):
+        try:
+            return api_call(*args, **kwargs)
+        except Exception as e:
+            if attempt < max_retries - 1:
+                # 재시도 전 로그 메시지 (스택 트레이스 없이)
+                log_debug("⚠️ API 호출 재시도", f"시도 {attempt + 1}/{max_retries}: {e}. 잠시 후 재시도합니다.")
+                time.sleep(2 ** attempt) # 지수 백오프 (1, 2, 4초 대기)
+            else:
+                # 모든 재시도 실패 시 최종 로그 메시지 (스택 트레이스 포함)
+                log_debug("❌ API 호출 최종 실패", str(e), exc_info=True)
+    return None # 모든 재시도 실패 시 None 반환
 
 def normalize_symbol(raw_symbol):
     """원본 심볼을 내부 표준 심볼명으로 정규화"""
@@ -203,10 +213,12 @@ def is_duplicate(data):
 
         # 1. PineScript ID를 통한 빠른 중복 체크 (5초 이내)
         if signal_id_from_pine and recent_signals.get(signal_id_from_pine) and (now - recent_signals[signal_id_from_pine]["time"] < 5):
+            log_debug(f"🔄 중복 신호 무시 ({data.get('symbol', '')})", f"PineScript ID '{signal_id_from_pine}' 5초 이내 중복.")
             return True
 
         # 2. 심볼+방향 기반 쿨다운 체크
         if recent_signals.get(symbol_id) and (now - recent_signals[symbol_id]["time"] < COOLDOWN_SECONDS):
+            log_debug(f"🔄 중복 신호 무시 ({data.get('symbol', '')})", f"'{symbol_id}' 쿨다운({COOLDOWN_SECONDS}초) 중.")
             return True
 
         # 신규 신호로 기록
@@ -271,7 +283,13 @@ def update_position_state(symbol):
     """Gate.io 포지션 상태 조회 및 내부 전역 변수 업데이트"""
     with position_lock:
         pos_info = _get_api_response(api.get_position, SETTLE, symbol)
-        size = Decimal(str(pos_info.size)) if pos_info and pos_info.size else Decimal("0")
+        size = Decimal("0")
+        if pos_info and pos_info.size:
+            try:
+                size = Decimal(str(pos_info.size))
+            except Exception:
+                log_debug(f"❌ 포지션 크기 변환 오류 ({symbol})", f"Invalid size received: {pos_info.size}. Treating as 0.")
+                size = Decimal("0")
         
         if size != 0: # 포지션이 열려있는 경우
             existing = position_state.get(symbol, {})
@@ -420,7 +438,7 @@ def webhook():
         except json.JSONDecodeError:
             if request.form: data = request.form.to_dict()
             elif "&" not in raw_data and "=" not in raw_data: # 단순 문자열 시도
-                try: data = json.loads(urllib.parse.unquote(raw_data))
+                try: data = json.loads(urllib.parse.unquote(raw_data)) # urllib.parse 임포트 필요
                 except Exception: pass
         
         if not data:
@@ -429,10 +447,12 @@ def webhook():
             return jsonify({"error": "Failed to parse data"}), 400
         
         symbol_raw, side, action = data.get("symbol", ""), data.get("side", "").lower(), data.get("action", "").lower()
-        log_debug("📊 파싱된 웹훅 데이터", f"심볼: {symbol_raw}, 방향: {side}, 액션: {action}, signal_type: {data.get('signal', 'N/A')}")
+        log_debug("📊 파싱된 웹훅 데이터", f"심볼: {symbol_raw}, 방향: {side}, 액션: {action}, signal_type: {data.get('signal', 'N/A')}, entry_type: {data.get('type', 'N/A')}")
         
         symbol = normalize_symbol(symbol_raw)
-        if not symbol or symbol not in SYMBOL_CONFIG: return jsonify({"error": f"Invalid symbol: {symbol_raw}"}), 400
+        if not symbol or symbol not in SYMBOL_CONFIG: 
+            log_debug("❌ 유효하지 않은 심볼", f"원본: {symbol_raw}. SYMBOL_CONFIG에 없음 또는 정규화 실패.")
+            return jsonify({"error": f"Invalid symbol: {symbol_raw}"}), 400
         
         if is_duplicate(data): return jsonify({"status": "duplicate_ignored"}), 200 # 중복 신호 무시
 
@@ -445,9 +465,13 @@ def webhook():
             if data.get("reason") in ["TP", "SL"]: return jsonify({"status": "ignored", "reason": "tp_sl_handled_by_server"}), 200 # 서버 자체 처리
             update_position_state(symbol)
             if position_state.get(symbol, {}).get("side"): # 포지션이 열려있으면 청산
+                log_debug(f"✅ TradingView 청산 신호 수신 ({symbol})", f"이유: {data.get('reason', '알 수 없음')}. 포지션 청산 시도.")
                 close_position(symbol, data.get("reason", "signal"))
+            else:
+                log_debug(f"💡 청산 실행 불필요 ({symbol})", "활성 포지션이 없거나 이미 청산되었습니다.")
             return jsonify({"status": "success", "action": "exit"})
         
+        log_debug("❌ 알 수 없는 웹훅 액션", f"수신된 액션: {action}. 처리되지 않았습니다.")
         return jsonify({"error": "Invalid action"}), 400     
         
     except Exception as e:
@@ -481,7 +505,7 @@ def status():
                 }
         
         return jsonify({
-            "status": "running", "version": "v6.12_optimized", "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
+            "status": "running", "version": "v6.12_retries", "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": positions, "cooldown_seconds": COOLDOWN_SECONDS,
             "max_entries_per_symbol": 5, "max_sl_rescue_per_position": 3,
             "sl_rescue_proximity_threshold": float(Decimal("0.0005")) * 100,
@@ -676,7 +700,7 @@ def handle_entry(data):
 # ========================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.12 (최종 정리 및 검증 버전) - 실행 중...")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.12 (재시도 로직 적용 최종 버전) - 실행 중...")
     log_debug("📊 현재 설정", f"감시 심볼: {len(SYMBOL_CONFIG)}개, 서버 쿨다운: {COOLDOWN_SECONDS}초, 최대 피라미딩 진입: 5회")
     
     # 설정 로깅
@@ -695,8 +719,13 @@ if __name__ == "__main__":
     log_debug("💰 초기 자산 확인", f"{equity:.2f} USDT" if equity > 0 else "자산 조회 실패 또는 잔고 부족. API 키 확인 필요.")
     
     initial_active_positions = []
-    for symbol in SYMBOL_CONFIG: update_position_state(symbol); pos = position_state.get(symbol, {});
-    if pos.get("side"): initial_active_positions.append(f"{symbol}: {pos['side']} {pos['size']:.4f} @ {pos['price']:.8f} (총 진입: #{pos.get('entry_count', 0)}/5, SL-Rescue: #{pos.get('sl_entry_count', 0)}/3)")
+    # SYMBOL_CONFIG의 각 심볼에 대해 초기 포지션 상태를 로드
+    for symbol in SYMBOL_CONFIG: 
+        # update_position_state는 이미 재시도 로직이 적용된 _get_api_response를 사용하므로 여기서 추가적인 try-except는 필요 없음
+        update_position_state(symbol) 
+        pos = position_state.get(symbol, {})
+        if pos.get("side"):
+            initial_active_positions.append(f"{symbol}: {pos['side']} {pos['size']:.4f} @ {pos['price']:.8f} (총 진입: #{pos.get('entry_count', 0)}/5, SL-Rescue: #{pos.get('sl_entry_count', 0)}/3)")
     log_debug("📊 초기 활성 포지션", f"서버 시작 시 {len(initial_active_positions)}개 감지." if initial_active_positions else "감지되지 않음.")
     for pos_info in initial_active_positions: log_debug("  └", pos_info)
     
@@ -712,7 +741,7 @@ if __name__ == "__main__":
         log_debug(f"⚙️ 워커-{i} 시작", f"워커 스레드 {i} 실행 중.")
         
     # Flask 웹 서버 실행
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 8080)) # 환경 변수에서 포트 가져오기 (기본 8080)
     log_debug("🌐 웹 서버 시작", f"Flask 웹 서버가 0.0.0.0:{port}에서 실행됩니다.")
     log_debug("✅ 준비 완료", "웹훅 신호를 기다리는 중입니다. (TradingView 알림 설정 확인)")
     log_debug("🔍 테스트 및 상태 확인 방법", f"POST http://localhost:{port}/webhook 으로 웹훅 테스트, GET http://localhost:{port}/status 로 서버 상태 확인.")
