@@ -695,21 +695,20 @@ def handle_entry(data):
         
         position_state[symbol]["sl_entry_count"] = sl_entry_count + 1 # SL-Rescue 카운트 증가
         log_debug(f"🚨 손절직전 진입 진행 ({symbol})", f"SL-Rescue #{sl_entry_count + 1}/3회 시도.")
-    else: # 일반 추가 진입 로직 (스킵 로직 적용)
+    else: # 일반 추가 진입 로직 (파인스크립트에서 이미 필터링됨)
         if entry_count > 0: # 1차 진입 이후만 해당
-            pyramid_tracking.setdefault(symbol, {"signal_count": 0, "last_entered": False})["signal_count"] += 1
-            tracking = pyramid_tracking[symbol]
+            # 🔧 수정: 파인스크립트에서 이미 건너뛰기가 적용되어 알림이 왔으므로
+            # 서버에서는 추가적인 건너뛰기 없이 바로 진입 처리
             
+            # 가격 조건만 체크 (평단보다 유리한 가격인지)
             current_price, avg_price = get_price(symbol), position_state[symbol]["price"]
             price_ok = (current_pos_side == "buy" and current_price < avg_price) or (current_pos_side == "sell" and current_price > avg_price)
             
-            should_skip_pyramid, skip_reason = False, ""
-            if tracking["signal_count"] == 1: should_skip_pyramid, skip_reason = True, "첫 번째 추가 진입 신호는 건너뜁니다."
-            elif tracking["signal_count"] == 2: should_skip_pyramid = not price_ok; skip_reason = "가격 조건 미충족." if should_skip_pyramid else ""
-            else: should_skip_pyramid = tracking["last_entered"] or not price_ok; skip_reason = ("직전 진입" if tracking["last_entered"] else "가격 조건 미충족.") if should_skip_pyramid else ""
-
-            if should_skip_pyramid: tracking["last_entered"] = False; log_debug(f"⏭️ 일반 추가 진입 건너뛰기 ({symbol})", f"신호 #{tracking['signal_count']}, 이유: {skip_reason}"); return
-            else: tracking["last_entered"] = True
+            if not price_ok:
+                log_debug(f"⏭️ 가격 조건 미충족 ({symbol})", f"현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
+                return
+            
+            log_debug(f"✅ 추가 진입 조건 충족 ({symbol})", f"파인스크립트 필터링 통과 신호")
 
     actual_entry_number = entry_count + 1
     
