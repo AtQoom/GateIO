@@ -11,7 +11,7 @@ Pine Script와 쿨다운 연동 강화.
 2. 손절직전 진입 (SL_Rescue) - 150% 가중치, 최대 3회, 0.05% 임계값
 3. 최소 수량 및 최소 명목 금액 보장
 4. 심볼별 가중치 적용 및 시간 감쇠 TP/SL
-5. 야간 시간 진입 수량 조절 (0.5배)
+5. 야간 시간 진입 수량 조절 (0.5배>1.0배)
 6. TradingView 웹훅 기반 자동 주문
 7. 실시간 WebSocket을 통한 TP/SL 모니터링 및 자동 청산
 8. API 호출 시 일시적 오류에 대한 재시도 로직
@@ -214,8 +214,8 @@ def get_tp_sl(symbol, entry_number=None):
 # ========================================
 
 def get_time_based_multiplier():
-    """한국 시간 기준, 시간대별 진입 배수를 반환 (야간 시간 0.5배)"""
-    return Decimal("0.5") if KST.localize(datetime.now()).hour >= 22 or KST.localize(datetime.now()).hour < 9 else Decimal("1.0")
+    """한국 시간 기준, 시간대별 진입 배수를 반환 (야간 시간 1.0배)"""
+    return Decimal("1.0") if KST.localize(datetime.now()).hour >= 22 or KST.localize(datetime.now()).hour < 9 else Decimal("1.0")
     
 def is_duplicate(data):
     """웹훅 신호의 중복을 체크하여 동일한 신호가 COOLDOWN_SECONDS 이내에 여러 번 처리되는 것을 방지"""
