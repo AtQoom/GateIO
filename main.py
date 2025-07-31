@@ -7,7 +7,7 @@ SL 임계값 0.01%로 변경 및 UnboundLocalError 해결.
 Pine Script와 쿨다운 연동 강화.
 
 주요 기능:
-1. 5단계 피라미딩 (20%→40%→120%→480%→960%)
+1. 5단계 피라미딩 (20%→30%→70%→160%→500%)
 2. 손절직전 진입 (SL_Rescue) - 150% 가중치, 최대 3회, 0.05% 임계값
 3. 최소 수량 및 최소 명목 금액 보장
 4. 심볼별 가중치 적용 및 시간 감쇠 TP/SL
@@ -541,7 +541,7 @@ def status():
             "balance_usdt": float(equity), "active_positions": positions, "cooldown_seconds": COOLDOWN_SECONDS,
             "max_entries_per_symbol": 5, "max_sl_rescue_per_position": 3,
             "sl_rescue_proximity_threshold": float(Decimal("0.0001")) * 100, # 0.01%로 표시
-            "pyramiding_entry_ratios": [float(r) for r in [Decimal("20"), Decimal("40"), Decimal("120"), Decimal("480"), Decimal("960")]],
+            "pyramiding_entry_ratios": [float(r) for r in [Decimal("20"), Decimal("30"), Decimal("70"), Decimal("120"), Decimal("500")]],
             "symbol_weights": {sym: {"tp_mult": cfg["tp_mult"], "sl_mult": cfg["sl_mult"]} for sym, cfg in SYMBOL_CONFIG.items()},
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
         })
@@ -714,7 +714,7 @@ def handle_entry(data):
     
     # TP/SL 저장 (SL-Rescue는 기존 포지션의 TP/SL을 따라감)
     # 🔧 수정: is_sl_rescue_signal 여부와 관계없이 TP/SL 갱신
-    tp_map = [Decimal("0.005"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002"), Decimal("0.0015")]
+    tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
     sl_map = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
     
     if actual_entry_number <= len(tp_map): # 배열 범위 확인
@@ -743,8 +743,8 @@ if __name__ == "__main__":
     for label, data in [("🎯 심볼별 TP/SL 가중치", {sym.replace('_USDT', ''): f"TP: {cfg['tp_mult']*100:.0f}%, SL: {cfg['sl_mult']*100:.0f}%" for sym, cfg in SYMBOL_CONFIG.items()}),
                        ("📈 전략 기본 설정", "기본 익절률: 0.6%, 기본 손절률: 4.0%"),
                        ("🔄 TP/SL 시간 감쇠", "15초마다 TP -0.002%*가중치, SL -0.004%*가중치 (최소 TP 0.12%, SL 0.09%)"),
-                       ("📊 피라미딩 진입 비율", "1차: 20%, 2차: 40%, 3차: 120%, 4차: 480%, 5차: 960% (자산 대비)"),
-                       ("📉 단계별 TP (가중치 적용 전)", "1차: 0.5%, 2차: 0.35%, 3차: 0.3%, 4차: 0.2%, 5차: 0.15%"),
+                       ("📊 피라미딩 진입 비율", "1차: 20%, 2차: 30%, 3차: 70%, 4차: 160%, 5차: 500% (자산 대비)"),
+                       ("📉 단계별 TP (가중치 적용 전)", "1차: 0.5%, 2차: 0.4%, 3차: 0.35%, 4차: 0.3%, 5차: 0.2%"),
                        ("📉 단계별 SL (가중치 적용 전)", "1차: 4.0%, 2차: 3.8%, 3차: 3.5%, 4차: 3.3%, 5차: 3.0%"),
                        ("🚨 손절직전 진입 (SL-Rescue)", f"범위: {Decimal('0.0001')*100:.2f}%, 수량 가중치: 150%, 최대 진입: 3회 (다른 조건 무시)"),
                        ("💡 최소 수량/명목 금액 보장", "계산 수량이 최소 규격 미달 시 자동으로 조정하여 주문.")]:
