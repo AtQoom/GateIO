@@ -7,11 +7,12 @@ from datetime import datetime
 import pytz
 import logging
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
+from gate_api import ApiClient, Configuration, FuturesApi, SpotApi, WalletApi, FuturesOrder
 from gate_api import exceptions as gate_api_exceptions
 
-# --- 로그 설정 ---
-logging.basicConfig(level=logging.DEBUG, format='[%(asctime)s] [%(levelname)s] %(message)s')
+# --- 로깅 ---
+logging.basicConfig(level=logging.DEBUG,
+    format='[%(asctime)s] [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
 API_KEY = os.environ.get("API_KEY", "")
@@ -21,6 +22,8 @@ SETTLE = "usdt"
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
+spot_api = SpotApi(client)
+wallet_api = WalletApi(client)
 KST = pytz.timezone('Asia/Seoul')
 
 position_state = {}
@@ -45,7 +48,7 @@ SYMBOL_MAPPING = {
     "PEPEUSDT": "PEPE_USDT", "PEPEUSDT.P": "PEPE_USDT", "PEPEUSDTPERP": "PEPE_USDT",
     "XRPUSDT": "XRP_USDT", "XRPUSDT.P": "XRP_USDT", "XRPUSDTPERP": "XRP_USDT",
     "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT",
-    "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT",
+    "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT"
 }
 
 SYMBOL_CONFIG = {
@@ -99,11 +102,31 @@ def fetch_market_price(symbol: str) -> Decimal:
         logger.error(f"fetch_market_price error: {e}")
     return Decimal("0")
 
-# **자산조회: 예전처럼 선물 계정에서만 조회**
+# --- Gate.io USDT 총 자산 통합 조회 (선물 + 현물 + 통합계정 USDT) ---
 def get_total_collateral(force=False):
     try:
-        data = api.get_futures_account(SETTLE)
-        return Decimal(str(data.total)) if data and data.total else Decimal("0")
+        # USDT 선물계좌
+        total = Decimal("0")
+        futures_acct = api.get_futures_account(SETTLE)
+        if futures_acct and futures_acct.total:
+            total += Decimal(str(futures_acct.total))
+        # 현물 USDT(잔고) 포함 옵션
+        try:
+            spot_balances = wallet_api.list_sub_account_assets('USDT')
+            for bal in spot_balances:
+                if hasattr(bal, 'available'):
+                    total += Decimal(str(bal.available))
+        except Exception:  # 서브계정 잔고 없는 경우 무시
+            pass
+        # 통합계정(메인) 현물 USDT
+        try:
+            main_bal = wallet_api.get_wallet_total_balance(currency='USDT')
+            if main_bal and hasattr(main_bal, 'available'):
+                total += Decimal(str(main_bal.available))
+        except Exception:
+            pass
+        logger.info(f"[자산조회] 총 USDT 자산(선물+현물): {total}")
+        return total
     except Exception as e:
         logger.error(f"[자산조회] 에러: {e}", exc_info=True)
         return Decimal("0")
@@ -172,12 +195,11 @@ def on_entry_signal_received(symbol_raw: str, side_raw: str):
             "tp_decay_amt": Decimal("0.00002"),
             "side": side
         }
-    # 자산 조회해서 진입 수량 계산! (예: 자산의 20%만 진입 등)
     equity = get_total_collateral()
     price = fetch_market_price(symbol)
     cfg = SYMBOL_CONFIG.get(symbol, {})
     if equity > 0 and price > 0:
-        notional = equity * Decimal("0.2")  # 1차 진입 20% 예시(2차 이상은 피라미딩 비율 반영 가능)
+        notional = equity * Decimal("0.2")  # 20% 진입 예시
         qty = (notional / (price * cfg.get("contract_size", Decimal("0.0001")))).quantize(cfg["qty_step"], rounding=ROUND_DOWN)
         qty = max(qty, cfg["min_qty"])
         execute_market_order(symbol, qty, side)
@@ -322,13 +344,13 @@ def debug_status():
             s = position_state.get(key)
             if not s:
                 return jsonify({"error": "symbol not found"}), 404
-            sanitized = {k: str(v) if isinstance(v, Decimal) else v for k, v in s.items()}
+            sanitized = {k: str(v) if isinstance(vv := v, Decimal) else vv for k, v in s.items()}
             return jsonify({key: sanitized}), 200
         sanitized = {k: {kk: str(vv) if isinstance(vv, Decimal) else vv for kk, vv in v.items()} for k, v in position_state.items()}
         return jsonify(sanitized), 200
 
 if __name__ == "__main__":
-    logger.info("[서버시작] Gate.io 자동매매 서버 (자산조회 완전 복원)")
+    logger.info("[서버시작] Gate.io 자동매매 서버 (완전 복원)")
     equity = get_total_collateral(force=True)
     logger.info(f"초기 자산: {equity} USDT")
 
