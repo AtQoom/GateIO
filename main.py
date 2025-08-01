@@ -10,11 +10,10 @@ from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 from gate_api import exceptions as gate_api_exceptions
 
-# --- 로깅 ---
+# --- 로그 설정 ---
 logging.basicConfig(level=logging.DEBUG, format='[%(asctime)s] [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- API KEY 설정 및 Gate.io 객체생성 ---
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
@@ -22,7 +21,6 @@ SETTLE = "usdt"
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
-
 KST = pytz.timezone('Asia/Seoul')
 
 position_state = {}
@@ -51,26 +49,16 @@ SYMBOL_MAPPING = {
 }
 
 SYMBOL_CONFIG = {
-    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.55")},
-    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.65")},
-    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.8")},
-    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
-    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
-    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
-                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
-    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"),
-                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.2")},
-    "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
-    "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
-                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.2")},
-    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
-                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.55")},
+    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.65")},
+    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.8")},
+    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.2")},
+    "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+    "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.2")},
+    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
 }
 
 def normalize_symbol(raw_symbol: str) -> str:
@@ -96,11 +84,7 @@ def fetch_position(symbol: str):
         if not pos_info or not pos_info.size:
             return None
         size = Decimal(str(pos_info.size))
-        return {
-            "avg_entry_price": Decimal(str(pos_info.entry_price)),
-            "size": abs(size),
-            "side": "buy" if size > 0 else "sell"
-        }
+        return {"avg_entry_price": Decimal(str(pos_info.entry_price)), "size": abs(size), "side": "buy" if size > 0 else "sell"}
     except Exception as e:
         logger.error(f"fetch_position error ({symbol}): {e}")
         return None
@@ -115,7 +99,7 @@ def fetch_market_price(symbol: str) -> Decimal:
         logger.error(f"fetch_market_price error: {e}")
     return Decimal("0")
 
-# **이전 코드 기반 자산조회 함수로 복원**
+# **자산조회: 예전처럼 선물 계정에서만 조회**
 def get_total_collateral(force=False):
     try:
         data = api.get_futures_account(SETTLE)
@@ -140,7 +124,9 @@ def execute_market_order(symbol, qty, side):
         logger.error(f"[주문실패] {symbol} {side} qty={qty}: {e}", exc_info=True)
         return False
 
-def calculate_dynamic_sl(entry_price: Decimal, elapsed_sec: int, sl_base: Decimal, sl_decay_sec: int, sl_decay_amt: Decimal, sl_multiplier: Decimal, sl_min: Decimal) -> Decimal:
+def calculate_dynamic_sl(entry_price: Decimal, elapsed_sec: int,
+                         sl_base: Decimal, sl_decay_sec: int, sl_decay_amt: Decimal,
+                         sl_multiplier: Decimal, sl_min: Decimal) -> Decimal:
     periods = elapsed_sec // sl_decay_sec
     decay_total = periods * sl_decay_amt * sl_multiplier
     return max(sl_min, sl_base - decay_total)
@@ -186,9 +172,18 @@ def on_entry_signal_received(symbol_raw: str, side_raw: str):
             "tp_decay_amt": Decimal("0.00002"),
             "side": side
         }
-    qty = Decimal("1")  # 실제 운영시 자산 조회 반영한 주문 수량 공식 추천
-    success = execute_market_order(symbol, qty, side)
-    logger.info(f"[Entry] {symbol} {side} 주문 실행 결과: {success}")
+    # 자산 조회해서 진입 수량 계산! (예: 자산의 20%만 진입 등)
+    equity = get_total_collateral()
+    price = fetch_market_price(symbol)
+    cfg = SYMBOL_CONFIG.get(symbol, {})
+    if equity > 0 and price > 0:
+        notional = equity * Decimal("0.2")  # 1차 진입 20% 예시(2차 이상은 피라미딩 비율 반영 가능)
+        qty = (notional / (price * cfg.get("contract_size", Decimal("0.0001")))).quantize(cfg["qty_step"], rounding=ROUND_DOWN)
+        qty = max(qty, cfg["min_qty"])
+        execute_market_order(symbol, qty, side)
+        logger.info(f"[Entry] {symbol} {side} 주문수량: {qty}")
+    else:
+        logger.warning(f"[Entry] {symbol} 자산/가격 조회 실패로 주문 불가: 자산={equity} 가격={price}")
 
 def is_sl_rescue_condition(symbol: str) -> bool:
     with position_lock:
@@ -247,11 +242,11 @@ def sl_rescue_monitor():
     while True:
         with position_lock:
             symbols = list(position_state.keys())
-        for sym in symbols:
+        for symbol in symbols:
             try:
-                run_sl_rescue(sym)
+                run_sl_rescue(symbol)
             except Exception as e:
-                logger.error(f"SL-Rescue 실행 예외({sym}): {e}")
+                logger.error(f"SL-Rescue 실행 예외({symbol}): {e}")
         time.sleep(0.2)
 
 def worker(worker_id):
@@ -333,7 +328,7 @@ def debug_status():
         return jsonify(sanitized), 200
 
 if __name__ == "__main__":
-    logger.info("[서버시작] Gate.io 자동매매 서버 (자산조회 최신 적용)")
+    logger.info("[서버시작] Gate.io 자동매매 서버 (자산조회 완전 복원)")
     equity = get_total_collateral(force=True)
     logger.info(f"초기 자산: {equity} USDT")
 
