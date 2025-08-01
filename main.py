@@ -447,7 +447,7 @@ def process_ticker(ticker: dict):
         return
     with position_lock:
         pos = position_state.get(symbol)
-        if not pos or not pos.get("side") or not pos.get("price"):
+        if not pos or not pos.get("side") or not pos.get("price") or pos.get("size", 0) == 0:
             return
         entry_price = pos["price"]
         side = pos["side"]
