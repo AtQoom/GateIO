@@ -90,14 +90,18 @@ def get_total_collateral(force=False):
         return account_cache["data"]
     equity = Decimal("0")
     try:
-        acc = _get_api_response(api.list_futures_accounts, SETTLE)
-        if acc and hasattr(acc, '__getitem__'):
-            acct0 = acc[0]
-            if hasattr(acct0, 'available'):
-                equity = Decimal(str(acct0.available))
-                log_debug("자산조회", f"{equity:.2f} USDT")
+        acct = api.get_futures_account("usdt")
+        # 최신 Gate.io는 "total"/"cross_margin_available" 등으로 표기할 수 있음
+        if hasattr(acct, 'total') and acct.total:
+            equity = Decimal(str(acct.total))
+        elif hasattr(acct, 'available') and acct.available:
+            equity = Decimal(str(acct.available))
+        else:
+            logger.warning(f"[자산조회] 최근 Gate.io API - 응답 필드: {acct}")
+        logger.info(f"[자산조회] 선물 계정 잔액: {equity} USDT")
     except Exception as e:
-        log_debug("자산조회 오류", str(e), exc_info=True)
+        logger.error(f"[자산조회] 에러: {e}", exc_info=True)
+        equity = Decimal("0")
     account_cache.update({"time": now, "data": equity})
     return equity
 
