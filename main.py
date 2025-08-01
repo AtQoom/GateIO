@@ -661,6 +661,7 @@ def webhook_handler():
                 return jsonify({"error": "Queue full"}), 429
 
         elif action in ("exit", "tp", "sl"):
+            update_position(symbol)  # << 꼭 먼저 실제 거래소에서 포지션 최신화!
             with position_lock:
                 pos = position_state.get(symbol)
                 if pos and pos.get("size", Decimal("0")) > 0:
@@ -668,7 +669,7 @@ def webhook_handler():
                     log_debug("FORCE_CLOSE", f"{symbol} {action.upper()} 알림으로 포지션 청산")
                     return jsonify({"status": f"{action}_closed"}), 200
                 else:
-                    log_debug("NO_POSITION_EXIT", f"{symbol} {action.upper()} 알림 - 포지션 없음, 작업 무시")
+                    log_debug("NO_POSITION_EXIT", f"{symbol} {action.upper()} 알림 - 실제 포지션 없음으로 무시")
                     return jsonify({"status": "no_position"}), 200
         
         else:
