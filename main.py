@@ -101,19 +101,42 @@ def get_total_collateral(force=False):
         return account_cache["data"]
     equity = Decimal("0")
     try:
+        # 1) 선물 계정 잔고 조회 시도
         accounts = api.list_futures_accounts("usdt")
-        if accounts and hasattr(accounts, '__getitem__'):
+        if accounts and hasattr(accounts, '__getitem__') and len(accounts) > 0:
             acct = accounts[0]
-            # 👇 본인 계정에 찍히는 필드를 여기에 맞춰만 주세요!
             if hasattr(acct, 'available') and acct.available is not None:
                 equity = Decimal(str(acct.available))
+                if equity == 0:
+                    logger.info("[자산조회] 선물 계정 잔고 0, 현물 잔고 조회 시도")
             elif hasattr(acct, 'total') and acct.total is not None:
                 equity = Decimal(str(acct.total))
-            # 필요시 추가 필드명 체크
-        logger.info(f"[자산조회] 선물 계정 잔액: {equity} USDT")
+                if equity == 0:
+                    logger.info("[자산조회] 선물 계정 잔고(total) 0, 현물 잔고 조회 시도")
+        else:
+            logger.info("[자산조회] 선물 계정 리스트 응답 비었거나 없음")
+        
+        # 2) 선물 잔고가 0이면 현물 계좌 잔고도 참고하기 (선물 미활성 시 대비)
+        if equity == 0:
+            try:
+                # 게이트 현물 API 호출 (Wallet API가 아니라 Spot 또는 FuturesApi에 따라 LIB 버전 차이 있을 수 있음)
+                spot_balances = client.call_api(
+                    '/api2/spot/balance', 'GET', {}, {}, {}, {}, None, None, {}, _return_http_data_only=True
+                )
+                # spot_balances는 리스트
+                for bal in spot_balances:
+                    if bal.get('currency') == 'USDT':
+                        balance_Q = bal.get('available') or bal.get('availableAmount') or '0'
+                        equity = Decimal(balance_Q)
+                        logger.info(f"[자산조회] 현물 USDT 잔고 참고: {equity}")
+                        if equity > 0:
+                            break
+            except Exception as e_spot:
+                logger.warning(f"[자산조회] 현물 잔고 조회 실패: {e_spot}")
     except Exception as e:
-        logger.error(f"[자산조회] 예외: {e}", exc_info=True)
+        logger.error(f"[자산조회] 예외 발생: {e}", exc_info=True)
         equity = Decimal("0")
+
     account_cache.update({"time": now, "data": equity})
     return equity
 
