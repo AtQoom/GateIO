@@ -169,14 +169,18 @@ def get_current_price(symbol: str) -> Decimal:
 def get_account_equity():
     acc_info = call_api_with_retry(futures_api.list_futures_accounts, SETTLE_CURRENCY)
     if acc_info:
+        # [수정] 여러 계좌 중 USDT 자산이 가장 큰 값 사용
+        max_amt = Decimal("0")
         for acc in acc_info:
-            if hasattr(acc, "available"):
-                try:
-                    amount = Decimal(str(acc.available))
-                    if amount > 0:
-                        return amount
-                except Exception:
-                    continue
+            amt = None
+            try:
+                amt = Decimal(str(getattr(acc, "available", 0)))
+            except Exception:
+                continue
+            if amt is not None and amt > max_amt:
+                max_amt = amt
+        if max_amt > 0:
+            return max_amt
     return Decimal("0")
     
 # -------------------------------
@@ -640,15 +644,15 @@ def log_initial_state():
 def run_ws_monitor():
     asyncio.run(price_monitor(list(SYMBOL_CONFIG.keys())))
 
-def worker_launcher(num_workers: int = 4):
+def worker_launcher(num_workers: int = 4):  # [수정]
     for i in range(num_workers):
         threading.Thread(target=worker_thread, args=(i,), daemon=True, name=f"Worker-{i}").start()
-    log_debug("WORKER", f"{num_workers} 워커 스레드 실행")
+    log_debug("WORKER", f"{num_workers} 워커 스레드 실행")  # [수정]
 
 def main():
     log_debug("STARTUP", "자동매매 서버 시작")
     log_initial_state()
-    worker_launcher(max(2, (os.cpu_count() or 2) * 2))
+    worker_launcher(4)  # [수정]
     threading.Thread(target=run_ws_monitor, daemon=True, name="WS-Monitor").start()
     port = int(os.environ.get("PORT", 8080))
     log_debug("SERVER", f"HTTP 서버 시작 포트 {port}")
