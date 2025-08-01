@@ -149,20 +149,15 @@ def get_current_price(symbol: str) -> Decimal:
     return Decimal("0")
 
 def get_account_equity():
-    acc_info = call_api_with_retry(futures_api.list_futures_accounts, SETTLE_CURRENCY)
-    if acc_info:
-        # 여러 계좌 중 USDT 자산 최대 사용 (Gate.io 스타일)
-        max_amt = Decimal("0")
-        for acc in acc_info:
-            amt = None
-            try:
-                amt = Decimal(str(getattr(acc, "available", 0)))
-            except Exception:
-                continue
-            if amt is not None and amt > max_amt:
-                max_amt = amt
-        if max_amt > 0:
-            return max_amt
+    try:
+        acc_info = futures_api.list_futures_accounts(SETTLE_CURRENCY)
+        # 최신 SDK는 객체, 일부에선 리스트
+        if hasattr(acc_info, 'available'):
+            return Decimal(str(acc_info.available))
+        if isinstance(acc_info, list) and hasattr(acc_info[0], 'available'):
+            return Decimal(str(acc_info[0].available))
+    except Exception as e:
+        log_debug("BALANCE_ERROR", f"잔고 조회 오류: {e}")
     return Decimal("0")
 
 # -------------------------------
