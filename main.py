@@ -680,6 +680,48 @@ def webhook_handler():
         log_debug("WEBHOOK_ERROR", f"웹훅 처리 중 예외: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/manual_sync", methods=["POST"])
+def manual_sync():
+    try:
+        data = request.get_json(force=True)
+        symbol_raw = data.get("symbol", "")
+        symbol = normalize_symbol(symbol_raw)
+        if symbol not in SYMBOL_CONFIG:
+            return jsonify({"error": "Invalid symbol"}), 400
+
+        size = Decimal(str(data.get("size", "0")))
+        price = Decimal(str(data.get("price", "0")))
+        side = data.get("side", "").lower()
+        entry_count = int(data.get("entry_count", 1))
+        entry_time = float(data.get("entry_time", time.time()))
+        sl_entry_count = int(data.get("sl_entry_count", 0))
+
+        with position_lock:
+            if size == 0:
+                position_state.pop(symbol, None)
+                log_debug("MANUAL_SYNC", f"{symbol} 포지션 없음, 내부 상태 초기화")
+            else:
+                position_state[symbol] = {
+                    "price": price,
+                    "side": side,
+                    "size": abs(size),
+                    "entry_count": entry_count,
+                    "sl_entry_count": sl_entry_count,
+                    "entry_time": entry_time,
+                    "time_multiplier": Decimal("1.0"),
+                }
+
+                tp_val = TP_BASE_MAP[min(entry_count - 1, 4)] * SYMBOL_CONFIG[symbol]["tp_mult"]
+                sl_val = SL_BASE_MAP[min(entry_count - 1, 4)] * SYMBOL_CONFIG[symbol]["sl_mult"]
+                store_tp_sl(symbol, tp_val, sl_val, entry_count)
+
+                log_debug("MANUAL_SYNC", f"{symbol} 위치 동기화됨: {side} {size}@{price} (진입#{entry_count})")
+
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        log_debug("MANUAL_SYNC_ERROR", str(e))
+        return jsonify({"error": str(e)}), 500
+        
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
