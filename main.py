@@ -591,7 +591,6 @@ def get_time_multiplier() -> Decimal:
 
 app = Flask(__name__)
 
-# 모든 웹훅 요청을 처리하는 통합 핸들러
 @app.route("/webhook", methods=["POST", "GET", "PUT", "PATCH"])
 @app.route("/", methods=["POST", "GET", "PUT", "PATCH"])
 def webhook_handler():
@@ -601,22 +600,17 @@ def webhook_handler():
         return jsonify({"status": "OK", "message": "Webhook endpoint is active"}), 200
     
     try:
-        # 다양한 방식으로 데이터 파싱 시도
         data = None
-        
-        # JSON 파싱 시도
         try:
             data = request.get_json(force=True)
             log_debug("WEBHOOK_PARSE", f"JSON 파싱 성공: {data}")
         except Exception as e:
             log_debug("WEBHOOK_PARSE", f"JSON 파싱 실패: {e}")
         
-        # Form 데이터 파싱 시도
         if not data and request.form:
             data = dict(request.form)
             log_debug("WEBHOOK_PARSE", f"Form 데이터 파싱: {data}")
-            
-        # Raw 데이터 파싱 시도
+
         if not data:
             raw_data = request.get_data(as_text=True)
             log_debug("WEBHOOK_RAW", f"Raw data: {raw_data[:200]}...")
@@ -625,31 +619,29 @@ def webhook_handler():
                     data = json.loads(raw_data)
                     log_debug("WEBHOOK_PARSE", f"Raw JSON 파싱 성공: {data}")
                 except:
-                    # URL encoded 데이터 시도
                     try:
                         import urllib.parse
                         data = dict(urllib.parse.parse_qsl(raw_data))
                         log_debug("WEBHOOK_PARSE", f"URL encoded 파싱: {data}")
                     except:
                         pass
-        
+
         if not data:
             log_debug("WEBHOOK_ERROR", "데이터 파싱 실패 - 빈 데이터")
             return jsonify({"error": "Empty or invalid data"}), 400
-            
-        # 필수 필드 검증
+        
         symbol_raw = data.get("symbol", "")
-        action = data.get("action", "entry")
+        action = str(data.get("action", "entry")).lower()
         
         if not symbol_raw:
             log_debug("WEBHOOK_ERROR", "심볼 누락")
             return jsonify({"error": "Symbol required"}), 400
-            
+        
         symbol = normalize_symbol(symbol_raw)
         if symbol not in SYMBOL_CONFIG:
             log_debug("WEBHOOK_ERROR", f"유효하지 않은 심볼: {symbol_raw} -> {symbol}")
             return jsonify({"error": f"Invalid symbol: {symbol_raw}"}), 400
-
+        
         log_debug("WEBHOOK_RECEIVED", f"유효한 신호: 심볼={symbol}, action={action}, side={data.get('side')}, signal={data.get('signal')}")
 
         # 중복 신호 체크
@@ -657,14 +649,31 @@ def webhook_handler():
             log_debug("WEBHOOK_DUPLICATE", "중복 신호로 무시")
             return jsonify({"status": "duplicate"}), 200
 
-        # 작업 큐에 추가
-        try:
-            task_queue.put_nowait(data)
-            log_debug("WEBHOOK_QUEUED", f"작업 큐에 추가 완료 (큐 크기: {task_queue.qsize()})")
-            return jsonify({"status": "queued", "queue_size": task_queue.qsize()}), 200
-        except queue.Full:
-            log_debug("WEBHOOK_ERROR", "작업 큐 가득참")
-            return jsonify({"error": "Queue full"}), 429
+        # action 별 처리 분기
+        if action == "entry":
+            # 진입 신호만 작업 큐에 넣음
+            try:
+                task_queue.put_nowait(data)
+                log_debug("WEBHOOK_QUEUED", f"작업 큐에 추가 완료 (큐 크기: {task_queue.qsize()})")
+                return jsonify({"status": "queued", "queue_size": task_queue.qsize()}), 200
+            except queue.Full:
+                log_debug("WEBHOOK_ERROR", "작업 큐 가득참")
+                return jsonify({"error": "Queue full"}), 429
+
+        elif action in ("exit", "tp", "sl"):
+            with position_lock:
+                pos = position_state.get(symbol)
+                if pos and pos.get("size", Decimal("0")) > 0:
+                    close_position(symbol, reason=action.upper())
+                    log_debug("FORCE_CLOSE", f"{symbol} {action.upper()} 알림으로 포지션 청산")
+                    return jsonify({"status": f"{action}_closed"}), 200
+                else:
+                    log_debug("NO_POSITION_EXIT", f"{symbol} {action.upper()} 알림 - 포지션 없음, 작업 무시")
+                    return jsonify({"status": "no_position"}), 200
+        
+        else:
+            log_debug("WEBHOOK_ERROR", f"알 수 없는 action: {action}")
+            return jsonify({"error": f"Unknown action: {action}"}), 400
 
     except Exception as e:
         log_debug("WEBHOOK_ERROR", f"웹훅 처리 중 예외: {str(e)}")
