@@ -95,7 +95,6 @@ def normalize_symbol(sym):
     sym = str(sym).upper().strip()
     return SYMBOL_MAPPING.get(sym, sym)
 
-# **[이 부분이 핵심: API 구조에 맞게 완전히 수정!]**
 def get_total_collateral(force=False):
     now = time.time()
     if not force and account_cache["time"] > now - 30 and account_cache["data"]:
@@ -105,12 +104,12 @@ def get_total_collateral(force=False):
         accounts = api.list_futures_accounts("usdt")
         if accounts and hasattr(accounts, '__getitem__'):
             acct = accounts[0]
+            # 👇 본인 계정에 찍히는 필드를 여기에 맞춰만 주세요!
             if hasattr(acct, 'available') and acct.available is not None:
                 equity = Decimal(str(acct.available))
             elif hasattr(acct, 'total') and acct.total is not None:
                 equity = Decimal(str(acct.total))
-            else:
-                logger.warning(f"[자산조회] 계정 객체 필드 없음: dir={dir(acct)}, val={acct}")
+            # 필요시 추가 필드명 체크
         logger.info(f"[자산조회] 선물 계정 잔액: {equity} USDT")
     except Exception as e:
         logger.error(f"[자산조회] 예외: {e}", exc_info=True)
