@@ -237,7 +237,7 @@ def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0")
     if entry_count >= 5:
         log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"현재 진입 횟수: {entry_count}/5")
         return Decimal("0")
-    entry_ratios = [Decimal("20"), Decimal("40"), Decimal("120"), Decimal("480"), Decimal("960")]
+    entry_ratios = [Decimal("20"), Decimal("30"), Decimal("70"), Decimal("160"), Decimal("500")]
     current_ratio = entry_ratios[entry_count]
     if signal_type == "sl_rescue":
         current_ratio = current_ratio * Decimal("1.5")
