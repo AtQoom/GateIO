@@ -35,31 +35,42 @@ SL_RESCUE_THRESHOLD = Decimal("0.0001")
 SL_RESCUE_MAX = 3
 MAX_PYRAMID_ENTRIES = 5
 
+# --- 심볼 매핑 오류 수정 포함 ---
 SYMBOL_MAPPING = {
-    "BTCUSDT": "BTC_USDT", "BTCUSDT.P": "BTC_USDT", "BTCUSDTPERP": "BTC_USDT", "BTC_USDT": "BTC_USDT", "BTC": "BTC_USDT",
-    "ETHUSDT": "ETH_USDT", "ETHUSDT.P": "ETH_USDT", "ETHUSDTPERP": "ETH_USDT", "ETH_USDT": "ETH_USDT", "ETH": "ETH_USDT",
-    "SOLUSDT": "SOL_USDT", "SOLUSDT.P": "SOL_USDT", "SOLUSDTPERP": "SOL_USDT", "SOL_USDT": "SOL_USDT", "SOL": "SOL_USDT",
-    "ADAUSDT": "ADA_USDT", "ADAUSDT.P": "ADA_USDT", "ADAUSDTPERP": "ADA_USDT", "ADA_USDT": "ADA_USDT", "ADA": "ADA_USDT",
-    "SUIUSDT": "SUI_USDT", "SUIUSDT.P": "SUI_USDT", "SUIUSDTPERP": "SUI_USDT", "SUI_USDT": "SUI_USDT", "SUI": "SUI_USDT",
-    "LINKUSDT": "LINK_USDT", "LINKUSDT.P": "LINK_USDT", "LINKUSDTPERP": "LINK_USDT", "LINK_USDT": "LINK_USDT", "LINK": "LINK_USDT",
-    "PEPEUSDT": "PEPE_USDT", "PEPEUSDT.P": "PEPE_USDT", "PEPEUSDTPERP": "PEPE_USDT", "PEPE_USDT": "PEPE_USDT", "PEPE": "PEPE_USDT",
-    "XRPUSDT": "XRP_USDT", "XRPUSDT.P": "XRP_USDT", "XRPUSDTPERP": "XRP_USDT", "XRP_USDT": "XRP_USDT", "XRP": "XRP_USDT",
-    "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT", "DOGE_USDT": "DOGE_USDT", "DOGE": "DOGE_USDT",
-    "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT", "ONDO_USDT": "ONDO_USDT", "ONDO": "ONDO_USDT",
+    "BTCUSDT": "BTC_USDT", "BTCUSDT.P": "BTC_USDT", "BTCUSDTPERP": "BTC_USDT",
+    "ETHUSDT": "ETH_USDT", "ETHUSDT.P": "ETH_USDT", "ETHUSDTPERP": "ETH_USDT",
+    "SOLUSDT": "SOL_USDT", "SOLUSDT.P": "SOL_USDT", "SOLUSDTPERP": "SOL_USDT",
+    "ADAUSDT": "ADA_USDT", "ADAUSDT.P": "ADA_USDT", "ADAUSDTPERP": "ADA_USDT",
+    "SUIUSDT": "SUI_USDT", "SUIUSDT.P": "SUI_USDT", "SUIUSDTPERP": "SUI_USDT",
+    "LINKUSDT": "LINK_USDT", "LINKUSDT.P": "LINK_USDT", "LINKUSDTPERP": "LINK_USDT",
+    "PEPEUSDT": "PEPE_USDT", "PEPEUSDT.P": "PEPE_USDT", "PEPEUSDTPERP": "PEPE_USDT",  # 쉼표 꼭 필요
+    "XRPUSDT": "XRP_USDT", "XRPUSDT.P": "XRP_USDT", "XRPUSDTPERP": "XRP_USDT",
+    "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT",
+    "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT",
 }
 
-# 심볼별 계약 사양 및 TP/SL 가중치 설정 (Gate.io 실제 규격에 맞춰 조정 필요)
+# --- 심볼별 설정 (Decimal 타입 통일) ---
 SYMBOL_CONFIG = {
-    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55},
-    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65},
-    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 0.8, "sl_mult": 0.8},
-    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
-    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
-    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
-    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2},
-    "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
-    "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2},
-    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
+    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"),
+                 "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.55")},
+    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"),
+                 "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.65")},
+    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"),
+                 "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.8")},
+    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"),
+                 "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"),
+                 "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"),
+                  "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"),
+                  "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.2")},
+    "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"),
+                 "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+    "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"),
+                  "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.2")},
+    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"),
+                  "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
 }
 
 account_cache = {"time": 0, "data": None}
@@ -84,23 +95,25 @@ def normalize_symbol(sym):
     sym = str(sym).upper().strip()
     return SYMBOL_MAPPING.get(sym, sym)
 
+# **[이 부분이 핵심: API 구조에 맞게 완전히 수정!]**
 def get_total_collateral(force=False):
     now = time.time()
     if not force and account_cache["time"] > now - 30 and account_cache["data"]:
         return account_cache["data"]
     equity = Decimal("0")
     try:
-        acct = api.get_futures_account("usdt")
-        # 최신 Gate.io는 "total"/"cross_margin_available" 등으로 표기할 수 있음
-        if hasattr(acct, 'total') and acct.total:
-            equity = Decimal(str(acct.total))
-        elif hasattr(acct, 'available') and acct.available:
-            equity = Decimal(str(acct.available))
-        else:
-            logger.warning(f"[자산조회] 최근 Gate.io API - 응답 필드: {acct}")
+        accounts = api.list_futures_accounts("usdt")
+        if accounts and hasattr(accounts, '__getitem__'):
+            acct = accounts[0]
+            if hasattr(acct, 'available') and acct.available is not None:
+                equity = Decimal(str(acct.available))
+            elif hasattr(acct, 'total') and acct.total is not None:
+                equity = Decimal(str(acct.total))
+            else:
+                logger.warning(f"[자산조회] 계정 객체 필드 없음: dir={dir(acct)}, val={acct}")
         logger.info(f"[자산조회] 선물 계정 잔액: {equity} USDT")
     except Exception as e:
-        logger.error(f"[자산조회] 에러: {e}", exc_info=True)
+        logger.error(f"[자산조회] 예외: {e}", exc_info=True)
         equity = Decimal("0")
     account_cache.update({"time": now, "data": equity})
     return equity
@@ -136,7 +149,6 @@ def execute_market_order(symbol, qty, side):
         log_debug("주문실패", f"{symbol} {side} {qty}: {e}", exc_info=True)
         return False
 
-# ---- TP/SL 저장/적용 개선: 진입 직후 거래소 진입가 기준으로 ----
 tp_sl_storage = {}
 tpsl_lock = threading.RLock()
 def store_tp_sl(symbol, tp_abs, sl_abs, entry_number):
@@ -177,8 +189,8 @@ def on_entry_signal_received(symbol_raw, side_raw):
         qty = max(qty, cfg["min_qty"])
         execute_market_order(symbol, qty, side)
         log_debug("진입주문", f"{symbol} {side} {qty}")
-        # 추가(★): 거래소 평단 entry_price 기준 TP/SL 지정
-        time.sleep(0.5)  # 체결 대기, 필요시 조정
+        # 진입 후 entry_price 기준 TP/SL 정확 계산
+        time.sleep(0.5)
         pos = fetch_position(symbol)
         if pos and pos["avg_entry_price"] > 0:
             tp_rate = Decimal("0.006") * Decimal(str(cfg["tp_mult"]))
@@ -188,10 +200,24 @@ def on_entry_signal_received(symbol_raw, side_raw):
             sl_abs = float(entry_price * (Decimal("1.0") - sl_rate) if side == "buy" else entry_price * (Decimal("1.0") + sl_rate))
             store_tp_sl(symbol, tp_abs, sl_abs, entry_count + 1)
             log_debug("TP/SL저장", f"{symbol}: 진입가 {entry_price}, TP {tp_abs}, SL {sl_abs}")
-    else:
-        log_debug("자산/시세 없음", f"{symbol} 자산={equity} 가격={price}")
 
-# ---- SL-Rescue: 동적 SL/가중치/단계 카운트 로직 개선 ----
+def is_duplicate_signal(data):
+    with signal_lock:
+        now = time.time()
+        signal_id = data.get("id", "")
+        symbol = data.get("symbol", "")
+        side = data.get("side", "")
+        key = f"{symbol}_{side}"
+        if signal_id and signal_id in recent_signals and now - recent_signals[signal_id] < COOLDOWN_SECONDS:
+            log_debug("중복신호 무시", signal_id)
+            return True
+        if key in recent_signals and now - recent_signals[key] < COOLDOWN_SECONDS:
+            log_debug("중복신호 무시", key)
+            return True
+        if signal_id:
+            recent_signals[signal_id] = now
+        recent_signals[key] = now
+        return False
 
 def is_sl_rescue_condition(symbol):
     with position_lock:
@@ -209,14 +235,10 @@ def is_sl_rescue_condition(symbol):
         entry_price = pos["avg_entry_price"]
         side = pos["side"]
         current_price = fetch_market_price(symbol)
-        # 동적 감쇠 SL (Rescue 수가 올라갈수록 stricter 적용)
         dynamic_sl_pct = max(sl_min, sl_base - (elapsed // sl_decay_sec) * sl_decay_amt * sl_mult)
         sl_price = entry_price * (Decimal("1.0") - dynamic_sl_pct) if side == "buy" else entry_price * (Decimal("1.0") + dynamic_sl_pct)
         near_sl = abs(current_price - sl_price) / sl_price <= SL_RESCUE_THRESHOLD
         is_loss = (side == "buy" and current_price < entry_price) or (side == "sell" and current_price > entry_price)
-        # Rescue 단계별로 entry_count, sl_rescue_count 체크
-        if near_sl and is_loss and s['sl_rescue_count'] < SL_RESCUE_MAX and s['entry_count'] < MAX_PYRAMID_ENTRIES:
-            log_debug("Rescue조건", f"{symbol} SL근접 SL:{sl_price:.6f} Cur:{current_price:.6f} Res:{s['sl_rescue_count']}/3 진입:{s['entry_count']}/5")
         return near_sl and is_loss and s['sl_rescue_count'] < SL_RESCUE_MAX and s['entry_count'] < MAX_PYRAMID_ENTRIES
 
 def run_sl_rescue(symbol):
@@ -328,7 +350,7 @@ def debug_status():
         return jsonify(sanitized), 200
 
 if __name__ == "__main__":
-    log_debug("서버시작", "Gate.io 자동매매 서버 (예전코드 기반 + 개선)")
+    log_debug("서버시작", "Gate.io 자동매매 서버 (API AttributeError 보완 완전판)")
     equity = get_total_collateral(force=True)
     log_debug("초기 자산", f"{equity} USDT")
     for symbol in SYMBOL_CONFIG:
