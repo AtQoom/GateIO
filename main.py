@@ -7,26 +7,23 @@ from datetime import datetime
 import pytz
 import logging
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, WalletApi
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 from gate_api import exceptions as gate_api_exceptions
 
-# ----------- 로그설정 -----------
+# --- 환경 기본설정 및 로깅 ---
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
-# ----------- API키 및 환경설정 -----------
-API_KEY = os.environ.get("API_KEY", "")
-API_SECRET = os.environ.get("API_SECRET", "")
+API_KEY = os.environ.get("API_KEY") or "YOUR_API_KEY"
+API_SECRET = os.environ.get("API_SECRET") or "YOUR_API_SECRET"
 SETTLE = "usdt"
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
-wallet_api = WalletApi(client)  # 자산 조회용
 
 KST = pytz.timezone('Asia/Seoul')
 
-# ----------- 전역 상태/락/큐 -----------
 position_state = {}
 position_lock = threading.RLock()
 recent_signals = {}
@@ -39,31 +36,42 @@ SL_RESCUE_THRESHOLD = Decimal("0.0001")
 SL_RESCUE_MAX = 3
 MAX_PYRAMID_ENTRIES = 5
 
+# --- 심볼 매핑 오류 수정 포함 ---
 SYMBOL_MAPPING = {
-    # ... (생략 없이 위 내용 모두 복사)
     "BTCUSDT": "BTC_USDT", "BTCUSDT.P": "BTC_USDT", "BTCUSDTPERP": "BTC_USDT",
     "ETHUSDT": "ETH_USDT", "ETHUSDT.P": "ETH_USDT", "ETHUSDTPERP": "ETH_USDT",
     "SOLUSDT": "SOL_USDT", "SOLUSDT.P": "SOL_USDT", "SOLUSDTPERP": "SOL_USDT",
     "ADAUSDT": "ADA_USDT", "ADAUSDT.P": "ADA_USDT", "ADAUSDTPERP": "ADA_USDT",
     "SUIUSDT": "SUI_USDT", "SUIUSDT.P": "SUI_USDT", "SUIUSDTPERP": "SUI_USDT",
     "LINKUSDT": "LINK_USDT", "LINKUSDT.P": "LINK_USDT", "LINKUSDTPERP": "LINK_USDT",
-    "PEPEUSDT": "PEPE_USDT", "PEPEUSDT.P": "PEPE_USDT", "PEPEUSDTPERP": "PEPE_USDT",
+    "PEPEUSDT": "PEPE_USDT", "PEPEUSDT.P": "PEPE_USDT", "PEPEUSDTPERP": "PEPE_USDT",  # 쉼표 꼭 필요
     "XRPUSDT": "XRP_USDT", "XRPUSDT.P": "XRP_USDT", "XRPUSDTPERP": "XRP_USDT",
     "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT",
     "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT",
 }
 
+# --- 심볼별 설정 (Decimal 타입 통일) ---
 SYMBOL_CONFIG = {
-    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.55")},
-    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.65")},
-    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.8")},
-    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
-    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
-    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
-    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.2")},
-    "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
-    "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.2")},
-    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"),
+                 "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.55")},
+    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"),
+                 "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.65")},
+    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"),
+                 "tp_mult": Decimal("1.0"), "sl_mult": Decimal("0.8")},
+    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"),
+                 "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"),
+                 "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"),
+                  "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"),
+                  "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.2")},
+    "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"),
+                 "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+    "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"),
+                  "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.2")},
+    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"),
+                  "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
 }
 
 def normalize_symbol(raw_symbol: str) -> str:
@@ -91,7 +99,7 @@ def fetch_position(symbol: str):
         size = Decimal(str(pos.size))
         return {"avg_entry_price": Decimal(str(pos.entry_price)), "size": abs(size), "side": "buy" if size > 0 else "sell"}
     except Exception as e:
-        logger.error(f"fetch_position error ({symbol}): {e}")
+        logger.error(f"[포지션] fetch error ({symbol}): {e}")
         return None
 
 def fetch_market_price(symbol: str) -> Decimal:
@@ -104,18 +112,33 @@ def fetch_market_price(symbol: str) -> Decimal:
         logger.error(f"fetch_market_price error: {e}")
     return Decimal("0")
 
-# 총 자산 조회 (실전 Gate.io API)
+# --- 주문 실행 함수(시장가/지정가: Gate.io 공식 API) ---
+def execute_market_order(symbol, qty, side):
+    try:
+        qty = float(qty)
+        order = FuturesOrder(
+            contract=symbol,
+            size=qty if side == "buy" else -qty,
+            price="",  # 시장가 주문
+            tif="ioc",  # 즉시체결, 부분만 체결 허용
+        )
+        result = api.create_futures_order(SETTLE, order)
+        logger.info(f"[주문성공] {symbol} {side} qty={qty} result={result}")
+        return True
+    except Exception as e:
+        logger.error(f"[주문실패] {symbol} {side}, qty={qty}: {e}", exc_info=True)
+        return False
+
 def get_total_collateral(force=False) -> Decimal:
     try:
-        # get_futures_account API 사용 (선물 총 자산)
         acct = _get_api_response(api.get_futures_account, SETTLE)
         if acct and acct.total:
             equity = Decimal(str(acct.total))
             logger.info(f"[자산조회] 총 USDT 자산: {equity}")
             return equity
-        logger.warning("[자산조회] 자산 정보를 불러올 수 없습니다.")
+        logger.warning("[자산조회] Gate.io 자산 정보 없음")
     except Exception as e:
-        logger.error(f"자산 조회 API 에러: {e}")
+        logger.error(f"[자산조회] get_total_collateral API에러: {e}")
     return Decimal("0")
 
 def update_position_state(symbol: str):
@@ -129,30 +152,6 @@ def update_position_state(symbol: str):
         else:
             logger.info(f"포지션 없음: {symbol}")
 
-# 작업 대기열 및 워커
-def worker(worker_id: int):
-    logger.info(f"워커-{worker_id} 시작")
-    while True:
-        try:
-            task = task_q.get(timeout=1)
-            symbol, action, data = task
-            logger.debug(f"워커-{worker_id} 작업 처리: {symbol}, {action}, {data}")
-            if action == "entry":
-                on_entry_signal_received(symbol, data)
-            task_q.task_done()
-        except queue.Empty:
-            continue
-        except Exception as e:
-            logger.error(f"워커-{worker_id} 작업 중 오류: {e}", exc_info=True)
-
-def enqueue_task(symbol: str, action: str, data):
-    try:
-        task_q.put_nowait((symbol, action, data))
-        logger.debug(f"작업큐 추가됨: {symbol}, {action}")
-    except queue.Full:
-        logger.error("작업 큐 가득참")
-
-# SL-Rescue 슬라이딩 및 실행
 def calculate_dynamic_sl(entry_price, elapsed_sec, sl_base, sl_decay_sec, sl_decay_amt, sl_multiplier, sl_min):
     periods = elapsed_sec // sl_decay_sec
     decay_total = periods * sl_decay_amt * sl_multiplier
@@ -199,7 +198,10 @@ def on_entry_signal_received(symbol_raw: str, side_raw: str):
             "tp_decay_amt": Decimal("0.00002"),
             "side": side
         }
-    logger.info(f"[Entry] {symbol} 신호({side}), 누적진입: {entry_count+1}")
+    # 이 자리에서 실제 주문 실행!
+    qty = Decimal("1")   # 적합한 주문 수량계산 로직 구현 필요!
+    success = execute_market_order(symbol, qty, side)
+    logger.info(f"[Entry] {symbol} {side} 주문 실행 결과: {success}")
 
 def is_sl_rescue_condition(symbol: str) -> bool:
     with position_lock:
@@ -223,8 +225,6 @@ def is_sl_rescue_condition(symbol: str) -> bool:
         sl_price = entry_price * (Decimal("1.0") - dynamic_sl_pct) if side == "buy" else entry_price * (Decimal("1.0") + dynamic_sl_pct)
         near_sl = abs(current_price - sl_price) / sl_price <= SL_RESCUE_THRESHOLD
         is_loss = (side == "buy" and current_price < entry_price) or (side == "sell" and current_price > entry_price)
-        if near_sl and is_loss:
-            logger.info(f"[SL-Rescue조건] {symbol}: SL 접근({sl_price}), 현재가({current_price}) 진입횟수 {s['entry_count']}, Rescue {s['sl_rescue_count']}")
         return near_sl and is_loss
 
 def run_sl_rescue(symbol: str):
@@ -247,11 +247,14 @@ def run_sl_rescue(symbol: str):
             qty = pos["size"] * base_ratio * Decimal("1.5")
             qty = qty.quantize(cfg.get("qty_step", Decimal("1")), rounding=ROUND_DOWN)
             side = pos["side"]
-            logger.info(f"[SL-Rescue] 진입: {symbol} qty={qty} side={side}")
-            # TODO: 거래소 주문 함수 연결
-            s["entry_count"] = idx+1
-            s["sl_rescue_count"] += 1
-            s["entry_time"] = time.time()
+            success = execute_market_order(symbol, qty, side)
+            if success:
+                s["entry_count"] = idx+1
+                s["sl_rescue_count"] += 1
+                s["entry_time"] = time.time()
+                logger.info(f"[SL-Rescue] 진입: {symbol} qty={qty} side={side}")
+            else:
+                logger.error(f"[SL-Rescue] 주문 실패: {symbol}")
 
 def sl_rescue_monitor():
     while True:
@@ -264,8 +267,29 @@ def sl_rescue_monitor():
                 logger.error(f"SL-Rescue 예외({sym}): {e}")
         time.sleep(0.2)
 
-# === Flask 제공 라우트 ===
+def worker(worker_id: int):
+    logger.info(f"워커-{worker_id} 시작")
+    while True:
+        try:
+            task = task_q.get(timeout=1)
+            symbol, action, data = task
+            logger.debug(f"워커-{worker_id} 작업 처리: {symbol}, {action}, {data}")
+            if action == "entry":
+                on_entry_signal_received(symbol, data)
+            task_q.task_done()
+        except queue.Empty:
+            continue
+        except Exception as e:
+            logger.error(f"워커-{worker_id} 작업 중 오류: {e}", exc_info=True)
 
+def enqueue_task(symbol: str, action: str, data):
+    try:
+        task_q.put_nowait((symbol, action, data))
+        logger.debug(f"작업큐 추가됨: {symbol}, {action}")
+    except queue.Full:
+        logger.error("작업 큐 가득참")
+
+# Flask App
 app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
@@ -311,14 +335,11 @@ def debug_status():
         sanitized = {k: {kk: str(vv) if isinstance(vv, Decimal) else vv for kk, vv in v.items()} for k, v in position_state.items()}
         return jsonify(sanitized), 200
 
-# === MAIN ENTRY ===
 if __name__ == "__main__":
-    logger.info("========== Gate.io 실전 자동매매 서버 시작 v6.12 ============")
-    logger.info(f"감시심볼수: {len(SYMBOL_CONFIG)}, 최대 피라미딩: {MAX_PYRAMID_ENTRIES}")
+    logger.info("========== Gate.io 실전 자동매매 서버 시작 ==========")
     equity = get_total_collateral(force=True)
     logger.info(f"초기 자산 (총 USDT): {equity}")
 
-    # 초기 모든 심볼 포지션 상태 갱신
     for symbol in SYMBOL_CONFIG:
         update_position_state(symbol)
 
