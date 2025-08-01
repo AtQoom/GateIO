@@ -18,23 +18,20 @@ import asyncio
 import websockets
 from flask import Flask, request, jsonify
 
-# -------------------------------
 # 1. 설정 및 상수 (기존 서버코드 포함 심볼+설정)
-# -------------------------------
 
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 
 SETTLE_CURRENCY = "usdt"
-
 KST = pytz.timezone('Asia/Seoul')
 
 COOLDOWN_SECONDS = 14
-SL_RESCUE_PROXIMITY = Decimal("0.0001")  # 0.01%
+SL_RESCUE_PROXIMITY = Decimal("0.0001")
 MAX_ENTRIES = 5
 MAX_SL_RESCUES = 3
 
-# 심볼 매핑(기존 서버코드 그대로 복사)
+# 심볼 매핑 (전체)
 SYMBOL_MAPPING = {
     "BTCUSDT": "BTC_USDT", "BTCUSDT.P": "BTC_USDT", "BTCUSDTPERP": "BTC_USDT", "BTC_USDT": "BTC_USDT", "BTC": "BTC_USDT",
     "ETHUSDT": "ETH_USDT", "ETHUSDT.P": "ETH_USDT", "ETHUSDTPERP": "ETH_USDT", "ETH_USDT": "ETH_USDT", "ETH": "ETH_USDT",
@@ -48,7 +45,6 @@ SYMBOL_MAPPING = {
     "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT", "ONDO_USDT": "ONDO_USDT", "ONDO": "ONDO_USDT",
 }
 
-# 심볼별 상세 설정 (기존 서버코드 기반, 그대로 복사)
 SYMBOL_CONFIG = {
     "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": Decimal("0.55"), "sl_mult": Decimal("0.55")},
     "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"),   "min_notional": Decimal("5"), "tp_mult": Decimal("0.65"), "sl_mult": Decimal("0.65")},
@@ -61,18 +57,10 @@ SYMBOL_CONFIG = {
     "DOGE_USDT":{"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),     "min_notional": Decimal("5"), "tp_mult": Decimal("1.2"),  "sl_mult": Decimal("1.2")},
     "ONDO_USDT":{"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),      "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"),  "sl_mult": Decimal("1.0")},
 }
+TP_BASE_MAP = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
+SL_BASE_MAP = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
 
-TP_BASE_MAP = [
-    Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002"),
-]
-
-SL_BASE_MAP = [
-    Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03"),
-]
-
-# -------------------------------
 # 2. 로깅 설정
-# -------------------------------
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,9 +72,7 @@ logger = logging.getLogger("AutoTrader")
 def log_debug(tag, message):
     logger.info(f"[{tag}] {message}")
 
-# -------------------------------
 # 3. API 클라이언트 및 상태 변수
-# -------------------------------
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 api_client = ApiClient(config)
@@ -103,9 +89,7 @@ signal_lock = threading.RLock()
 
 task_queue = queue.Queue(maxsize=100)
 
-# -------------------------------
 # 4. 유틸리티 및 API 호출 재시도
-# -------------------------------
 
 def normalize_symbol(raw_symbol: str) -> str:
     s = raw_symbol.strip().upper()
@@ -129,9 +113,7 @@ def call_api_with_retry(api_func, *args, retries=3, delay=2, **kwargs):
             time.sleep(delay)
     return None
 
-# -------------------------------
 # 5. 포지션 및 가격 조회
-# -------------------------------
 
 def update_position(symbol: str):
     with position_lock:
@@ -169,7 +151,7 @@ def get_current_price(symbol: str) -> Decimal:
 def get_account_equity():
     acc_info = call_api_with_retry(futures_api.list_futures_accounts, SETTLE_CURRENCY)
     if acc_info:
-        # [수정] 여러 계좌 중 USDT 자산이 가장 큰 값 사용
+        # 여러 계좌 중 USDT 자산 최대 사용 (Gate.io 스타일)
         max_amt = Decimal("0")
         for acc in acc_info:
             amt = None
@@ -182,7 +164,7 @@ def get_account_equity():
         if max_amt > 0:
             return max_amt
     return Decimal("0")
-    
+
 # -------------------------------
 # 6. TP/SL 저장 및 조회
 # -------------------------------
@@ -620,10 +602,8 @@ def webhook_handler():
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
-
-# -------------------------------
+    
 # 14. 초기 상태 출력 및 실행
-# -------------------------------
 
 def log_initial_state():
     equity = get_account_equity()
@@ -644,15 +624,15 @@ def log_initial_state():
 def run_ws_monitor():
     asyncio.run(price_monitor(list(SYMBOL_CONFIG.keys())))
 
-def worker_launcher(num_workers: int = 4):  # [수정]
+def worker_launcher(num_workers: int = 4):
     for i in range(num_workers):
         threading.Thread(target=worker_thread, args=(i,), daemon=True, name=f"Worker-{i}").start()
-    log_debug("WORKER", f"{num_workers} 워커 스레드 실행")  # [수정]
+    log_debug("WORKER", f"{num_workers} 워커 스레드 실행")
 
 def main():
     log_debug("STARTUP", "자동매매 서버 시작")
     log_initial_state()
-    worker_launcher(4)  # [수정]
+    worker_launcher(4)
     threading.Thread(target=run_ws_monitor, daemon=True, name="WS-Monitor").start()
     port = int(os.environ.get("PORT", 8080))
     log_debug("SERVER", f"HTTP 서버 시작 포트 {port}")
