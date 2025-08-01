@@ -166,15 +166,19 @@ def get_current_price(symbol: str) -> Decimal:
         return safe_decimal(price_str, Decimal("0"))
     return Decimal("0")
 
-def get_account_equity() -> Decimal:
+def get_account_equity():
     acc_info = call_api_with_retry(futures_api.list_futures_accounts, SETTLE_CURRENCY)
     if acc_info:
-        try:
-            return safe_decimal(acc_info[0].available)
-        except Exception:
-            return Decimal("0")
+        for acc in acc_info:
+            if hasattr(acc, "available"):
+                try:
+                    amount = Decimal(str(acc.available))
+                    if amount > 0:
+                        return amount
+                except Exception:
+                    continue
     return Decimal("0")
-
+    
 # -------------------------------
 # 6. TP/SL 저장 및 조회
 # -------------------------------
@@ -636,10 +640,10 @@ def log_initial_state():
 def run_ws_monitor():
     asyncio.run(price_monitor(list(SYMBOL_CONFIG.keys())))
 
-def worker_launcher(num_workers: int):
+def worker_launcher(num_workers: int = 4):
     for i in range(num_workers):
         threading.Thread(target=worker_thread, args=(i,), daemon=True, name=f"Worker-{i}").start()
-    log_debug("WORKER", f"{num_workers} 워커 시작")
+    log_debug("WORKER", f"{num_workers} 워커 스레드 실행")
 
 def main():
     log_debug("STARTUP", "자동매매 서버 시작")
