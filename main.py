@@ -10,11 +10,11 @@ from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 from gate_api import exceptions as gate_api_exceptions
 
-# --- 로그 설정 ---
+# --- 로깅 ---
 logging.basicConfig(level=logging.DEBUG, format='[%(asctime)s] [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- API 키 및 Gate.io 설정 ---
+# --- API KEY 설정 및 Gate.io 객체생성 ---
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
@@ -23,10 +23,8 @@ config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
 
-# --- 시간대 ---
 KST = pytz.timezone('Asia/Seoul')
 
-# --- 전역 상태 및 락---
 position_state = {}
 position_lock = threading.RLock()
 recent_signals = {}
@@ -34,13 +32,11 @@ signal_lock = threading.RLock()
 task_q = queue.Queue(maxsize=100)
 WORKER_COUNT = 4
 
-# --- 상수 ---
 COOLDOWN_SECONDS = 14
-SL_RESCUE_THRESHOLD = Decimal("0.0001")   # 0.01%
+SL_RESCUE_THRESHOLD = Decimal("0.0001")
 SL_RESCUE_MAX = 3
 MAX_PYRAMID_ENTRIES = 5
 
-# --- 심볼 매핑 및 설정 ---
 SYMBOL_MAPPING = {
     "BTCUSDT": "BTC_USDT", "BTCUSDT.P": "BTC_USDT", "BTCUSDTPERP": "BTC_USDT",
     "ETHUSDT": "ETH_USDT", "ETHUSDT.P": "ETH_USDT", "ETHUSDTPERP": "ETH_USDT",
@@ -76,8 +72,6 @@ SYMBOL_CONFIG = {
     "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
                   "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
 }
-
-# --- 유틸리티 함수 ---
 
 def normalize_symbol(raw_symbol: str) -> str:
     key = str(raw_symbol).upper().strip()
@@ -121,7 +115,14 @@ def fetch_market_price(symbol: str) -> Decimal:
         logger.error(f"fetch_market_price error: {e}")
     return Decimal("0")
 
-# --- 주문 함수 (시장가 주문, Gate.io 공식 방식) ---
+# **이전 코드 기반 자산조회 함수로 복원**
+def get_total_collateral(force=False):
+    try:
+        data = api.get_futures_account(SETTLE)
+        return Decimal(str(data.total)) if data and data.total else Decimal("0")
+    except Exception as e:
+        logger.error(f"[자산조회] 에러: {e}", exc_info=True)
+        return Decimal("0")
 
 def execute_market_order(symbol, qty, side):
     try:
@@ -129,8 +130,8 @@ def execute_market_order(symbol, qty, side):
         order = FuturesOrder(
             contract=symbol,
             size=qty if side == "buy" else -qty,
-            price=None,  # None 또는 "" 로 시장가 지정 가능
-            tif="ioc",  # 즉시 체결
+            price=None,
+            tif="ioc"
         )
         result = api.create_futures_order(SETTLE, order)
         logger.info(f"[주문성공] {symbol} {side} qty={qty} result={result}")
@@ -139,37 +140,10 @@ def execute_market_order(symbol, qty, side):
         logger.error(f"[주문실패] {symbol} {side} qty={qty}: {e}", exc_info=True)
         return False
 
-# --- 자산 조회 (Gate.io 선물 USDT 총 자산) ---
-
-def get_total_collateral(force=False):
-    if not hasattr(get_total_collateral, "cache"):
-        get_total_collateral.cache = {"time": 0, "value": Decimal("0")}
-    now = time.time()
-    if not force and now - get_total_collateral.cache["time"] < 30:
-        return get_total_collateral.cache["value"]
-    try:
-        acct = _get_api_response(api.get_futures_account, SETTLE)
-        if acct and acct.total:
-            equity = Decimal(str(acct.total))
-            get_total_collateral.cache = {"time": now, "value": equity}
-            logger.info(f"[자산조회] 총 USDT 자산: {equity}")
-            return equity
-        logger.warning("[자산조회] 자산 정보 없음")
-    except Exception as e:
-        logger.error(f"[자산조회] API 오류: {e}")
-    return Decimal("0")
-
-# --- 동적 SL 계산 ---
-
-def calculate_dynamic_sl(entry_price: Decimal, elapsed_sec: int,
-                         sl_base: Decimal, sl_decay_sec: int,
-                         sl_decay_amt: Decimal, sl_multiplier: Decimal,
-                         sl_min: Decimal) -> Decimal:
+def calculate_dynamic_sl(entry_price: Decimal, elapsed_sec: int, sl_base: Decimal, sl_decay_sec: int, sl_decay_amt: Decimal, sl_multiplier: Decimal, sl_min: Decimal) -> Decimal:
     periods = elapsed_sec // sl_decay_sec
     decay_total = periods * sl_decay_amt * sl_multiplier
     return max(sl_min, sl_base - decay_total)
-
-# --- 중복 신호 쿨다운 체크 ---
 
 def is_duplicate_signal(data):
     with signal_lock:
@@ -178,21 +152,16 @@ def is_duplicate_signal(data):
         symbol = data.get("symbol", "")
         side = data.get("side", "")
         key = f"{symbol}_{side}"
-
         if signal_id and signal_id in recent_signals and now - recent_signals[signal_id] < COOLDOWN_SECONDS:
             logger.info(f"중복신호 {signal_id} 무시됨")
             return True
         if key in recent_signals and now - recent_signals[key] < COOLDOWN_SECONDS:
             logger.info(f"중복신호 {key} 무시됨")
             return True
-
         if signal_id:
             recent_signals[signal_id] = now
         recent_signals[key] = now
-
         return False
-
-# --- 진입 신호 수신 처리 및 상태 초기화 ---
 
 def on_entry_signal_received(symbol_raw: str, side_raw: str):
     symbol = normalize_symbol(symbol_raw)
@@ -201,7 +170,7 @@ def on_entry_signal_received(symbol_raw: str, side_raw: str):
         existing = position_state.get(symbol)
         entry_count = existing["entry_count"] if existing else 0
         if entry_count >= MAX_PYRAMID_ENTRIES:
-            logger.info(f"[Entry] {symbol} 최대 진입 {MAX_PYRAMID_ENTRIES}회 초과로 진입 무시")
+            logger.info(f"[Entry] {symbol} 최대 진입 {MAX_PYRAMID_ENTRIES}회 초과 진입 무시")
             return
         position_state[symbol] = {
             "entry_count": entry_count + 1,
@@ -217,12 +186,9 @@ def on_entry_signal_received(symbol_raw: str, side_raw: str):
             "tp_decay_amt": Decimal("0.00002"),
             "side": side
         }
-    # 주문 수량 산출 로직 필요, 임시 1개로 빠르게 구현 예시
-    qty = Decimal("1")
+    qty = Decimal("1")  # 실제 운영시 자산 조회 반영한 주문 수량 공식 추천
     success = execute_market_order(symbol, qty, side)
     logger.info(f"[Entry] {symbol} {side} 주문 실행 결과: {success}")
-
-# --- SL-Rescue 조건 판단 ---
 
 def is_sl_rescue_condition(symbol: str) -> bool:
     with position_lock:
@@ -235,34 +201,23 @@ def is_sl_rescue_condition(symbol: str) -> bool:
         elapsed = int(time.time() - s["entry_time"])
         cfg = SYMBOL_CONFIG.get(symbol, {"sl_mult": Decimal("1.0")})
         sl_mult = Decimal(cfg.get("sl_mult", "1.0"))
-
         sl_base = s.get("stored_sl_pct", Decimal("0.04"))
         sl_min = s.get("sl_min_pct", Decimal("0.0009"))
         sl_decay_sec = s.get("sl_decay_sec", 15)
         sl_decay_amt = s.get("sl_decay_amt", Decimal("0.00004"))
         entry_price = pos["avg_entry_price"]
         side = pos["side"]
-
         current_price = fetch_market_price(symbol)
-        if current_price <= 0:
-            return False
-
         dynamic_sl_pct = calculate_dynamic_sl(entry_price, elapsed, sl_base, sl_decay_sec, sl_decay_amt, sl_mult, sl_min)
         sl_price = entry_price * (Decimal("1.0") - dynamic_sl_pct) if side == "buy" else entry_price * (Decimal("1.0") + dynamic_sl_pct)
-
         near_sl = abs(current_price - sl_price) / sl_price <= SL_RESCUE_THRESHOLD
         is_loss = (side == "buy" and current_price < entry_price) or (side == "sell" and current_price > entry_price)
-
         return near_sl and is_loss
-
-# --- SL-Rescue 실행 ---
 
 def run_sl_rescue(symbol: str):
     with position_lock:
         s = position_state.get(symbol)
-        if not s:
-            return
-        if s.get("sl_rescue_count", 0) >= SL_RESCUE_MAX:
+        if not s or s.get("sl_rescue_count", 0) >= SL_RESCUE_MAX:
             return
         pos = fetch_position(symbol)
         if not pos or pos["size"] == 0:
@@ -279,7 +234,6 @@ def run_sl_rescue(symbol: str):
             qty = pos["size"] * base_ratio * Decimal("1.5")
             qty = qty.quantize(cfg.get("qty_step", Decimal("1")), rounding=ROUND_DOWN)
             side = pos["side"]
-
             success = execute_market_order(symbol, qty, side)
             if success:
                 s["entry_count"] = idx + 1
@@ -293,14 +247,12 @@ def sl_rescue_monitor():
     while True:
         with position_lock:
             symbols = list(position_state.keys())
-        for symbol in symbols:
+        for sym in symbols:
             try:
-                run_sl_rescue(symbol)
+                run_sl_rescue(sym)
             except Exception as e:
-                logger.error(f"SL-Rescue 실행 예외({symbol}): {e}")
+                logger.error(f"SL-Rescue 실행 예외({sym}): {e}")
         time.sleep(0.2)
-
-# --- 작업 대기열 & 워커 ---
 
 def worker(worker_id):
     logger.info(f"워커-{worker_id} 시작됨")
@@ -324,8 +276,6 @@ def enqueue_task(symbol: str, action: str, data):
     except queue.Full:
         logger.error("작업 큐 가득참")
 
-# --- 포지션 상태 업데이트 ---
-
 def update_position_state(symbol: str):
     with position_lock:
         pos = fetch_position(symbol)
@@ -336,8 +286,6 @@ def update_position_state(symbol: str):
             logger.info(f"포지션 상태 업데이트: {symbol} {state}")
         else:
             logger.info(f"포지션 없음: {symbol}")
-
-# --- Flask 앱과 라우팅 ---
 
 app = Flask(__name__)
 
@@ -384,22 +332,17 @@ def debug_status():
         sanitized = {k: {kk: str(vv) if isinstance(vv, Decimal) else vv for kk, vv in v.items()} for k, v in position_state.items()}
         return jsonify(sanitized), 200
 
-# --- 메인 진입점 ---
-
 if __name__ == "__main__":
-    logger.info("[서버시작] Gate.io 자동매매 서버 v6.12")
+    logger.info("[서버시작] Gate.io 자동매매 서버 (자산조회 최신 적용)")
     equity = get_total_collateral(force=True)
     logger.info(f"초기 자산: {equity} USDT")
 
-    # 초기 상태 업데이트
     for symbol in SYMBOL_CONFIG:
         update_position_state(symbol)
 
-    # SL-Rescue 감시 스레드 시작
     threading.Thread(target=sl_rescue_monitor, daemon=True).start()
     logger.info("SL-Rescue 감시 스레드 가동 중")
 
-    # 워커 스레드 시작
     for i in range(WORKER_COUNT):
         threading.Thread(target=worker, args=(i,), daemon=True).start()
         logger.info(f"워커-{i} 시작")
