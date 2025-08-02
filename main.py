@@ -656,9 +656,8 @@ def webhook_handler():
             log_debug("WEBHOOK_DUPLICATE", "중복 신호로 무시")
             return jsonify({"status": "duplicate"}), 200
 
-        # action 별 처리 분기
         if action == "entry":
-            # 진입 신호만 작업 큐에 넣음
+            # 작업 큐에 진입 처리만
             try:
                 task_queue.put_nowait(data)
                 log_debug("WEBHOOK_QUEUED", f"작업 큐에 추가 완료 (큐 크기: {task_queue.qsize()})")
@@ -667,8 +666,9 @@ def webhook_handler():
                 log_debug("WEBHOOK_ERROR", "작업 큐 가득참")
                 return jsonify({"error": "Queue full"}), 429
 
-        elif action in ("exit", "tp", "sl"):
-            update_position(symbol)  # << 꼭 먼저 실제 거래소에서 포지션 최신화!
+        elif action == "exit":
+            # 강제 청산만 허용
+            update_position(symbol)
             with position_lock:
                 pos = position_state.get(symbol)
                 if pos and pos.get("size", Decimal("0")) > 0:
@@ -678,7 +678,12 @@ def webhook_handler():
                 else:
                     log_debug("NO_POSITION_EXIT", f"{symbol} {action.upper()} 알림 - 실제 포지션 없음으로 무시")
                     return jsonify({"status": "no_position"}), 200
-        
+
+        elif action in ("tp", "sl"):
+            # TP / SL 청산 알림 무시
+            log_debug("WEBHOOK_IGNORED", f"{symbol} {action.upper()} 알림 무시 (실시간 TP/SL 자동청산 룰)")
+            return jsonify({"status": f"{action}_ignored"}), 200
+
         else:
             log_debug("WEBHOOK_ERROR", f"알 수 없는 action: {action}")
             return jsonify({"error": f"Unknown action: {action}"}), 400
