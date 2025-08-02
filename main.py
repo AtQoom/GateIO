@@ -77,7 +77,7 @@ SYMBOL_CONFIG = {
                   "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
 }
 
-TP_BASE_MAP = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
+TP_BASE_MAP = [Decimal("0.006"), Decimal("0.005"), Decimal("0.004"), Decimal("0.003"), Decimal("0.002")]
 SL_BASE_MAP = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
 
 # 2. 강화된 로깅 설정
