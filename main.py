@@ -38,7 +38,7 @@ SYMBOL_MAPPING = {
     "ETH_USDT": "ETH_USDT", "ETH": "ETH_USDT",
     "SOLUSDT": "SOL_USDT", "SOLUSDT.P": "SOL_USDT", "SOLUSDTPERP": "SOL_USDT",
     "SOL_USDT": "SOL_USDT", "SOL": "SOL_USDT",
-    "ADAUSDT": "ADA_USDT", "ADAUSDT.P": "ADA_USDT", "ADAUSDTPERP": "ADA_USDT",
+    "ADAUSDT": "ADA_USDT", "ADAUSDT.P": "ADA_USDT", "AD⁴AUSDTPERP": "ADA_USDT",
     "ADA_USDT": "ADA_USDT", "ADA": "ADA_USDT",
     "SUIUSDT": "SUI_USDT", "SUIUSDT.P": "SUI_USDT", "SUIUSDTPERP": "SUI_USDT",
     "SUI_USDT": "SUI_USDT", "SUI": "SUI_USDT",
@@ -56,32 +56,32 @@ SYMBOL_MAPPING = {
 
 SYMBOL_CONFIG = {
     "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("0.55"), "sl_mult": Decimal("0.55"),
-                 "qty_mult": Decimal("1.0")},
+                 "min_notional": Decimal("5"), "tp_mult": Decimal("0.6"), "sl_mult": Decimal("0.6"),
+                 "qty_mult": Decimal("1.5")},
     "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"),
                  "min_notional": Decimal("5"), "tp_mult": Decimal("0.65"), "sl_mult": Decimal("0.65"),
-                 "qty_mult": Decimal("1.0")},
+                 "qty_mult": Decimal("1.5")},
     "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
                  "min_notional": Decimal("5"), "tp_mult": Decimal("0.8"), "sl_mult": Decimal("0.8"),
-                 "qty_mult": Decimal("1.0")},
+                 "qty_mult": Decimal("1.5")},
     "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
                  "qty_mult": Decimal("1.0")},
     "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
-                 "qty_mult": Decimal("0.5")},
+                 "qty_mult": Decimal("1.0")},
     "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
                   "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
                   "qty_mult": Decimal("1.0")},
     "PEPE_USDT": {"min_qty": Decimal("0.5"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"),
                   "min_notional": Decimal("5"), "tp_mult": Decimal("1.2"), "sl_mult": Decimal("1.2"),
-                  "qty_mult": Decimal("0.5")},
+                  "qty_mult": Decimal("1.0")},
     "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
                  "qty_mult": Decimal("1.0")},
     "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
                   "min_notional": Decimal("5"), "tp_mult": Decimal("1.2"), "sl_mult": Decimal("1.2"),
-                  "qty_mult": Decimal("0.5")},
+                  "qty_mult": Decimal("1.0")},
     "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
                   "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
                   "qty_mult": Decimal("1.0")},
@@ -275,8 +275,8 @@ def calculate_qty(symbol: str, signal_type: str, entry_multiplier: Decimal) -> D
         log_debug("QTY_CALC_LIMIT", f"Max entries reached for {symbol} - {current_entry_count}/{MAX_ENTRIES}")
         return Decimal("0")
 
-    # 수정된 진입 비율: 20-30-70-160-500
-    entry_ratios = [Decimal("20"), Decimal("30"), Decimal("70"), Decimal("160"), Decimal("500")]
+    # 수정된 진입 비율: 10-20-50-120-400
+    entry_ratios = [Decimal("10"), Decimal("20"), Decimal("50"), Decimal("120"), Decimal("400")]
 
     base_ratio = entry_ratios[current_entry_count]
     if signal_type == "sl_rescue":
