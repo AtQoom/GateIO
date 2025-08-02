@@ -459,12 +459,12 @@ def process_ticker(ticker: dict):
         elapsed = time.time() - entry_time
         decay_steps = int(elapsed / 15)
 
-        tp_decay_per_15s = Decimal("0.0002")
+        tp_decay_per_15s = Decimal("0.00002")
         tp_min = Decimal("0.0012")
         tp_mult = SYMBOL_CONFIG[symbol]["tp_mult"]
         tp_adj = max(tp_min, tp_orig - decay_steps * tp_decay_per_15s * tp_mult)
 
-        sl_decay_per_15s = Decimal("0.0004")
+        sl_decay_per_15s = Decimal("0.00004")
         sl_min = Decimal("0.0009")
         sl_mult = SYMBOL_CONFIG[symbol]["sl_mult"]
         sl_adj = max(sl_min, sl_orig - decay_steps * sl_decay_per_15s * sl_mult)
