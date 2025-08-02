@@ -455,20 +455,27 @@ def process_ticker(ticker: dict):
         if entry_count == 0:
             return
 
-        tp_orig, sl_orig, entry_time = get_tp_sl(symbol, entry_count)
-        elapsed = time.time() - entry_time
-        decay_steps = int(elapsed / 15)
+        # TP/SL 초기값과 진입시각 불러오기
+        tp_orig, sl_orig, entry_time_stored = get_tp_sl(symbol, entry_count)
 
+        elapsed_seconds = time.time() - entry_time_stored
+        # 15초 간격 감쇠 횟수 산정
+        decay_steps = int(elapsed_seconds // 15)
+
+        # TP 감쇠량: 0.00002 (0.002%) per 15 seconds, 곱하기 코인별 가중치
         tp_decay_per_15s = Decimal("0.00002")
-        tp_min = Decimal("0.0012")
-        tp_mult = SYMBOL_CONFIG[symbol]["tp_mult"]
+        tp_min = Decimal("0.0012")   # 최소 TP 0.12%
+        tp_mult = SYMBOL_CONFIG[symbol].get("tp_mult", Decimal("1.0"))
+        # 감쇠 적용 후 TP값
         tp_adj = max(tp_min, tp_orig - decay_steps * tp_decay_per_15s * tp_mult)
 
+        # SL 감쇠량: 0.00004 (0.004%) per 15 seconds, 곱하기 코인별 가중치
         sl_decay_per_15s = Decimal("0.00004")
         sl_min = Decimal("0.0009")
-        sl_mult = SYMBOL_CONFIG[symbol]["sl_mult"]
+        sl_mult = SYMBOL_CONFIG[symbol].get("sl_mult", Decimal("1.0"))
         sl_adj = max(sl_min, sl_orig - decay_steps * sl_decay_per_15s * sl_mult)
 
+        # TP 및 SL 목표가격 계산 (롱/숏 구분)
         tp_price = entry_price * (1 + tp_adj) if side == "buy" else entry_price * (1 - tp_adj)
         sl_price = entry_price * (1 - sl_adj) if side == "buy" else entry_price * (1 + sl_adj)
 
