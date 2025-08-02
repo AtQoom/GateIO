@@ -678,21 +678,26 @@ def webhook_handler():
                 return jsonify({"error": "Queue full"}), 429
 
         elif action == "exit":
-            # 강제 청산만 허용
+            reason = str(data.get("reason", "")).strip().lower()
+            # 1) TP/SL 청산 알림(reason 정확히 'tp' 또는 'sl')은 무조건 무시!
+            if reason in ("tp", "sl"):
+                log_debug("WEBHOOK_IGNORED", f"{symbol} EXIT({reason.upper()}) 알림 무시 (자동 TP/SL 청산 차단)")
+                return jsonify({"status": f"{action}_{reason}_ignored"}), 200
+            # 2) 나머지(수동, 전략, 기타 alert)는 정상적으로 청산 실행
             update_position(symbol)
             with position_lock:
                 pos = position_state.get(symbol)
                 if pos and pos.get("size", Decimal("0")) > 0:
                     close_position(symbol, reason=action.upper())
-                    log_debug("FORCE_CLOSE", f"{symbol} {action.upper()} 알림으로 포지션 청산")
+                    log_debug("FORCE_CLOSE", f"{symbol} {action.upper()}({reason}) 알림으로 포지션 청산")
                     return jsonify({"status": f"{action}_closed"}), 200
                 else:
-                    log_debug("NO_POSITION_EXIT", f"{symbol} {action.upper()} 알림 - 실제 포지션 없음으로 무시")
+                    log_debug("NO_POSITION_EXIT", f"{symbol} {action.upper()}({reason}) 알림 - 포지션 없음")
                     return jsonify({"status": "no_position"}), 200
 
         elif action in ("tp", "sl"):
-            # TP / SL 청산 알림 무시
-            log_debug("WEBHOOK_IGNORED", f"{symbol} {action.upper()} 알림 무시 (실시간 TP/SL 자동청산 룰)")
+           # TP/SL 청산 단독 알림(아예 action이 'tp','sl'인 경우도 필요시 방어)
+            log_debug("WEBHOOK_IGNORED", f"{symbol} {action.upper()} 알림 무시 (TP/SL 자동청산 룰)")
             return jsonify({"status": f"{action}_ignored"}), 200
 
         else:
