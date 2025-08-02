@@ -56,25 +56,35 @@ SYMBOL_MAPPING = {
 
 SYMBOL_CONFIG = {
     "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("0.55"), "sl_mult": Decimal("0.55")},
+                 "min_notional": Decimal("5"), "tp_mult": Decimal("0.55"), "sl_mult": Decimal("0.55"),
+                 "qty_mult": Decimal("1.0")},
     "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("0.65"), "sl_mult": Decimal("0.65")},
+                 "min_notional": Decimal("5"), "tp_mult": Decimal("0.65"), "sl_mult": Decimal("0.65"),
+                 "qty_mult": Decimal("1.0")},
     "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("0.8"), "sl_mult": Decimal("0.8")},
+                 "min_notional": Decimal("5"), "tp_mult": Decimal("0.8"), "sl_mult": Decimal("0.8"),
+                 "qty_mult": Decimal("1.0")},
     "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
+                 "qty_mult": Decimal("1.0")},
     "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
+                 "qty_mult": Decimal("0.5")},
     "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
-                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
-    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"),
-                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.2"), "sl_mult": Decimal("1.2")},
+                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
+                  "qty_mult": Decimal("1.0")},
+    "PEPE_USDT": {"min_qty": Decimal("0.5"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"),
+                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.2"), "sl_mult": Decimal("1.2"),
+                  "qty_mult": Decimal("0.5")},
     "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
+                 "qty_mult": Decimal("1.0")},
     "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
-                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.2"), "sl_mult": Decimal("1.2")},
+                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.2"), "sl_mult": Decimal("1.2"),
+                  "qty_mult": Decimal("0.5")},
     "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
-                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0")},
+                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
+                  "qty_mult": Decimal("1.0")},
 }
 
 TP_BASE_MAP = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
@@ -251,6 +261,7 @@ def calculate_qty(symbol: str, signal_type: str, entry_multiplier: Decimal) -> D
     log_debug("QTY_CALC_START", f"{symbol} 수량 계산 시작 (signal_type: {signal_type})")
     
     cfg = SYMBOL_CONFIG[symbol]
+    qty_mult = cfg.get("qty_mult", Decimal("1.0"))
     equity = get_account_equity()
     price = get_current_price(symbol)
 
@@ -272,7 +283,7 @@ def calculate_qty(symbol: str, signal_type: str, entry_multiplier: Decimal) -> D
         base_ratio *= Decimal("1.5")
         log_debug("QTY_CALC_SL_RESCUE", f"SL-Rescue qty multiplier applied: {float(base_ratio)}%")
 
-    position_value = equity * (base_ratio / Decimal("100")) * entry_multiplier
+    position_value = equity * (base_ratio / Decimal("100")) * entry_multiplier * qty_mult
 
     contract_size = cfg["contract_size"]
     qty_step = cfg["qty_step"]
