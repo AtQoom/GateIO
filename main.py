@@ -73,7 +73,7 @@ SYMBOL_CONFIG = {
     "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
                   "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
                   "qty_mult": Decimal("1.0")},
-    "PEPE_USDT": {"min_qty": Decimal("0.5"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"),
+    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"),
                   "min_notional": Decimal("5"), "tp_mult": Decimal("1.3"), "sl_mult": Decimal("1.3"),
                   "qty_mult": Decimal("1.0")},
     "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
