@@ -89,6 +89,7 @@ SYMBOL_CONFIG = {
 
 TP_BASE_MAP = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
 SL_BASE_MAP = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
+MIN_ENTRY_FOR_SL = 4  # 예: 3회 추가진입 후부터 SL 청산 허용
 
 # 2. 강화된 로깅 설정
 
@@ -309,11 +310,7 @@ def calculate_qty(symbol: str, signal_type: str, entry_multiplier: Decimal) -> D
 def is_sl_rescue_condition(symbol: str) -> bool:
     with position_lock:
         pos = position_state.get(symbol)
-        if not pos:
-            return False
-        if pos.get("size", Decimal("0")) == 0:
-            return False
-        if pos.get("sl_entry_count", 0) >= MAX_SL_RESCUES:
+        if not pos or pos.get("size", Decimal("0")) == 0 or pos.get("sl_entry_count", 0) >= MAX_SL_RESCUES:
             return False
 
         current_price = get_current_price(symbol)
@@ -325,27 +322,15 @@ def is_sl_rescue_condition(symbol: str) -> bool:
         entry_count = pos.get("entry_count", 1)
 
         tp_orig, sl_orig, entry_start_time = get_tp_sl(symbol, entry_count)
-
-        elapsed_sec = time.time() - entry_start_time
-        periods_15s = int(elapsed_sec // 15)
-
-        sl_decay_rate = Decimal("0.0004")
-        sl_minimum = Decimal("0.0009")
         sl_mult = SYMBOL_CONFIG.get(symbol, {}).get("sl_mult", Decimal("1.0"))
-        sl_adjusted = max(sl_minimum, sl_orig - periods_15s * sl_decay_rate * sl_mult)
+        sl_pct = SL_BASE_MAP[min(entry_count-1, len(SL_BASE_MAP)-1)] * sl_mult
 
-        sl_price = entry_price * (1 - sl_adjusted) if side == "buy" else entry_price * (1 + sl_adjusted)
-
-        proximity = abs(current_price - sl_price) / sl_price
-        underwater = (side == "buy" and current_price < entry_price) or (side == "sell" and current_price > entry_price)
-
-        condition = proximity <= SL_RESCUE_PROXIMITY and underwater
-
-        if condition:
-            log_debug("SL_RESCUE_CONDITION",
-                      f"{symbol} proximity={proximity:.8f} underwater={underwater} sl_price={sl_price:.8f} current_price={current_price:.8f}")
-
-        return condition
+        if side == "buy":
+            sl_price = entry_price * (1 - sl_pct)
+            return current_price <= sl_price
+        else:
+            sl_price = entry_price * (1 + sl_pct)
+            return current_price >= sl_price
 
 # 10. 주문 실행
 
@@ -494,8 +479,14 @@ def process_ticker(ticker: dict):
             log_debug("TP_TRIGGER", f"{symbol} TP 발동 현재가={price}, TP가격={tp_price}")
             close_position(symbol, reason="TP")
 
-        elif (side == "buy" and price <= sl_price) or (side == "sell" and price >= sl_price):
-            log_debug("SL_TRIGGER", f"{symbol} SL 발동 현재가={price}, SL가격={sl_price}")
+        entry_count = pos.get("entry_count", 0)
+
+        if (side == "buy" and price <= sl_price) and entry_count >= MIN_ENTRY_FOR_SL:
+            log_debug("SL_TRIGGER", f"{symbol} SL 발동 현재가={price}, SL가격={sl_price}, 진입횟수={entry_count} 조건 만족")
+            close_position(symbol, reason="SL")
+
+        elif (side == "sell" and price >= sl_price) and entry_count >= MIN_ENTRY_FOR_SL:
+            log_debug("SL_TRIGGER", f"{symbol} SL 발동 현재가={price}, SL가격={sl_price}, 진입횟수={entry_count} 조건 만족")
             close_position(symbol, reason="SL")
 
 # 12. 워커 스레드 및 진입 처리
