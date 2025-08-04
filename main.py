@@ -89,7 +89,7 @@ SYMBOL_CONFIG = {
 
 TP_BASE_MAP = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
 SL_BASE_MAP = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
-MIN_ENTRY_FOR_SL = 4  # 예: 3회 추가진입 후부터 SL 청산 허용
+MIN_ENTRY_FOR_SL = 6  # 예: 3회 추가진입 후부터 SL 청산 허용
 
 # 2. 강화된 로깅 설정
 
