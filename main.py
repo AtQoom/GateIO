@@ -764,7 +764,7 @@ def worker_launcher(num_workers: int = 10):
 
 def main():
     log_debug("STARTUP", "자동매매 서버 시작")
-    log_debug("ENTRY_RATIOS", "진입 비율: 10%-20%-50%-120%-100%")
+    log_debug("ENTRY_RATIOS", "진입 비율: 20%-30%-0%-160%-500%")
     log_initial_state()
     worker_launcher(8)
     threading.Thread(target=run_ws_monitor, daemon=True, name="WS-Monitor").start()
