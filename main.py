@@ -588,6 +588,20 @@ def log_initial_state():
 def run_ws_monitor():
     asyncio.run(price_monitor(list(SYMBOL_CONFIG.keys())))
 
+def worker_thread(worker_id: int):
+    log_debug(f"Worker-{worker_id}", "워커 시작")
+    while True:
+        try:
+            data = task_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        try:
+            handle_entry(data)
+        except Exception as e:
+            log_debug(f"Worker-{worker_id} ERROR", f"진입 처리 실패: {e}")
+        finally:
+            task_queue.task_done()
+
 def worker_launcher(num_workers: int = 8):
     for i in range(num_workers):
         threading.Thread(target=worker_thread, args=(i,), daemon=True, name=f"Worker-{i}").start()
