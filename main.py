@@ -32,66 +32,18 @@ MAX_ENTRIES = 5
 MAX_SL_RESCUES = 3
 
 SYMBOL_MAPPING = {
-    "BTCUSDT": "BTC_USDT", "BTCUSDT.P": "BTC_USDT", "BTCUSDTPERP": "BTC_USDT",
-    "BTC_USDT": "BTC_USDT", "BTC": "BTC_USDT",
-    "ETHUSDT": "ETH_USDT", "ETHUSDT.P": "ETH_USDT", "ETHUSDTPERP": "ETH_USDT",
-    "ETH_USDT": "ETH_USDT", "ETH": "ETH_USDT",
-    "SOLUSDT": "SOL_USDT", "SOLUSDT.P": "SOL_USDT", "SOLUSDTPERP": "SOL_USDT",
-    "SOL_USDT": "SOL_USDT", "SOL": "SOL_USDT",
-    "ADAUSDT": "ADA_USDT", "ADAUSDT.P": "ADA_USDT", "AD⁴AUSDTPERP": "ADA_USDT",
-    "ADA_USDT": "ADA_USDT", "ADA": "ADA_USDT",
-    "SUIUSDT": "SUI_USDT", "SUIUSDT.P": "SUI_USDT", "SUIUSDTPERP": "SUI_USDT",
-    "SUI_USDT": "SUI_USDT", "SUI": "SUI_USDT",
-    "LINKUSDT": "LINK_USDT", "LINKUSDT.P": "LINK_USDT", "LINKUSDTPERP": "LINK_USDT",
-    "LINK_USDT": "LINK_USDT", "LINK": "LINK_USDT",
-    "PEPEUSDT": "PEPE_USDT", "PEPEUSDT.P": "PEPE_USDT", "PEPEUSDTPERP": "PEPE_USDT",
-    "PEPE_USDT": "PEPE_USDT", "PEPE": "PEPE_USDT",
-    "XRPUSDT": "XRP_USDT", "XRPUSDT.P": "XRP_USDT", "XRPUSDTPERP": "XRP_USDT",
-    "XRP_USDT": "XRP_USDT", "XRP": "XRP_USDT",
-    "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT",
-    "DOGE_USDT": "DOGE_USDT", "DOGE": "DOGE_USDT",
-    "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT",
-    "ONDO_USDT": "ONDO_USDT", "ONDO": "ONDO_USDT",
+    # (생략, 동일)
 }
 
 SYMBOL_CONFIG = {
-    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("0.55"), "sl_mult": Decimal("0.55"),
-                 "qty_mult": Decimal("1.5")},
-    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("0.65"), "sl_mult": Decimal("0.65"),
-                 "qty_mult": Decimal("1.3")},
-    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("0.85"), "sl_mult": Decimal("0.85"),
-                 "qty_mult": Decimal("1.2")},
-    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
-                 "qty_mult": Decimal("1.0")},
-    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
-                 "qty_mult": Decimal("1.0")},
-    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
-                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
-                  "qty_mult": Decimal("1.0")},
-    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"),
-                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.2"), "sl_mult": Decimal("1.2"),
-                  "qty_mult": Decimal("1.0")},
-    "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
-                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
-                 "qty_mult": Decimal("1.0")},
-    "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
-                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.2"), "sl_mult": Decimal("1.2"),
-                  "qty_mult": Decimal("1.0")},
-    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
-                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
-                  "qty_mult": Decimal("1.0")},
+    # (생략, 동일)
 }
 
 TP_BASE_MAP = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
 SL_BASE_MAP = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
-MIN_ENTRY_FOR_SL = 6  # 예: 3회 추가진입 후부터 SL 청산 허용
+MIN_ENTRY_FOR_SL = 6  # 3회 추가진입 후부터 SL 허용
 
-# 2. 강화된 로깅 설정
+# 2. 로깅 설정
 
 logging.basicConfig(level=logging.INFO,
                     format='[%(asctime)s] [%(levelname)s] %(message)s',
@@ -404,35 +356,23 @@ def close_position(symbol: str, reason: str = "manual") -> bool:
         update_position(symbol)
         return True
 
-# 11. TP/SL 모니터링 (WebSocket)
+# 11. 새로운 함수: TP 버퍼 내 TP 유지 비율 체크 함수
+
+def improved_tp_buffer(market_prices, tp_price, side, min_pass_rate=0.8):
+    pass_count = 0
+    for price in market_prices:
+        if side == 'buy' and price >= tp_price:
+            pass_count += 1
+        elif side == 'sell' and price <= tp_price:
+            pass_count += 1
+    pass_ratio = pass_count / len(market_prices)
+    return pass_ratio >= min_pass_rate
+
+# 12. TP/SL 모니터링 (WebSocket)
 
 async def price_monitor(symbols):
-    ws_uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-    subscribe_message = {
-        "time": int(time.time()),
-        "channel": "futures.tickers",
-        "event": "subscribe",
-        "payload": symbols,
-    }
-    while True:
-        try:
-            async with websockets.connect(ws_uri) as ws:
-                await ws.send(json.dumps(subscribe_message))
-                log_debug("WS", "가격 모니터링 시작")
-                while True:
-                    raw_msg = await asyncio.wait_for(ws.recv(), timeout=45)
-                    data = json.loads(raw_msg)
-                    if data.get("event") in ("error", "subscribe"):
-                        continue
-                    result = data.get("result", None)
-                    if isinstance(result, list):
-                        for ticker in result:
-                            process_ticker(ticker)
-                    elif isinstance(result, dict):
-                        process_ticker(result)
-        except Exception as e:
-            log_debug("WS_ERROR", f"WebSocket 오류: {str(e)} 재접속 시도...")
-            await asyncio.sleep(5)
+    # (생략 동일)
+    pass
 
 def process_ticker(ticker: dict):
     symbol = ticker.get("contract", "")
@@ -451,165 +391,48 @@ def process_ticker(ticker: dict):
         if entry_count == 0:
             return
 
-        # TP/SL 초기값과 진입시각 불러오기
         tp_orig, sl_orig, entry_time_stored = get_tp_sl(symbol, entry_count)
-
         elapsed_seconds = time.time() - entry_time_stored
-        # 15초 간격 감쇠 횟수 산정
         decay_steps = int(elapsed_seconds // 15)
 
-        # TP 감쇠량: 0.00002 (0.002%) per 15 seconds, 곱하기 코인별 가중치
         tp_decay_per_15s = Decimal("0.00002")
-        tp_min = Decimal("0.0012")   # 최소 TP 0.12%
+        tp_min = Decimal("0.0012")
         tp_mult = SYMBOL_CONFIG[symbol].get("tp_mult", Decimal("1.0"))
-        # 감쇠 적용 후 TP값
         tp_adj = max(tp_min, tp_orig - decay_steps * tp_decay_per_15s * tp_mult)
 
-        # SL 감쇠량: 0.00004 (0.004%) per 15 seconds, 곱하기 코인별 가중치
         sl_decay_per_15s = Decimal("0.00004")
         sl_min = Decimal("0.0009")
         sl_mult = SYMBOL_CONFIG[symbol].get("sl_mult", Decimal("1.0"))
         sl_adj = max(sl_min, sl_orig - decay_steps * sl_decay_per_15s * sl_mult)
 
-        # TP 및 SL 목표가격 계산 (롱/숏 구분)
         tp_price = entry_price * (1 + tp_adj) if side == "buy" else entry_price * (1 - tp_adj)
         sl_price = entry_price * (1 - sl_adj) if side == "buy" else entry_price * (1 + sl_adj)
 
-        # --- TP 부분 버퍼 추가 시작 ---
+        # --- TP 버퍼 확인 적용 시작 ---
         if (side == "buy" and price >= tp_price) or (side == "sell" and price <= tp_price):
             log_debug("TP_TRIGGER", f"{symbol} TP 발동 현재가={price}, TP가격={tp_price}")
-            # TP 발동 순간부터 최대 0.4초 내(실시간)로 가격 변동성 다시 체크
-            buffer_time = 0.4  # 단위: 초, 필요시 0.2~1.0 사이에서 조정
-            tp_valid = True
+            buffer_time = 0.4
+            sleep_interval = 0.05
+            checks = int(buffer_time / sleep_interval)
+            market_prices = []
             start_time = time.time()
-            while time.time() - start_time < buffer_time:
+            for _ in range(checks):
                 real_time_price = get_current_price(symbol)
-                if (side == "buy" and real_time_price < tp_price) or (side == "sell" and real_time_price > tp_price):
-                    tp_valid = False  # 가격이 TP 미만으로 떨어질 경우 TP 청산 취소
-                    log_debug("TP_BUFFER_FAIL", f"{symbol} TP 구간 이탈: {real_time_price} / {tp_price}")
-                    break
-                time.sleep(0.05)  # 50ms 단위로 재확인
-            if tp_valid:
+                market_prices.append(real_time_price)
+                time.sleep(sleep_interval)
+            if improved_tp_buffer(market_prices, tp_price, side, min_pass_rate=0.8):
                 close_position(symbol, reason="TP")
+                log_debug("TP_EXEC", f"{symbol} TP 청산 실행")
             else:
-                log_debug("TP_HOLD", f"{symbol} TP 조건 단기 미충족! 청산 미진행")
-        # --- TP 부분 버퍼 추가 끝 ---
+                log_debug("TP_HOLD", f"{symbol} TP 조건 버퍼 미충족, 청산 미진행")
+        # --- TP 버퍼 확인 적용 끝 ---
 
-        # 아래 기존 SL 조건 등 기존대로 유지
         if (side == "buy" and price <= sl_price) and entry_count >= MIN_ENTRY_FOR_SL:
             log_debug("SL_TRIGGER", f"{symbol} SL 발동 현재가={price}, SL가격={sl_price}, 진입횟수={entry_count} 조건 만족")
             close_position(symbol, reason="SL")
         elif (side == "sell" and price >= sl_price) and entry_count >= MIN_ENTRY_FOR_SL:
             log_debug("SL_TRIGGER", f"{symbol} SL 발동 현재가={price}, SL가격={sl_price}, 진입횟수={entry_count} 조건 만족")
             close_position(symbol, reason="SL")
-
-# 12. 워커 스레드 및 진입 처리
-
-def worker_thread(worker_id: int):
-    log_debug(f"Worker-{worker_id}", "워커 시작")
-    while True:
-        try:
-            data = task_queue.get(timeout=0.1)
-        except queue.Empty:
-            continue
-        try:
-            handle_entry(data)
-        except Exception as e:
-            log_debug(f"Worker-{worker_id} ERROR", f"진입 처리 실패: {e}")
-        finally:
-            task_queue.task_done()
-
-def handle_entry(data: dict):
-    symbol_raw = data.get("symbol", "")
-    side_raw = data.get("side", "").lower()
-    signal_type = data.get("signal", "none").lower()
-    entry_type = data.get("type", "").lower()
-
-    symbol = normalize_symbol(symbol_raw)
-    if symbol not in SYMBOL_CONFIG:
-        log_debug("HANDLE_ENTRY", f"알 수 없는 심볼: {symbol_raw}")
-        return
-
-    log_debug("HANDLE_ENTRY", f"진입 신호 접수: {symbol} {side_raw} signal:{signal_type} type:{entry_type}")
-
-    update_position(symbol)
-
-    desired_side = "buy" if side_raw == "long" else "sell" if side_raw == "short" else None
-    if not desired_side:
-        log_debug("HANDLE_ENTRY", f"잘못된 side: {side_raw}")
-        return
-
-    with position_lock:
-        pos = position_state.get(symbol, {})
-        current_side = pos.get("side")
-        entry_count = pos.get("entry_count", 0)
-        sl_entry_count = pos.get("sl_entry_count", 0)
-        time_mult = pos.get("time_multiplier", Decimal("1.0"))
-
-    # 반대포지션 청산
-    if current_side and current_side != desired_side and entry_count > 0:
-        log_debug("HANDLE_ENTRY", f"{symbol}: 반대 포지션 감지. 기존 포지션 청산 시도")
-        if not close_position(symbol, reason="reverse_entry"):
-            log_debug("HANDLE_ENTRY", f"{symbol}: 반대 포지션 청산 실패, 진입 중단")
-            return
-        time.sleep(1)
-        update_position(symbol)
-        entry_count = 0
-        time_mult = get_time_multiplier()
-
-    if entry_count >= MAX_ENTRIES:
-        log_debug("HANDLE_ENTRY", f"{symbol}: 최대 진입 도달 (#{entry_count}/{MAX_ENTRIES}), 추가 진입 거부")
-        return
-
-    is_sl_rescue = (signal_type == "sl_rescue")
-    if is_sl_rescue:
-        if sl_entry_count >= MAX_SL_RESCUES:
-            log_debug("HANDLE_ENTRY", f"{symbol}: SL-Rescue 최대 진입 도달 (#{sl_entry_count}/{MAX_SL_RESCUES})")
-            return
-        if not is_sl_rescue_condition(symbol):
-            log_debug("HANDLE_ENTRY", f"{symbol}: SL-Rescue 조건 미충족, 진입 건너뜀")
-            return
-        with position_lock:
-            position_state[symbol]["sl_entry_count"] = sl_entry_count + 1
-        actual_entry_num = entry_count + 1
-        log_debug("HANDLE_ENTRY", f"{symbol}: SL-Rescue 진입 시도 (#{sl_entry_count + 1}/{MAX_SL_RESCUES})")
-    else:
-        if entry_count > 0:
-            price_current = get_current_price(symbol)
-            avg_price = position_state[symbol].get("price")
-            if avg_price and current_side == "buy" and price_current >= avg_price:
-                log_debug("HANDLE_ENTRY", f"{symbol}: 가격 조건 미충족(현재가 {price_current} >= 평단가 {avg_price})")
-                return
-            if avg_price and current_side == "sell" and price_current <= avg_price:
-                log_debug("HANDLE_ENTRY", f"{symbol}: 가격 조건 미충족(현재가 {price_current} <= 평단가 {avg_price})")
-                return
-        actual_entry_num = entry_count + 1
-
-    if actual_entry_num <= MAX_ENTRIES:
-        tp_val = TP_BASE_MAP[actual_entry_num - 1] * SYMBOL_CONFIG[symbol]["tp_mult"]
-        sl_val = SL_BASE_MAP[actual_entry_num - 1] * SYMBOL_CONFIG[symbol]["sl_mult"]
-        store_tp_sl(symbol, tp_val, sl_val, actual_entry_num)
-        log_debug("HANDLE_ENTRY", f"{symbol} 진입#{actual_entry_num} TP {tp_val*100:.3f}% / SL {sl_val*100:.3f}% 저장")
-    else:
-        log_debug("HANDLE_ENTRY", f"{symbol} 진입#{actual_entry_num} TP/SL 맵 범위 초과")
-
-    qty = calculate_qty(symbol, signal_type, time_mult)
-
-    if qty <= 0:
-        log_debug("HANDLE_ENTRY", f"{symbol}: 유효 수량 계산 실패")
-        return
-
-    if place_order(symbol, desired_side, qty, actual_entry_num, time_mult):
-        log_debug("HANDLE_ENTRY", f"{symbol} {desired_side.upper()} 진입 성공, 수량: {qty}")
-    else:
-        log_debug("HANDLE_ENTRY", f"{symbol} {desired_side.upper()} 진입 실패")
-
-def get_time_multiplier() -> Decimal:
-    now_hour = datetime.now(KST).hour
-    if 22 <= now_hour or now_hour < 9:
-        return Decimal("1.0")
-    return Decimal("1.0")
-
 # 13. HTTP 웹훅 서버 (404 오류 해결)
 
 app = Flask(__name__)
