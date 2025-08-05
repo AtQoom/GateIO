@@ -552,6 +552,24 @@ def worker_launcher(num_workers: int = 10):
     for i in range(num_workers):
         threading.Thread(target=worker_thread, args=(i,), daemon=True, name=f"Worker-{i}").start()
     log_debug("WORKER", f"{num_workers} 워커 스레드 실행")
+    
+def log_initial_state():
+    equity = get_account_equity()
+    log_debug("INIT", f"초기 자산 조회: {equity:.2f} USDT")
+    active_positions = []
+    for sym in SYMBOL_CONFIG:
+        update_position(sym)
+        pos = position_state.get(sym, {})
+        if pos and pos.get("side") and pos.get("size", 0) > 0:
+            active_positions.append(
+                f"{sym} 포지션: {pos['side']} {pos['size']} @ {pos['price']} (진입#{pos.get('entry_count', 0)}/5, SL-Rescue#{pos.get('sl_entry_count', 0)}/3)"
+            )
+    if active_positions:
+        log_debug("INIT", "현재 활성화된 포지션:")
+        for info in active_positions:
+            log_debug("INIT", f"  - {info}")
+    else:
+        log_debug("INIT", "활성 포지션 없음")
 
 def main():
     log_debug("STARTUP", "자동매매 서버 시작")
