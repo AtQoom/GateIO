@@ -757,7 +757,7 @@ def log_initial_state():
 def run_ws_monitor():
     asyncio.run(price_monitor(list(SYMBOL_CONFIG.keys())))
 
-def worker_launcher(num_workers: int = 6):
+def worker_launcher(num_workers: int = 10):
     for i in range(num_workers):
         threading.Thread(target=worker_thread, args=(i,), daemon=True, name=f"Worker-{i}").start()
     log_debug("WORKER", f"{num_workers} 워커 스레드 실행")
@@ -766,7 +766,7 @@ def main():
     log_debug("STARTUP", "자동매매 서버 시작")
     log_debug("ENTRY_RATIOS", "진입 비율: 10%-20%-50%-120%-100%")
     log_initial_state()
-    worker_launcher(4)
+    worker_launcher(8)
     threading.Thread(target=run_ws_monitor, daemon=True, name="WS-Monitor").start()
     port = int(os.environ.get("PORT", 8080))
     log_debug("SERVER", f"HTTP 서버 시작 포트 {port}")
