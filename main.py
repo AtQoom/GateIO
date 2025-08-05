@@ -475,16 +475,30 @@ def process_ticker(ticker: dict):
         tp_price = entry_price * (1 + tp_adj) if side == "buy" else entry_price * (1 - tp_adj)
         sl_price = entry_price * (1 - sl_adj) if side == "buy" else entry_price * (1 + sl_adj)
 
+        # --- TP 부분 버퍼 추가 시작 ---
         if (side == "buy" and price >= tp_price) or (side == "sell" and price <= tp_price):
             log_debug("TP_TRIGGER", f"{symbol} TP 발동 현재가={price}, TP가격={tp_price}")
-            close_position(symbol, reason="TP")
+            # TP 발동 순간부터 최대 0.4초 내(실시간)로 가격 변동성 다시 체크
+            buffer_time = 0.4  # 단위: 초, 필요시 0.2~1.0 사이에서 조정
+            tp_valid = True
+            start_time = time.time()
+            while time.time() - start_time < buffer_time:
+                real_time_price = get_current_price(symbol)
+                if (side == "buy" and real_time_price < tp_price) or (side == "sell" and real_time_price > tp_price):
+                    tp_valid = False  # 가격이 TP 미만으로 떨어질 경우 TP 청산 취소
+                    log_debug("TP_BUFFER_FAIL", f"{symbol} TP 구간 이탈: {real_time_price} / {tp_price}")
+                    break
+                time.sleep(0.05)  # 50ms 단위로 재확인
+            if tp_valid:
+                close_position(symbol, reason="TP")
+            else:
+                log_debug("TP_HOLD", f"{symbol} TP 조건 단기 미충족! 청산 미진행")
+        # --- TP 부분 버퍼 추가 끝 ---
 
-        entry_count = pos.get("entry_count", 0)
-
+        # 아래 기존 SL 조건 등 기존대로 유지
         if (side == "buy" and price <= sl_price) and entry_count >= MIN_ENTRY_FOR_SL:
             log_debug("SL_TRIGGER", f"{symbol} SL 발동 현재가={price}, SL가격={sl_price}, 진입횟수={entry_count} 조건 만족")
             close_position(symbol, reason="SL")
-
         elif (side == "sell" and price >= sl_price) and entry_count >= MIN_ENTRY_FOR_SL:
             log_debug("SL_TRIGGER", f"{symbol} SL 발동 현재가={price}, SL가격={sl_price}, 진입횟수={entry_count} 조건 만족")
             close_position(symbol, reason="SL")
@@ -751,7 +765,7 @@ def log_initial_state():
 def run_ws_monitor():
     asyncio.run(price_monitor(list(SYMBOL_CONFIG.keys())))
 
-def worker_launcher(num_workers: int = 6):
+def worker_launcher(num_workers: int = 8):
     for i in range(num_workers):
         threading.Thread(target=worker_thread, args=(i,), daemon=True, name=f"Worker-{i}").start()
     log_debug("WORKER", f"{num_workers} 워커 스레드 실행")
