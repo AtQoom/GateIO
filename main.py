@@ -117,7 +117,7 @@ tpsl_lock = threading.RLock()
 recent_signals = {}
 signal_lock = threading.RLock()
 
-task_queue = queue.Queue(maxsize=100)
+task_queue = queue.Queue(maxsize=20)
 
 # 4. 유틸리티 및 API 호출 재시도
 
@@ -548,7 +548,7 @@ def worker_thread(worker_id: int):
         finally:
             task_queue.task_done()
 
-def worker_launcher(num_workers: int = 8):
+def worker_launcher(num_workers: int = 10):
     for i in range(num_workers):
         threading.Thread(target=worker_thread, args=(i,), daemon=True, name=f"Worker-{i}").start()
     log_debug("WORKER", f"{num_workers} 워커 스레드 실행")
@@ -556,7 +556,7 @@ def worker_launcher(num_workers: int = 8):
 def main():
     log_debug("STARTUP", "자동매매 서버 시작")
     log_initial_state()
-    worker_launcher(4)
+    worker_launcher(12)
     threading.Thread(target=run_ws_monitor, daemon=True, name="WS-Monitor").start()
     port = int(os.environ.get("PORT", 8080))
     log_debug("SERVER", f"HTTP 서버 시작 포트 {port}")
