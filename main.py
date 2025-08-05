@@ -470,22 +470,10 @@ def process_ticker(ticker: dict):
         tp_price = entry_price * (1 + tp_adj) if side == "buy" else entry_price * (1 - tp_adj)
         sl_price = entry_price * (1 - sl_adj) if side == "buy" else entry_price * (1 + sl_adj)
 
-        # TP 버퍼링 적용
         if (side == "buy" and price >= tp_price) or (side == "sell" and price <= tp_price):
-            log_debug("TP_TRIGGER", f"{symbol} TP 발동 현재가={price}, TP가격={tp_price}")
-            buffer_time = 0.4
-            sleep_interval = 0.05
-            checks = int(buffer_time / sleep_interval)
-            market_prices = []
-            for _ in range(checks):
-                real_time_price = get_current_price(symbol)
-                market_prices.append(real_time_price)
-                time.sleep(sleep_interval)
-            if improved_tp_buffer(market_prices, tp_price, side):
-                close_position(symbol, reason="TP")
-                log_debug("TP_EXEC", f"{symbol} TP 청산 실행")
-            else:
-                log_debug("TP_HOLD", f"{symbol} TP 조건 버퍼 미충족, 청산 미진행")
+            log_debug("TP_TRIGGER", f"{symbol} TP 도달 현재가={price}, TP가격={tp_price} (즉시 청산)")
+            close_position(symbol, reason="TP")
+            log_debug("TP_EXEC", f"{symbol} TP 청산 실행")
 
         # SL 청산 조건
         if (side == "buy" and price <= sl_price) and entry_count >= MIN_ENTRY_FOR_SL:
