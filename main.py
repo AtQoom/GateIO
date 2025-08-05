@@ -570,7 +570,9 @@ def log_initial_state():
             log_debug("INIT", f"  - {info}")
     else:
         log_debug("INIT", "활성 포지션 없음")
-
+def run_ws_monitor():
+    asyncio.run(price_monitor(list(SYMBOL_CONFIG.keys())))
+    
 def main():
     log_debug("STARTUP", "자동매매 서버 시작")
     log_initial_state()
