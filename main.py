@@ -444,31 +444,24 @@ def process_ticker(ticker: dict):
 
     with position_lock:
         pos = position_state.get(symbol)
-        # 포지션 없거나 사이즈 0이면 검사하지 않음
         if not pos or not pos.get("side") or not pos.get("price") or pos.get("size", 0) == 0:
             return
 
         now = time.time()
         entry_time = pos.get("entry_time", now)
-        # 진입 후 1초 미만이면 TP/SL 체크 생략 (즉시 청산 방지)
-        if now - entry_time < 3.0:
-            return
-
-        entry_price = pos["price"]
-        side = pos["side"]
-        entry_count = pos.get("entry_count", 0)
-        if entry_count == 0:
-            return
-
-        tp_orig, sl_orig, entry_time_stored = get_tp_sl(symbol, entry_count)
-
-        elapsed_seconds = time.time() - entry_time_stored
-        decay_steps = int(elapsed_seconds // 15)
-
-        tp_decay_per_15s = Decimal("0.00002")
-        tp_min = Decimal("0.0012")
-        tp_mult = SYMBOL_CONFIG[symbol].get("tp_mult", Decimal("1.0"))
-        tp_adj = max(tp_min, tp_orig - decay_steps * tp_decay_per_15s * tp_mult)
+        # 진입 후 5초간 TP 목표 상향 조정
+        if now - entry_time < 5.0:
+            # TP 기준을 1.0%로 임시 변경
+            tp_adj = Decimal("0.01")  # 1.0%
+        else:
+            # 기존 TP 감쇠 계산 유지
+            elapsed_seconds = now - entry_time
+            decay_steps = int(elapsed_seconds // 15)
+            tp_decay_per_15s = Decimal("0.00002")
+            tp_min = Decimal("0.0012")
+            tp_orig, sl_orig, _ = get_tp_sl(symbol, pos.get("entry_count", 1))
+            tp_mult = SYMBOL_CONFIG[symbol].get("tp_mult", Decimal("1.0"))
+            tp_adj = max(tp_min, tp_orig - decay_steps * tp_decay_per_15s * tp_mult)
 
         sl_decay_per_15s = Decimal("0.00004")
         sl_min = Decimal("0.0009")
