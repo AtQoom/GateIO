@@ -318,8 +318,10 @@ def is_sl_rescue_condition(symbol: str) -> bool:
 
         entry_price = pos.get("price")
         side = pos.get("side")
-        entry_count = pos.get("entry_count", 1)
-
+        entry_count = pos.get("entry_count", 0)
+        if not entry_price or side not in ("buy", "sell") or entry_count == 0:
+            return
+    
         tp_orig, sl_orig, _ = get_tp_sl(symbol, entry_count)   # 수정: 변수명 entry_start_time 삭제(미사용)
         sl_mult = SYMBOL_CONFIG.get(symbol, {}).get("sl_mult", Decimal("1.0"))
         sl_pct = SL_BASE_MAP[min(entry_count-1, len(SL_BASE_MAP)-1)] * sl_mult
@@ -449,17 +451,23 @@ def process_ticker(ticker: dict):
 
         now = time.time()
         entry_time = pos.get("entry_time", now)
-        # 진입 후 5초간 TP 목표 상향 조정
+
+        entry_price = pos["price"]
+        side = pos["side"]
+        entry_count = pos.get("entry_count", 0)
+        if entry_count == 0:
+            return
+
+        decay_steps = int((now - entry_time) // 15)
+
         if now - entry_time < 5.0:
-            # TP 기준을 1.0%로 임시 변경
-            tp_adj = Decimal("0.01")  # 1.0%
+            tp_adj = Decimal("0.01")  # 1.0%로 임시 TP 목표 상향 (5초)
+            # 그대로 sl_adj 계산도 유지
+            tp_orig, sl_orig, _ = get_tp_sl(symbol, entry_count)
         else:
-            # 기존 TP 감쇠 계산 유지
-            elapsed_seconds = now - entry_time
-            decay_steps = int(elapsed_seconds // 15)
             tp_decay_per_15s = Decimal("0.00002")
             tp_min = Decimal("0.0012")
-            tp_orig, sl_orig, _ = get_tp_sl(symbol, pos.get("entry_count", 1))
+            tp_orig, sl_orig, _ = get_tp_sl(symbol, entry_count)
             tp_mult = SYMBOL_CONFIG[symbol].get("tp_mult", Decimal("1.0"))
             tp_adj = max(tp_min, tp_orig - decay_steps * tp_decay_per_15s * tp_mult)
 
