@@ -437,18 +437,26 @@ def process_ticker(ticker: dict):
     symbol = ticker.get("contract", "")
     if symbol not in SYMBOL_CONFIG:
         return
+
     price = safe_decimal(ticker.get("last", "0"))
     if price <= 0:
         return
+
     with position_lock:
         pos = position_state.get(symbol)
+        # 포지션 없거나 사이즈 0이면 검사하지 않음
         if not pos or not pos.get("side") or not pos.get("price") or pos.get("size", 0) == 0:
+            return
+
+        now = time.time()
+        entry_time = pos.get("entry_time", now)
+        # 진입 후 1초 미만이면 TP/SL 체크 생략 (즉시 청산 방지)
+        if now - entry_time < 3.0:
             return
 
         entry_price = pos["price"]
         side = pos["side"]
         entry_count = pos.get("entry_count", 0)
-
         if entry_count == 0:
             return
 
@@ -470,12 +478,13 @@ def process_ticker(ticker: dict):
         tp_price = entry_price * (1 + tp_adj) if side == "buy" else entry_price * (1 - tp_adj)
         sl_price = entry_price * (1 - sl_adj) if side == "buy" else entry_price * (1 + sl_adj)
 
+        # 즉시 TP 청산
         if (side == "buy" and price >= tp_price) or (side == "sell" and price <= tp_price):
             log_debug("TP_TRIGGER", f"{symbol} TP 도달 현재가={price}, TP가격={tp_price} (즉시 청산)")
             close_position(symbol, reason="TP")
             log_debug("TP_EXEC", f"{symbol} TP 청산 실행")
 
-        # SL 청산 조건
+        # SL 조건 및 최소 진입횟수 검사
         if (side == "buy" and price <= sl_price) and entry_count >= MIN_ENTRY_FOR_SL:
             log_debug("SL_TRIGGER", f"{symbol} SL 발동 현재가={price}, SL가격={sl_price}, 진입횟수={entry_count}")
             close_position(symbol, reason="SL")
