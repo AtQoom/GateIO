@@ -91,7 +91,7 @@ TP_BASE_MAP = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0
 SL_BASE_MAP = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
 MIN_ENTRY_FOR_SL = 6  # 예: 3회 추가진입 후부터 SL 청산 허용
 
-# 2. 강화된 로깅 설정
+# 2. 로깅 설정
 
 logging.basicConfig(level=logging.INFO,
                     format='[%(asctime)s] [%(levelname)s] %(message)s',
@@ -101,7 +101,7 @@ logger = logging.getLogger("AutoTrader")
 def log_debug(tag, message):
     logger.info(f"[{tag}] {message}")
 
-# 3. API 클라이언트 및 상태 변수
+# 3. API 클라이언트 및 상태 변수 선언
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 api_client = ApiClient(config)
@@ -118,12 +118,14 @@ signal_lock = threading.RLock()
 
 task_queue = queue.Queue(maxsize=100)
 
-# 4. 유틸리티 및 API 호출 재시도
+# 4. symbol 정규화
 
 def normalize_symbol(raw_symbol: str) -> str:
     result = SYMBOL_MAPPING.get(raw_symbol.strip().upper(), raw_symbol.strip().upper())
     log_debug("SYMBOL_NORMALIZE", f"'{raw_symbol}' -> '{result}'")
     return result
+
+# 5. Decimal 안전 변환
 
 def safe_decimal(value, default=Decimal("0")):
     try:
@@ -131,6 +133,8 @@ def safe_decimal(value, default=Decimal("0")):
     except Exception as e:
         log_debug("DECIMAL_ERROR", f"Failed to convert '{value}': {e}")
         return default
+
+# 6. API 재시도 호출
 
 def call_api_with_retry(api_func, *args, retries=3, delay=2, **kwargs):
     for i in range(retries):
@@ -145,7 +149,7 @@ def call_api_with_retry(api_func, *args, retries=3, delay=2, **kwargs):
             time.sleep(delay)
     return None
 
-# 5. 포지션 및 가격 조회
+# 7. 포지션 업데이트
 
 def update_position(symbol: str):
     log_debug("UPDATE_POSITION", f"{symbol} 포지션 업데이트 시작")
@@ -167,12 +171,15 @@ def update_position(symbol: str):
                     "entry_count": current_pos.get("entry_count", 0),
                     "sl_entry_count": current_pos.get("sl_entry_count", 0),
                     "entry_time": current_pos.get("entry_time", time.time()),
-                    "time_multiplier": current_pos.get("time_multiplier", Decimal("1.0"))
+                    "time_multiplier": current_pos.get("time_multiplier", Decimal("1.0")),
+                    "is_entering": current_pos.get("is_entering", False),
                 }
                 log_debug("POSITION_UPDATED", f"{symbol}: {side} {size_abs} @ {entry_price}")
         else:
             position_state.pop(symbol, None)
     return position_state.get(symbol, None)
+
+# 8. 현재 가격 조회
 
 def get_current_price(symbol: str) -> Decimal:
     tickers = call_api_with_retry(futures_api.list_futures_tickers, settle=SETTLE_CURRENCY, contract=symbol)
@@ -182,20 +189,20 @@ def get_current_price(symbol: str) -> Decimal:
         return price
     return Decimal("0")
 
+# 9. 잔고 조회
+
 def get_account_equity():
     try:
         acc_info = futures_api.list_futures_accounts(SETTLE_CURRENCY)
         if hasattr(acc_info, 'available'):
-            equity = Decimal(str(acc_info.available))
-            return equity
+            return Decimal(str(acc_info.available))
         if isinstance(acc_info, list) and hasattr(acc_info[0], 'available'):
-            equity = Decimal(str(acc_info[0].available))
-            return equity
+            return Decimal(str(acc_info[0].available))
     except Exception as e:
         log_debug("BALANCE_ERROR", f"잔고 조회 오류: {e}")
     return Decimal("0")
 
-# 6. TP/SL 저장 및 조회
+# 10. TP/SL 저장 및 조회
 
 def store_tp_sl(symbol: str, tp: Decimal, sl: Decimal, entry_num: int):
     with tpsl_lock:
@@ -218,7 +225,7 @@ def get_tp_sl(symbol: str, entry_num: int):
     sl_mult = cfg.get("sl_mult", Decimal("1.0"))
     return Decimal("0.006") * tp_mult, Decimal("0.04") * sl_mult, time.time()
 
-# 7. 중복 신호 방지 쿨다운
+# 11. 중복 신호 쿨다운
 
 def is_duplicate_signal(data: dict) -> bool:
     with signal_lock:
@@ -256,7 +263,7 @@ def is_duplicate_signal(data: dict) -> bool:
 
         return False
 
-# 8. 주문 수량 계산
+# 12. 주문 수량 계산
 
 def calculate_qty(symbol: str, signal_type: str, entry_multiplier: Decimal) -> Decimal:
     log_debug("QTY_CALC_START", f"{symbol} 수량 계산 시작 (signal_type: {signal_type})")
@@ -304,7 +311,7 @@ def calculate_qty(symbol: str, signal_type: str, entry_multiplier: Decimal) -> D
     log_debug("QTY_CALC_RESULT", f"{symbol}: Qty={qty}, Notional={notional:.2f}, Equity={equity:.2f}, Ratio={base_ratio}%")
     return qty
 
-# 9. SL-Rescue 조건 확인
+# 13. SL-Rescue 조건 확인
 
 def is_sl_rescue_condition(symbol: str) -> bool:
     with position_lock:
@@ -322,7 +329,7 @@ def is_sl_rescue_condition(symbol: str) -> bool:
         if not entry_price or side not in ("buy", "sell") or entry_count == 0:
             return
     
-        tp_orig, sl_orig, _ = get_tp_sl(symbol, entry_count)   # 수정: 변수명 entry_start_time 삭제(미사용)
+        tp_orig, sl_orig, _ = get_tp_sl(symbol, entry_count)
         sl_mult = SYMBOL_CONFIG.get(symbol, {}).get("sl_mult", Decimal("1.0"))
         sl_pct = SL_BASE_MAP[min(entry_count-1, len(SL_BASE_MAP)-1)] * sl_mult
 
@@ -333,7 +340,7 @@ def is_sl_rescue_condition(symbol: str) -> bool:
             sl_price = entry_price * (1 + sl_pct)
             return current_price >= sl_price
 
-# 10. 주문 실행
+# 14. 주문 실행
 
 def place_order(symbol: str, side: str, qty: Decimal, entry_num: int, time_multiplier: Decimal) -> bool:
     log_debug("ORDER_ATTEMPT", f"{symbol} 주문 시도: {side} {qty} (진입#{entry_num})")
@@ -384,6 +391,8 @@ def place_order(symbol: str, side: str, qty: Decimal, entry_num: int, time_multi
 
         return True
 
+# 15. 포지션 청산
+
 def close_position(symbol: str, reason: str = "manual") -> bool:
     with position_lock:
         order = FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True)
@@ -398,14 +407,14 @@ def close_position(symbol: str, reason: str = "manual") -> bool:
         with tpsl_lock:
             tpsl_storage.pop(symbol, None)
         with signal_lock:
-            keys_rm = [k for k in recent_signals.keys() if k.startswith(symbol + "_") or (k == symbol)]
+            keys_rm = [k for k, t in recent_signals.items() if k.startswith(symbol + "_") or (k == symbol)]
             for k in keys_rm:
                 recent_signals.pop(k)
         time.sleep(1)
         update_position(symbol)
         return True
 
-# 11. TP/SL 모니터링 (WebSocket)
+# 16. 실시간 가격 모니터링 및 TP/SL 평가
 
 async def price_monitor(symbols):
     ws_uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
@@ -449,20 +458,22 @@ def process_ticker(ticker: dict):
         if not pos or not pos.get("side") or not pos.get("price") or pos.get("size", 0) == 0:
             return
 
+        if pos.get("is_entering", False):  # 진입중이면 평가 안함
+            return
+
         now = time.time()
         entry_time = pos.get("entry_time", now)
-
         entry_price = pos["price"]
         side = pos["side"]
         entry_count = pos.get("entry_count", 0)
+
         if entry_count == 0:
             return
 
         decay_steps = int((now - entry_time) // 15)
 
         if now - entry_time < 5.0:
-            tp_adj = Decimal("0.01")  # 1.0%로 임시 TP 목표 상향 (5초)
-            # 그대로 sl_adj 계산도 유지
+            tp_adj = Decimal("0.01")
             tp_orig, sl_orig, _ = get_tp_sl(symbol, entry_count)
         else:
             tp_decay_per_15s = Decimal("0.00002")
@@ -479,13 +490,11 @@ def process_ticker(ticker: dict):
         tp_price = entry_price * (1 + tp_adj) if side == "buy" else entry_price * (1 - tp_adj)
         sl_price = entry_price * (1 - sl_adj) if side == "buy" else entry_price * (1 + sl_adj)
 
-        # 즉시 TP 청산
         if (side == "buy" and price >= tp_price) or (side == "sell" and price <= tp_price):
             log_debug("TP_TRIGGER", f"{symbol} TP 도달 현재가={price}, TP가격={tp_price} (즉시 청산)")
             close_position(symbol, reason="TP")
             log_debug("TP_EXEC", f"{symbol} TP 청산 실행")
 
-        # SL 조건 및 최소 진입횟수 검사
         if (side == "buy" and price <= sl_price) and entry_count >= MIN_ENTRY_FOR_SL:
             log_debug("SL_TRIGGER", f"{symbol} SL 발동 현재가={price}, SL가격={sl_price}, 진입횟수={entry_count}")
             close_position(symbol, reason="SL")
@@ -493,7 +502,7 @@ def process_ticker(ticker: dict):
             log_debug("SL_TRIGGER", f"{symbol} SL 발동 현재가={price}, SL가격={sl_price}, 진입횟수={entry_count}")
             close_position(symbol, reason="SL")
 
-# 12. 워커 스레드 및 진입 처리
+# 17. 워커 스레드 및 작업 큐 처리
 
 def worker_thread(worker_id: int):
     log_debug(f"Worker-{worker_id}", "워커 시작")
@@ -509,90 +518,9 @@ def worker_thread(worker_id: int):
         finally:
             task_queue.task_done()
 
-def handle_entry(data: dict):
-    symbol_raw = data.get("symbol", "")
-    side_raw = data.get("side", "").lower()
-    signal_type = data.get("signal", "none").lower()
-    entry_type = data.get("type", "").lower()
+# 18. handle_entry 함수 (위에 정의됨, 중복 표시 안함)
 
-    symbol = normalize_symbol(symbol_raw)
-    if symbol not in SYMBOL_CONFIG:
-        log_debug("HANDLE_ENTRY", f"알 수 없는 심볼: {symbol_raw}")
-        return
-
-    log_debug("HANDLE_ENTRY", f"진입 신호 접수: {symbol} {side_raw} signal:{signal_type} type:{entry_type}")
-
-    update_position(symbol)
-
-    desired_side = "buy" if side_raw == "long" else "sell" if side_raw == "short" else None
-    if not desired_side:
-        log_debug("HANDLE_ENTRY", f"잘못된 side: {side_raw}")
-        return
-
-    with position_lock:
-        pos = position_state.get(symbol, {})
-        current_side = pos.get("side")
-        entry_count = pos.get("entry_count", 0)
-        sl_entry_count = pos.get("sl_entry_count", 0)
-        time_mult = pos.get("time_multiplier", Decimal("1.0"))
-
-    # 반대포지션 청산
-    if current_side and current_side != desired_side and entry_count > 0:
-        log_debug("HANDLE_ENTRY", f"{symbol}: 반대 포지션 감지. 기존 포지션 청산 시도")
-        if not close_position(symbol, reason="reverse_entry"):
-            log_debug("HANDLE_ENTRY", f"{symbol}: 반대 포지션 청산 실패, 진입 중단")
-            return
-        time.sleep(1)
-        update_position(symbol)
-        entry_count = 0
-        time_mult = get_time_multiplier()
-
-    if entry_count >= MAX_ENTRIES:
-        log_debug("HANDLE_ENTRY", f"{symbol}: 최대 진입 도달 (#{entry_count}/{MAX_ENTRIES}), 추가 진입 거부")
-        return
-
-    is_sl_rescue = (signal_type == "sl_rescue")
-    if is_sl_rescue:
-        if sl_entry_count >= MAX_SL_RESCUES:
-            log_debug("HANDLE_ENTRY", f"{symbol}: SL-Rescue 최대 진입 도달 (#{sl_entry_count}/{MAX_SL_RESCUES})")
-            return
-        if not is_sl_rescue_condition(symbol):
-            log_debug("HANDLE_ENTRY", f"{symbol}: SL-Rescue 조건 미충족, 진입 건너뜀")
-            return
-        with position_lock:
-            position_state[symbol]["sl_entry_count"] = sl_entry_count + 1
-        actual_entry_num = entry_count + 1
-        log_debug("HANDLE_ENTRY", f"{symbol}: SL-Rescue 진입 시도 (#{sl_entry_count + 1}/{MAX_SL_RESCUES})")
-    else:
-        if entry_count > 0:
-            price_current = get_current_price(symbol)
-            avg_price = position_state[symbol].get("price")
-            if avg_price and current_side == "buy" and price_current >= avg_price:
-                log_debug("HANDLE_ENTRY", f"{symbol}: 가격 조건 미충족(현재가 {price_current} >= 평단가 {avg_price})")
-                return
-            if avg_price and current_side == "sell" and price_current <= avg_price:
-                log_debug("HANDLE_ENTRY", f"{symbol}: 가격 조건 미충족(현재가 {price_current} <= 평단가 {avg_price})")
-                return
-        actual_entry_num = entry_count + 1
-
-    if actual_entry_num <= MAX_ENTRIES:
-        tp_val = TP_BASE_MAP[actual_entry_num - 1] * SYMBOL_CONFIG[symbol]["tp_mult"]
-        sl_val = SL_BASE_MAP[actual_entry_num - 1] * SYMBOL_CONFIG[symbol]["sl_mult"]
-        store_tp_sl(symbol, tp_val, sl_val, actual_entry_num)
-        log_debug("HANDLE_ENTRY", f"{symbol} 진입#{actual_entry_num} TP {tp_val*100:.3f}% / SL {sl_val*100:.3f}% 저장")
-    else:
-        log_debug("HANDLE_ENTRY", f"{symbol} 진입#{actual_entry_num} TP/SL 맵 범위 초과")
-
-    qty = calculate_qty(symbol, signal_type, time_mult)
-
-    if qty <= 0:
-        log_debug("HANDLE_ENTRY", f"{symbol}: 유효 수량 계산 실패")
-        return
-
-    if place_order(symbol, desired_side, qty, actual_entry_num, time_mult):
-        log_debug("HANDLE_ENTRY", f"{symbol} {desired_side.upper()} 진입 성공, 수량: {qty}")
-    else:
-        log_debug("HANDLE_ENTRY", f"{symbol} {desired_side.upper()} 진입 실패")
+# 19. 시간배수 함수 예시(기본 1.0 고정, 필요시 확장)
 
 def get_time_multiplier() -> Decimal:
     now_hour = datetime.now(KST).hour
@@ -600,7 +528,7 @@ def get_time_multiplier() -> Decimal:
         return Decimal("1.0")
     return Decimal("1.0")
 
-# 13. HTTP 웹훅 서버 (404 오류 해결)
+# 20. HTTP 웹훅 서버
 
 app = Flask(__name__)
 
@@ -657,13 +585,11 @@ def webhook_handler():
 
         log_debug("WEBHOOK_RECEIVED", f"유효한 신호: 심볼={symbol}, action={action}, side={data.get('side')}, signal={data.get('signal')}")
 
-        # 중복 신호 체크
         if is_duplicate_signal(data):
             log_debug("WEBHOOK_DUPLICATE", "중복 신호로 무시")
             return jsonify({"status": "duplicate"}), 200
 
         if action == "entry":
-            # 작업 큐에 진입 처리만
             try:
                 task_queue.put_nowait(data)
                 log_debug("WEBHOOK_QUEUED", f"작업 큐에 추가 완료 (큐 크기: {task_queue.qsize()})")
@@ -674,11 +600,9 @@ def webhook_handler():
 
         elif action == "exit":
             reason = str(data.get("reason", "")).strip().lower()
-            # 1) TP/SL 청산 알림(reason 정확히 'tp' 또는 'sl')은 무조건 무시!
             if reason in ("tp", "sl"):
                 log_debug("WEBHOOK_IGNORED", f"{symbol} EXIT({reason.upper()}) 알림 무시 (자동 TP/SL 청산 차단)")
                 return jsonify({"status": f"{action}_{reason}_ignored"}), 200
-            # 2) 나머지(수동, 전략, 기타 alert)는 정상적으로 청산 실행
             update_position(symbol)
             with position_lock:
                 pos = position_state.get(symbol)
@@ -691,7 +615,6 @@ def webhook_handler():
                     return jsonify({"status": "no_position"}), 200
 
         elif action in ("tp", "sl"):
-            # TP/SL 청산 단독 알림(아예 action이 'tp','sl'인 경우도 필요시 방어)
             log_debug("WEBHOOK_IGNORED", f"{symbol} {action.upper()} 알림 무시 (TP/SL 자동청산 룰)")
             return jsonify({"status": f"{action}_ignored"}), 200
 
@@ -734,7 +657,7 @@ def status():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# 14. 초기 상태 출력 및 실행
+# 21. 초기 실행 및 워커 스레드 시작
 
 def log_initial_state():
     equity = get_account_equity()
@@ -744,7 +667,8 @@ def log_initial_state():
         update_position(sym)
         pos = position_state.get(sym, {})
         if pos and pos.get("side") and pos.get("size", 0) > 0:
-            active_positions.append(f"{sym} 포지션: {pos['side']} {pos['size']} @ {pos['price']} (진입#{pos.get('entry_count', 0)}/5, SL-Rescue#{pos.get('sl_entry_count', 0)}/3)")
+            active_positions.append(f"{sym} 포지션: {pos['side']} {pos['size']} @ {pos['price']} "
+                                    f"(진입#{pos.get('entry_count', 0)}/5, SL-Rescue#{pos.get('sl_entry_count', 0)}/3)")
     if active_positions:
         log_debug("INIT", "현재 활성화된 포지션:")
         for info in active_positions:
