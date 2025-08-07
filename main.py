@@ -121,8 +121,7 @@ class SymbolData:
     def __init__(self, symbol):
         self.symbol = symbol
         self.lock = threading.RLock()
-        self.df_15s = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        self.df_15s.set_index('timestamp', inplace=True)
+        self.df_15s = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
         self.last_bar_time = None
         self.df_1m = None
         self.df_3m = None
@@ -131,19 +130,21 @@ class SymbolData:
         with self.lock:
             ts = int(timestamp or time.time())
             bar_time = ts - (ts % 15)
-            if bar_time not in self.df_15s.index:
-                self.df_15s.loc[bar_time] = [price, price, price, price, volume]
-                self.last_bar_time = bar_time
+            # bar_time을 datetime으로 변환
+            bar_dt = pd.to_datetime(bar_time, unit="s")
+            if bar_dt not in self.df_15s.index:
+                self.df_15s.loc[bar_dt] = [price, price, price, price, volume]
+                self.last_bar_time = bar_dt
             else:
-                self.df_15s.at[bar_time, 'high'] = max(self.df_15s.at[bar_time, 'high'], price)
-                self.df_15s.at[bar_time, 'low'] = min(self.df_15s.at[bar_time, 'low'], price)
-                self.df_15s.at[bar_time, 'close'] = price
-                self.df_15s.at[bar_time, 'volume'] += volume
+                self.df_15s.at[bar_dt, 'high'] = max(self.df_15s.at[bar_dt, 'high'], price)
+                self.df_15s.at[bar_dt, 'low'] = min(self.df_15s.at[bar_dt, 'low'], price)
+                self.df_15s.at[bar_dt, 'close'] = price
+                self.df_15s.at[bar_dt, 'volume'] += volume
 
             if len(self.df_15s) > 200:
                 self.df_15s = self.df_15s.iloc[-200:]
 
-            # 1분봉 리샘플링
+            # 인덱스가 DatetimeIndex이므로 resample 안전하게 동작
             self.df_1m = self.df_15s.resample('1T').agg({
                 'open': 'first',
                 'high': 'max',
@@ -151,10 +152,10 @@ class SymbolData:
                 'close': 'last',
                 'volume': 'sum'
             }).dropna()
+
             if len(self.df_1m) > 200:
                 self.df_1m = self.df_1m.iloc[-200:]
 
-            # 3분봉 리샘플링
             self.df_3m = self.df_15s.resample('3T').agg({
                 'open': 'first',
                 'high': 'max',
