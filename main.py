@@ -58,7 +58,7 @@ SYMBOL_CONFIG = {
     "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"), "qty_mult": Decimal("1.0")},
 }
 
-ENTRY_RATIOS = [Decimal(x) for x in [0.20, 0.30, 0.70, 1.60, 5.00]]
+ENTRY_RATIOS = [Decimal(x) for x in [0.10, 0.20, 0.50, 1.40, 4.00]]
 TP_LEVELS = [Decimal(x) for x in [0.005, 0.004, 0.0035, 0.003, 0.002]]
 SL_LEVELS = [Decimal(x) for x in [0.04, 0.038, 0.035, 0.033, 0.03]]
 
@@ -278,10 +278,15 @@ def is_sl_rescue_condition(symbol: str) -> bool:
             sl_price=entry_price*(1+sl_pct)
             return current_price>=sl_price
             
-def get_tp_sl(symbol:str, entry_count:int):
-    symbol_mult=get_symbol_multiplier(symbol)
-    tp=TP_LEVELS[min(entry_count-1, len(TP_LEVELS)-1)]*symbol_mult
-    sl=SL_LEVELS[min(entry_count-1, len(SL_LEVELS)-1)]*symbol_mult
+def get_tp_sl(symbol: str, entry_count: int):
+    symbol_mult = get_symbol_multiplier(symbol)
+    if entry_count == 1:
+        tp = BASE_TP_PCT * symbol_mult
+        sl = BASE_SL_PCT * symbol_mult
+    else:
+        idx = min(entry_count - 2, len(TP_LEVELS) - 1)  # entry_count=2부터 TP_LEVELS/SL_LEVELS 배열 참조
+        tp = TP_LEVELS[idx] * symbol_mult
+        sl = SL_LEVELS[idx] * symbol_mult
     return tp, sl, None
 
 def place_order(symbol: str, side: str, qty: Decimal, entry_num: int, time_multiplier: Decimal) -> bool:
