@@ -145,9 +145,6 @@ class SymbolData:
             self.df_15s.index = pd.to_datetime(self.df_15s.index)
             self.df_15s.sort_index(inplace=True)
 
-            if len(self.df_15s) > 200:
-                self.df_15s = self.df_15s.iloc[-200:]
-
             if len(self.df_15s) > 0:
                 self.df_1m = self.df_15s.resample('1T').agg({
                     'open': 'first',
@@ -171,7 +168,13 @@ class SymbolData:
             else:
                 self.df_1m = None
                 self.df_3m = None
+                                    
+            log_debug("add_tick", "Tick added and resampled successfully")
                 
+        except Exception as e:
+            log_debug("add_tick_error", f"Exception occurred: {e}")
+            raise
+
     def compute_indicators(self):
         with self.lock:
             if (len(self.df_15s) < 20 or self.df_1m is None or len(self.df_1m) < 20 or
