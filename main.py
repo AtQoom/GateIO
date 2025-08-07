@@ -121,71 +121,68 @@ class SymbolData:
     def __init__(self, symbol):
         self.symbol = symbol
         self.lock = threading.RLock()
-        # 15초봉 원본 데이터 저장용 DataFrame
-        # 인덱스는 pandas DatetimeIndex로 처리하므로 timestamp 컬럼 없이 open,high,low,close,volume만 선언
         self.df_15s = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
-        # 인덱스를 날짜시간(DatetimeIndex)로 설정 (초기엔 빈 상태)
-        self.df_15s.index = pd.to_datetime(self.df_15s.index)
-        self.last_bar_time = None  # 최근 바의 datetime 저장
-
-        # 1분봉, 3분봉 리샘플링 결과 저장
+        self.df_15s.index.name = 'timestamp'
+        self.last_bar_time = None
+        self.df_15s.index = pd.to_datetime(self.df_15s.index)  # 안전 차원에서 초기화 시켜도 무방
+        self.df_15s.sort_index(inplace=True)
         self.df_1m = None
         self.df_3m = None
 
     def add_tick(self, price, volume, timestamp=None):
         with self.lock:
             ts = int(timestamp or time.time())
-            # 15초 단위로 timestamp 맞춤
             bar_time = ts - (ts % 15)
-            # pandas DatetimeIndex는 timezone naiv로 둠 (UTC 기준 초 단위)
             bar_dt = pd.to_datetime(bar_time, unit='s')
+
             if bar_dt not in self.df_15s.index:
-                # 신규 바 생성: open=high=low=close=price, volume=volume
                 self.df_15s.loc[bar_dt] = [price, price, price, price, volume]
                 self.last_bar_time = bar_dt
             else:
-                # 기존 바 업데이트
                 self.df_15s.at[bar_dt, 'high'] = max(self.df_15s.at[bar_dt, 'high'], price)
                 self.df_15s.at[bar_dt, 'low'] = min(self.df_15s.at[bar_dt, 'low'], price)
                 self.df_15s.at[bar_dt, 'close'] = price
                 self.df_15s.at[bar_dt, 'volume'] += volume
 
-            # 너무 오래된 데이터 삭제: 최근 200개 바만 유지
+            # 강제로 시계열 인덱스 유지 및 정렬
+            self.df_15s.index = pd.to_datetime(self.df_15s.index)
+            self.df_15s.sort_index(inplace=True)
+
             if len(self.df_15s) > 200:
                 self.df_15s = self.df_15s.iloc[-200:]
 
-            # 1분봉 리샘플링 (DatetimeIndex 기준)
-            self.df_1m = self.df_15s.resample('1T').agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'volume': 'sum'
-            }).dropna()
-            if len(self.df_1m) > 200:
-                self.df_1m = self.df_1m.iloc[-200:]
+            # 안전하게 resample
+            if len(self.df_15s) > 0:
+                self.df_1m = self.df_15s.resample('1T').agg({
+                    'open': 'first',
+                    'high': 'max',
+                    'low': 'min',
+                    'close': 'last',
+                    'volume': 'sum'
+                }).dropna()
+                if len(self.df_1m) > 200:
+                    self.df_1m = self.df_1m.iloc[-200:]
 
-            # 3분봉 리샘플링
-            self.df_3m = self.df_15s.resample('3T').agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'volume': 'sum'
-            }).dropna()
-            if len(self.df_3m) > 200:
-                self.df_3m = self.df_3m.iloc[-200:]
-
+                self.df_3m = self.df_15s.resample('3T').agg({
+                    'open': 'first',
+                    'high': 'max',
+                    'low': 'min',
+                    'close': 'last',
+                    'volume': 'sum'
+                }).dropna()
+                if len(self.df_3m) > 200:
+                    self.df_3m = self.df_3m.iloc[-200:]
+            else:
+                self.df_1m = None
+                self.df_3m = None
+                
     def compute_indicators(self):
         with self.lock:
-            # 지표 계산에 충분한 바가 있는지 체크
             if (len(self.df_15s) < 20 or self.df_1m is None or len(self.df_1m) < 20 or
                 self.df_3m is None or len(self.df_3m) < 20):
                 return None
 
             res = {}
-
-            # 15초봉 지표 계산
             df15 = self.df_15s.copy()
             close15 = df15['close'].astype(float)
             df15['rsi_15s'] = ta.momentum.RSIIndicator(close15, window=RSI_LENGTH).rsi()
@@ -194,26 +191,23 @@ class SymbolData:
             df15['bb_low_15s'] = bb_15s.bollinger_lband()
             denom_15s = df15['bb_high_15s'] - df15['bb_low_15s']
             df15['bb_pos_15s'] = (close15 - df15['bb_low_15s']) / denom_15s.replace(0, np.nan)
-            df15['vol_sma20_15s'] = df15['volume'].rolling(window=20).mean()
-            # NaN 유무 체크
+            df15['vol_sma20_15s'] = df15['volume'].rolling(20).mean()
             if df15.iloc[-1][['rsi_15s', 'bb_high_15s', 'bb_low_15s', 'bb_pos_15s']].isnull().any():
                 return None
             res['15s'] = df15.iloc[-1]
 
-            # 1분봉 지표 계산
             df1m = self.df_1m.copy()
             close1m = df1m['close'].astype(float)
             df1m['rsi_1m'] = ta.momentum.RSIIndicator(close1m, window=RSI_LENGTH).rsi()
-            df1m['vol_sma20_1m'] = df1m['volume'].rolling(window=20).mean()
+            df1m['vol_sma20_1m'] = df1m['volume'].rolling(20).mean()
             if df1m.iloc[-1][['rsi_1m']].isnull().any():
                 return None
             res['1m'] = df1m.iloc[-1]
 
-            # 3분봉 지표 계산
             df3m = self.df_3m.copy()
             close3m = df3m['close'].astype(float)
             df3m['rsi_3m'] = ta.momentum.RSIIndicator(close3m, window=RSI_LENGTH).rsi()
-            df3m['vol_sma20_3m'] = df3m['volume'].rolling(window=20).mean()
+            df3m['vol_sma20_3m'] = df3m['volume'].rolling(20).mean()
             if df3m.iloc[-1][['rsi_3m']].isnull().any():
                 return None
             res['3m'] = df3m.iloc[-1]
