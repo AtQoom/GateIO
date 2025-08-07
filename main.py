@@ -112,18 +112,18 @@ class SymbolData:
     def add_tick(self, price, volume, tstamp=None):
         with self.lock:
             timestamp = int(tstamp or time.time())
-            bar_time = timestamp - (timestamp % 15)  # 15초 봉 기준
-            if self.last_bar_time != bar_time:
+            bar_time = timestamp - (timestamp % 15)
+            # bar_time이 없으면 새로 추가
+            if bar_time not in self.df.index:
                 self.df.loc[bar_time] = [price, price, price, price, volume]
                 self.last_bar_time = bar_time
             else:
-                row = self.df.loc[bar_time]
-                row['high'] = max(row['high'], price)
-                row['low'] = min(row['low'], price)
-                row['close'] = price
-                row['volume'] += volume
-                self.df.loc[bar_time] = row
+                self.df.at[bar_time, 'high'] = max(self.df.at[bar_time, 'high'], price)
+                self.df.at[bar_time, 'low'] = min(self.df.at[bar_time, 'low'], price)
+                self.df.at[bar_time, 'close'] = price
+                self.df.at[bar_time, 'volume'] += volume
 
+            # 히스토리 사이즈 유지
             if len(self.df) > 100:
                 self.df = self.df.iloc[-100:]
 
