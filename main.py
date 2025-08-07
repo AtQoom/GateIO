@@ -208,6 +208,9 @@ class SymbolData:
 
 symbol_data_map={sym:SymbolData(sym) for sym in SYMBOL_CONFIG.keys()}
 
+def log_debug(tag, msg):
+    logger.info(f"[{tag}] {msg}")
+
 def get_symbol_multiplier(symbol: str) -> Decimal:
     sym = symbol.upper()
     if "BTC" in sym:
@@ -222,28 +225,34 @@ def get_symbol_multiplier(symbol: str) -> Decimal:
         return Decimal("1.0")
 
 def calculate_qty(symbol: str, signal_type: str, entry_multiplier: Decimal) -> Decimal:
-    cfg=SYMBOL_CONFIG[symbol]
-    symbol_mult=get_symbol_multiplier(symbol)
-    equity=get_account_equity()
-    price=get_current_price(symbol)
-    if equity<=0 or price<=0:
+    cfg = SYMBOL_CONFIG[symbol]
+    symbol_mult = get_symbol_multiplier(symbol)
+    equity = get_account_equity()
+    price = get_current_price(symbol)
+    if equity <= 0 or price <= 0:
         return Decimal("0")
-    cnt=position_state.get(symbol, {}).get("entry_count", 0)
-    if cnt>=MAX_ENTRIES:
+    cnt = position_state.get(symbol, {}).get("entry_count", 0)
+    if cnt >= MAX_ENTRIES:
         return Decimal("0")
-    base_ratio=ENTRY_RATIOS[cnt]
-    if signal_type=="sl_rescue":
-        base_ratio*=Decimal("1.5")
-    position_val=equity*base_ratio*symbol_mult/Decimal("100")
-    qty_raw=(position_val/(price*cfg["contract_size"])) / cfg["qty_step"]
-    qty_floor=qty_raw.quantize(Decimal("1"), rounding=ROUND_DOWN)
-    qty=qty_floor*cfg["qty_step"]
-    qty=max(qty, cfg["min_qty"])
-    notional=qty*price*cfg["contract_size"]
-    if notional<cfg.get("min_notional", Decimal("0")):
-        min_qty=(cfg["min_notional"]/(price*cfg["contract_size"])) / cfg["qty_step"]
-        min_qty_floor=min_qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
-        qty=max(qty, min_qty_floor*cfg["qty_step"])
+    base_ratio = ENTRY_RATIOS[cnt]
+    if signal_type == "sl_rescue":
+        base_ratio *= Decimal("1.5")
+
+    # 반드시 /100 포함해서 %를 분수로 변환하여 계산
+    position_val = equity * base_ratio * symbol_mult / Decimal("100")
+
+    qty_raw = (position_val / (price * cfg["contract_size"])) / cfg["qty_step"]
+    qty_floor = qty_raw.quantize(Decimal("1"), rounding=ROUND_DOWN)
+    qty = qty_floor * cfg["qty_step"]
+    try:
+        qty = max(qty, cfg["min_qty"])
+    except Exception:
+        qty = cfg["min_qty"]
+    notional = qty * price * cfg["contract_size"]
+    if notional < cfg.get("min_notional", Decimal("0")) and price > 0:
+        min_qty = (cfg["min_notional"] / (price * cfg["contract_size"])) / cfg["qty_step"]
+        min_qty_floor = min_qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
+        qty = max(qty, min_qty_floor * cfg["qty_step"])
     return qty
 
 def is_sl_rescue_condition(symbol: str) -> bool:
@@ -268,7 +277,7 @@ def is_sl_rescue_condition(symbol: str) -> bool:
         else:
             sl_price=entry_price*(1+sl_pct)
             return current_price>=sl_price
-
+            
 def get_tp_sl(symbol:str, entry_count:int):
     symbol_mult=get_symbol_multiplier(symbol)
     tp=TP_LEVELS[min(entry_count-1, len(TP_LEVELS)-1)]*symbol_mult
@@ -358,7 +367,7 @@ def update_position(symbol: str):
                 position_state.pop(symbol, None)
         except Exception as e:
             log_debug("UPDATE_POSITION_ERROR", f"{symbol} 포지션 업데이트 중 오류: {e}")
-
+            
 def handle_entry(data: dict):
     symbol_raw=data.get("symbol", "")
     side_raw=data.get("side", "").lower()
