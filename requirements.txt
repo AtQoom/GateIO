@@ -3,3 +3,6 @@ gate-api==6.97.2
 flask
 websockets
 pytz
+pandas
+numpy
+ta
