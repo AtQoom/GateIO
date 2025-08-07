@@ -368,6 +368,51 @@ def update_position(symbol: str):
         except Exception as e:
             log_debug("UPDATE_POSITION_ERROR", f"{symbol} 포지션 업데이트 중 오류: {e}")
             
+def check_entry_conditions(symbol: str):
+    inds = symbol_data_map[symbol].compute_indicators()
+    if inds is None:
+        return None
+
+    last15 = inds["15s"]
+    last1m = inds["1m"]
+    last3m = inds["3m"]
+
+    # PineScript 전략과 동일한 신호 변수 계산
+    # 강화된 전략 로직 예시
+    tighten_mult = 1.0 + position_state.get(symbol, {}).get("entry_count", 0) * 0.1
+    adj_rsi_long = RSI_LONG_MAIN - (RSI_LONG_MAIN * (tighten_mult - 1.0))
+    adj_rsi_short = RSI_SHORT_MAIN + ((100 - RSI_SHORT_MAIN) * (tighten_mult - 1.0))
+    adj_vol_mult = VOLUME_MULT * tighten_mult
+    adj_bb_long = 0.10 / tighten_mult
+    adj_bb_short = 1.0 - (0.10 / tighten_mult)
+    bb_pos = last15["bb_pos"]
+
+    main_long = (last3m["rsi_3m"] <= adj_rsi_long and last1m["rsi_1m"] <= adj_rsi_long and
+                 last3m["rsi_3m"] < inds["3m"].get("rsi_3m", 1000) and  # 이전봉 대비 감소
+                 last15["rsi_15s"] <= RSI_15S_LONG and
+                 last15["rsi_15s"] < inds["15s"].get("rsi_15s", 1000) and
+                 last3m["volume"] >= last3m["vol_sma_20"] * adj_vol_mult and
+                 last1m["volume"] >= last1m["vol_sma_20"] * adj_vol_mult and
+                 last15["volume"] >= last15["vol_sma_20"] * adj_vol_mult and
+                 (not USE_BB_FILTER or bb_pos <= adj_bb_long)
+                )
+    main_short = (last3m["rsi_3m"] >= adj_rsi_short and last1m["rsi_1m"] >= adj_rsi_short and
+                  last3m["rsi_3m"] > inds["3m"].get("rsi_3m", 0) and  # 이전봉 대비 증가
+                  last15["rsi_15s"] >= RSI_15S_SHORT and
+                  last15["rsi_15s"] > inds["15s"].get("rsi_15s", 0) and
+                  last3m["volume"] >= last3m["vol_sma_20"] * adj_vol_mult and
+                  last1m["volume"] >= last1m["vol_sma_20"] * adj_vol_mult and
+                  last15["volume"] >= last15["vol_sma_20"] * adj_vol_mult and
+                  (not USE_BB_FILTER or bb_pos >= adj_bb_short)
+                )
+
+    if main_long:
+        return "long"
+    elif main_short:
+        return "short"
+    else:
+        return None
+
 def handle_entry(data: dict):
     symbol_raw=data.get("symbol", "")
     side_raw=data.get("side", "").lower()
