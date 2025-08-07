@@ -124,8 +124,6 @@ class SymbolData:
         self.df_15s = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
         self.df_15s.index.name = 'timestamp'
         self.last_bar_time = None
-        self.df_15s.index = pd.to_datetime(self.df_15s.index)  # 안전 차원에서 초기화 시켜도 무방
-        self.df_15s.sort_index(inplace=True)
         self.df_1m = None
         self.df_3m = None
 
@@ -134,24 +132,22 @@ class SymbolData:
             ts = int(timestamp or time.time())
             bar_time = ts - (ts % 15)
             bar_dt = pd.to_datetime(bar_time, unit='s')
-
+            # 봉 생성 또는 갱신
             if bar_dt not in self.df_15s.index:
                 self.df_15s.loc[bar_dt] = [price, price, price, price, volume]
-                self.last_bar_time = bar_dt
             else:
                 self.df_15s.at[bar_dt, 'high'] = max(self.df_15s.at[bar_dt, 'high'], price)
                 self.df_15s.at[bar_dt, 'low'] = min(self.df_15s.at[bar_dt, 'low'], price)
                 self.df_15s.at[bar_dt, 'close'] = price
                 self.df_15s.at[bar_dt, 'volume'] += volume
 
-            # 강제로 시계열 인덱스 유지 및 정렬
+            # **매 tick마다 반드시 실행!**
             self.df_15s.index = pd.to_datetime(self.df_15s.index)
             self.df_15s.sort_index(inplace=True)
 
             if len(self.df_15s) > 200:
                 self.df_15s = self.df_15s.iloc[-200:]
 
-            # 안전하게 resample
             if len(self.df_15s) > 0:
                 self.df_1m = self.df_15s.resample('1T').agg({
                     'open': 'first',
