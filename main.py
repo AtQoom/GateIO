@@ -19,11 +19,12 @@ import ta  # pip install ta
 
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 from gate_api import exceptions as gate_api_exceptions
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 
-getcontext().prec = 12  # Decimal 연산 정밀도
+# Decimal 연산 정밀도 설정
+getcontext().prec = 12
 
-# --- 환경 변수 및 상수 설정 ---
+# --- 환경변수 및 상수 ---
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE_CURRENCY = "usdt"
@@ -74,20 +75,12 @@ RSI_SHORT_MAIN = 72
 RSI_15S_LONG = 21
 RSI_15S_SHORT = 79
 
-ENGULF_RSI_OB = 79
-ENGULF_RSI_OS = 21
-
 USE_BB_FILTER = True
 BB_LENGTH = 20
 BB_MULT = 2.0
 VOLUME_MULT = 1.5
 
-ENGULF_EXIT_OB = 76
-ENGULF_EXIT_OS = 24
-
 REQ_MIN_FOR_SL = 6
-
-ENABLE_ALERTS = True
 
 logging.basicConfig(level=logging.INFO,
                     format='[%(asctime)s] [%(levelname)s] %(message)s',
@@ -102,77 +95,67 @@ config = Configuration(key=API_KEY, secret=API_SECRET)
 api_client = ApiClient(config)
 futures_api = FuturesApi(api_client)
 
-# 상태 변수, 스레드 락, 작업 큐
+# 상태 및 락
 position_state = {}
 position_lock = threading.RLock()
 tpsl_storage = {}
 tpsl_lock = threading.RLock()
-recent_signals = {}
-signal_lock = threading.RLock()
 task_queue = queue.Queue(maxsize=100)
 
 app = Flask(__name__)
 
-# ---------------------------------------------------
-# SymbolData 클래스: 15초, 1분, 3분 봉 데이터 생성 및 지표 계산
-# ---------------------------------------------------
-
+# --- SymbolData 클래스 ---
 class SymbolData:
     def __init__(self, symbol):
         self.symbol = symbol
         self.lock = threading.RLock()
-        # 15초봉용 빈 DataFrame 초기화 (컬럼명 지정)
         self.df_15s = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
         self.df_15s.index.name = 'timestamp'
         self.last_bar_time = None
         self.df_1m = None
         self.df_3m = None
-
+    
     def add_tick(self, price, volume, timestamp=None):
         with self.lock:
             try:
                 ts = int(timestamp or time.time())
-                # 15초 봉의 타임스탬프(초)에 맞춰 클러스터링
                 bar_time = ts - (ts % 15)
-                bar_dt = pd.to_datetime(bar_time, unit='s')
-
-                # 신규 봉 생성 또는 기존 봉 갱신
+                bar_dt = pd.to_datetime(bar_time, unit="s")
                 if bar_dt not in self.df_15s.index:
                     self.df_15s.loc[bar_dt] = [price, price, price, price, volume]
                     self.last_bar_time = bar_dt
                 else:
-                    self.df_15s.at[bar_dt, 'high'] = max(self.df_15s.at[bar_dt, 'high'], price)
-                    self.df_15s.at[bar_dt, 'low'] = min(self.df_15s.at[bar_dt, 'low'], price)
-                    self.df_15s.at[bar_dt, 'close'] = price
-                    self.df_15s.at[bar_dt, 'volume'] += volume
+                    self.df_15s.at[bar_dt, "high"] = max(self.df_15s.at[bar_dt, "high"], price)
+                    self.df_15s.at[bar_dt, "low"] = min(self.df_15s.at[bar_dt, "low"], price)
+                    self.df_15s.at[bar_dt, "close"] = price
+                    self.df_15s.at[bar_dt, "volume"] += volume
 
-                # 인덱스를 항상 DatetimeIndex 타입으로 유지하고 정렬
                 self.df_15s.index = pd.to_datetime(self.df_15s.index)
                 self.df_15s.sort_index(inplace=True)
 
-                # 데이터 길이 관리: 최근 200개 봉만 유지
                 if len(self.df_15s) > 200:
                     self.df_15s = self.df_15s.iloc[-200:]
 
-                # 1분, 3분 봉 재집계 (리샘플링)
                 if len(self.df_15s) > 0:
-                    self.df_1m = self.df_15s.resample('1T').agg({
-                        'open': 'first',
-                        'high': 'max',
-                        'low': 'min',
-                        'close': 'last',
-                        'volume': 'sum'
+                    self.df_1m = self.df_15s.resample("1min").agg({
+                        "open": "first",
+                        "high": "max",
+                        "low": "min",
+                        "close": "last",
+                        "volume": "sum"
                     }).dropna()
+
                     if len(self.df_1m) > 200:
                         self.df_1m = self.df_1m.iloc[-200:]
 
-                    self.df_3m = self.df_15s.resample('3T').agg({
-                        'open': 'first',
-                        'high': 'max',
-                        'low': 'min',
-                        'close': 'last',
-                        'volume': 'sum'
+                    self.df_3m = self.df_15s.resample("3min").agg({
+                        "open": "first",
+                        "high": "max",
+                        "low": "min",
+                        "close": "last",
+                        "volume": "sum"
                     }).dropna()
+
                     if len(self.df_3m) > 200:
                         self.df_3m = self.df_3m.iloc[-200:]
                 else:
@@ -180,66 +163,66 @@ class SymbolData:
                     self.df_3m = None
 
             except Exception as e:
-                # 로그 기록 및 예외 재발생
                 logger.error(f"[SymbolData.add_tick] Exception: {e}")
                 raise
 
     def compute_indicators(self):
         with self.lock:
-            # 데이터가 충분하지 않으면 None 반환
-            if (self.df_15s is None or len(self.df_15s) < 20 or
-                    self.df_1m is None or len(self.df_1m) < 20 or
-                    self.df_3m is None or len(self.df_3m) < 20):
+            if (
+                self.df_15s is None or len(self.df_15s) < 20 or
+                self.df_1m is None or len(self.df_1m) < 20 or
+                self.df_3m is None or len(self.df_3m) < 20
+            ):
                 return None
+
             try:
-                df_15 = self.df_15s.copy()
-                close_15 = df_15['close'].astype(float)
+                df15 = self.df_15s.copy()
+                close15 = df15["close"].astype(float)
 
-                # RSI 계산
-                df_15['rsi_15s'] = ta.momentum.RSIIndicator(close_15, window=RSI_LENGTH).rsi()
-                # 볼린저 밴드 계산
-                bb = ta.volatility.BollingerBands(close_15, window=BB_LENGTH, window_dev=BB_MULT)
-                df_15['bb_high'] = bb.bollinger_hband()
-                df_15['bb_low'] = bb.bollinger_lband()
+                df15["rsi_15s"] = ta.momentum.RSIIndicator(close15, window=RSI_LENGTH).rsi()
+                bb = ta.volatility.BollingerBands(close15, window=BB_LENGTH, window_dev=BB_MULT)
+                df15["bb_high"] = bb.bollinger_hband()
+                df15["bb_low"] = bb.bollinger_lband()
 
-                denom = df_15['bb_high'] - df_15['bb_low']
-                df_15['bb_pos'] = (close_15 - df_15['bb_low']) / denom.replace(0, np.nan)
-                df_15['vol_sma_20'] = df_15['volume'].rolling(window=20).mean()
+                denom = df15["bb_high"] - df15["bb_low"]
+                df15["bb_pos"] = (close15 - df15["bb_low"]) / denom.replace(0, np.nan)
+                df15["vol_sma_20"] = df15["volume"].rolling(window=20).mean()
 
-                # NaN 검증
-                last_15 = df_15.iloc[-1]
-                if last_15[['rsi_15s', 'bb_high', 'bb_low', 'bb_pos']].isnull().any():
+                last15 = df15.iloc[-1]
+                if last15[["rsi_15s", "bb_high", "bb_low", "bb_pos"]].isnull().any():
                     return None
 
-                df_1m = self.df_1m.copy()
-                close_1m = df_1m['close'].astype(float)
-                df_1m['rsi_1m'] = ta.momentum.RSIIndicator(close_1m, window=RSI_LENGTH).rsi()
-                df_1m['vol_sma_20'] = df_1m['volume'].rolling(window=20).mean()
-                last_1m = df_1m.iloc[-1]
-                if pd.isna(last_1m['rsi_1m']):
+                df1m = self.df_1m.copy()
+                close1m = df1m["close"].astype(float)
+                df1m["rsi_1m"] = ta.momentum.RSIIndicator(close1m, window=RSI_LENGTH).rsi()
+                df1m["vol_sma_20"] = df1m["volume"].rolling(window=20).mean()
+                last1m = df1m.iloc[-1]
+                if pd.isna(last1m["rsi_1m"]):
                     return None
 
-                df_3m = self.df_3m.copy()
-                close_3m = df_3m['close'].astype(float)
-                df_3m['rsi_3m'] = ta.momentum.RSIIndicator(close_3m, window=RSI_LENGTH).rsi()
-                df_3m['vol_sma_20'] = df_3m['volume'].rolling(window=20).mean()
-                last_3m = df_3m.iloc[-1]
-                if pd.isna(last_3m['rsi_3m']):
+                df3m = self.df_3m.copy()
+                close3m = df3m["close"].astype(float)
+                df3m["rsi_3m"] = ta.momentum.RSIIndicator(close3m, window=RSI_LENGTH).rsi()
+                df3m["vol_sma_20"] = df3m["volume"].rolling(window=20).mean()
+                last3m = df3m.iloc[-1]
+                if pd.isna(last3m["rsi_3m"]):
                     return None
 
                 return {
-                    "15s": last_15,
-                    "1m": last_1m,
-                    "3m": last_3m,
+                    "15s": last15,
+                    "1m": last1m,
+                    "3m": last3m,
                 }
+
             except Exception as e:
                 logger.error(f"[SymbolData.compute_indicators] Exception: {e}")
                 return None
 
+
+# SymbolData 인스턴스 맵 생성
 symbol_data_map = {sym: SymbolData(sym) for sym in SYMBOL_CONFIG.keys()}
 
-# --- 유틸 함수 ---
-
+# 유틸 함수
 def normalize_symbol(raw_symbol: str) -> str:
     return SYMBOL_MAPPING.get(raw_symbol.strip().upper(), raw_symbol.strip().upper())
 
@@ -262,38 +245,40 @@ def call_api_with_retry(api_func, *args, retries=3, delay=2, **kwargs):
             time.sleep(delay)
     return None
 
-def get_account_equity():
+def get_account_equity() -> Decimal:
     try:
         acc_info = futures_api.list_futures_accounts(SETTLE_CURRENCY)
-        if hasattr(acc_info, 'available'):
+        if hasattr(acc_info, "available"):
             return Decimal(str(acc_info.available))
-        if isinstance(acc_info, list) and hasattr(acc_info[0], 'available'):
+        if isinstance(acc_info, list) and hasattr(acc_info[0], "available"):
             return Decimal(str(acc_info[0].available))
     except Exception as e:
         log_debug("BALANCE_ERROR", f"잔고 조회 실패: {e}")
     return Decimal("0")
 
 def get_current_price(symbol: str) -> Decimal:
-    tickers = call_api_with_retry(futures_api.list_futures_tickers, settle=SETTLE_CURRENCY, contract=symbol)
+    tickers = call_api_with_retry(
+        futures_api.list_futures_tickers, settle=SETTLE_CURRENCY, contract=symbol
+    )
     if tickers and isinstance(tickers, list) and len(tickers) > 0:
         price_str = getattr(tickers[0], "last", None)
         return safe_decimal(price_str, Decimal("0"))
     return Decimal("0")
 
-# --- 진입 조건 함수 ---
 
+# 진입 조건 함수
 def check_entry_conditions(symbol):
     inds = symbol_data_map[symbol].compute_indicators()
     if inds is None:
         return None
 
-    last15 = inds['15s']
-    last1m = inds['1m']
-    last3m = inds['3m']
+    last15 = inds["15s"]
+    last1m = inds["1m"]
+    last3m = inds["3m"]
 
-    keys_15s = ['rsi_15s', 'bb_pos_15s', 'volume', 'vol_sma20_15s']
-    keys_1m = ['rsi_1m', 'volume', 'vol_sma20_1m']
-    keys_3m = ['rsi_3m', 'volume', 'vol_sma20_3m']
+    keys_15s = ["rsi_15s", "bb_pos", "volume", "vol_sma_20"]
+    keys_1m = ["rsi_1m", "volume", "vol_sma_20"]
+    keys_3m = ["rsi_3m", "volume", "vol_sma_20"]
 
     for k in keys_15s:
         if k not in last15 or pd.isna(last15[k]):
@@ -305,66 +290,43 @@ def check_entry_conditions(symbol):
         if k not in last3m or pd.isna(last3m[k]):
             return None
 
-    bb_pos = last15['bb_pos_15s']
+    bb_pos = last15["bb_pos"]
 
     cond_long = (
-        last3m['rsi_3m'] <= RSI_LONG_MAIN and
-        last1m['rsi_1m'] <= RSI_LONG_MAIN and
-        last15['rsi_15s'] <= RSI_15S_LONG and
-        last3m['volume'] >= last3m['vol_sma20_3m'] * VOLUME_MULT and
-        last1m['volume'] >= last1m['vol_sma20_1m'] * VOLUME_MULT and
-        last15['volume'] >= last15['vol_sma20_15s'] * VOLUME_MULT and
-        (not USE_BB_FILTER or bb_pos <= 0.10)
+        last3m["rsi_3m"] <= RSI_LONG_MAIN
+        and last1m["rsi_1m"] <= RSI_LONG_MAIN
+        and last15["rsi_15s"] <= RSI_15S_LONG
+        and last3m["volume"] >= last3m["vol_sma_20"] * VOLUME_MULT
+        and last1m["volume"] >= last1m["vol_sma_20"] * VOLUME_MULT
+        and last15["volume"] >= last15["vol_sma_20"] * VOLUME_MULT
+        and (not USE_BB_FILTER or bb_pos <= 0.10)
     )
 
     cond_short = (
-        last3m['rsi_3m'] >= RSI_SHORT_MAIN and
-        last1m['rsi_1m'] >= RSI_SHORT_MAIN and
-        last15['rsi_15s'] >= RSI_15S_SHORT and
-        last3m['volume'] >= last3m['vol_sma20_3m'] * VOLUME_MULT and
-        last1m['volume'] >= last1m['vol_sma20_1m'] * VOLUME_MULT and
-        last15['volume'] >= last15['vol_sma20_15s'] * VOLUME_MULT and
-        (not USE_BB_FILTER or bb_pos >= 0.90)
+        last3m["rsi_3m"] >= RSI_SHORT_MAIN
+        and last1m["rsi_1m"] >= RSI_SHORT_MAIN
+        and last15["rsi_15s"] >= RSI_15S_SHORT
+        and last3m["volume"] >= last3m["vol_sma_20"] * VOLUME_MULT
+        and last1m["volume"] >= last1m["vol_sma_20"] * VOLUME_MULT
+        and last15["volume"] >= last15["vol_sma_20"] * VOLUME_MULT
+        and (not USE_BB_FILTER or bb_pos >= 0.90)
     )
 
     if cond_long:
-        return 'long'
+        return "long"
     elif cond_short:
-        return 'short'
+        return "short"
     else:
         return None
 
-# --- 중복 신호 쿨다운 체크 ---
 
-def is_duplicate_signal(data: dict) -> bool:
-    with signal_lock:
-        now = time.time()
-        symbol = normalize_symbol(data.get("symbol", ""))
-        side = data.get("side", "").lower()
-        signal_id = data.get("id", None)
-        key_symbol_side = f"{symbol}_{side}"
+# TP/SL 저장 함수
+def store_tp_sl(symbol, tp_pct, sl_pct, entry_num):
+    with tpsl_lock:
+        tpsl_storage[(symbol, entry_num)] = {"tp": tp_pct, "sl": sl_pct}
 
-        if signal_id and signal_id in recent_signals:
-            last_time = recent_signals[signal_id]
-            if now - last_time < COOLDOWN_SECONDS:
-                return True
 
-        if key_symbol_side in recent_signals:
-            last_time = recent_signals[key_symbol_side]
-            if now - last_time < COOLDOWN_SECONDS:
-                return True
-
-        if signal_id:
-            recent_signals[signal_id] = now
-        recent_signals[key_symbol_side] = now
-
-        prune_keys = [k for k, t in recent_signals.items() if now - t > 300]
-        for k in prune_keys:
-            recent_signals.pop(k, None)
-        return False
-
-# --- 주문 수량 계산 ---
-
+# 주문 수량 계산 함수
 def calculate_qty(symbol: str, signal_type: str, entry_multiplier: Decimal) -> Decimal:
     cfg = SYMBOL_CONFIG[symbol]
     qty_mult = cfg.get("qty_mult", Decimal("1.0"))
@@ -375,7 +337,6 @@ def calculate_qty(symbol: str, signal_type: str, entry_multiplier: Decimal) -> D
         return Decimal("0")
 
     current_entry_count = position_state.get(symbol, {}).get("entry_count", 0)
-
     if current_entry_count >= MAX_ENTRIES:
         return Decimal("0")
 
@@ -385,7 +346,7 @@ def calculate_qty(symbol: str, signal_type: str, entry_multiplier: Decimal) -> D
     if signal_type == "sl_rescue":
         base_ratio *= Decimal("1.5")
 
-    position_value = equity * (base_ratio / Decimal("100")) * entry_multiplier * qty_mult
+    position_value = equity * (base_ratio / Decimal(100)) * entry_multiplier * qty_mult
 
     contract_size = cfg["contract_size"]
     qty_step = cfg["qty_step"]
@@ -404,8 +365,8 @@ def calculate_qty(symbol: str, signal_type: str, entry_multiplier: Decimal) -> D
 
     return qty
 
-# --- SL-Rescue 조건 체크 ---
 
+# SL-Rescue 조건 체크
 def is_sl_rescue_condition(symbol: str) -> bool:
     with position_lock:
         pos = position_state.get(symbol)
@@ -420,7 +381,9 @@ def is_sl_rescue_condition(symbol: str) -> bool:
         if not entry_price or side not in ("buy", "sell") or entry_count == 0:
             return False
 
-        _, sl_orig, _ = get_tp_sl(symbol, entry_count)
+        # get_tp_sl 함수가 아래와 같이 구현된 것으로 가정 (없으면 직접 구현 필요)
+        tp, sl, _ = get_tp_sl(symbol, entry_count)
+
         sl_mult = SYMBOL_CONFIG.get(symbol, {}).get("sl_mult", Decimal("1.0"))
         sl_pct = SL_BASE_MAP[min(entry_count - 1, len(SL_BASE_MAP) - 1)] * sl_mult
 
@@ -431,8 +394,8 @@ def is_sl_rescue_condition(symbol: str) -> bool:
             sl_price = entry_price * (1 + sl_pct)
             return current_price >= sl_price
 
-# --- 주문 실행 ---
 
+# 주문 실행 함수
 def place_order(symbol: str, side: str, qty: Decimal, entry_num: int, time_multiplier: Decimal) -> bool:
     with position_lock:
         cfg = SYMBOL_CONFIG[symbol]
@@ -468,12 +431,12 @@ def place_order(symbol: str, side: str, qty: Decimal, entry_num: int, time_multi
         update_position(symbol)
     return True
 
-# --- 청산 실행 ---
 
+# 청산 함수
 def close_position(symbol: str, reason: str = "manual") -> bool:
     with position_lock:
-        now = time.time()
         pos = position_state.get(symbol, {})
+        now = time.time()
         last_close = pos.get("last_close_time", 0)
         if now - last_close < 1.0:
             return False
@@ -481,20 +444,50 @@ def close_position(symbol: str, reason: str = "manual") -> bool:
         result = call_api_with_retry(futures_api.create_futures_order, SETTLE_CURRENCY, order)
         if not result:
             return False
+        
         pos["last_close_time"] = now
         position_state.pop(symbol, None)
         with tpsl_lock:
             tpsl_storage.pop(symbol, None)
-        with signal_lock:
-            keys_rm = [k for k, _ in recent_signals.items() if k.startswith(symbol + "_") or k == symbol]
-            for k in keys_rm:
-                recent_signals.pop(k)
         time.sleep(1)
         update_position(symbol)
     return True
 
-# --- 진입 처리 함수 ---
 
+# 포지션 업데이트 함수
+def update_position(symbol: str):
+    with position_lock:
+        try:
+            pos_info = call_api_with_retry(futures_api.get_position, SETTLE_CURRENCY, symbol)
+            if pos_info and pos_info.size:
+                size = safe_decimal(pos_info.size)
+                if size == 0:
+                    position_state.pop(symbol, None)
+                else:
+                    entry_price = safe_decimal(pos_info.entry_price)
+                    side = "buy" if size > 0 else "sell"
+                    size_abs = abs(size)
+                    current_pos = position_state.get(symbol, {})
+                    position_state[symbol] = {
+                        "price": entry_price,
+                        "side": side,
+                        "size": size_abs,
+                        "entry_count": current_pos.get("entry_count", 0),
+                        "sl_entry_count": current_pos.get("sl_entry_count", 0),
+                        "stored_tp_pct": current_pos.get("stored_tp_pct", Decimal("0")),
+                        "stored_sl_pct": current_pos.get("stored_sl_pct", Decimal("0")),
+                        "entry_time": current_pos.get("entry_time", time.time()),
+                        "time_multiplier": current_pos.get("time_multiplier", Decimal("1.0")),
+                        "is_entering": current_pos.get("is_entering", False),
+                        "last_close_time": current_pos.get("last_close_time", 0),
+                    }
+            else:
+                position_state.pop(symbol, None)
+        except Exception as e:
+            log_debug("UPDATE_POSITION_ERROR", f"{symbol} 포지션 업데이트 중 오류: {e}")
+
+
+# 진입 처리 함수
 def handle_entry(data: dict):
     symbol_raw = data.get("symbol", "")
     side_raw = data.get("side", "").lower()
@@ -556,7 +549,6 @@ def handle_entry(data: dict):
         return
 
     qty = calculate_qty(symbol, signal_type, time_mult)
-
     if qty <= 0:
         return
 
@@ -580,8 +572,49 @@ def handle_entry(data: dict):
 
     update_position(symbol)
 
-# --- 실시간 가격 모니터링 및 TP/SL 체크 ---
 
+# 스레드 워커
+def worker_thread(worker_id: int):
+    while True:
+        try:
+            data = task_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        try:
+            handle_entry(data)
+        except Exception as e:
+            log_debug(f"Worker-{worker_id} ERROR", f"입력 처리 실패: {e}")
+        finally:
+            task_queue.task_done()
+
+
+# 자동 진입 감시 루프
+def entry_monitor_loop():
+    while True:
+        for symbol in SYMBOL_CONFIG.keys():
+            side = check_entry_conditions(symbol)
+            if side:
+                with position_lock:
+                    pos = position_state.get(symbol, {})
+                    if pos.get("entry_count", 0) >= MAX_ENTRIES:
+                        continue
+                    last_entry = pos.get("entry_time", 0)
+                    if time.time() - last_entry < COOLDOWN_SECONDS:
+                        continue
+                try:
+                    task_queue.put_nowait({
+                        "symbol": symbol,
+                        "side": side,
+                        "signal": "main",
+                        "type": "auto_entry"
+                    })
+                    log_debug("ENTRY_MONITOR", f"{symbol} 자동진입 신호: {side}")
+                except queue.Full:
+                    log_debug("ENTRY_MONITOR", "큐 가득참, 신호 누락")
+        time.sleep(1)
+
+
+# WebSocket 가격 모니터
 async def price_monitor(symbols):
     ws_uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     subscribe_msg = {
@@ -618,6 +651,7 @@ async def price_monitor(symbols):
         except Exception as e:
             log_debug("WS_ERROR", f"WebSocket 오류: {e} 재접속 대기 중...")
             await asyncio.sleep(5)
+
 
 def process_ticker(ticker: dict):
     symbol = ticker.get("contract", "")
@@ -675,176 +709,22 @@ def process_ticker(ticker: dict):
         elif (side == "sell" and price >= sl_price) and entry_count >= MIN_ENTRY_FOR_SL:
             close_position(symbol, reason="SL")
 
-# --- 워커 스레드 ---
 
-def worker_thread(worker_id: int):
-    while True:
-        try:
-            data = task_queue.get(timeout=0.1)
-        except queue.Empty:
-            continue
-        try:
-            handle_entry(data)
-        except Exception as e:
-            log_debug(f"Worker-{worker_id} ERROR", f"입력 처리 실패: {e}")
-        finally:
-            task_queue.task_done()
-
-# --- 진입 감시 루프 ---
-
-def entry_monitor_loop():
-    while True:
-        for symbol in SYMBOL_CONFIG.keys():
-            side = check_entry_conditions(symbol)
-            if side:
-                with position_lock:
-                    pos = position_state.get(symbol, {})
-                    if pos.get("entry_count", 0) >= MAX_ENTRIES:
-                        continue
-                    last_entry = pos.get("entry_time", 0)
-                    if time.time() - last_entry < COOLDOWN_SECONDS:
-                        continue
-                try:
-                    task_queue.put_nowait({
-                        "symbol": symbol,
-                        "side": side,
-                        "signal": "main",
-                        "type": "auto_entry"
-                    })
-                    log_debug("ENTRY_MONITOR", f"{symbol} 자동진입 신호: {side}")
-                except queue.Full:
-                    log_debug("ENTRY_MONITOR", "큐 가득참, 신호 누락")
-        time.sleep(1)
-
-# --- 웹소켓 가격 모니터 및 스레드 시작 ---
-
+# 스레드 시작 및 웹소켓 실행
 def start_threads_and_ws():
     for i in range(8):
         threading.Thread(target=worker_thread, args=(i,), daemon=True, name=f"worker-{i}").start()
     threading.Thread(target=entry_monitor_loop, daemon=True, name="EntryMonitor").start()
     threading.Thread(target=lambda: asyncio.run(price_monitor(list(SYMBOL_CONFIG.keys()))), daemon=True, name="WSMonitor").start()
 
-# --- Flask 웹훅 서버/API ---
 
-@app.route("/webhook", methods=["POST", "GET", "PUT", "PATCH"])
-@app.route("/", methods=["POST", "GET", "PUT", "PATCH"])
-def webhook_handler():
-    if request.method == "GET":
-        return jsonify({"status": "OK", "message": "Webhook endpoint is active"}), 200
-
-    try:
-        data = request.get_json(force=True)
-    except Exception:
-        data = None
-
-    if not data:
-        return jsonify({"error": "Invalid or empty data"}), 400
-
-    symbol_raw = data.get("symbol", "")
-    action = data.get("action", "entry").lower()
-
-    if not symbol_raw:
-        return jsonify({"error": "Symbol required"}), 400
-
-    symbol = normalize_symbol(symbol_raw)
-    if symbol not in SYMBOL_CONFIG:
-        return jsonify({"error": f"Invalid symbol: {symbol_raw}"}), 400
-
-    if is_duplicate_signal(data):
-        return jsonify({"status": "duplicate"}), 200
-
-    if action == "entry":
-        try:
-            task_queue.put_nowait(data)
-            return jsonify({"status": "queued", "queue_size": task_queue.qsize()}), 200
-        except queue.Full:
-            return jsonify({"error": "Queue full"}), 429
-
-    elif action == "exit":
-        reason = str(data.get("reason", "")).strip().lower()
-        if reason in ("tp", "sl"):
-            return jsonify({"status": f"{action}_{reason}_ignored"}), 200
-        update_position(symbol)
-        with position_lock:
-            pos = position_state.get(symbol)
-            if pos and pos.get("size", Decimal("0")) > 0:
-                close_position(symbol, reason=action.upper())
-                return jsonify({"status": f"{action}_closed"}), 200
-            else:
-                return jsonify({"status": "no_position"}), 200
-
-    elif action in ("tp", "sl"):
-        return jsonify({"status": f"{action}_ignored"}), 200
-
-    else:
-        return jsonify({"error": f"Unknown action: {action}"}), 400
-
-# --- 기타 API ---
-
+# ping API - 업타임 모니터링용
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
 
-@app.route("/status", methods=["GET"])
-def status():
-    try:
-        equity = get_account_equity()
-        positions = {}
-        for sym in SYMBOL_CONFIG:
-            pos = position_state.get(sym, {})
-            if pos.get("side"):
-                positions[sym] = {
-                    "side": pos["side"],
-                    "size": float(pos.get("size", 0)),
-                    "price": float(pos.get("price", 0)),
-                    "entry_count": pos.get("entry_count", 0),
-                    "sl_entry_count": pos.get("sl_entry_count", 0)
-                }
-        return jsonify({
-            "status": "running",
-            "current_time": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST"),
-            "balance_usdt": float(equity),
-            "active_positions": positions,
-            "queue_size": task_queue.qsize(),
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
-# --- 포지션 업데이트 ---
-
-def update_position(symbol: str):
-    with position_lock:
-        try:
-            pos_info = call_api_with_retry(futures_api.get_position, SETTLE_CURRENCY, symbol)
-            if pos_info and pos_info.size:
-                size = safe_decimal(pos_info.size)
-                if size == 0:
-                    position_state.pop(symbol, None)
-                else:
-                    entry_price = safe_decimal(pos_info.entry_price)
-                    side = "buy" if size > 0 else "sell"
-                    size_abs = abs(size)
-                    current_pos = position_state.get(symbol, {})
-                    position_state[symbol] = {
-                        "price": entry_price,
-                        "side": side,
-                        "size": size_abs,
-                        "entry_count": current_pos.get("entry_count", 0),
-                        "sl_entry_count": current_pos.get("sl_entry_count", 0),
-                        "stored_tp_pct": current_pos.get("stored_tp_pct", Decimal("0")),
-                        "stored_sl_pct": current_pos.get("stored_sl_pct", Decimal("0")),
-                        "entry_time": current_pos.get("entry_time", time.time()),
-                        "time_multiplier": current_pos.get("time_multiplier", Decimal("1.0")),
-                        "is_entering": current_pos.get("is_entering", False),
-                        "last_close_time": current_pos.get("last_close_time", 0),
-                    }
-            else:
-                position_state.pop(symbol, None)
-        except Exception as e:
-            log_debug("UPDATE_POSITION_ERROR", f"{symbol} 포지션 업데이트 중 오류: {e}")
-
-# --- 메인 루틴 ---
-
+# 메인 함수
 def main():
     log_debug("STARTUP", "자동매매 서버 시작 중...")
     for sym in SYMBOL_CONFIG.keys():
@@ -853,6 +733,7 @@ def main():
 
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
 
 if __name__ == "__main__":
     main()
