@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.12 - 모든 기능 유지, 코드 정리 및 최적화, API 재시도 로직 추가
-통합 계정 조회 로직 제거. 이전처럼 선물 계정 자산만 조회하도록 수정.
-SL 임계값 0.01%로 변경 및 UnboundLocalError 해결.
-Pine Script와 쿨다운 연동 강화.
+Gate.io 자동매매 서버 v6.12 - 점수 기반 진입 시스템 추가
+Pine Script v6.12와 완전 호환 - entry_score 기반 동적 수량 조절
 
 주요 기능:
 1. 5단계 피라미딩 (20%→30%→70%→160%→500%)
 2. 손절직전 진입 (SL_Rescue) - 150% 가중치, 최대 3회, 0.01% 임계값
-3. 최소 수량 및 최소 명목 금액 보장
-4. 심볼별 가중치 적용 및 시간 감쇠 TP/SL
-5. 야간 시간 진입 수량 조절 (0.5배→1.0배)
-6. TradingView 웹훅 기반 자동 주문
-7. 실시간 WebSocket을 통한 TP/SL 모니터링 및 자동 청산
-8. API 호출 시 일시적 오류에 대한 재시도 로직
-9. 통합 계정 관련 API 호출 제거 (이전 동작 방식 재현)
+3. 점수 기반 진입 수량 조절 (0~100점 → 30%~100% 비중)
+4. 최소 수량 및 최소 명목 금액 보장
+5. 심볼별 가중치 적용 및 시간 감쇠 TP/SL
+6. 야간 시간 진입 수량 조절 (0.5배→1.0배)
+7. TradingView 웹훅 기반 자동 주문
+8. 실시간 WebSocket을 통한 TP/SL 모니터링 및 자동 청산
+9. API 호출 시 일시적 오류에 대한 재시도 로직
 10. SL 임계값 0.01%로 변경
 11. check_tp_sl 함수의 UnboundLocalError 해결
 12. 웹훅 쿨다운 로직 강화
+13. Pine Script entry_score 필드 처리 및 가중치 적용
 """
 
 import os
@@ -87,7 +86,7 @@ SYMBOL_MAPPING = {
     "PEPEUSDT": "PEPE_USDT", "PEPEUSDT.P": "PEPE_USDT", "PEPEUSDTPERP": "PEPE_USDT", "PEPE_USDT": "PEPE_USDT", "PEPE": "PEPE_USDT",
     "XRPUSDT": "XRP_USDT", "XRPUSDT.P": "XRP_USDT", "XRPUSDTPERP": "XRP_USDT", "XRP_USDT": "XRP_USDT", "XRP": "XRP_USDT",
     "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT", "DOGE_USDT": "DOGE_USDT", "DOGE": "DOGE_USDT",
-    "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT", "ONDO_USDT": "ONDO_USDT", "ONDO": "ONDO_USDT",
+    "ONDO_USDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT", "ONDO_USDT": "ONDO_USDT", "ONDO": "ONDO_USDT",
 }
 
 SYMBOL_CONFIG = {
@@ -168,7 +167,35 @@ def get_price(symbol):
     return Decimal("0")
 
 # ========================================
-# 6. TP/SL 저장 및 관리 (PineScript v6.12 호환)
+# 6. 점수 기반 가중치 계산 (NEW)
+# ========================================
+
+def get_entry_weight_from_score(score):
+    """
+    Pine Script entry_score (0~100)를 기반으로 진입 수량 가중치 계산
+    점수 구간별 진입 비중:
+    0~10: 30%, 11~30: 40%, 31~50: 50%, 51~70: 60%, 71~90: 80%, 91~100: 100%
+    """
+    try:
+        score = Decimal(str(score))
+        if score <= 10:
+            return Decimal("0.30")
+        elif score <= 30:
+            return Decimal("0.40")
+        elif score <= 50:
+            return Decimal("0.50")
+        elif score <= 70:
+            return Decimal("0.60")
+        elif score <= 90:
+            return Decimal("0.80")
+        else:
+            return Decimal("1.00")
+    except (ValueError, TypeError, Exception):
+        log_debug("⚠️ 점수 변환 오류", f"entry_score: {score}, 기본값 0.5 사용")
+        return Decimal("0.50")  # 기본값
+
+# ========================================
+# 7. TP/SL 저장 및 관리 (PineScript v6.12 호환)
 # ========================================
 
 def store_tp_sl(symbol, tp, sl, entry_number):
@@ -191,7 +218,7 @@ def get_tp_sl(symbol, entry_number=None):
     return Decimal("0.006") * Decimal(str(cfg["tp_mult"])), Decimal("0.04") * Decimal(str(cfg["sl_mult"])), time.time()
 
 # ========================================
-# 7. 중복 신호 체크 및 시간대 조절
+# 8. 중복 신호 체크 및 시간대 조절
 # ========================================
 
 def get_time_based_multiplier():
@@ -224,40 +251,62 @@ def is_duplicate(data):
         return False
 
 # ========================================
-# 8. 수량 계산 (피라미딩, SL-Rescue, 최소 수량/명목 보장)
+# 9. 수량 계산 (피라미딩, SL-Rescue, 최소 수량/명목 보장, 점수 기반 가중치 추가)
 # ========================================
 
-def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0")):
+def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0"), entry_score=50):
+    """
+    Pine Script와 연동된 수량 계산
+    - entry_score: Pine Script에서 전송한 0~100 점수
+    - 점수에 따라 진입 비중을 동적으로 조절
+    """
     cfg = SYMBOL_CONFIG[symbol]
     equity, price = get_total_collateral(), get_price(symbol)
     if equity <= 0 or price <= 0:
         log_debug(f"⚠️ 수량 계산 불가 ({symbol})", f"자산: {equity}, 가격: {price}")
         return Decimal("0")
+    
     entry_count = position_state.get(symbol, {}).get("entry_count", 0)
     if entry_count >= 5:
         log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"현재 진입 횟수: {entry_count}/5")
         return Decimal("0")
+    
     entry_ratios = [Decimal("20"), Decimal("30"), Decimal("70"), Decimal("160"), Decimal("500")]
     current_ratio = entry_ratios[entry_count]
+    
+    # SL-Rescue 가중치 적용
     if signal_type == "sl_rescue":
         current_ratio = current_ratio * Decimal("1.5")
         log_debug(f"🚨 손절직전 가중치 적용 ({symbol})", f"기본 비율({entry_ratios[entry_count]}%) → 150% 증량({float(current_ratio)}%)")
 
-    position_value = equity * (current_ratio / Decimal("100")) * entry_multiplier
+    # 점수 기반 가중치 적용 (NEW)
+    score_weight = get_entry_weight_from_score(entry_score)
+    log_debug(f"🎯 점수 기반 가중치 적용 ({symbol})", f"진입 점수: {entry_score}점 → 가중치: {float(score_weight*100)}%")
+    
+    # 최종 포지션 비율 = 기본 비율 × 시간 가중치 × 점수 가중치
+    final_position_ratio = current_ratio * entry_multiplier * score_weight
+    
+    position_value = equity * (final_position_ratio / Decimal("100"))
     contract_value = price * cfg["contract_size"]
     calculated_qty = (position_value / contract_value / cfg["qty_step"]).quantize(Decimal('1'), rounding=ROUND_DOWN) * cfg["qty_step"]
     final_qty = max(calculated_qty, cfg["min_qty"])
+    
     current_notional = final_qty * price * cfg["contract_size"]
     if current_notional < cfg["min_notional"]:
         log_debug(f"💡 최소 주문금액 ({cfg['min_notional']} USDT) 미달 감지 ({symbol})", f"현재 명목가치: {current_notional:.2f} USDT")
         min_qty_for_notional = (cfg["min_notional"] / contract_value / cfg["qty_step"]).quantize(Decimal('1'), rounding=ROUND_DOWN) * cfg["qty_step"]
         final_qty = max(final_qty, min_qty_for_notional)
         log_debug(f"💡 최소 주문금액 조정 완료 ({symbol})", f"조정된 최종 수량: {final_qty:.4f} (명목가치: {final_qty * price * cfg['contract_size']:.2f} USDT)")
-    log_debug(f"📊 수량 계산 상세 ({symbol})", f"진입 #{entry_count+1}/5, 비율: {float(current_ratio)}%, 최종수량: {final_qty:.4f}")
+    
+    log_debug(f"📊 수량 계산 상세 ({symbol})", 
+              f"진입 #{entry_count+1}/5, 기본비율: {float(current_ratio)}%, "
+              f"점수: {entry_score}점({float(score_weight*100)}%), "
+              f"최종비율: {float(final_position_ratio)}%, 수량: {final_qty:.4f}")
+    
     return final_qty
 
 # ========================================
-# 9. 포지션 상태 관리 및 업데이트
+# 10. 포지션 상태 관리 및 업데이트
 # ========================================
 
 def update_position_state(symbol):
@@ -291,7 +340,7 @@ def update_position_state(symbol):
             return True
 
 # ========================================
-# 10. SL-Rescue 조건 확인
+# 11. SL-Rescue 조건 확인
 # ========================================
 
 def is_sl_rescue_condition(symbol):
@@ -312,7 +361,7 @@ def is_sl_rescue_condition(symbol):
         return False
 
 # ========================================
-# 11. 주문 실행 및 청산
+# 12. 주문 실행 및 청산
 # ========================================
 
 def place_order(symbol, side, qty, entry_number, time_multiplier):
@@ -356,7 +405,7 @@ def close_position(symbol, reason="manual"):
         return True
 
 # ========================================
-# 12. Flask 라우트 (웹훅 및 상태 API)
+# 13. Flask 라우트 (웹훅 및 상태 API)
 # ========================================
 
 @app.route("/ping", methods=["GET", "HEAD"])
@@ -413,10 +462,13 @@ def webhook():
         symbol_raw = data.get("symbol", "")
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
+        entry_score = data.get("entry_score", 50)  # Pine Script에서 전송한 점수 (기본값 50)
+        
         log_debug(
             "📊 파싱된 웹훅 데이터",
             f"심볼: {symbol_raw}, 방향: {side}, 액션: {action}, "
-            f"signal_type: {data.get('signal', 'N/A')}, entry_type: {data.get('type', 'N/A')}"
+            f"signal_type: {data.get('signal', 'N/A')}, entry_type: {data.get('type', 'N/A')}, "
+            f"entry_score: {entry_score}점"
         )
 
         symbol = normalize_symbol(symbol_raw)
@@ -438,6 +490,7 @@ def webhook():
                 "status": "queued",
                 "symbol": symbol,
                 "side": side,
+                "entry_score": entry_score,
                 "queue_size": task_q.qsize()
             }), 200
 
@@ -527,7 +580,7 @@ def status():
                 }
         return jsonify({
             "status": "running",
-            "version": "v6.12_sl_0_01pct_cooldown_14s_fixed",
+            "version": "v6.12_pine_score_integrated",
             "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity),
             "active_positions": positions,
@@ -536,6 +589,10 @@ def status():
             "max_sl_rescue_per_position": 3,
             "sl_rescue_proximity_threshold": float(Decimal("0.0001")) * 100,
             "pyramiding_entry_ratios": [20, 30, 70, 160, 500],
+            "score_based_weights": {
+                "0-10": "30%", "11-30": "40%", "31-50": "50%", 
+                "51-70": "60%", "71-90": "80%", "91-100": "100%"
+            },
             "symbol_weights": {sym: {"tp_mult": cfg["tp_mult"], "sl_mult": cfg["sl_mult"]} for sym, cfg in SYMBOL_CONFIG.items()},
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
         })
@@ -544,7 +601,7 @@ def status():
         return jsonify({"error": str(e)}), 500
 
 # ========================================
-# 13. WebSocket 모니터링 (TP/SL 체크)
+# 14. WebSocket 모니터링 (TP/SL 체크)
 # ========================================
 
 async def price_monitor():
@@ -605,7 +662,7 @@ def check_tp_sl(ticker):
         log_debug(f"❌ TP/SL 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
 
 # ========================================
-# 14. 백그라운드 모니터링 및 워커 스레드
+# 15. 백그라운드 모니터링 및 워커 스레드
 # ========================================
 
 def position_monitor():
@@ -651,11 +708,20 @@ def worker(idx):
 
 def handle_entry(data):
     symbol_raw, side, signal_type, entry_type = data.get("symbol", ""), data.get("side", "").lower(), data.get("signal", "none"), data.get("type", "")
-    log_debug("📊 진입 처리 시작", f"심볼: {symbol_raw}, 방향: {side}, signal_type: {signal_type}, entry_type: {entry_type}")
+    entry_score = data.get("entry_score", 50)  # Pine Script에서 전송한 점수 추출
+    
+    log_debug("📊 진입 처리 시작", 
+              f"심볼: {symbol_raw}, 방향: {side}, signal_type: {signal_type}, "
+              f"entry_type: {entry_type}, entry_score: {entry_score}점")
 
     symbol = normalize_symbol(symbol_raw)
     if not symbol or symbol not in SYMBOL_CONFIG:
         log_debug(f"❌ 잘못된 심볼 ({symbol_raw})", "처리 중단.")
+        return
+
+    # entry_score가 0인 경우 진입하지 않음 (Pine Script에서 조건 미충족)
+    if entry_score == 0:
+        log_debug(f"⏭️ 진입 조건 미충족 ({symbol})", f"Pine Script 점수: {entry_score}점 (진입 불가)")
         return
 
     update_position_state(symbol)
@@ -697,14 +763,22 @@ def handle_entry(data):
                 return
         actual_entry_number = entry_count + 1
 
-    # TP/SL 저장
-    tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
-    sl_map = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
-    if actual_entry_number <= len(tp_map):
-        tp = tp_map[actual_entry_number - 1] * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
-        sl = sl_map[actual_entry_number - 1] * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
-        store_tp_sl(symbol, tp, sl, actual_entry_number)
-        log_debug(f"💾 TP/SL 저장 ({symbol})", f"#{actual_entry_number}/5, TP: {tp*100:.3f}%, SL: {sl*100:.3f}%")
+    # TP/SL 저장 (Pine Script에서 받은 실제 TP/SL 값 사용)
+    pine_tp = data.get("tp_pct", 0.6) / 100  # Pine Script에서 %로 전송
+    pine_sl = data.get("sl_pct", 4.0) / 100
+    
+    if pine_tp > 0 and pine_sl > 0:
+        store_tp_sl(symbol, Decimal(str(pine_tp)), Decimal(str(pine_sl)), actual_entry_number)
+        log_debug(f"💾 Pine Script TP/SL 저장 ({symbol})", f"#{actual_entry_number}/5, TP: {pine_tp*100:.3f}%, SL: {pine_sl*100:.3f}%")
+    else:
+        # 기본값 사용
+        tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
+        sl_map = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
+        if actual_entry_number <= len(tp_map):
+            tp = tp_map[actual_entry_number - 1] * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
+            sl = sl_map[actual_entry_number - 1] * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
+            store_tp_sl(symbol, tp, sl, actual_entry_number)
+            log_debug(f"💾 기본 TP/SL 저장 ({symbol})", f"#{actual_entry_number}/5, TP: {tp*100:.3f}%, SL: {sl*100:.3f}%")
 
     # ===== 가격차이 필터 (불리할때만) =====
     current_price = get_price(symbol)
@@ -729,22 +803,24 @@ def handle_entry(data):
                       f"현재가 {current_price:.8f}, 목표가 {target_price:.8f}, 차이 {price_diff_ratio*100:.3f}%")
     # ===== 필터 끝 =====
 
-    qty = calculate_position_size(symbol, signal_type, entry_multiplier)
+    # 점수 기반 수량 계산
+    qty = calculate_position_size(symbol, signal_type, entry_multiplier, entry_score)
     if qty <= 0:
         log_debug(f"❌ 수량계산 실패 ({symbol})", "0 이하")
         return
     if place_order(symbol, desired_side, qty, actual_entry_number, entry_multiplier):
-        log_debug(f"✅ 진입 성공 ({symbol})", f"{desired_side.upper()} {float(qty)} 계약 (#{actual_entry_number}/5)")
+        log_debug(f"✅ 진입 성공 ({symbol})", f"{desired_side.upper()} {float(qty)} 계약 (#{actual_entry_number}/5, 점수: {entry_score}점)")
     else:
         log_debug(f"❌ 진입 실패 ({symbol})", f"{desired_side.upper()}")
 
 # ========================================
-# 15. 메인 실행
+# 16. 메인 실행
 # ========================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.12 (SL 임계값 0.01%, 쿨다운 및 오류 수정)")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.12 (Pine Script 점수 기반 진입 시스템)")
     log_debug("📊 현재 설정", f"감시 심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초, 최대 피라미딩 진입: 5회")
+    log_debug("🎯 점수 기반 가중치", "0~10점: 30%, 11~30점: 40%, 31~50점: 50%, 51~70점: 60%, 71~90점: 80%, 91~100점: 100%")
     equity = get_total_collateral(force=True)
     log_debug("💰 초기 자산 확인", f"{equity:.2f} USDT" if equity > 0 else "자산 조회 실패 또는 잔고 부족")
     initial_active_positions = []
@@ -764,5 +840,5 @@ if __name__ == "__main__":
         log_debug(f"⚙️ 워커-{i} 시작", f"워커 {i} 실행 중")
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹 서버 시작", f"Flask 서버 0.0.0.0:{port}에서 실행 중")
-    log_debug("✅ 준비 완료", "웹훅 신호 대기중")
+    log_debug("✅ 준비 완료", "Pine Script 점수 기반 진입 신호 대기중")
     app.run(host="0.0.0.0", port=port, debug=False)
