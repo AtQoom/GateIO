@@ -7,7 +7,7 @@ SL 임계값 0.01%로 변경 및 UnboundLocalError 해결.
 Pine Script와 쿨다운 연동 강화.
 
 주요 기능:
-1. 5단계 피라미딩 (20%→30%→70%→160%→500%)
+1. 5단계 피라미딩 (30%→30%→40%→150%→500%)
 2. 손절직전 진입 (SL_Rescue) - 150% 가중치, 최대 3회, 0.01% 임계값
 3. 최소 수량 및 최소 명목 금액 보장
 4. 심볼별 가중치 적용 및 시간 감쇠 TP/SL
@@ -237,7 +237,7 @@ def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0")
     if entry_count >= 5:
         log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"현재 진입 횟수: {entry_count}/5")
         return Decimal("0")
-    entry_ratios = [Decimal("20"), Decimal("30"), Decimal("70"), Decimal("160"), Decimal("500")]
+    entry_ratios = [Decimal("30"), Decimal("50"), Decimal("100"), Decimal("200"), Decimal("400")]
     current_ratio = entry_ratios[entry_count]
     if signal_type == "sl_rescue":
         current_ratio = current_ratio * Decimal("1.5")
@@ -302,19 +302,14 @@ def is_sl_rescue_condition(symbol):
         current_price, avg_price, side = get_price(symbol), pos["price"], pos["side"]
         if current_price <= 0: return False
         original_tp, original_sl, entry_start_time = get_tp_sl(symbol, pos["entry_count"])
-        sl_proximity_threshold = Decimal("0.0001")  # 0.01%
-        time_elapsed = time.time() - entry_start_time
-        periods_15s = int(time_elapsed / 15)
-        sl_decay_amt_ps, sl_min_pct_ps = Decimal("0.004") / 100, Decimal("0.09") / 100
         symbol_weight_sl = Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
-        sl_reduction = Decimal(str(periods_15s)) * (sl_decay_amt_ps * symbol_weight_sl)
-        adjusted_sl = max(sl_min_pct_ps, original_sl - sl_reduction)
-        sl_price = avg_price * (1 - adjusted_sl) if side == "buy" else avg_price * (1 + adjusted_sl)
-        is_near_sl = abs(current_price - sl_price) / sl_price <= sl_proximity_threshold
-        is_underwater = (side == "buy" and current_price < avg_price) or (side == "sell" and current_price > avg_price)
-        if is_near_sl and is_underwater:
-            log_debug(f"🚨 SL-Rescue 조건 충족 ({symbol})", f"현재가: {current_price:.8f}, 손절가: {sl_price:.8f}, 차이: {abs(current_price - sl_price) / sl_price * 100:.4f}% (<0.01%), 손절률: {adjusted_sl*100:.2f}%")
-        return is_near_sl and is_underwater
+        # 손절가 계산
+        sl_price = avg_price * (1 - original_sl * symbol_weight_sl) if side == "buy" else avg_price * (1 + original_sl * symbol_weight_sl)
+        
+        # 손절가 도달 조건: 현재가가 손절가 이하인 경우 (롱), 이상인 경우 (숏)
+        if (side == "buy" and current_price <= sl_price) or (side == "sell" and current_price >= sl_price):
+            return True
+        return False
 
 # ========================================
 # 11. 주문 실행 및 청산
@@ -390,42 +385,110 @@ def webhook():
     logger.info(f"[WEBHOOK_RECEIVED] 데이터 수신: {request.data}")
     try:
         raw_data = request.get_data(as_text=True)
-        if not raw_data: return jsonify({"error": "Empty data"}), 400
+        if not raw_data:
+            return jsonify({"error": "Empty data"}), 400
+
+        # JSON 파싱
         data = None
-        try: data = json.loads(raw_data)
+        try:
+            data = json.loads(raw_data)
         except json.JSONDecodeError:
-            if request.form: data = request.form.to_dict()
+            if request.form:
+                data = request.form.to_dict()
             elif "&" not in raw_data and "=" not in raw_data:
-                try: data = json.loads(urllib.parse.unquote(raw_data))
-                except Exception: pass
+                try:
+                    data = json.loads(urllib.parse.unquote(raw_data))
+                except Exception:
+                    pass
+
         if not data:
             if "{{" in raw_data and "}}" in raw_data:
-                return jsonify({"error": "TradingView placeholder detected", "solution": "Use {{strategy.order.alert_message}} in TradingView alert message field"}), 400
+                return jsonify({
+                    "error": "TradingView placeholder detected",
+                    "solution": "Use {{strategy.order.alert_message}} in TradingView alert message field"
+                }), 400
             return jsonify({"error": "Failed to parse data"}), 400
-        symbol_raw, side, action = data.get("symbol", ""), data.get("side", "").lower(), data.get("action", "").lower()
-        log_debug("📊 파싱된 웹훅 데이터", f"심볼: {symbol_raw}, 방향: {side}, 액션: {action}, signal_type: {data.get('signal', 'N/A')}, entry_type: {data.get('type', 'N/A')}")
+
+        # 기본 데이터
+        symbol_raw = data.get("symbol", "")
+        side = data.get("side", "").lower()
+        action = data.get("action", "").lower()
+        log_debug(
+            "📊 파싱된 웹훅 데이터",
+            f"심볼: {symbol_raw}, 방향: {side}, 액션: {action}, "
+            f"signal_type: {data.get('signal', 'N/A')}, entry_type: {data.get('type', 'N/A')}"
+        )
+
         symbol = normalize_symbol(symbol_raw)
         if not symbol or symbol not in SYMBOL_CONFIG:
-            log_debug("❌ 유효하지 않은 심볼", f"원본: {symbol_raw}. SYMBOL_CONFIG에 없음.")
+            log_debug("❌ 유효하지 않은 심볼", f"원본: {symbol_raw}")
             return jsonify({"error": f"Invalid symbol: {symbol_raw}"}), 400
+
+        # 중복 신호 체크
         if is_duplicate(data):
             return jsonify({"status": "duplicate_ignored"}), 200
+
+        # ===== Entry 처리 =====
         if action == "entry" and side in ["long", "short"]:
-            try: task_q.put_nowait(data)
-            except queue.Full: return jsonify({"status": "queue_full"}), 429
-            return jsonify({"status": "queued", "symbol": symbol, "side": side, "queue_size": task_q.qsize()}), 200
+            try:
+                task_q.put_nowait(data)
+            except queue.Full:
+                return jsonify({"status": "queue_full"}), 429
+            return jsonify({
+                "status": "queued",
+                "symbol": symbol,
+                "side": side,
+                "queue_size": task_q.qsize()
+            }), 200
+
+        # ===== Exit 처리 =====
         elif action == "exit":
-            if data.get("reason") in ["TP", "SL"]:
+            reason = data.get("reason", "").upper()
+
+            # TP/SL 청산 알림은 서버 내부 자동청산 처리만 하고 무시
+            if reason in ("TP", "SL"):
+                log_debug(f"TP/SL 청산 알림 무시 ({symbol})", f"이유: {reason}")
                 return jsonify({"status": "ignored", "reason": "tp_sl_handled_by_server"}), 200
+
+            # 현재 포지션 상태 및 방향 확인
             update_position_state(symbol)
-            if position_state.get(symbol, {}).get("side"):
-                log_debug(f"✅ TradingView 청산 신호 수신 ({symbol})", f"이유: {data.get('reason', '알 수 없음')}. 포지션 청산 시도.")
-                close_position(symbol, data.get("reason", "signal"))
+            pos = position_state.get(symbol, {})
+            pos_side = pos.get("side")  # 'buy' or 'sell'
+
+            current_price = get_price(symbol)
+            target_price = Decimal(str(data.get("price", current_price)))
+            base_tolerance = Decimal("0.0002")  # 0.02%
+            symbol_mult = Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
+            price_tolerance = base_tolerance * symbol_mult
+
+            if current_price <= 0 or target_price <= 0:
+                log_debug(f"⚠️ 가격 0 감지 ({symbol})", f"필터 무시 - 현재가: {current_price}, 목표가: {target_price}")
             else:
-                log_debug(f"💡 청산 실행 불필요 ({symbol})", "활성 포지션이 없거나 이미 청산되었습니다.")
+                price_diff_ratio = abs(current_price - target_price) / target_price
+                # 불리한 경우에만 필터 적용 (롱: 현재가 < 목표가, 숏: 현재가 > 목표가)
+                if (pos_side == "buy" and current_price < target_price) or (pos_side == "sell" and current_price > target_price):
+                    if price_diff_ratio > price_tolerance:
+                        log_debug(f"⏳ 불리한 가격, 청산 보류 ({symbol})",
+                                  f"현재가 {current_price:.8f}, 목표가 {target_price:.8f}, "
+                                  f"차이 {price_diff_ratio*100:.3f}% > 허용 {price_tolerance*100:.3f}%")
+                        return jsonify({"status": "exit_delayed", "reason": "price_diff"}), 200
+                else:
+                    log_debug(f"💡 유리한 가격 즉시 청산 ({symbol})",
+                              f"현재가 {current_price:.8f}, 목표가 {target_price:.8f}, "
+                              f"차이 {price_diff_ratio*100:.3f}%")
+
+            if pos_side:
+                log_debug(f"✅ 청산 신호 수신 ({symbol})", f"이유: {reason}. 포지션 청산 시도.")
+                close_position(symbol, reason)
+            else:
+                log_debug(f"💡 청산 불필요 ({symbol})", "활성 포지션 없음")
+
             return jsonify({"status": "success", "action": "exit"})
-        log_debug("❌ 알 수 없는 웹훅 액션", f"수신된 액션: {action}. 처리되지 않았습니다.")
+
+        # ===== 알 수 없는 액션 =====
+        log_debug("❌ 알 수 없는 웹훅 액션", f"수신된 액션: {action}")
         return jsonify({"error": "Invalid action"}), 400
+
     except Exception as e:
         log_debug("❌ 웹훅 처리 중 예외 발생", str(e), exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -472,7 +535,7 @@ def status():
             "max_entries_per_symbol": 5,
             "max_sl_rescue_per_position": 3,
             "sl_rescue_proximity_threshold": float(Decimal("0.0001")) * 100,
-            "pyramiding_entry_ratios": [20, 30, 70, 120, 500],
+            "pyramiding_entry_ratios": [30, 30, 40, 150, 500],
             "symbol_weights": {sym: {"tp_mult": cfg["tp_mult"], "sl_mult": cfg["sl_mult"]} for sym, cfg in SYMBOL_CONFIG.items()},
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
         })
@@ -589,15 +652,18 @@ def worker(idx):
 def handle_entry(data):
     symbol_raw, side, signal_type, entry_type = data.get("symbol", ""), data.get("side", "").lower(), data.get("signal", "none"), data.get("type", "")
     log_debug("📊 진입 처리 시작", f"심볼: {symbol_raw}, 방향: {side}, signal_type: {signal_type}, entry_type: {entry_type}")
+
     symbol = normalize_symbol(symbol_raw)
     if not symbol or symbol not in SYMBOL_CONFIG:
         log_debug(f"❌ 잘못된 심볼 ({symbol_raw})", "처리 중단.")
         return
+
     update_position_state(symbol)
     entry_count = position_state.get(symbol, {}).get("entry_count", 0)
     current_pos_side = position_state.get(symbol, {}).get("side")
     desired_side = "buy" if side == "long" else "sell"
     entry_multiplier = position_state.get(symbol, {}).get('time_multiplier', Decimal("1.0")) if entry_count > 0 else get_time_based_multiplier()
+
     if current_pos_side and current_pos_side != desired_side:
         log_debug(f"🔄 반대 포지션 감지 ({symbol})", f"{current_pos_side.upper()} → {desired_side.upper()} 기존 청산 시도")
         if not close_position(symbol, "reverse_entry"):
@@ -606,47 +672,71 @@ def handle_entry(data):
         time.sleep(1)
         update_position_state(symbol)
         entry_count = 0
+
     if entry_count >= 5:
-        log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"진입 {entry_count}/5. 추가 진입하지 않음")
+        log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"진입 {entry_count}/5. 추가진입 안함")
         return
+
     is_sl_rescue_signal = (signal_type == "sl_rescue")
     if is_sl_rescue_signal:
         sl_entry_count = position_state.get(symbol, {}).get("sl_entry_count", 0)
         if sl_entry_count >= 3:
-            log_debug(f"⚠️ 손절직전 최대 진입 도달 ({symbol})", f"SL-Rescue {sl_entry_count}/3회. 추가 진입하지 않음")
+            log_debug(f"⚠️ SL-Rescue 최대 진입 도달 ({symbol})", f"{sl_entry_count}/3회")
             return
         if not is_sl_rescue_condition(symbol):
-            log_debug(f"⏭️ 손절직전 조건 불충족 ({symbol})", "서버 기준 미충족, 진입 건너뜀")
+            log_debug(f"⏭️ SL-Rescue 조건 미충족 ({symbol})", "진입 건너뜀")
             return
         position_state[symbol]["sl_entry_count"] = sl_entry_count + 1
-        log_debug(f"🚨 손절직전 진입 진행 ({symbol})", f"SL-Rescue #{sl_entry_count + 1}/3회 시도")
+        log_debug(f"🚨 SL-Rescue 진입 ({symbol})", f"#{sl_entry_count + 1}/3회 시도")
         actual_entry_number = entry_count + 1
     else:
-        if entry_count > 0:  # 추가진입 일반 로직
+        if entry_count > 0:
             current_price, avg_price = get_price(symbol), position_state[symbol]["price"]
             if (current_pos_side == "buy" and current_price >= avg_price) or (current_pos_side == "sell" and current_price <= avg_price):
-                log_debug(f"⏭️ 가격 조건 미충족 ({symbol})", f"현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
+                log_debug(f"⏭️ 가격조건 미충족 ({symbol})", f"현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
                 return
         actual_entry_number = entry_count + 1
 
+    # TP/SL 저장
     tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
     sl_map = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
     if actual_entry_number <= len(tp_map):
         tp = tp_map[actual_entry_number - 1] * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
         sl = sl_map[actual_entry_number - 1] * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
         store_tp_sl(symbol, tp, sl, actual_entry_number)
-        log_debug(f"💾 TP/SL 저장 ({symbol})", f"진입 #{actual_entry_number}/5, TP: {tp*100:.3f}%, SL: {sl*100:.3f}%")
+        log_debug(f"💾 TP/SL 저장 ({symbol})", f"#{actual_entry_number}/5, TP: {tp*100:.3f}%, SL: {sl*100:.3f}%")
+
+    # ===== 가격차이 필터 (불리할때만) =====
+    current_price = get_price(symbol)
+    target_price = Decimal(str(data.get("price", current_price)))
+    base_tolerance = Decimal("0.0002")  # 0.02%
+    symbol_mult = Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
+    price_tolerance = base_tolerance * symbol_mult
+
+    if current_price <= 0 or target_price <= 0:
+        log_debug(f"⚠️ 가격 0 감지 ({symbol})", f"필터 무시 - 현재가: {current_price}, 목표가: {target_price}")
     else:
-        log_debug(f"⚠️ TP/SL 저장 오류 ({symbol})", f"진입 단계 {actual_entry_number}에 대한 TP/SL 맵 없음")
+        price_diff_ratio = abs(current_price - target_price) / target_price
+        # 불리한 방향일 때만 필터 적용
+        if (side == "long" and current_price > target_price) or (side == "short" and current_price < target_price):
+            if price_diff_ratio > price_tolerance:
+                log_debug(f"⏳ 불리한 가격, 진입 보류 ({symbol})",
+                          f"현재가 {current_price:.8f}, 목표가 {target_price:.8f}, "
+                          f"차이 {price_diff_ratio*100:.3f}% > 허용 {price_tolerance*100:.3f}%")
+                return
+        else:
+            log_debug(f"💡 유리한 가격 즉시 진입 ({symbol})",
+                      f"현재가 {current_price:.8f}, 목표가 {target_price:.8f}, 차이 {price_diff_ratio*100:.3f}%")
+    # ===== 필터 끝 =====
+
     qty = calculate_position_size(symbol, signal_type, entry_multiplier)
     if qty <= 0:
-        log_debug(f"❌ 수량 계산 실패 ({symbol})", "계산 수량 0 이하로 주문 안함")
+        log_debug(f"❌ 수량계산 실패 ({symbol})", "0 이하")
         return
-    success = place_order(symbol, desired_side, qty, actual_entry_number, entry_multiplier)
-    if success:
-        log_debug(f"✅ 진입 성공 ({symbol})", f"{desired_side.upper()} {float(qty)} 계약 (진입 #{actual_entry_number}/5, 타입: {'손절직전(+50%)' if is_sl_rescue_signal else '일반'})")
+    if place_order(symbol, desired_side, qty, actual_entry_number, entry_multiplier):
+        log_debug(f"✅ 진입 성공 ({symbol})", f"{desired_side.upper()} {float(qty)} 계약 (#{actual_entry_number}/5)")
     else:
-        log_debug(f"❌ 진입 실패 ({symbol})", f"{desired_side.upper()} 주문 실패")
+        log_debug(f"❌ 진입 실패 ({symbol})", f"{desired_side.upper()}")
 
 # ========================================
 # 15. 메인 실행
