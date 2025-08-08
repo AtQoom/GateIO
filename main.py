@@ -283,7 +283,7 @@ def calculate_qty(symbol: str, signal_type: str, entry_multiplier: Decimal) -> D
         log_debug("QTY_CALC_LIMIT", f"Max entries reached for {symbol} - {current_entry_count}/{MAX_ENTRIES}")
         return Decimal("0")
 
-    entry_ratios = [Decimal("10"), Decimal("20"), Decimal("50"), Decimal("120"), Decimal("400")]
+    entry_ratios = [Decimal("18"), Decimal("30"), Decimal("72"), Decimal("180"), Decimal("550")]
 
     base_ratio = entry_ratios[current_entry_count]
     if signal_type == "sl_rescue":
@@ -652,7 +652,7 @@ def status():
             "balance_usdt": float(equity),
             "active_positions": positions,
             "queue_size": task_queue.qsize(),
-            "entry_ratios": [20, 32, 75, 180, 550]
+            "entry_ratios": [18, 30, 72, 180, 550]
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -686,7 +686,7 @@ def worker_launcher(num_workers: int = 10):
 
 def main():
     log_debug("STARTUP", "자동매매 서버 시작")
-    log_debug("ENTRY_RATIOS", "진입 비율: 20%-30%-0%-160%-500%")
+    log_debug("ENTRY_RATIOS", "진입 비율: 18%-30%-72%-180%-550%")
     log_initial_state()
     worker_launcher(8)
     threading.Thread(target=run_ws_monitor, daemon=True, name="WS-Monitor").start()
