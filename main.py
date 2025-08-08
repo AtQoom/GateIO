@@ -173,26 +173,27 @@ def get_price(symbol):
 def get_entry_weight_from_score(score):
     """
     Pine Script entry_score (0~100)를 기반으로 진입 수량 가중치 계산
+    0점이어도 신호가 나왔으므로 최소 가중치 적용
     점수 구간별 진입 비중:
-    0~10: 30%, 11~30: 40%, 31~50: 50%, 51~70: 60%, 71~90: 80%, 91~100: 100%
+    0~10: 25%, 11~30: 35%, 31~50: 50%, 51~70: 65%, 71~90: 80%, 91~100: 100%
     """
     try:
         score = Decimal(str(score))
-        if score <= 10:
-            return Decimal("0.30")
+        if score <= 10:  # 0점 포함
+            return Decimal("0.25")  # 25% (기존 30%에서 약간 낮춤)
         elif score <= 30:
-            return Decimal("0.40")
+            return Decimal("0.35")
         elif score <= 50:
             return Decimal("0.50")
         elif score <= 70:
-            return Decimal("0.60")
+            return Decimal("0.65")
         elif score <= 90:
             return Decimal("0.80")
         else:
             return Decimal("1.00")
     except (ValueError, TypeError, Exception):
-        log_debug("⚠️ 점수 변환 오류", f"entry_score: {score}, 기본값 0.5 사용")
-        return Decimal("0.50")  # 기본값
+        log_debug("⚠️ 점수 변환 오류", f"entry_score: {score}, 기본값 0.25 사용")
+        return Decimal("0.25")  # 0점도 25% 가중치
 
 # ========================================
 # 7. TP/SL 저장 및 관리 (PineScript v6.12 호환)
@@ -716,10 +717,8 @@ def handle_entry(data):
         log_debug(f"❌ 잘못된 심볼 ({symbol_raw})", "처리 중단.")
         return
 
-    # entry_score가 0인 경우 진입하지 않음 (Pine Script에서 조건 미충족)
-    if entry_score == 0:
-        log_debug(f"⏭️ 진입 조건 미충족 ({symbol})", f"Pine Script 점수: {entry_score}점 (진입 불가)")
-        return
+    # ✅ 수정: Pine Script 신호 = 무조건 진입 (점수는 수량 가중치에만 영향)
+    log_debug(f"✅ Pine Script 신호 수신 ({symbol})", f"점수: {entry_score}점 - 진입 진행")
 
     update_position_state(symbol)
     entry_count = position_state.get(symbol, {}).get("entry_count", 0)
@@ -800,7 +799,7 @@ def handle_entry(data):
                       f"현재가 {current_price:.8f}, 목표가 {target_price:.8f}, 차이 {price_diff_ratio*100:.3f}%")
     # ===== 필터 끝 =====
 
-    # 점수 기반 수량 계산
+    # 점수 기반 수량 계산 (0점이어도 25% 가중치로 진입)
     qty = calculate_position_size(symbol, signal_type, entry_multiplier, entry_score)
     if qty <= 0:
         log_debug(f"❌ 수량계산 실패 ({symbol})", "0 이하")
