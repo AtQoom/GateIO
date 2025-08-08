@@ -387,6 +387,7 @@ def log_request():
 @app.route("/", methods=["POST"])
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    logger.info(f"[WEBHOOK_RECEIVED] 데이터 수신: {request.data}")
     try:
         raw_data = request.get_data(as_text=True)
         if not raw_data: return jsonify({"error": "Empty data"}), 400
