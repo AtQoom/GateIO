@@ -254,12 +254,8 @@ def is_duplicate(data):
 # 9. 수량 계산 (피라미딩, SL-Rescue, 최소 수량/명목 보장, 점수 기반 가중치 추가)
 # ========================================
 
+# 기존 진입비율을 점수 시스템에 맞게 상향 조정
 def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0"), entry_score=50):
-    """
-    Pine Script와 연동된 수량 계산
-    - entry_score: Pine Script에서 전송한 0~100 점수
-    - 점수에 따라 진입 비중을 동적으로 조절
-    """
     cfg = SYMBOL_CONFIG[symbol]
     equity, price = get_total_collateral(), get_price(symbol)
     if equity <= 0 or price <= 0:
@@ -271,7 +267,8 @@ def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0")
         log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"현재 진입 횟수: {entry_count}/5")
         return Decimal("0")
     
-    entry_ratios = [Decimal("20"), Decimal("30"), Decimal("70"), Decimal("160"), Decimal("500")]
+    # 🔥 수정: 점수 시스템을 고려한 진입비율 상향 조정
+    entry_ratios = [Decimal("35"), Decimal("50"), Decimal("100"), Decimal("220"), Decimal("650")]
     current_ratio = entry_ratios[entry_count]
     
     # SL-Rescue 가중치 적용
@@ -279,11 +276,11 @@ def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0")
         current_ratio = current_ratio * Decimal("1.5")
         log_debug(f"🚨 손절직전 가중치 적용 ({symbol})", f"기본 비율({entry_ratios[entry_count]}%) → 150% 증량({float(current_ratio)}%)")
 
-    # 점수 기반 가중치 적용 (NEW)
+    # 점수 기반 가중치 적용
     score_weight = get_entry_weight_from_score(entry_score)
     log_debug(f"🎯 점수 기반 가중치 적용 ({symbol})", f"진입 점수: {entry_score}점 → 가중치: {float(score_weight*100)}%")
     
-    # 최종 포지션 비율 = 기본 비율 × 시간 가중치 × 점수 가중치
+    # 최종 포지션 비율 = 조정된 기본 비율 × 시간 가중치 × 점수 가중치
     final_position_ratio = current_ratio * entry_multiplier * score_weight
     
     position_value = equity * (final_position_ratio / Decimal("100"))
@@ -299,7 +296,7 @@ def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0")
         log_debug(f"💡 최소 주문금액 조정 완료 ({symbol})", f"조정된 최종 수량: {final_qty:.4f} (명목가치: {final_qty * price * cfg['contract_size']:.2f} USDT)")
     
     log_debug(f"📊 수량 계산 상세 ({symbol})", 
-              f"진입 #{entry_count+1}/5, 기본비율: {float(current_ratio)}%, "
+              f"진입 #{entry_count+1}/5, 조정된기본비율: {float(current_ratio)}%, "
               f"점수: {entry_score}점({float(score_weight*100)}%), "
               f"최종비율: {float(final_position_ratio)}%, 수량: {final_qty:.4f}")
     
