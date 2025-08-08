@@ -7,7 +7,7 @@ SL 임계값 0.01%로 변경 및 UnboundLocalError 해결.
 Pine Script와 쿨다운 연동 강화.
 
 주요 기능:
-1. 5단계 피라미딩 (30%→30%→40%→150%→500%)
+1. 5단계 피라미딩 (20%→30%→70%→160%→500%)
 2. 손절직전 진입 (SL_Rescue) - 150% 가중치, 최대 3회, 0.01% 임계값
 3. 최소 수량 및 최소 명목 금액 보장
 4. 심볼별 가중치 적용 및 시간 감쇠 TP/SL
@@ -237,7 +237,7 @@ def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0")
     if entry_count >= 5:
         log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"현재 진입 횟수: {entry_count}/5")
         return Decimal("0")
-    entry_ratios = [Decimal("30"), Decimal("50"), Decimal("100"), Decimal("200"), Decimal("400")]
+    entry_ratios = [Decimal("20"), Decimal("30"), Decimal("70"), Decimal("160"), Decimal("500")]
     current_ratio = entry_ratios[entry_count]
     if signal_type == "sl_rescue":
         current_ratio = current_ratio * Decimal("1.5")
@@ -535,7 +535,7 @@ def status():
             "max_entries_per_symbol": 5,
             "max_sl_rescue_per_position": 3,
             "sl_rescue_proximity_threshold": float(Decimal("0.0001")) * 100,
-            "pyramiding_entry_ratios": [30, 30, 40, 150, 500],
+            "pyramiding_entry_ratios": [20, 30, 70, 160, 500],
             "symbol_weights": {sym: {"tp_mult": cfg["tp_mult"], "sl_mult": cfg["sl_mult"]} for sym, cfg in SYMBOL_CONFIG.items()},
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
         })
