@@ -268,7 +268,7 @@ def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0")
         return Decimal("0")
     
     # 🔥 수정: 점수 시스템을 고려한 진입비율 상향 조정
-    entry_ratios = [Decimal("35"), Decimal("50"), Decimal("100"), Decimal("220"), Decimal("650")]
+    entry_ratios = [Decimal("50"), Decimal("80"), Decimal("200"), Decimal("420"), Decimal("1200")]
     current_ratio = entry_ratios[entry_count]
     
     # SL-Rescue 가중치 적용
