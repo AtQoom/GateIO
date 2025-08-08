@@ -458,13 +458,15 @@ def process_entry_signal(data):
     return success
 
 def process_exit_signal(data):
+    reason = data.get("reason", "").upper()
+    # TP 또는 SL 청산 사유일 경우 서버 청산 무시
+    if reason in ("TP", "SL"):
+        logger.info(f"TP/SL 청산 알림 수신: 서버 청산 무시 - {data}")
+        return True  # 무시하되 성공 처리
+
+    # 그 외 이유(예: 엔걸핑 등)는 서버 청산 실행
     symbol_raw = data.get("symbol", "")
     symbol = normalize_symbol(symbol_raw)
-    side = data.get("side", "").lower()
-    reason = data.get("reason", "manual")
-
-    # 필요한 경우 중복 체크도 가능
-
     return close_position(symbol, reason)
 
 # ------------------------------------------------------
