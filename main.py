@@ -7,32 +7,29 @@ import time
 import threading
 import queue
 import logging
-from decimal import Decimal, ROUND_DOWN, getcontext
+from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 import pytz
-import asyncio
-import websockets
-import pandas as pd
-import numpy as np
-import ta  # pip install ta
+
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
 from gate_api import exceptions as gate_api_exceptions
-from flask import Flask, jsonify
 
-# Decimal 정밀도
-getcontext().prec = 12
+import asyncio
+import websockets
+from flask import Flask, request, jsonify
 
-# 환경 변수 및 상수
+# 1. 설정 및 상수
+
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
-SETTLE_CURRENCY = "usdt"
-KST = pytz.timezone("Asia/Seoul")
 
-# 전략 파라미터
-COOLDOWN_SECONDS = 15          
-MAX_ENTRIES = 5                
-MAX_SL_RESCUES = 3             
-MIN_ENTRY_FOR_SL = 6           
+SETTLE_CURRENCY = "usdt"
+KST = pytz.timezone('Asia/Seoul')
+
+COOLDOWN_SECONDS = 14
+SL_RESCUE_PROXIMITY = Decimal("0.0001")
+MAX_ENTRIES = 5
+MAX_SL_RESCUES = 3
 
 SYMBOL_MAPPING = {
     "BTCUSDT": "BTC_USDT", "BTCUSDT.P": "BTC_USDT", "BTCUSDTPERP": "BTC_USDT",
@@ -41,61 +38,70 @@ SYMBOL_MAPPING = {
     "ETH_USDT": "ETH_USDT", "ETH": "ETH_USDT",
     "SOLUSDT": "SOL_USDT", "SOLUSDT.P": "SOL_USDT", "SOLUSDTPERP": "SOL_USDT",
     "SOL_USDT": "SOL_USDT", "SOL": "SOL_USDT",
-    "ADAUSDT": "ADA_USDT", "ADAUSDT.P": "ADA_USDT", "ADAUSDTPERP": "ADA_USDT",
+    "ADAUSDT": "ADA_USDT", "ADAUSDT.P": "ADA_USDT", "AD⁴AUSDTPERP": "ADA_USDT",
     "ADA_USDT": "ADA_USDT", "ADA": "ADA_USDT",
     "SUIUSDT": "SUI_USDT", "SUIUSDT.P": "SUI_USDT", "SUIUSDTPERP": "SUI_USDT",
     "SUI_USDT": "SUI_USDT", "SUI": "SUI_USDT",
     "LINKUSDT": "LINK_USDT", "LINKUSDT.P": "LINK_USDT", "LINKUSDTPERP": "LINK_USDT",
     "LINK_USDT": "LINK_USDT", "LINK": "LINK_USDT",
+    "PEPEUSDT": "PEPE_USDT", "PEPEUSDT.P": "PEPE_USDT", "PEPEUSDTPERP": "PEPE_USDT",
+    "PEPE_USDT": "PEPE_USDT", "PEPE": "PEPE_USDT",
+    "XRPUSDT": "XRP_USDT", "XRPUSDT.P": "XRP_USDT", "XRPUSDTPERP": "XRP_USDT",
+    "XRP_USDT": "XRP_USDT", "XRP": "XRP_USDT",
+    "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT",
+    "DOGE_USDT": "DOGE_USDT", "DOGE": "DOGE_USDT",
+    "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT",
+    "ONDO_USDT": "ONDO_USDT", "ONDO": "ONDO_USDT",
 }
 
 SYMBOL_CONFIG = {
-    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": Decimal("0.55"), "sl_mult": Decimal("0.55"), "qty_mult": Decimal("1.5")},
-    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": Decimal("0.65"), "sl_mult": Decimal("0.65"), "qty_mult": Decimal("1.3")},
-    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": Decimal("0.8"), "sl_mult": Decimal("0.8"), "qty_mult": Decimal("1.2")},
-    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"), "qty_mult": Decimal("1.0")},
-    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"), "qty_mult": Decimal("1.0")},
-    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"), "qty_mult": Decimal("1.0")},
+    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"),
+                 "min_notional": Decimal("5"), "tp_mult": Decimal("0.55"), "sl_mult": Decimal("0.55"),
+                 "qty_mult": Decimal("1.5")},
+    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"),
+                 "min_notional": Decimal("5"), "tp_mult": Decimal("0.65"), "sl_mult": Decimal("0.65"),
+                 "qty_mult": Decimal("1.3")},
+    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
+                 "min_notional": Decimal("5"), "tp_mult": Decimal("0.85"), "sl_mult": Decimal("0.85"),
+                 "qty_mult": Decimal("1.2")},
+    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
+                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
+                 "qty_mult": Decimal("1.0")},
+    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
+                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
+                 "qty_mult": Decimal("1.0")},
+    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
+                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
+                  "qty_mult": Decimal("1.0")},
+    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"),
+                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.2"), "sl_mult": Decimal("1.2"),
+                  "qty_mult": Decimal("1.0")},
+    "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
+                 "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
+                 "qty_mult": Decimal("1.0")},
+    "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"),
+                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.2"), "sl_mult": Decimal("1.2"),
+                  "qty_mult": Decimal("1.0")},
+    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"),
+                  "min_notional": Decimal("5"), "tp_mult": Decimal("1.0"), "sl_mult": Decimal("1.0"),
+                  "qty_mult": Decimal("1.0")},
 }
 
-ENTRY_RATIOS = [Decimal(x) for x in [0.10, 0.20, 0.50, 1.40, 4.00]]
-TP_LEVELS = [Decimal(x) for x in [0.005, 0.004, 0.0035, 0.003, 0.002]]
-SL_LEVELS = [Decimal(x) for x in [0.04, 0.038, 0.035, 0.033, 0.03]]
+TP_BASE_MAP = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
+SL_BASE_MAP = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
+MIN_ENTRY_FOR_SL = 6  # 예: 3회 추가진입 후부터 SL 청산 허용
 
-BASE_TP_PCT = Decimal("0.006")
-BASE_SL_PCT = Decimal("0.04")
-RSI_LENGTH = 14
-RSI_LONG_MAIN = 28
-RSI_SHORT_MAIN = 72
-RSI_15S_LONG = 21
-RSI_15S_SHORT = 79
-RSI_15S_LONG_EXIT = 78
-RSI_15S_SHORT_EXIT = 22
-ENGULF_RSI_OB = 79
-ENGULF_RSI_OS = 21
-ENGULF_EXIT_OB = 76
-ENGULF_EXIT_OS = 24
-
-USE_BB_FILTER = True
-BB_LENGTH = 20
-BB_MULT = 2.0
-VOLUME_MULT = 1.5
-
-TP_DECAY_SEC = 15.0
-TP_DECAY_AMT = Decimal("0.002")
-TP_MIN_PCT = Decimal("0.0012")
-SL_DECAY_AMT = Decimal("0.004")
-SL_MIN_PCT = Decimal("0.0009")
-
-ENABLE_ALERTS = True
+# 2. 로깅 설정
 
 logging.basicConfig(level=logging.INFO,
                     format='[%(asctime)s] [%(levelname)s] %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger("AutoTrader")
 
-def log_debug(tag, msg):
-    logger.info(f"[{tag}] {msg}")
+def log_debug(tag, message):
+    logger.info(f"[{tag}] {message}")
+
+# 3. API 클라이언트 및 상태 변수 선언
 
 config = Configuration(key=API_KEY, secret=API_SECRET)
 api_client = ApiClient(config)
@@ -103,446 +109,316 @@ futures_api = FuturesApi(api_client)
 
 position_state = {}
 position_lock = threading.RLock()
+
 tpsl_storage = {}
 tpsl_lock = threading.RLock()
+
+recent_signals = {}
+signal_lock = threading.RLock()
+
 task_queue = queue.Queue(maxsize=100)
 
-app = Flask(__name__)
+# 4. symbol 정규화
 
-# --- SymbolData 클래스 ---
-class SymbolData:
-    def __init__(self, symbol):
-        self.symbol = symbol
-        self.lock = threading.RLock()
-        self.df_15s = pd.DataFrame(columns=['open','high','low','close','volume'])
-        self.df_15s.index.name='timestamp'
-        self.last_bar_time=None
-        self.df_1m=None
-        self.df_3m=None
+def normalize_symbol(raw_symbol: str) -> str:
+    result = SYMBOL_MAPPING.get(raw_symbol.strip().upper(), raw_symbol.strip().upper())
+    log_debug("SYMBOL_NORMALIZE", f"'{raw_symbol}' -> '{result}'")
+    return result
 
-    def add_tick(self, price, volume, timestamp=None):
-        with self.lock:
-            try:
-                ts = int(timestamp or time.time())
-                bar_time = ts - (ts % 15)
-                bar_dt = pd.to_datetime(bar_time, unit='s')
-                if bar_dt not in self.df_15s.index:
-                    self.df_15s.loc[bar_dt]=[price, price, price, price, volume]
-                    self.last_bar_time=bar_dt
-                else:
-                    self.df_15s.at[bar_dt, 'high']=max(self.df_15s.at[bar_dt, 'high'], price)
-                    self.df_15s.at[bar_dt, 'low']=min(self.df_15s.at[bar_dt, 'low'], price)
-                    self.df_15s.at[bar_dt, 'close']=price
-                    self.df_15s.at[bar_dt, 'volume']+=volume
-                self.df_15s.index=pd.to_datetime(self.df_15s.index)
-                self.df_15s.sort_index(inplace=True)
-                if len(self.df_15s)>200:
-                    self.df_15s=self.df_15s.iloc[-200:]
-                if len(self.df_15s)>0:
-                    self.df_1m=self.df_15s.resample('1min').agg({
-                        'open': 'first',
-                        'high': 'max',
-                        'low': 'min',
-                        'close': 'last',
-                        'volume': 'sum'
-                    }).dropna()
-                    if len(self.df_1m)>200:
-                        self.df_1m=self.df_1m.iloc[-200:]
-                    self.df_3m=self.df_15s.resample('3min').agg({
-                        'open': 'first',
-                        'high': 'max',
-                        'low': 'min',
-                        'close': 'last',
-                        'volume': 'sum'
-                    }).dropna()
-                    if len(self.df_3m)>200:
-                        self.df_3m=self.df_3m.iloc[-200:]
-                else:
-                    self.df_1m=None
-                    self.df_3m=None
-            except Exception as e:
-                logger.error(f"[SymbolData.add_tick] Exception: {e}")
-                raise
+# 5. Decimal 안전 변환
 
-    def compute_indicators(self):
-        with self.lock:
-            if (self.df_15s is None or len(self.df_15s)<20 or
-                self.df_1m is None or len(self.df_1m)<20 or
-                self.df_3m is None or len(self.df_3m)<20):
-                return None
-            try:
-                df15=self.df_15s.copy()
-                close15=df15['close'].astype(float)
-                df15['rsi_15s']=ta.momentum.RSIIndicator(close15, window=RSI_LENGTH).rsi()
-                bb=ta.volatility.BollingerBands(close15, window=BB_LENGTH, window_dev=BB_MULT)
-                df15['bb_high']=bb.bollinger_hband()
-                df15['bb_low']=bb.bollinger_lband()
-                denom=df15['bb_high']-df15['bb_low']
-                df15['bb_pos']=(close15 - df15['bb_low']) / denom.replace({0: np.nan})
-                df15['vol_sma_20'] = df15['volume'].rolling(20).mean()
+def safe_decimal(value, default=Decimal("0")):
+    try:
+        return Decimal(str(value))
+    except Exception as e:
+        log_debug("DECIMAL_ERROR", f"Failed to convert '{value}': {e}")
+        return default
 
-                last15=df15.iloc[-1]
-                if last15[['rsi_15s','bb_high','bb_low','bb_pos']].isnull().any():
-                    return None
+# 6. API 재시도 호출
 
-                df1m=self.df_1m.copy()
-                close1m=df1m['close'].astype(float)
-                df1m['rsi_1m']=ta.momentum.RSIIndicator(close1m, window=RSI_LENGTH).rsi()
-                df1m['vol_sma_20']=df1m['volume'].rolling(20).mean()
-                last1m=df1m.iloc[-1]
-                if pd.isna(last1m['rsi_1m']):
-                    return None
+def call_api_with_retry(api_func, *args, retries=3, delay=2, **kwargs):
+    for i in range(retries):
+        try:
+            result = api_func(*args, **kwargs)
+            return result
+        except gate_api_exceptions.ApiException as e:
+            log_debug("API_ERROR", f"ApiException: status={e.status}, reason={e.reason}")
+        except Exception as e:
+            log_debug("API_ERROR", f"Exception: {e}")
+        if i < retries - 1:
+            time.sleep(delay)
+    return None
 
-                df3m=self.df_3m.copy()
-                close3m=df3m['close'].astype(float)
-                df3m['rsi_3m']=ta.momentum.RSIIndicator(close3m, window=RSI_LENGTH).rsi()
-                df3m['vol_sma_20']=df3m['volume'].rolling(20).mean()
-                last3m=df3m.iloc[-1]
-                if pd.isna(last3m['rsi_3m']):
-                    return None
+# 7. 포지션 업데이트
 
-                return {'15s': last15, '1m': last1m, '3m': last3m}
-            except Exception as e:
-                logger.error(f"[SymbolData.compute_indicators] Exception: {e}")
-                return None
+def update_position(symbol: str):
+    log_debug("UPDATE_POSITION", f"{symbol} 포지션 업데이트 시작")
+    with position_lock:
+        pos_info = call_api_with_retry(futures_api.get_position, SETTLE_CURRENCY, symbol)
+        if pos_info and pos_info.size:
+            size = safe_decimal(pos_info.size)
+            if size == 0:
+                position_state.pop(symbol, None)
+            else:
+                entry_price = safe_decimal(pos_info.entry_price)
+                side = "buy" if size > 0 else "sell"
+                size_abs = abs(size)
+                current_pos = position_state.get(symbol, {})
+                position_state[symbol] = {
+                    "price": entry_price,
+                    "side": side,
+                    "size": size_abs,
+                    "entry_count": current_pos.get("entry_count", 0),
+                    "sl_entry_count": current_pos.get("sl_entry_count", 0),
+                    "entry_time": current_pos.get("entry_time", time.time()),
+                    "time_multiplier": current_pos.get("time_multiplier", Decimal("1.0")),
+                    "is_entering": current_pos.get("is_entering", False),
+                }
+                log_debug("POSITION_UPDATED", f"{symbol}: {side} {size_abs} @ {entry_price}")
+        else:
+            position_state.pop(symbol, None)
+    return position_state.get(symbol, None)
 
-symbol_data_map={sym:SymbolData(sym) for sym in SYMBOL_CONFIG.keys()}
+# 8. 현재 가격 조회
 
-def log_debug(tag, msg):
-    logger.info(f"[{tag}] {msg}")
+def get_current_price(symbol: str) -> Decimal:
+    tickers = call_api_with_retry(futures_api.list_futures_tickers, settle=SETTLE_CURRENCY, contract=symbol)
+    if tickers and isinstance(tickers, list) and len(tickers) > 0:
+        price_str = getattr(tickers[0], "last", None)
+        price = safe_decimal(price_str, Decimal("0"))
+        return price
+    return Decimal("0")
 
-def get_symbol_multiplier(symbol: str) -> Decimal:
-    sym = symbol.upper()
-    if "BTC" in sym:
-        return Decimal("0.55")
-    elif "ETH" in sym:
-        return Decimal("0.65")
-    elif "SOL" in sym:
-        return Decimal("0.80")
-    elif "PEPE" in sym or "DOGE" in sym:
-        return Decimal("1.2")
-    else:
-        return Decimal("1.0")
+# 9. 잔고 조회
+
+def get_account_equity():
+    try:
+        acc_info = futures_api.list_futures_accounts(SETTLE_CURRENCY)
+        if hasattr(acc_info, 'available'):
+            return Decimal(str(acc_info.available))
+        if isinstance(acc_info, list) and hasattr(acc_info[0], 'available'):
+            return Decimal(str(acc_info[0].available))
+    except Exception as e:
+        log_debug("BALANCE_ERROR", f"잔고 조회 오류: {e}")
+    return Decimal("0")
+
+# 10. TP/SL 저장 및 조회
+
+def store_tp_sl(symbol: str, tp: Decimal, sl: Decimal, entry_num: int):
+    with tpsl_lock:
+        if symbol not in tpsl_storage:
+            tpsl_storage[symbol] = {}
+        tpsl_storage[symbol][entry_num] = {
+            "tp": tp,
+            "sl": sl,
+            "entry_time": time.time()
+        }
+
+def get_tp_sl(symbol: str, entry_num: int):
+    with tpsl_lock:
+        symbol_dict = tpsl_storage.get(symbol, {})
+        if entry_num in symbol_dict:
+            v = symbol_dict[entry_num]
+            return v["tp"], v["sl"], v["entry_time"]
+    cfg = SYMBOL_CONFIG.get(symbol, {})
+    tp_mult = cfg.get("tp_mult", Decimal("1.0"))
+    sl_mult = cfg.get("sl_mult", Decimal("1.0"))
+    return Decimal("0.006") * tp_mult, Decimal("0.04") * sl_mult, time.time()
+
+# 11. 중복 신호 쿨다운
+
+def is_duplicate_signal(data: dict) -> bool:
+    with signal_lock:
+        now = time.time()
+        symbol = normalize_symbol(data.get("symbol", ""))
+        side = data.get("side", "").lower()
+        signal_id = data.get("id", None)
+        key_symbol_side = f"{symbol}_{side}"
+
+        log_debug("COOLDOWN_CHECK", f"검증 중: symbol={symbol}, side={side}, id={signal_id}")
+
+        if signal_id and signal_id in recent_signals:
+            last_time = recent_signals[signal_id]
+            remaining = COOLDOWN_SECONDS - (now - last_time)
+            if remaining > 0:
+                log_debug("DUPLICATE_SIGNAL", f"Signal id {signal_id} 쿨다운 중 (남은시간: {remaining:.1f}초)")
+                return True
+
+        if key_symbol_side in recent_signals:
+            last_time = recent_signals[key_symbol_side]
+            remaining = COOLDOWN_SECONDS - (now - last_time)
+            if remaining > 0:
+                log_debug("DUPLICATE_SIGNAL", f"Symbol-side {key_symbol_side} 쿨다운 중 (남은시간: {remaining:.1f}초)")
+                return True
+
+        if signal_id:
+            recent_signals[signal_id] = now
+        recent_signals[key_symbol_side] = now
+
+        log_debug("SIGNAL_ACCEPTED", f"신호 수용: {key_symbol_side}")
+
+        prune_keys = [k for k, t in recent_signals.items() if now - t > 300]
+        for k in prune_keys:
+            recent_signals.pop(k, None)
+
+        return False
+
+# 12. 주문 수량 계산
 
 def calculate_qty(symbol: str, signal_type: str, entry_multiplier: Decimal) -> Decimal:
+    log_debug("QTY_CALC_START", f"{symbol} 수량 계산 시작 (signal_type: {signal_type})")
+
     cfg = SYMBOL_CONFIG[symbol]
-    symbol_mult = get_symbol_multiplier(symbol)
+    qty_mult = cfg.get("qty_mult", Decimal("1.0"))
     equity = get_account_equity()
     price = get_current_price(symbol)
+
     if equity <= 0 or price <= 0:
+        log_debug("QTY_CALC_FAIL", f"Invalid equity({equity}) or price({price}) for {symbol}")
         return Decimal("0")
-    cnt = position_state.get(symbol, {}).get("entry_count", 0)
-    if cnt >= MAX_ENTRIES:
+
+    current_entry_count = position_state.get(symbol, {}).get("entry_count", 0)
+
+    if current_entry_count >= MAX_ENTRIES:
+        log_debug("QTY_CALC_LIMIT", f"Max entries reached for {symbol} - {current_entry_count}/{MAX_ENTRIES}")
         return Decimal("0")
-    base_ratio = ENTRY_RATIOS[cnt]
+
+    entry_ratios = [Decimal("10"), Decimal("20"), Decimal("50"), Decimal("120"), Decimal("400")]
+
+    base_ratio = entry_ratios[current_entry_count]
     if signal_type == "sl_rescue":
         base_ratio *= Decimal("1.5")
+        log_debug("QTY_CALC_SL_RESCUE", f"SL-Rescue qty multiplier applied: {float(base_ratio)}%")
 
-    # 반드시 /100 포함해서 %를 분수로 변환하여 계산
-    position_val = equity * base_ratio * symbol_mult / Decimal("100")
+    position_value = equity * (base_ratio / Decimal("100")) * entry_multiplier * qty_mult
 
-    qty_raw = (position_val / (price * cfg["contract_size"])) / cfg["qty_step"]
-    qty_floor = qty_raw.quantize(Decimal("1"), rounding=ROUND_DOWN)
-    qty = qty_floor * cfg["qty_step"]
-    try:
-        qty = max(qty, cfg["min_qty"])
-    except Exception:
-        qty = cfg["min_qty"]
-    notional = qty * price * cfg["contract_size"]
-    if notional < cfg.get("min_notional", Decimal("0")) and price > 0:
-        min_qty = (cfg["min_notional"] / (price * cfg["contract_size"])) / cfg["qty_step"]
-        min_qty_floor = min_qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
-        qty = max(qty, min_qty_floor * cfg["qty_step"])
+    contract_size = cfg["contract_size"]
+    qty_step = cfg["qty_step"]
+
+    qty_raw = (position_value / (price * contract_size)) / qty_step
+    qty_floor = qty_raw.quantize(Decimal('1'), rounding=ROUND_DOWN)
+    qty = qty_floor * qty_step
+
+    qty = max(qty, cfg["min_qty"])
+
+    notional = qty * price * contract_size
+    if notional < cfg["min_notional"]:
+        min_qty = (cfg["min_notional"] / (price * contract_size)) / qty_step
+        min_qty_floor = min_qty.quantize(Decimal('1'), rounding=ROUND_DOWN)
+        qty = max(qty, min_qty_floor * qty_step)
+        log_debug("QTY_CALC_MIN_NOTIONAL", f"Adjusted qty for min notional: {qty}")
+
+    log_debug("QTY_CALC_RESULT", f"{symbol}: Qty={qty}, Notional={notional:.2f}, Equity={equity:.2f}, Ratio={base_ratio}%")
     return qty
+
+# 13. SL-Rescue 조건 확인
 
 def is_sl_rescue_condition(symbol: str) -> bool:
     with position_lock:
-        pos=position_state.get(symbol)
-        if not pos or pos.get("size", Decimal("0"))==0 or pos.get("sl_entry_count", 0)>=MAX_SL_RESCUES:
+        pos = position_state.get(symbol)
+        if not pos or pos.get("size", Decimal("0")) == 0 or pos.get("sl_entry_count", 0) >= MAX_SL_RESCUES:
             return False
-        current_price=get_current_price(symbol)
-        if current_price<=0:
+
+        current_price = get_current_price(symbol)
+        if current_price <= 0:
             return False
-        entry_price=pos.get("price")
-        side=pos.get("side")
-        entry_count=pos.get("entry_count", 0)
-        if not entry_price or side not in ("buy", "sell") or entry_count==0:
-            return False
-        tp_val, sl_val, _=get_tp_sl(symbol, entry_count)
-        sl_mult=SYMBOL_CONFIG.get(symbol, {}).get("sl_mult", Decimal("1.0"))
-        sl_pct=SL_LEVELS[min(entry_count-1, 4)]*sl_mult
-        if side=="buy":
-            sl_price=entry_price*(1-sl_pct)
-            return current_price<=sl_price
+
+        entry_price = pos.get("price")
+        side = pos.get("side")
+        entry_count = pos.get("entry_count", 0)
+        if not entry_price or side not in ("buy", "sell") or entry_count == 0:
+            return
+    
+        tp_orig, sl_orig, _ = get_tp_sl(symbol, entry_count)
+        sl_mult = SYMBOL_CONFIG.get(symbol, {}).get("sl_mult", Decimal("1.0"))
+        sl_pct = SL_BASE_MAP[min(entry_count-1, len(SL_BASE_MAP)-1)] * sl_mult
+
+        if side == "buy":
+            sl_price = entry_price * (1 - sl_pct)
+            return current_price <= sl_price
         else:
-            sl_price=entry_price*(1+sl_pct)
-            return current_price>=sl_price
-            
-def get_tp_sl(symbol: str, entry_count: int):
-    symbol_mult = get_symbol_multiplier(symbol)
-    if entry_count == 1:
-        tp = BASE_TP_PCT * symbol_mult
-        sl = BASE_SL_PCT * symbol_mult
-    else:
-        idx = min(entry_count - 2, len(TP_LEVELS) - 1)  # entry_count=2부터 TP_LEVELS/SL_LEVELS 배열 참조
-        tp = TP_LEVELS[idx] * symbol_mult
-        sl = SL_LEVELS[idx] * symbol_mult
-    return tp, sl, None
+            sl_price = entry_price * (1 + sl_pct)
+            return current_price >= sl_price
+
+# 14. 주문 실행
 
 def place_order(symbol: str, side: str, qty: Decimal, entry_num: int, time_multiplier: Decimal) -> bool:
+    log_debug("ORDER_ATTEMPT", f"{symbol} 주문 시도: {side} {qty} (진입#{entry_num})")
+
     with position_lock:
-        cfg=SYMBOL_CONFIG[symbol]
-        qty_adj=qty.quantize(cfg.get("qty_step", Decimal("1")), rounding=ROUND_DOWN)
-        if qty_adj<cfg["min_qty"]:
+        cfg = SYMBOL_CONFIG[symbol]
+        qty_adj = qty.quantize(cfg["qty_step"], rounding=ROUND_DOWN)
+        if qty_adj < cfg["min_qty"]:
+            log_debug("ORDER_SKIPPED", f"{symbol}: Qty {qty_adj} below min_qty {cfg['min_qty']}")
             return False
-        price=get_current_price(symbol)
-        if price<=0:
+
+        price = get_current_price(symbol)
+        if price <= 0:
+            log_debug("ORDER_SKIPPED", f"{symbol}: Invalid price {price}")
             return False
-        order_size=float(qty_adj) if side=="buy" else -float(qty_adj)
-        max_allowed_value=get_account_equity()*Decimal("10")
-        order_value=qty_adj*price*cfg["contract_size"]
-        if order_value>max_allowed_value:
+
+        order_size = float(qty_adj) if side == "buy" else -float(qty_adj)
+
+        max_allowed_value = get_account_equity() * Decimal("10")
+        order_value = qty_adj * price * cfg["contract_size"]
+        if order_value > max_allowed_value:
+            log_debug("ORDER_SKIPPED", f"{symbol}: 주문 명목가 {order_value:.2f} USDT가 최대허용값 초과")
             return False
-        order=FuturesOrder(
+
+        order = FuturesOrder(
             contract=symbol,
             size=order_size,
             price="0",
             tif="ioc",
             reduce_only=False,
         )
-        result=call_api_with_retry(futures_api.create_futures_order, SETTLE_CURRENCY, order)
+
+        result = call_api_with_retry(futures_api.create_futures_order, SETTLE_CURRENCY, order)
         if not result:
+            log_debug("ORDER_FAIL", f"{symbol}: 주문 실패")
             return False
-        pos=position_state.setdefault(symbol, {})
-        pos["entry_count"]=entry_num
-        pos["entry_time"]=time.time()
-        pos["time_multiplier"]=time_multiplier
+
+        pos = position_state.setdefault(symbol, {})
+        pos["entry_count"] = entry_num
+        pos["entry_time"] = time.time()
+        pos["time_multiplier"] = time_multiplier
         if "sl_entry_count" not in pos:
-            pos["sl_entry_count"]=0
+            pos["sl_entry_count"] = 0
+        log_debug("ORDER_SUCCESS", f"{symbol} {side} {qty_adj} 계약 (진입#{entry_num}/5)")
+
         time.sleep(2)
         update_position(symbol)
-    return True
+
+        return True
+
+# 15. 포지션 청산
 
 def close_position(symbol: str, reason: str = "manual") -> bool:
     with position_lock:
-        pos=position_state.get(symbol, {})
-        now=time.time()
-        last_close=pos.get("last_close_time", 0)
-        if now-last_close<1.0:
-            return False
-        order=FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True)
-        result=call_api_with_retry(futures_api.create_futures_order, SETTLE_CURRENCY, order)
+        order = FuturesOrder(contract=symbol, size=0, price="0", tif="ioc", close=True)
+        result = call_api_with_retry(futures_api.create_futures_order, SETTLE_CURRENCY, order)
         if not result:
+            log_debug("CLOSE_FAIL", f"{symbol}: 청산 실패")
             return False
-        pos["last_close_time"]=now
+
+        log_debug("CLOSE_SUCCESS", f"{symbol}: 청산 완료 (이유: {reason})")
+
         position_state.pop(symbol, None)
         with tpsl_lock:
             tpsl_storage.pop(symbol, None)
+        with signal_lock:
+            keys_rm = [k for k, t in recent_signals.items() if k.startswith(symbol + "_") or (k == symbol)]
+            for k in keys_rm:
+                recent_signals.pop(k)
         time.sleep(1)
         update_position(symbol)
-    return True
+        return True
 
-def update_position(symbol: str):
-    with position_lock:
-        try:
-            pos_info=call_api_with_retry(futures_api.get_position, SETTLE_CURRENCY, symbol)
-            if pos_info and pos_info.size:
-                size=safe_decimal(pos_info.size)
-                if size==0:
-                    position_state.pop(symbol, None)
-                else:
-                    entry_price=safe_decimal(pos_info.entry_price)
-                    side="buy" if size>0 else "sell"
-                    size_abs=abs(size)
-                    current_pos=position_state.get(symbol, {})
-                    position_state[symbol]={
-                        "price": entry_price,
-                        "side": side,
-                        "size": size_abs,
-                        "entry_count": current_pos.get("entry_count", 0),
-                        "sl_entry_count": current_pos.get("sl_entry_count", 0),
-                        "stored_tp_pct": current_pos.get("stored_tp_pct", Decimal("0")),
-                        "stored_sl_pct": current_pos.get("stored_sl_pct", Decimal("0")),
-                        "entry_time": current_pos.get("entry_time", time.time()),
-                        "time_multiplier": current_pos.get("time_multiplier", Decimal("1.0")),
-                        "is_entering": current_pos.get("is_entering", False),
-                        "last_close_time": current_pos.get("last_close_time", 0),
-                    }
-            else:
-                position_state.pop(symbol, None)
-        except Exception as e:
-            log_debug("UPDATE_POSITION_ERROR", f"{symbol} 포지션 업데이트 중 오류: {e}")
-            
-def check_entry_conditions(symbol: str):
-    inds = symbol_data_map[symbol].compute_indicators()
-    if inds is None:
-        return None
-
-    last15 = inds["15s"]
-    last1m = inds["1m"]
-    last3m = inds["3m"]
-
-    # PineScript 전략과 동일한 신호 변수 계산
-    # 강화된 전략 로직 예시
-    tighten_mult = 1.0 + position_state.get(symbol, {}).get("entry_count", 0) * 0.1
-    adj_rsi_long = RSI_LONG_MAIN - (RSI_LONG_MAIN * (tighten_mult - 1.0))
-    adj_rsi_short = RSI_SHORT_MAIN + ((100 - RSI_SHORT_MAIN) * (tighten_mult - 1.0))
-    adj_vol_mult = VOLUME_MULT * tighten_mult
-    adj_bb_long = 0.10 / tighten_mult
-    adj_bb_short = 1.0 - (0.10 / tighten_mult)
-    bb_pos = last15["bb_pos"]
-
-    main_long = (last3m["rsi_3m"] <= adj_rsi_long and last1m["rsi_1m"] <= adj_rsi_long and
-                 last3m["rsi_3m"] < inds["3m"].get("rsi_3m", 1000) and  # 이전봉 대비 감소
-                 last15["rsi_15s"] <= RSI_15S_LONG and
-                 last15["rsi_15s"] < inds["15s"].get("rsi_15s", 1000) and
-                 last3m["volume"] >= last3m["vol_sma_20"] * adj_vol_mult and
-                 last1m["volume"] >= last1m["vol_sma_20"] * adj_vol_mult and
-                 last15["volume"] >= last15["vol_sma_20"] * adj_vol_mult and
-                 (not USE_BB_FILTER or bb_pos <= adj_bb_long)
-                )
-    main_short = (last3m["rsi_3m"] >= adj_rsi_short and last1m["rsi_1m"] >= adj_rsi_short and
-                  last3m["rsi_3m"] > inds["3m"].get("rsi_3m", 0) and  # 이전봉 대비 증가
-                  last15["rsi_15s"] >= RSI_15S_SHORT and
-                  last15["rsi_15s"] > inds["15s"].get("rsi_15s", 0) and
-                  last3m["volume"] >= last3m["vol_sma_20"] * adj_vol_mult and
-                  last1m["volume"] >= last1m["vol_sma_20"] * adj_vol_mult and
-                  last15["volume"] >= last15["vol_sma_20"] * adj_vol_mult and
-                  (not USE_BB_FILTER or bb_pos >= adj_bb_short)
-                )
-
-    if main_long:
-        return "long"
-    elif main_short:
-        return "short"
-    else:
-        return None
-
-def handle_entry(data: dict):
-    symbol_raw=data.get("symbol", "")
-    side_raw=data.get("side", "").lower()
-    signal_type=data.get("signal", "none").lower()
-    entry_type=data.get("type", "").lower()
-
-    symbol=normalize_symbol(symbol_raw)
-    if symbol not in SYMBOL_CONFIG:
-        return
-
-    update_position(symbol)
-
-    with position_lock:
-        pos=position_state.get(symbol, {})
-        current_side=pos.get("side")
-        entry_count=pos.get("entry_count", 0)
-        sl_entry_count=pos.get("sl_entry_count", 0)
-        time_mult=pos.get("time_multiplier", Decimal("1.0"))
-
-    desired_side="buy" if side_raw=="long" else "sell" if side_raw=="short" else None
-    if not desired_side:
-        return
-
-    if current_side and current_side!=desired_side and entry_count>0:
-        if not close_position(symbol, reason="reverse_entry"):
-            return
-        time.sleep(1)
-        update_position(symbol)
-        entry_count=0
-        time_mult=Decimal("1.0")
-
-    if entry_count>=MAX_ENTRIES:
-        return
-
-    is_sl_rescue=(signal_type=="sl_rescue")
-    if is_sl_rescue:
-        if sl_entry_count>=MAX_SL_RESCUES:
-            return
-        if not is_sl_rescue_condition(symbol):
-            return
-        with position_lock:
-            position_state[symbol]["sl_entry_count"]=sl_entry_count+1
-        actual_entry_num=entry_count+1
-    else:
-        if entry_count>0:
-            current_price=get_current_price(symbol)
-            avg_price=position_state[symbol].get("price")
-            if avg_price and current_side=="buy" and current_price>=avg_price:
-                return
-            if avg_price and current_side=="sell" and current_price<=avg_price:
-                return
-        actual_entry_num=entry_count+1
-
-    if actual_entry_num<=MAX_ENTRIES:
-        tp_val=TP_LEVELS[actual_entry_num-1]*get_symbol_multiplier(symbol)
-        sl_val=SL_LEVELS[actual_entry_num-1]*get_symbol_multiplier(symbol)
-        store_tp_sl(symbol, tp_val, sl_val, actual_entry_num)
-    else:
-        return
-
-    qty=calculate_qty(symbol, signal_type, time_mult)
-    if qty<=0:
-        return
-
-    with position_lock:
-        pos=position_state.setdefault(symbol, {})
-        pos["is_entering"]=True
-        pos["entry_time"]=time.time()
-        pos["entry_count"]=actual_entry_num
-        pos["time_multiplier"]=time_mult
-        pos["stored_tp_pct"]=tp_val
-        pos["stored_sl_pct"]=sl_val
-        if "sl_entry_count" not in pos:
-            pos["sl_entry_count"]=0
-
-    place_order(symbol, desired_side, qty, actual_entry_num, time_mult)
-
-    time.sleep(0.25)
-    with position_lock:
-        pos=position_state.get(symbol, {})
-        pos["entry_time"]=time.time()
-        pos["is_entering"]=False
-
-    update_position(symbol)
-
-def worker_thread(worker_id: int):
-    while True:
-        try:
-            data=task_queue.get(timeout=0.1)
-        except queue.Empty:
-            continue
-        try:
-            handle_entry(data)
-        except Exception as e:
-            log_debug(f"Worker-{worker_id} ERROR", f"입력 처리 실패: {e}")
-        finally:
-            task_queue.task_done()
-
-def entry_monitor_loop():
-    while True:
-        for symbol in SYMBOL_CONFIG.keys():
-            side=check_entry_conditions(symbol)
-            if side:
-                with position_lock:
-                    pos=position_state.get(symbol, {})
-                    if pos.get("entry_count", 0)>=MAX_ENTRIES:
-                        continue
-                    last_entry=pos.get("entry_time", 0)
-                    if time.time()-last_entry<COOLDOWN_SECONDS:
-                        continue
-                try:
-                    task_queue.put_nowait({
-                        "symbol": symbol,
-                        "side": side,
-                        "signal": "main",
-                        "type": "auto_entry",
-                    })
-                    log_debug("ENTRY_MONITOR", f"{symbol} 자동진입 신호: {side}")
-                except queue.Full:
-                    log_debug("ENTRY_MONITOR", "큐 가득참, 신호 누락")
-        time.sleep(1)
+# 16. 실시간 가격 모니터링 및 TP/SL 평가
 
 async def price_monitor(symbols):
     ws_uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-    subscribe_msg = {
+    subscribe_message = {
         "time": int(time.time()),
         "channel": "futures.tickers",
         "event": "subscribe",
@@ -551,163 +427,272 @@ async def price_monitor(symbols):
     while True:
         try:
             async with websockets.connect(ws_uri) as ws:
-                await ws.send(json.dumps(subscribe_msg))
+                await ws.send(json.dumps(subscribe_message))
+                log_debug("WS", "가격 모니터링 시작")
                 while True:
-                    raw_msg=await asyncio.wait_for(ws.recv(), timeout=45)
-                    data=json.loads(raw_msg)
-                    if data.get("event") in ("error","subscribe"):
+                    raw_msg = await asyncio.wait_for(ws.recv(), timeout=45)
+                    data = json.loads(raw_msg)
+                    if data.get("event") in ("error", "subscribe"):
                         continue
-                    results=data.get("result", None)
-                    if isinstance(results, list):
-                        for ticker in results:
-                            symbol=ticker.get("contract", "")
-                            price=safe_decimal(ticker.get("last", "0"))
-                            volume=safe_decimal(ticker.get("base_volume", "0"))
-                            if symbol in symbol_data_map:
-                                symbol_data_map[symbol].add_tick(float(price), float(volume))
+                    result = data.get("result", None)
+                    if isinstance(result, list):
+                        for ticker in result:
                             process_ticker(ticker)
-                    elif isinstance(results, dict):
-                        symbol=results.get("contract", "")
-                        price=safe_decimal(results.get("last", "0"))
-                        volume=safe_decimal(results.get("base_volume", "0"))
-                        if symbol in symbol_data_map:
-                            symbol_data_map[symbol].add_tick(float(price), float(volume))
-                        process_ticker(results)
+                    elif isinstance(result, dict):
+                        process_ticker(result)
         except Exception as e:
-            log_debug("WS_ERROR", f"WebSocket 오류: {e} 재접속 대기중...")
+            log_debug("WS_ERROR", f"WebSocket 오류: {str(e)} 재접속 시도...")
             await asyncio.sleep(5)
 
 def process_ticker(ticker: dict):
-    symbol=ticker.get("contract", "")
+    symbol = ticker.get("contract", "")
     if symbol not in SYMBOL_CONFIG:
         return
 
-    price=safe_decimal(ticker.get("last", "0"))
+    price = safe_decimal(ticker.get("last", "0"))
     if price <= 0:
         return
 
     with position_lock:
-        pos=position_state.get(symbol)
-        if not pos or pos.get("is_entering", False):
-            return
-        now=time.time()
-        entry_time=pos.get("entry_time", now)
-        entry_price=pos.get("price")
-        side=pos.get("side")
-        entry_count=pos.get("entry_count", 0)
-        if entry_count==0 or entry_price is None or side is None:
+        pos = position_state.get(symbol)
+        if not pos or not pos.get("side") or not pos.get("price") or pos.get("size", 0) == 0:
             return
 
-        # TP/SL 감소(Decay) 로직 (시간경과에 따라서 TP, SL이 줄어듦)
-        sec_passed=now-entry_time
-        periods=int(sec_passed//TP_DECAY_SEC)
-        symbol_mult=get_symbol_multiplier(symbol)
-
-        base_tp=TP_LEVELS[min(entry_count-1, len(TP_LEVELS)-1)]*symbol_mult
-        base_sl=SL_LEVELS[min(entry_count-1, len(SL_LEVELS)-1)]*symbol_mult
-
-        tp_decay=TP_DECAY_AMT * symbol_mult
-        sl_decay=SL_DECAY_AMT * symbol_mult
-
-        tp_reduction=periods*tp_decay
-        sl_reduction=periods*sl_decay
-
-        decayed_tp=max(TP_MIN_PCT, base_tp-tp_reduction)
-        decayed_sl=max(SL_MIN_PCT, base_sl-sl_reduction)
-
-        if side=="buy":
-            tp_price=entry_price*(1+decayed_tp)
-            sl_price=entry_price*(1-decayed_sl)
-            if price>=tp_price:
-                close_position(symbol, reason="TP")
-            if entry_count>=MIN_ENTRY_FOR_SL and price<=sl_price:
-                close_position(symbol, reason="SL")
-        else:  # sell
-            tp_price=entry_price*(1-decayed_tp)
-            sl_price=entry_price*(1+decayed_sl)
-            if price<=tp_price:
-                close_position(symbol, reason="TP")
-            if entry_count>=MIN_ENTRY_FOR_SL and price>=sl_price:
-                close_position(symbol, reason="SL")
-
-        # 엔걸핑 진입 및 청산 신호(간단 예시)
-        inds=symbol_data_map[symbol].compute_indicators()
-        if inds is None:
+        if pos.get("is_entering", False):  # 진입중이면 평가 안함
             return
-        rsi_3m=inds["3m"]["rsi_3m"]
 
-        df15 = symbol_data_map[symbol].df_15s
-        if df15 is None or len(df15)<2:
+        now = time.time()
+        entry_time = pos.get("entry_time", now)
+        entry_price = pos["price"]
+        side = pos["side"]
+        entry_count = pos.get("entry_count", 0)
+
+        if entry_count == 0:
             return
-        last_candle=df15.iloc[-1]
-        prev_candle=df15.iloc[-2]
 
-        bullish_engulf = last_candle['close'] >= prev_candle['open'] and prev_candle['close'] < prev_candle['open']
-        bearish_engulf = last_candle['close'] <= prev_candle['open'] and prev_candle['close'] > prev_candle['open']
+        decay_steps = int((now - entry_time) // 15)
 
-        engulf_long_exit = (side=="buy" and USE_BB_FILTER and bearish_engulf and (rsi_3m >= ENGULF_EXIT_OB))
-        engulf_short_exit = (side=="sell" and USE_BB_FILTER and bullish_engulf and (rsi_3m <= ENGULF_EXIT_OS))
+        if now - entry_time < 5.0:
+            tp_adj = Decimal("0.01")
+            tp_orig, sl_orig, _ = get_tp_sl(symbol, entry_count)
+        else:
+            tp_decay_per_15s = Decimal("0.00002")
+            tp_min = Decimal("0.0012")
+            tp_orig, sl_orig, _ = get_tp_sl(symbol, entry_count)
+            tp_mult = SYMBOL_CONFIG[symbol].get("tp_mult", Decimal("1.0"))
+            tp_adj = max(tp_min, tp_orig - decay_steps * tp_decay_per_15s * tp_mult)
 
-        if engulf_long_exit:
-            close_position(symbol, reason="ENGULF")
-        if engulf_short_exit:
-            close_position(symbol, reason="ENGULF")
+        sl_decay_per_15s = Decimal("0.00004")
+        sl_min = Decimal("0.0009")
+        sl_mult = SYMBOL_CONFIG[symbol].get("sl_mult", Decimal("1.0"))
+        sl_adj = max(sl_min, sl_orig - decay_steps * sl_decay_per_15s * sl_mult)
 
-def normalize_symbol(raw_symbol: str):
-    return SYMBOL_MAPPING.get(raw_symbol.strip().upper(), raw_symbol.strip().upper())
+        tp_price = entry_price * (1 + tp_adj) if side == "buy" else entry_price * (1 - tp_adj)
+        sl_price = entry_price * (1 - sl_adj) if side == "buy" else entry_price * (1 + sl_adj)
 
-def safe_decimal(val, default=Decimal("0")):
-    try:
-        return Decimal(str(val))
-    except Exception:
-        return default
+        if (side == "buy" and price >= tp_price) or (side == "sell" and price <= tp_price):
+            log_debug("TP_TRIGGER", f"{symbol} TP 도달 현재가={price}, TP가격={tp_price} (즉시 청산)")
+            close_position(symbol, reason="TP")
+            log_debug("TP_EXEC", f"{symbol} TP 청산 실행")
 
-def call_api_with_retry(func, *args, retries=3, delay=2, **kwargs):
-    for attempt in range(retries):
+        if (side == "buy" and price <= sl_price) and entry_count >= MIN_ENTRY_FOR_SL:
+            log_debug("SL_TRIGGER", f"{symbol} SL 발동 현재가={price}, SL가격={sl_price}, 진입횟수={entry_count}")
+            close_position(symbol, reason="SL")
+        elif (side == "sell" and price >= sl_price) and entry_count >= MIN_ENTRY_FOR_SL:
+            log_debug("SL_TRIGGER", f"{symbol} SL 발동 현재가={price}, SL가격={sl_price}, 진입횟수={entry_count}")
+            close_position(symbol, reason="SL")
+
+# 17. 워커 스레드 및 작업 큐 처리
+
+def worker_thread(worker_id: int):
+    log_debug(f"Worker-{worker_id}", "워커 시작")
+    while True:
         try:
-            return func(*args, **kwargs)
-        except gate_api_exceptions.ApiException as e:
-            log_debug("API_ERROR", f"ApiException: status={e.status}, reason={e.reason}")
+            data = task_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        try:
+            handle_entry(data)
         except Exception as e:
-            log_debug("API_ERROR", f"Exception: {e}")
-        if attempt < retries - 1:
-            time.sleep(delay)
-    return None
+            log_debug(f"Worker-{worker_id} ERROR", f"진입 처리 실패: {e}")
+        finally:
+            task_queue.task_done()
 
-def get_account_equity():
+# 18. handle_entry 함수 (위에 정의됨, 중복 표시 안함)
+
+# 19. 시간배수 함수 예시(기본 1.0 고정, 필요시 확장)
+
+def get_time_multiplier() -> Decimal:
+    now_hour = datetime.now(KST).hour
+    if 22 <= now_hour or now_hour < 9:
+        return Decimal("1.0")
+    return Decimal("1.0")
+
+# 20. HTTP 웹훅 서버
+
+app = Flask(__name__)
+
+@app.route("/webhook", methods=["POST", "GET", "PUT", "PATCH"])
+@app.route("/", methods=["POST", "GET", "PUT", "PATCH"])
+def webhook_handler():
+    log_debug("WEBHOOK_REQUEST", f"웹훅 요청 수신: {request.method} {request.path}")
+
+    if request.method == "GET":
+        return jsonify({"status": "OK", "message": "Webhook endpoint is active"}), 200
+
     try:
-        acc_info = futures_api.list_futures_accounts(SETTLE_CURRENCY)
-        if hasattr(acc_info, "available"):
-            return Decimal(str(acc_info.available))
-        if isinstance(acc_info, list) and acc_info and hasattr(acc_info[0], "available"):
-            return Decimal(str(acc_info[0].available))
+        data = None
+        try:
+            data = request.get_json(force=True)
+            log_debug("WEBHOOK_PARSE", f"JSON 파싱 성공: {data}")
+        except Exception as e:
+            log_debug("WEBHOOK_PARSE", f"JSON 파싱 실패: {e}")
+
+        if not data and request.form:
+            data = dict(request.form)
+            log_debug("WEBHOOK_PARSE", f"Form 데이터 파싱: {data}")
+
+        if not data:
+            raw_data = request.get_data(as_text=True)
+            log_debug("WEBHOOK_RAW", f"Raw data: {raw_data[:200]}...")
+            if raw_data:
+                try:
+                    data = json.loads(raw_data)
+                    log_debug("WEBHOOK_PARSE", f"Raw JSON 파싱 성공: {data}")
+                except:
+                    try:
+                        import urllib.parse
+                        data = dict(urllib.parse.parse_qsl(raw_data))
+                        log_debug("WEBHOOK_PARSE", f"URL encoded 파싱: {data}")
+                    except:
+                        pass
+
+        if not data:
+            log_debug("WEBHOOK_ERROR", "데이터 파싱 실패 - 빈 데이터")
+            return jsonify({"error": "Empty or invalid data"}), 400
+
+        symbol_raw = data.get("symbol", "")
+        action = str(data.get("action", "entry")).lower()
+
+        if not symbol_raw:
+            log_debug("WEBHOOK_ERROR", "심볼 누락")
+            return jsonify({"error": "Symbol required"}), 400
+
+        symbol = normalize_symbol(symbol_raw)
+        if symbol not in SYMBOL_CONFIG:
+            log_debug("WEBHOOK_ERROR", f"유효하지 않은 심볼: {symbol_raw} -> {symbol}")
+            return jsonify({"error": f"Invalid symbol: {symbol_raw}"}), 400
+
+        log_debug("WEBHOOK_RECEIVED", f"유효한 신호: 심볼={symbol}, action={action}, side={data.get('side')}, signal={data.get('signal')}")
+
+        if is_duplicate_signal(data):
+            log_debug("WEBHOOK_DUPLICATE", "중복 신호로 무시")
+            return jsonify({"status": "duplicate"}), 200
+
+        if action == "entry":
+            try:
+                task_queue.put_nowait(data)
+                log_debug("WEBHOOK_QUEUED", f"작업 큐에 추가 완료 (큐 크기: {task_queue.qsize()})")
+                return jsonify({"status": "queued", "queue_size": task_queue.qsize()}), 200
+            except queue.Full:
+                log_debug("WEBHOOK_ERROR", "작업 큐 가득참")
+                return jsonify({"error": "Queue full"}), 429
+
+        elif action == "exit":
+            reason = str(data.get("reason", "")).strip().lower()
+            if reason in ("tp", "sl"):
+                log_debug("WEBHOOK_IGNORED", f"{symbol} EXIT({reason.upper()}) 알림 무시 (자동 TP/SL 청산 차단)")
+                return jsonify({"status": f"{action}_{reason}_ignored"}), 200
+            update_position(symbol)
+            with position_lock:
+                pos = position_state.get(symbol)
+                if pos and pos.get("size", Decimal("0")) > 0:
+                    close_position(symbol, reason=action.upper())
+                    log_debug("FORCE_CLOSE", f"{symbol} {action.upper()}({reason}) 알림으로 포지션 청산")
+                    return jsonify({"status": f"{action}_closed"}), 200
+                else:
+                    log_debug("NO_POSITION_EXIT", f"{symbol} {action.upper()}({reason}) 알림 - 포지션 없음")
+                    return jsonify({"status": "no_position"}), 200
+
+        elif action in ("tp", "sl"):
+            log_debug("WEBHOOK_IGNORED", f"{symbol} {action.upper()} 알림 무시 (TP/SL 자동청산 룰)")
+            return jsonify({"status": f"{action}_ignored"}), 200
+
+        else:
+            log_debug("WEBHOOK_ERROR", f"알 수 없는 action: {action}")
+            return jsonify({"error": f"Unknown action: {action}"}), 400
+
     except Exception as e:
-        log_debug("BALANCE_ERROR", f"잔고 조회 실패: {e}")
-    return Decimal("0")
-
-def get_current_price(symbol):
-    tickers = call_api_with_retry(futures_api.list_futures_tickers, settle=SETTLE_CURRENCY, contract=symbol)
-    if tickers and isinstance(tickers, list) and tickers:
-        return safe_decimal(getattr(tickers[0], "last", None), Decimal("0"))
-    return Decimal("0")
-
-def start_threads_and_ws():
-    for i in range(8):
-        threading.Thread(target=worker_thread, args=(i,), daemon=True, name=f"worker-{i}").start()
-    threading.Thread(target=entry_monitor_loop, daemon=True, name="EntryMonitor").start()
-    threading.Thread(target=lambda: asyncio.run(price_monitor(list(SYMBOL_CONFIG.keys()))), daemon=True, name="WSMonitor").start()
+        log_debug("WEBHOOK_ERROR", f"웹훅 처리 중 예외: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
 
-def main():
-    log_debug("STARTUP", "자동매매 서버 시작 중...")
-    for sym in SYMBOL_CONFIG.keys():
+@app.route("/status", methods=["GET"])
+def status():
+    try:
+        equity = get_account_equity()
+        positions = {}
+        for sym in SYMBOL_CONFIG:
+            pos = position_state.get(sym, {})
+            if pos.get("side"):
+                positions[sym] = {
+                    "side": pos["side"],
+                    "size": float(pos.get("size", 0)),
+                    "price": float(pos.get("price", 0)),
+                    "entry_count": pos.get("entry_count", 0),
+                    "sl_entry_count": pos.get("sl_entry_count", 0)
+                }
+
+        return jsonify({
+            "status": "running",
+            "current_time": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S KST'),
+            "balance_usdt": float(equity),
+            "active_positions": positions,
+            "queue_size": task_queue.qsize(),
+            "entry_ratios": [20, 32, 75, 180, 550]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# 21. 초기 실행 및 워커 스레드 시작
+
+def log_initial_state():
+    equity = get_account_equity()
+    log_debug("INIT", f"초기 자산 조회: {equity:.2f} USDT")
+    active_positions = []
+    for sym in SYMBOL_CONFIG:
         update_position(sym)
-    start_threads_and_ws()
-    port=int(os.environ.get("PORT", "8080"))
+        pos = position_state.get(sym, {})
+        if pos and pos.get("side") and pos.get("size", 0) > 0:
+            active_positions.append(f"{sym} 포지션: {pos['side']} {pos['size']} @ {pos['price']} "
+                                    f"(진입#{pos.get('entry_count', 0)}/5, SL-Rescue#{pos.get('sl_entry_count', 0)}/3)")
+    if active_positions:
+        log_debug("INIT", "현재 활성화된 포지션:")
+        for info in active_positions:
+            log_debug("INIT", f"  - {info}")
+    else:
+        log_debug("INIT", "활성 포지션 없음")
+
+def run_ws_monitor():
+    asyncio.run(price_monitor(list(SYMBOL_CONFIG.keys())))
+
+def worker_launcher(num_workers: int = 10):
+    for i in range(num_workers):
+        threading.Thread(target=worker_thread, args=(i,), daemon=True, name=f"Worker-{i}").start()
+    log_debug("WORKER", f"{num_workers} 워커 스레드 실행")
+
+def main():
+    log_debug("STARTUP", "자동매매 서버 시작")
+    log_debug("ENTRY_RATIOS", "진입 비율: 20%-30%-0%-160%-500%")
+    log_initial_state()
+    worker_launcher(8)
+    threading.Thread(target=run_ws_monitor, daemon=True, name="WS-Monitor").start()
+    port = int(os.environ.get("PORT", 8080))
+    log_debug("SERVER", f"HTTP 서버 시작 포트 {port}")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
