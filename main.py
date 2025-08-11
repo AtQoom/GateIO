@@ -206,6 +206,7 @@ def store_tp_sl(symbol, tp, sl, entry_number):
         }
 
 def get_tp_sl(symbol, entry_number=None):
+    """Pine Script와 동기화된 TP/SL 값 반환"""
     with tpsl_lock:
         if symbol in tpsl_storage:
             if entry_number and entry_number in tpsl_storage[symbol]:
@@ -215,8 +216,13 @@ def get_tp_sl(symbol, entry_number=None):
                 latest_entry = max(tpsl_storage[symbol].keys())
                 val = tpsl_storage[symbol][latest_entry]
                 return val["tp"], val["sl"], val["entry_time"]
+    
+    # 🔥 수정: Pine Script와 동일한 기본값 (0.6% → 0.5%)
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
-    return Decimal("0.006") * Decimal(str(cfg["tp_mult"])), Decimal("0.04") * Decimal(str(cfg["sl_mult"])), time.time()
+    base_tp = Decimal("0.005")  # 0.5% (Pine Script와 동일)
+    base_sl = Decimal("0.04")   # 4.0%
+    
+    return base_tp * Decimal(str(cfg["tp_mult"])), base_sl * Decimal(str(cfg["sl_mult"])), time.time()
 
 # ========================================
 # 8. 중복 신호 체크 및 시간대 조절
@@ -336,7 +342,7 @@ def update_position_state(symbol):
             pyramid_tracking.pop(symbol, None)
             tpsl_storage.pop(symbol, None)
             return True
-
+            
 # ========================================
 # 11. SL-Rescue 조건 확인
 # ========================================
@@ -627,35 +633,63 @@ async def price_monitor():
         await asyncio.sleep(5)
 
 def check_tp_sl(ticker):
+    """Pine Script avg_price와 동기화된 TP/SL 체크"""
     try:
         symbol, price = ticker.get("contract"), Decimal(str(ticker.get("last", "0")))
-        if not symbol or symbol not in SYMBOL_CONFIG or price <= 0: return
+        if not symbol or symbol not in SYMBOL_CONFIG or price <= 0: 
+            return
+            
         with position_lock:
             pos = position_state.get(symbol, {})
-            entry_price, side, entry_count = pos.get("price"), pos.get("side"), pos.get("entry_count", 0)
-            if not entry_price or not side or entry_count == 0:
+            side, entry_count = pos.get("side"), pos.get("entry_count", 0)
+            
+            if not side or entry_count == 0:
                 return
+            
+            # 🔥 수정: Pine Script avg_price 우선 사용
+            pine_avg_price = pos.get("pine_avg_price")  # Pine Script에서 받은 평단가
+            entry_price = pine_avg_price if pine_avg_price else pos.get("price")
+            
+            if not entry_price:
+                return
+                
             symbol_weight_tp = Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
             symbol_weight_sl = Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
+            
             original_tp, original_sl, entry_start_time = get_tp_sl(symbol, entry_count)
+            
+            # 시간 감쇠 계산 (Pine Script와 동일)
             time_elapsed = time.time() - entry_start_time
             periods_15s = int(time_elapsed / 15)
-            tp_decay_amt_ps, tp_min_pct_ps = Decimal("0.002") / 100, Decimal("0.12") / 100
+            
+            # TP 감쇠 (Pine Script와 동일한 0.002%)
+            tp_decay_amt_ps = Decimal("0.002") / 100
+            tp_min_pct_ps = Decimal("0.12") / 100  # Pine Script와 동일
             tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp)
-            adjusted_tp = max(tp_min_pct_ps, original_tp - tp_reduction)
-            sl_decay_amt_ps, sl_min_pct_ps = Decimal("0.004") / 100, Decimal("0.09") / 100
+            adjusted_tp = max(tp_min_pct_ps * symbol_weight_tp, original_tp - tp_reduction)
+            
+            # SL 감쇠
+            sl_decay_amt_ps = Decimal("0.004") / 100
+            sl_min_pct_ps = Decimal("0.09") / 100
             sl_reduction = Decimal(str(periods_15s)) * (sl_decay_amt_ps * symbol_weight_sl)
-            adjusted_sl = max(sl_min_pct_ps, original_sl - sl_reduction)
+            adjusted_sl = max(sl_min_pct_ps * symbol_weight_sl, original_sl - sl_reduction)
+            
+            # 🔥 수정: 평단가 기준 TP/SL 계산 (Pine Script와 동일)
             tp_price = entry_price * (1 + adjusted_tp) if side == "buy" else entry_price * (1 - adjusted_tp)
             sl_price = entry_price * (1 - adjusted_sl) if side == "buy" else entry_price * (1 + adjusted_sl)
+            
             tp_triggered = (price >= tp_price if side == "buy" else price <= tp_price)
             sl_triggered = (price <= sl_price if side == "buy" else price >= sl_price)
+            
             if tp_triggered:
-                log_debug(f"🎯 TP 트리거 ({symbol})", f"현재가: {price:.8f}, TP가: {tp_price:.8f} ({adjusted_tp*100:.3f}%)")
+                log_debug(f"🎯 TP 트리거 ({symbol})", 
+                         f"평단가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f} ({adjusted_tp*100:.3f}%)")
                 close_position(symbol, "TP")
             elif sl_triggered:
-                log_debug(f"🛑 SL 트리거 ({symbol})", f"현재가: {price:.8f}, SL가: {sl_price:.8f} ({adjusted_sl*100:.3f}%)")
+                log_debug(f"🛑 SL 트리거 ({symbol})", 
+                         f"평단가: {entry_price:.8f}, 현재가: {price:.8f}, SL가: {sl_price:.8f} ({adjusted_sl*100:.3f}%)")
                 close_position(symbol, "SL")
+                
     except Exception as e:
         log_debug(f"❌ TP/SL 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
 
@@ -664,26 +698,50 @@ def check_tp_sl(ticker):
 # ========================================
 
 def position_monitor():
+    """포지션 모니터링 + 대기 진입 체크"""
     while True:
-        time.sleep(300)
+        time.sleep(30)  # 30초마다 체크 (기존 300초에서 단축)
         try:
+            # 🔥 추가: 대기 진입 체크
+            check_pending_entries()
+            
+            # 기존 포지션 모니터링 로직
             total_value = Decimal("0")
             active_positions_log = []
+            pending_entries_log = []
+            
             for symbol in SYMBOL_CONFIG:
                 update_position_state(symbol)
                 pos = position_state.get(symbol, {})
+                
+                # 활성 포지션 체크
                 if pos.get("side"):
                     total_value += pos["value"]
                     pyramid_info = f", 일반 추가 신호: {pyramid_tracking.get(symbol, {}).get('signal_count', 0)}회"
-                    active_positions_log.append(f"{symbol}: {pos['side']} {pos['size']:.4f} 계약 @ {pos['price']:.8f} (총 진입: #{pos.get('entry_count', 0)}/5, SL-Rescue: #{pos.get('sl_entry_count', 0)}/3, 명목 가치: {pos['value']:.2f} USDT{pyramid_info})")
+                    active_positions_log.append(f"{symbol}: {pos['side']} {pos['size']:.4f} @ {pos.get('pine_avg_price', pos['price']):.8f} (총 진입: #{pos.get('entry_count', 0)}/5, SL-Rescue: #{pos.get('sl_entry_count', 0)}/3, 명목 가치: {pos['value']:.2f} USDT{pyramid_info})")
+                
+                # 🔥 추가: 대기 진입 체크
+                if pos.get("pending_entry"):
+                    pending = pos["pending_entry"]
+                    wait_time = int(time.time() - pending["timestamp"])
+                    pending_entries_log.append(f"{symbol}: {pending['side']} 대기중 (목표가: {pending['target_price']:.8f}, 대기시간: {wait_time}초)")
+            
+            # 로그 출력
             if active_positions_log:
                 equity = get_total_collateral()
                 exposure_pct = (total_value / equity * 100) if equity > 0 else 0
                 log_debug("📊 포지션 현황 보고", f"활성 포지션: {len(active_positions_log)}개, 총 명목 가치: {total_value:.2f} USDT, 총 자산: {equity:.2f} USDT, 노출도: {exposure_pct:.1f}%")
                 for pos_info in active_positions_log:
                     log_debug("  └", pos_info)
-            else:
-                log_debug("📊 포지션 현황 보고", "현재 활성 포지션이 없습니다.")
+            
+            if pending_entries_log:
+                log_debug("⏳ 대기중인 진입", f"{len(pending_entries_log)}개")
+                for pending_info in pending_entries_log:
+                    log_debug("  └", pending_info)
+            
+            if not active_positions_log and not pending_entries_log:
+                log_debug("📊 포지션 현황 보고", "현재 활성 포지션 및 대기 진입이 없습니다.")
+                
         except Exception as e:
             log_debug("❌ 포지션 모니터링 오류 발생", str(e), exc_info=True)
 
@@ -706,7 +764,7 @@ def worker(idx):
 
 def handle_entry(data):
     symbol_raw, side, signal_type, entry_type = data.get("symbol", ""), data.get("side", "").lower(), data.get("signal", "none"), data.get("type", "")
-    entry_score = data.get("entry_score", 50)  # Pine Script에서 전송한 점수 추출
+    entry_score = data.get("entry_score", 50)
     
     log_debug("📊 진입 처리 시작", 
               f"심볼: {symbol_raw}, 방향: {side}, signal_type: {signal_type}, "
@@ -714,101 +772,92 @@ def handle_entry(data):
 
     symbol = normalize_symbol(symbol_raw)
     if not symbol or symbol not in SYMBOL_CONFIG:
-        log_debug(f"❌ 잘못된 심볼 ({symbol_raw})", "처리 중단.")
         return
 
-    # ✅ 수정: Pine Script 신호 = 무조건 진입 (점수는 수량 가중치에만 영향)
     log_debug(f"✅ Pine Script 신호 수신 ({symbol})", f"점수: {entry_score}점 - 진입 진행")
 
     update_position_state(symbol)
     entry_count = position_state.get(symbol, {}).get("entry_count", 0)
     current_pos_side = position_state.get(symbol, {}).get("side")
     desired_side = "buy" if side == "long" else "sell"
-    entry_multiplier = position_state.get(symbol, {}).get('time_multiplier', Decimal("1.0")) if entry_count > 0 else get_time_based_multiplier()
 
+    # Pine Script avg_price 정보 저장
+    pine_avg_price = data.get("avg_price")
+    if pine_avg_price and pine_avg_price > 0:
+        position_state.setdefault(symbol, {})["pine_avg_price"] = Decimal(str(pine_avg_price))
+
+    # 반대 포지션 처리
     if current_pos_side and current_pos_side != desired_side:
-        log_debug(f"🔄 반대 포지션 감지 ({symbol})", f"{current_pos_side.upper()} → {desired_side.upper()} 기존 청산 시도")
         if not close_position(symbol, "reverse_entry"):
-            log_debug(f"❌ 반대 포지션 청산 실패 ({symbol})", "신규 진입 중단.")
             return
         time.sleep(1)
         update_position_state(symbol)
         entry_count = 0
 
     if entry_count >= 5:
-        log_debug(f"⚠️ 최대 진입 도달 ({symbol})", f"진입 {entry_count}/5. 추가진입 안함")
         return
 
+    # SL-Rescue 처리
     is_sl_rescue_signal = (signal_type == "sl_rescue")
     if is_sl_rescue_signal:
         sl_entry_count = position_state.get(symbol, {}).get("sl_entry_count", 0)
         if sl_entry_count >= 3:
-            log_debug(f"⚠️ SL-Rescue 최대 진입 도달 ({symbol})", f"{sl_entry_count}/3회")
             return
         if not is_sl_rescue_condition(symbol):
-            log_debug(f"⏭️ SL-Rescue 조건 미충족 ({symbol})", "진입 건너뜀")
             return
         position_state[symbol]["sl_entry_count"] = sl_entry_count + 1
-        log_debug(f"🚨 SL-Rescue 진입 ({symbol})", f"#{sl_entry_count + 1}/3회 시도")
         actual_entry_number = entry_count + 1
     else:
         if entry_count > 0:
-            current_price, avg_price = get_price(symbol), position_state[symbol]["price"]
+            current_price = get_price(symbol)
+            avg_price = position_state[symbol].get("pine_avg_price") or position_state[symbol]["price"]
             if (current_pos_side == "buy" and current_price >= avg_price) or (current_pos_side == "sell" and current_price <= avg_price):
                 log_debug(f"⏭️ 가격조건 미충족 ({symbol})", f"현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
                 return
         actual_entry_number = entry_count + 1
 
-    # TP/SL 저장 (Pine Script에서 받은 실제 TP/SL 값 사용)
-    pine_tp = data.get("tp_pct", 0.6) / 100  # Pine Script에서 %로 전송
+    # Pine Script TP/SL 값 저장
+    pine_tp = data.get("tp_pct", 0.5) / 100
     pine_sl = data.get("sl_pct", 4.0) / 100
     
     if pine_tp > 0 and pine_sl > 0:
         store_tp_sl(symbol, Decimal(str(pine_tp)), Decimal(str(pine_sl)), actual_entry_number)
-        log_debug(f"💾 Pine Script TP/SL 저장 ({symbol})", f"#{actual_entry_number}/5, TP: {pine_tp*100:.3f}%, SL: {pine_sl*100:.3f}%")
+
+    # 🔥 수정: 가격 필터는 최초 진입에만 적용
+    if entry_count == 0:  # 최초 진입인 경우에만
+        current_price = get_price(symbol)
+        target_price = Decimal(str(data.get("price", current_price)))
+        base_tolerance = Decimal("0.0002")  # 0.02%
+        symbol_mult = Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
+        price_tolerance = base_tolerance * symbol_mult
+
+        if current_price > 0 and target_price > 0:
+            price_diff_ratio = abs(current_price - target_price) / target_price
+            # 불리한 방향일 때만 필터 적용
+            if (side == "long" and current_price > target_price) or (side == "short" and current_price < target_price):
+                if price_diff_ratio > price_tolerance:
+                    log_debug(f"⏳ 최초 진입 가격 필터 차단 ({symbol})",
+                              f"현재가 {current_price:.8f}, 목표가 {target_price:.8f}, "
+                              f"차이 {price_diff_ratio*100:.3f}% > 허용 {price_tolerance*100:.3f}%")
+                    return
+            else:
+                log_debug(f"💡 최초 진입 유리한 가격 ({symbol})",
+                          f"현재가 {current_price:.8f}, 목표가 {target_price:.8f}, 차이 {price_diff_ratio*100:.3f}%")
     else:
-        # 기본값 사용
-        tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
-        sl_map = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
-        if actual_entry_number <= len(tp_map):
-            tp = tp_map[actual_entry_number - 1] * Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
-            sl = sl_map[actual_entry_number - 1] * Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
-            store_tp_sl(symbol, tp, sl, actual_entry_number)
-            log_debug(f"💾 기본 TP/SL 저장 ({symbol})", f"#{actual_entry_number}/5, TP: {tp*100:.3f}%, SL: {sl*100:.3f}%")
+        # 추가 진입 (2차~5차)은 가격 필터 없이 바로 진입
+        log_debug(f"🚀 추가 진입 - 가격 필터 무시 ({symbol})", f"#{actual_entry_number}/5차 진입")
 
-    # ===== 가격차이 필터 (불리할때만) =====
-    current_price = get_price(symbol)
-    target_price = Decimal(str(data.get("price", current_price)))
-    base_tolerance = Decimal("0.0002")  # 0.02%
-    symbol_mult = Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
-    price_tolerance = base_tolerance * symbol_mult
-
-    if current_price <= 0 or target_price <= 0:
-        log_debug(f"⚠️ 가격 0 감지 ({symbol})", f"필터 무시 - 현재가: {current_price}, 목표가: {target_price}")
-    else:
-        price_diff_ratio = abs(current_price - target_price) / target_price
-        # 불리한 방향일 때만 필터 적용
-        if (side == "long" and current_price > target_price) or (side == "short" and current_price < target_price):
-            if price_diff_ratio > price_tolerance:
-                log_debug(f"⏳ 불리한 가격, 진입 보류 ({symbol})",
-                          f"현재가 {current_price:.8f}, 목표가 {target_price:.8f}, "
-                          f"차이 {price_diff_ratio*100:.3f}% > 허용 {price_tolerance*100:.3f}%")
-                return
-        else:
-            log_debug(f"💡 유리한 가격 즉시 진입 ({symbol})",
-                      f"현재가 {current_price:.8f}, 목표가 {target_price:.8f}, 차이 {price_diff_ratio*100:.3f}%")
-    # ===== 필터 끝 =====
-
-    # 점수 기반 수량 계산 (0점이어도 25% 가중치로 진입)
-    qty = calculate_position_size(symbol, signal_type, entry_multiplier, entry_score)
+    # 점수 기반 수량 계산 및 진입 실행
+    qty = calculate_position_size(symbol, signal_type, get_time_based_multiplier(), entry_score)
     if qty <= 0:
-        log_debug(f"❌ 수량계산 실패 ({symbol})", "0 이하")
         return
-    if place_order(symbol, desired_side, qty, actual_entry_number, entry_multiplier):
+        
+    if place_order(symbol, desired_side, qty, actual_entry_number, get_time_based_multiplier()):
         log_debug(f"✅ 진입 성공 ({symbol})", f"{desired_side.upper()} {float(qty)} 계약 (#{actual_entry_number}/5, 점수: {entry_score}점)")
     else:
         log_debug(f"❌ 진입 실패 ({symbol})", f"{desired_side.upper()}")
 
+        
 # ========================================
 # 16. 메인 실행
 # ========================================
