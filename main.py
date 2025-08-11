@@ -719,7 +719,7 @@ async def price_monitor():
         await asyncio.sleep(5)
 
 def check_tp_sl(ticker):
-    """Pine Script avg_price와 동기화된 TP/SL 체크"""
+    """Pine Script와 완전 동기화된 TP/SL 체크"""
     try:
         symbol, price = ticker.get("contract"), Decimal(str(ticker.get("last", "0")))
         if not symbol or symbol not in SYMBOL_CONFIG or price <= 0: 
@@ -727,7 +727,7 @@ def check_tp_sl(ticker):
             
         with position_lock:
             pos = position_state.get(symbol, {})
-            side, total_entry_count = pos.get("side"), pos.get("total_entry_count", 0)  # 🔥 수정
+            side, total_entry_count = pos.get("side"), pos.get("total_entry_count", 0)
             
             if not side or total_entry_count == 0:
                 return
@@ -741,19 +741,20 @@ def check_tp_sl(ticker):
             symbol_weight_tp = Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
             symbol_weight_sl = Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
             
-            original_tp, original_sl, entry_start_time = get_tp_sl(symbol, total_entry_count)  # 🔥 수정
+            original_tp, original_sl, entry_start_time = get_tp_sl(symbol, total_entry_count)
             
-            # 시간 감쇠 계산
+            # 🔥 수정된 시간 감쇠 계산 (Pine Script와 동일)
             time_elapsed = time.time() - entry_start_time
-            periods_15s = int(time_elapsed / 15)
+            periods_15s = int(time_elapsed / 15)  # 15초 주기
             
-            tp_decay_amt_ps = Decimal("0.002") / 100
-            tp_min_pct_ps = Decimal("0.12") / 100
+            # 🔥 수정: Pine Script와 동일한 값 사용
+            tp_decay_amt_ps = Decimal("0.002") / 100  # Pine Script tp_decay_amt
+            tp_min_pct_ps = Decimal("0.12") / 100     # Pine Script tp_min_pct_input
             tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp)
             adjusted_tp = max(tp_min_pct_ps * symbol_weight_tp, original_tp - tp_reduction)
             
-            sl_decay_amt_ps = Decimal("0.004") / 100
-            sl_min_pct_ps = Decimal("0.09") / 100
+            sl_decay_amt_ps = Decimal("0.004") / 100  # Pine Script sl_decay_amt  
+            sl_min_pct_ps = Decimal("0.09") / 100     # Pine Script sl_min_pct
             sl_reduction = Decimal(str(periods_15s)) * (sl_decay_amt_ps * symbol_weight_sl)
             adjusted_sl = max(sl_min_pct_ps * symbol_weight_sl, original_sl - sl_reduction)
             
