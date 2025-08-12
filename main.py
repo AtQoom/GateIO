@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.12 - 독립적 피라미딩 시스템 (일반 5차 + 프리미엄 5차)
-Pine Script v6.12+독립피라미딩과 완전 호환 - 3분 RSI 기반 수량 조절
+Gate.io 자동매매 서버 v6.14 - 진입비율절반+SL보호+SL-Rescue알림기반
+Pine Script v6.14+진입비율절반+SL보호와 완전 호환
 
-주요 기능:
-1. 독립적 피라미딩: 일반 신호 최대 5차 + 프리미엄 신호 최대 5차 = 총 10차
-2. 3분 RSI 기반 수량 조절: 일반 70%, 프리미엄 140%
-3. 손절직전 진입 (SL_Rescue) - 150% 가중치, 최대 3회
-4. 점수 기반 진입 수량 조절 (0~100점 → 25%~100% 가중치)
-5. 심볼별 가중치 적용 및 시간 감쇠 TP/SL
-6. TradingView 웹훅 기반 자동 주문
-7. 실시간 WebSocket을 통한 TP/SL 모니터링 및 자동 청산
+주요 변경사항:
+1. 진입비율 절반 조정: 10%/20%/50%/120%/400% → 5%/10%/25%/60%/200%
+2. SL-Rescue 보호 시스템: SL-Rescue 상황에서 15초간 SL 실행 차단
+3. SL-Rescue 알림 기반: TradingView 알림으로만 진입 (직전 진입 × 150%)
+4. 코인별 가중치: 수량에서 제거, TP/SL만 적용
 """
 
 import os
@@ -111,6 +108,10 @@ pyramid_tracking = {}
 task_q = queue.Queue(maxsize=100)
 WORKER_COUNT = min(6, max(2, os.cpu_count() * 2))
 
+# 🔥 추가: SL-Rescue 보호 시스템
+sl_rescue_protection = {}  # 심볼별 SL 보호 상태
+sl_protection_lock = threading.RLock()
+
 # ========================================
 # 5. 핵심 유틸리티 함수
 # ========================================
@@ -161,26 +162,100 @@ def get_price(symbol):
     return Decimal("0")
 
 # ========================================
-# 6. 🔥 수정된 신호 타입 기반 수량 가중치 계산
+# 6. 🔥 SL-Rescue 보호 시스템
+# ========================================
+
+def activate_sl_rescue_protection(symbol, duration_seconds=15):
+    """SL-Rescue 보호 활성화"""
+    with sl_protection_lock:
+        end_time = time.time() + duration_seconds
+        sl_rescue_protection[symbol] = {
+            "active": True,
+            "end_time": end_time,
+            "activated_at": time.time()
+        }
+        log_debug(f"🛡️ SL-Rescue 보호 활성화 ({symbol})", f"{duration_seconds}초간 SL 실행 차단")
+
+def is_sl_rescue_protected(symbol):
+    """SL-Rescue 보호 상태 확인"""
+    with sl_protection_lock:
+        if symbol not in sl_rescue_protection:
+            return False
+        
+        protection = sl_rescue_protection[symbol]
+        if not protection.get("active", False):
+            return False
+        
+        # 보호 시간 만료 체크
+        if time.time() > protection.get("end_time", 0):
+            # 보호 해제
+            sl_rescue_protection[symbol]["active"] = False
+            log_debug(f"🛡️ SL-Rescue 보호 해제 ({symbol})", "보호 시간 만료")
+            return False
+        
+        return True
+
+def deactivate_sl_rescue_protection(symbol):
+    """SL-Rescue 보호 수동 해제"""
+    with sl_protection_lock:
+        if symbol in sl_rescue_protection:
+            sl_rescue_protection[symbol]["active"] = False
+            log_debug(f"🛡️ SL-Rescue 보호 수동 해제 ({symbol})", "보호 비활성화")
+
+def is_sl_rescue_price_zone(symbol):
+    """SL-Rescue 가격대 여부 확인 (Pine Script와 동일한 로직)"""
+    try:
+        with position_lock:
+            pos = position_state.get(symbol, {})
+            if not pos.get("side"):
+                return False
+                
+            current_price = get_price(symbol)
+            avg_price = pos.get("pine_avg_price") or pos.get("price")
+            
+            if not avg_price:
+                return False
+                
+            # 저장된 SL 비율 가져오기
+            _, original_sl, _ = get_tp_sl(symbol)
+            
+            # Pine Script와 동일한 SL 가격 계산
+            if pos["side"] == "buy":
+                sl_price = avg_price * (1 - original_sl)
+            else:
+                sl_price = avg_price * (1 + original_sl)
+            
+            # SL-Rescue 가격대 (±1%)
+            sl_zone_upper = sl_price * Decimal("1.01")
+            sl_zone_lower = sl_price * Decimal("0.99")
+            
+            # 가격대 내 여부 확인
+            in_zone = sl_zone_lower <= current_price <= sl_zone_upper
+            
+            if in_zone:
+                log_debug(f"🎯 SL-Rescue 가격대 감지 ({symbol})", 
+                         f"현재가: {current_price:.8f}, SL가: {sl_price:.8f} (±1%)")
+            
+            return in_zone
+            
+    except Exception as e:
+        log_debug(f"❌ SL-Rescue 가격대 확인 오류 ({symbol})", str(e))
+        return False
+
+# ========================================
+# 7. 수정된 신호 타입 기반 수량 가중치 계산
 # ========================================
 
 def get_signal_type_multiplier(signal_type, entry_type):
-    """
-    Pine Script signal_type과 entry_type을 기반으로 수량 배수 계산
-    
-    프리미엄 신호 (3분 RSI 만족): 140% (70% × 2.0)
-    일반 신호 (3분 RSI 불만족): 70% (70% × 1.0)
-    """
+    """Pine Script signal_type과 entry_type을 기반으로 수량 배수 계산"""
     try:
-        # Pine Script v6.12+독립피라미딩의 signal_type 확인
         if signal_type == "premium_3m_rsi":
-            # 프리미엄 신호: 70%의 2배 = 140%
-            return Decimal("1.4")
+            return Decimal("1.4")  # 140%
+        elif signal_type == "sl_rescue":
+            return Decimal("1.5")  # 150%
         elif signal_type in ["normal_signal", "main", "hybrid_enhanced", "backup_enhanced"]:
-            # 일반 신호: 70%
-            return Decimal("0.7")
+            return Decimal("0.7")  # 70%
         else:
-            # 알 수 없는 신호 타입: 기본 70%
             log_debug("⚠️ 알 수 없는 신호 타입", f"signal_type: {signal_type}, entry_type: {entry_type}, 기본값 70% 적용")
             return Decimal("0.7")
     except Exception:
@@ -208,7 +283,7 @@ def get_entry_weight_from_score(score):
         return Decimal("0.25")
 
 # ========================================
-# 7. TP/SL 저장 및 관리
+# 8. TP/SL 저장 및 관리
 # ========================================
 
 def store_tp_sl(symbol, tp, sl, entry_number):
@@ -236,7 +311,7 @@ def get_tp_sl(symbol, entry_number=None):
     return base_tp * Decimal(str(cfg["tp_mult"])), base_sl * Decimal(str(cfg["sl_mult"])), time.time()
 
 # ========================================
-# 8. 중복 신호 체크
+# 9. 중복 신호 체크
 # ========================================
 
 def get_time_based_multiplier():
@@ -266,16 +341,16 @@ def is_duplicate(data):
         return False
 
 # ========================================
-# 9. 🔥 수정된 수량 계산 (독립적 피라미딩 + 3분 RSI)
+# 10. 🔥 수정된 수량 계산 (절반 비율 + 코인별 가중치 제거)
 # ========================================
 
 def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0"), entry_score=50, current_signal_count=0):
     """
-    독립적 피라미딩 시스템 수량 계산
+    v6.14 수량 계산 시스템
     
-    - 일반 신호: 최대 5차까지 독립 카운트
-    - 프리미엄 신호: 최대 5차까지 독립 카운트
-    - 신호 타입별 수량 조절: 일반 70%, 프리미엄 140%
+    1. 진입비율 절반 조정: 5%/10%/25%/60%/200%
+    2. 코인별 가중치 수량에서 제거
+    3. SL-Rescue: 직전 진입 × 150%
     """
     cfg = SYMBOL_CONFIG[symbol]
     equity, price = get_total_collateral(), get_price(symbol)
@@ -283,7 +358,7 @@ def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0")
         log_debug(f"⚠️ 수량 계산 불가 ({symbol})", f"자산: {equity}, 가격: {price}")
         return Decimal("0")
     
-    # 🔥 수정: 독립적 피라미딩 카운트 확인
+    # 독립적 피라미딩 카운트 확인
     total_entry_count = position_state.get(symbol, {}).get("total_entry_count", 0)
     normal_entry_count = position_state.get(symbol, {}).get("normal_entry_count", 0)
     premium_entry_count = position_state.get(symbol, {}).get("premium_entry_count", 0)
@@ -301,16 +376,11 @@ def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0")
         log_debug(f"⚠️ 일반 최대 진입 도달 ({symbol})", f"일반 진입: {normal_entry_count}/5")
         return Decimal("0")
     
-    # 진입비율 배열 (Pine Script와 동일)
-    entry_ratios = [Decimal("0.50"), Decimal("0.80"), Decimal("2.00"), Decimal("4.20"), Decimal("12.00")]
+    # 🔥 수정: 절반으로 줄인 진입비율 배열 (Pine Script v6.14와 동일)
+    entry_ratios = [Decimal("5.00"), Decimal("10.00"), Decimal("25.00"), Decimal("60.00"), Decimal("200.00")]
     current_ratio = entry_ratios[min(current_signal_count, len(entry_ratios) - 1)]
     
-    # SL-Rescue 가중치 적용
-    if signal_type == "sl_rescue":
-        current_ratio = current_ratio * Decimal("1.5")
-        log_debug(f"🚨 SL-Rescue 가중치 적용 ({symbol})", f"150% 증량")
-    
-    # 🔥 신호 타입별 수량 조절 적용
+    # 신호 타입별 수량 조절 적용
     signal_multiplier = get_signal_type_multiplier(signal_type, "")
     log_debug(f"🎯 신호 타입 수량 조절 ({symbol})", 
               f"signal_type: {signal_type} → 배수: {float(signal_multiplier*100)}%")
@@ -320,7 +390,7 @@ def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0")
     log_debug(f"📊 점수 기반 가중치 적용 ({symbol})", 
               f"진입 점수: {entry_score}점 → 가중치: {float(score_weight*100)}%")
     
-    # 최종 포지션 비율 = 기본 비율 × 신호 타입 배수 × 시간 가중치 × 점수 가중치
+    # 🔥 수정: 최종 포지션 비율 (코인별 가중치 제거)
     final_position_ratio = current_ratio * signal_multiplier * entry_multiplier * score_weight
     
     position_value = equity * (final_position_ratio / Decimal("100"))
@@ -335,16 +405,16 @@ def calculate_position_size(symbol, signal_type, entry_multiplier=Decimal("1.0")
         final_qty = max(final_qty, min_qty_for_notional)
         log_debug(f"💡 최소 주문금액 조정 ({symbol})", f"조정된 수량: {final_qty}")
     
-    log_debug(f"📊 독립피라미딩 수량 계산 ({symbol})", 
+    log_debug(f"🚀 v6.14 절반비율 수량 계산 ({symbol})", 
               f"총진입: #{total_entry_count+1}/10, {signal_type}진입: #{current_signal_count+1}/5, "
-              f"기본비율: {float(current_ratio)}%, 신호배수: {float(signal_multiplier*100)}%, "
+              f"기본비율: {float(current_ratio)}% (절반조정), 신호배수: {float(signal_multiplier*100)}%, "
               f"점수: {entry_score}점({float(score_weight*100)}%), 최종비율: {float(final_position_ratio)}%, "
               f"수량: {final_qty}")
     
     return final_qty
 
 # ========================================
-# 10. 🔥 수정된 포지션 상태 관리 (독립 카운트 포함)
+# 11. 수정된 포지션 상태 관리 (독립 카운트 포함)
 # ========================================
 
 def update_position_state(symbol):
@@ -365,52 +435,36 @@ def update_position_state(symbol):
                 "size": abs(size),
                 "value": abs(size) * Decimal(str(pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"],
                 # 기존 카운트 유지
-                "entry_count": existing.get("entry_count", 0),  # 호환성 유지
-                "total_entry_count": existing.get("total_entry_count", 0),  # 🔥 추가: 총 진입 횟수
-                "normal_entry_count": existing.get("normal_entry_count", 0),  # 🔥 추가: 일반 신호 진입 횟수
-                "premium_entry_count": existing.get("premium_entry_count", 0),  # 🔥 추가: 프리미엄 신호 진입 횟수
+                "entry_count": existing.get("entry_count", 0),
+                "total_entry_count": existing.get("total_entry_count", 0),
+                "normal_entry_count": existing.get("normal_entry_count", 0),
+                "premium_entry_count": existing.get("premium_entry_count", 0),
                 "entry_time": existing.get("entry_time", time.time()),
                 "sl_entry_count": existing.get("sl_entry_count", 0),
-                'time_multiplier': existing.get('time_multiplier', Decimal("1.0"))
+                'time_multiplier': existing.get('time_multiplier', Decimal("1.0")),
+                'last_entry_ratio': existing.get('last_entry_ratio', Decimal("5.0"))  # 🔥 수정: 절반 비율 반영
             }
             return False
         else:
-            # 🔥 수정: 모든 카운트 리셋
+            # 모든 카운트 리셋
             position_state[symbol] = {
                 "price": None, "side": None, "size": Decimal("0"), "value": Decimal("0"),
-                "entry_count": 0, "total_entry_count": 0,  # 🔥 추가
-                "normal_entry_count": 0, "premium_entry_count": 0,  # 🔥 추가
+                "entry_count": 0, "total_entry_count": 0,
+                "normal_entry_count": 0, "premium_entry_count": 0,
                 "entry_time": None, "sl_entry_count": 0, 
-                'time_multiplier': Decimal("1.0")
+                'time_multiplier': Decimal("1.0"), 'last_entry_ratio': Decimal("0.0")
             }
             pyramid_tracking.pop(symbol, None)
             tpsl_storage.pop(symbol, None)
+            # 🔥 추가: SL-Rescue 보호 해제
+            deactivate_sl_rescue_protection(symbol)
             return True
 
 # ========================================
-# 11. SL-Rescue 조건 확인 (기존과 동일)
+# 12. 수정된 주문 실행 (독립 카운트 관리 + 직전 진입 비율 저장)
 # ========================================
 
-def is_sl_rescue_condition(symbol):
-    with position_lock:
-        pos = position_state.get(symbol)
-        if not pos or pos["size"] == 0 or pos["total_entry_count"] >= 10 or pos["sl_entry_count"] >= 3:  # 🔥 수정: 총 10차 제한
-            return False
-        current_price, avg_price, side = get_price(symbol), pos["price"], pos["side"]
-        if current_price <= 0: return False
-        original_tp, original_sl, entry_start_time = get_tp_sl(symbol, pos["total_entry_count"])  # 🔥 수정
-        symbol_weight_sl = Decimal(str(SYMBOL_CONFIG[symbol]["sl_mult"]))
-        sl_price = avg_price * (1 - original_sl * symbol_weight_sl) if side == "buy" else avg_price * (1 + original_sl * symbol_weight_sl)
-        
-        if (side == "buy" and current_price <= sl_price) or (side == "sell" and current_price >= sl_price):
-            return True
-        return False
-
-# ========================================
-# 12. 🔥 수정된 주문 실행 (독립 카운트 관리)
-# ========================================
-
-def place_order(symbol, side, qty, signal_type, time_multiplier):
+def place_order(symbol, side, qty, signal_type, time_multiplier, final_position_ratio=Decimal("0")):
     with position_lock:
         cfg = SYMBOL_CONFIG[symbol]
         qty_dec = qty.quantize(cfg["qty_step"], rounding=ROUND_DOWN)
@@ -426,7 +480,7 @@ def place_order(symbol, side, qty, signal_type, time_multiplier):
         if not _get_api_response(api.create_futures_order, SETTLE, order): 
             return False
         
-        # 🔥 카운트 업데이트 (독립적)
+        # 카운트 업데이트 (독립적)
         pos = position_state.setdefault(symbol, {})
         
         # 총 진입 횟수 증가
@@ -440,14 +494,19 @@ def place_order(symbol, side, qty, signal_type, time_multiplier):
         elif signal_type in ["normal_signal", "main"]:
             pos["normal_entry_count"] = pos.get("normal_entry_count", 0) + 1
         
+        # 직전 진입 비율 저장 (SL-Rescue용)
+        if signal_type != "sl_rescue" and final_position_ratio > 0:
+            pos['last_entry_ratio'] = final_position_ratio
+        
         pos["entry_time"] = time.time()
         if total_count == 1:
             pos['time_multiplier'] = time_multiplier
         
-        log_debug(f"✅ 독립피라미딩 주문 성공 ({symbol})", 
+        log_debug(f"✅ v6.14 절반비율 주문 성공 ({symbol})", 
                   f"{side.upper()} {float(qty_dec)} 계약 ({signal_type}, "
                   f"총: #{total_count}/10, 일반: {pos.get('normal_entry_count', 0)}/5, "
-                  f"프리미엄: {pos.get('premium_entry_count', 0)}/5)")
+                  f"프리미엄: {pos.get('premium_entry_count', 0)}/5, "
+                  f"직전비율: {float(pos.get('last_entry_ratio', 0))}%)")
         
         time.sleep(2)
         update_position_state(symbol)
@@ -460,17 +519,19 @@ def close_position(symbol, reason="manual"):
         
         log_debug(f"✅ 청산 완료 ({symbol})", f"이유: {reason}")
         
-        # 🔥 수정: 모든 카운트 리셋
+        # 모든 카운트 리셋
         position_state[symbol] = {
             "price": None, "side": None, "size": Decimal("0"), "value": Decimal("0"),
             "entry_count": 0, "total_entry_count": 0,
             "normal_entry_count": 0, "premium_entry_count": 0,
             "entry_time": None, "sl_entry_count": 0, 
-            'time_multiplier': Decimal("1.0")
+            'time_multiplier': Decimal("1.0"), 'last_entry_ratio': Decimal("0.0")
         }
         
         pyramid_tracking.pop(symbol, None)
         tpsl_storage.pop(symbol, None)
+        # 🔥 추가: SL-Rescue 보호 해제
+        deactivate_sl_rescue_protection(symbol)
         
         with signal_lock:
             keys_to_remove = [k for k in recent_signals.keys() if k.startswith(symbol + "_") or k.startswith(symbol)]
@@ -482,7 +543,7 @@ def close_position(symbol, reason="manual"):
         return True
 
 # ========================================
-# 13. 🔥 수정된 Flask 웹훅 라우트 (독립 피라미딩 정보 처리)
+# 13. Flask 웹훅 라우트 (SL-Rescue 알림 기반 + 보호 시스템)
 # ========================================
 
 @app.route("/ping", methods=["GET", "HEAD"])
@@ -493,8 +554,9 @@ def ping():
 def clear_cache():
     with signal_lock: recent_signals.clear()
     with tpsl_lock: tpsl_storage.clear()
+    with sl_protection_lock: sl_rescue_protection.clear()  # 🔥 추가
     pyramid_tracking.clear()
-    log_debug("🔄 캐시 초기화", "모든 신호 및 TP/SL 캐시가 초기화되었습니다.")
+    log_debug("🔄 캐시 초기화", "모든 신호, TP/SL, SL보호 캐시가 초기화되었습니다.")
     return jsonify({"status": "cache_cleared"})
 
 @app.route("/", methods=["POST"])
@@ -522,29 +584,32 @@ def webhook():
         if not data:
             return jsonify({"error": "Failed to parse data"}), 400
 
-        # 🔥 수정된 데이터 파싱 (독립 피라미딩 정보 추가)
+        # 수정된 데이터 파싱 (SL-Rescue 알림 기반 + 보호 정보)
         symbol_raw = data.get("symbol", "")
         side = data.get("side", "").lower()
         action = data.get("action", "").lower()
-        signal_type = data.get("signal", "normal_signal")  # Pine Script signal_type
-        entry_type = data.get("type", "")  # entry_type
+        signal_type = data.get("signal", "normal_signal")
+        entry_type = data.get("type", "")
         entry_score = data.get("entry_score", 50)
         
-        # 🔥 추가: 독립 피라미딩 카운트 정보
+        # 독립 피라미딩 카운트 정보
         total_entries = data.get("total_entries", 0)
         normal_entries = data.get("normal_entries", 0)
         premium_entries = data.get("premium_entries", 0)
-        rsi_3m = data.get("rsi_3m", 0)  # 3분 RSI 값
-        rsi_15s = data.get("rsi_15s", 0)  # 15초 RSI 값
-        qty_multiplier = data.get("qty_multiplier", "70%")  # 수량 배수 정보
+        rsi_3m = data.get("rsi_3m", 0)
+        rsi_15s = data.get("rsi_15s", 0)
+        qty_multiplier = data.get("qty_multiplier", "70%")
+        
+        # 🔥 추가: SL-Rescue 보호 정보
+        sl_rescue_protection_status = data.get("sl_rescue_protection", False)
         
         log_debug(
-            "📊 독립피라미딩 웹훅 데이터 (v6.12)",
+            "🚀 v6.14 웹훅 데이터 (절반비율+SL보호+SL-Rescue알림)",
             f"심볼: {symbol_raw}, 방향: {side}, 액션: {action}, "
             f"signal_type: {signal_type}, entry_type: {entry_type}, "
             f"총진입: {total_entries}, 일반: {normal_entries}/5, 프리미엄: {premium_entries}/5, "
             f"3분RSI: {rsi_3m}, 15초RSI: {rsi_15s}, 수량배수: {qty_multiplier}, "
-            f"점수: {entry_score}점"
+            f"점수: {entry_score}점, SL보호: {sl_rescue_protection_status}"
         )
 
         symbol = normalize_symbol(symbol_raw)
@@ -556,17 +621,27 @@ def webhook():
         if is_duplicate(data):
             return jsonify({"status": "duplicate_ignored"}), 200
 
-        # ===== Entry 처리 =====
+        # ===== Entry 처리 (SL-Rescue 보호 시스템 포함) =====
         if action == "entry" and side in ["long", "short"]:
             try:
-                # 🔥 Pine Script v6.12+독립피라미딩 데이터 추가
-                data["signal_type"] = signal_type
+                # 🔥 SL-Rescue 알림 기반 처리 + 보호 활성화
+                if "SL_Rescue" in entry_type:
+                    log_debug(f"🚨 SL-Rescue 알림 수신 ({symbol})", f"TradingView에서 SL-Rescue 신호 수신")
+                    data["signal_type"] = "sl_rescue"
+                    
+                    # 🛡️ SL-Rescue 보호 즉시 활성화
+                    if sl_rescue_protection_status:
+                        activate_sl_rescue_protection(symbol, 15)  # 15초간 보호
+                
+                # Pine Script v6.14 데이터 추가
+                data["signal_type"] = signal_type if "SL_Rescue" not in entry_type else "sl_rescue"
                 data["entry_type"] = entry_type
                 data["total_entries"] = total_entries
                 data["normal_entries"] = normal_entries
                 data["premium_entries"] = premium_entries
                 data["rsi_3m"] = rsi_3m
                 data["rsi_15s"] = rsi_15s
+                data["sl_rescue_protection"] = sl_rescue_protection_status
                 task_q.put_nowait(data)
             except queue.Full:
                 return jsonify({"status": "queue_full"}), 429
@@ -574,11 +649,12 @@ def webhook():
                 "status": "queued",
                 "symbol": symbol,
                 "side": side,
-                "signal_type": signal_type,
+                "signal_type": signal_type if "SL_Rescue" not in entry_type else "sl_rescue",
                 "total_entries": total_entries,
                 "normal_entries": normal_entries,
                 "premium_entries": premium_entries,
                 "qty_multiplier": qty_multiplier,
+                "sl_protection_activated": sl_rescue_protection_status,  # 🔥 추가
                 "queue_size": task_q.qsize()
             }), 200
 
@@ -610,7 +686,7 @@ def webhook():
         return jsonify({"error": str(e)}), 500
 
 # ========================================
-# 14. 🔥 수정된 상태 API (독립 피라미딩 정보 추가)
+# 14. 🔥 수정된 상태 API (절반비율 + SL 보호 정보 추가)
 # ========================================
 
 @app.route("/status", methods=["GET"])
@@ -618,6 +694,7 @@ def status():
     try:
         equity = get_total_collateral(force=True)
         positions = {}
+        
         for sym in SYMBOL_CONFIG:
             update_position_state(sym)
             pos = position_state.get(sym, {})
@@ -637,47 +714,87 @@ def status():
                         "elapsed_seconds": int(time.time() - entry_start_time)
                     })
                 
+                # 🔥 SL-Rescue 보호 상태 정보
+                protection_info = {}
+                with sl_protection_lock:
+                    if sym in sl_rescue_protection:
+                        prot = sl_rescue_protection[sym]
+                        protection_info = {
+                            "active": prot.get("active", False),
+                            "end_time": prot.get("end_time", 0),
+                            "remaining_seconds": max(0, int(prot.get("end_time", 0) - time.time())),
+                            "activated_at": datetime.fromtimestamp(prot.get("activated_at", 0), KST).strftime('%Y-%m-%d %H:%M:%S') if prot.get("activated_at") else None
+                        }
+                    else:
+                        protection_info = {"active": False}
+                
                 positions[sym] = {
                     "side": pos["side"],
                     "size": float(pos["size"]),
                     "price": float(pos["price"]),
                     "value": float(pos["value"]),
-                    # 🔥 독립 피라미딩 정보 추가
+                    # 독립 피라미딩 정보
                     "total_entry_count": total_entry_count,
                     "normal_entry_count": normal_entry_count,
                     "premium_entry_count": premium_entry_count,
                     "entry_count": total_entry_count,  # 호환성 유지
                     "sl_rescue_count": pos.get("sl_entry_count", 0),
+                    "last_entry_ratio": float(pos.get('last_entry_ratio', Decimal("0"))),
                     "symbol_multiplier": SYMBOL_CONFIG[sym]["tp_mult"],
                     "time_multiplier": float(pos.get('time_multiplier', Decimal("1.0"))),
                     "tp_sl_info": tp_sl_info,
-                    "pyramid_tracking": pyramid_tracking.get(sym, {"signal_count": 0, "last_entered": False})
+                    "pyramid_tracking": pyramid_tracking.get(sym, {"signal_count": 0, "last_entered": False}),
+                    # 🔥 SL-Rescue 보호 정보
+                    "sl_rescue_protection": protection_info
                 }
         
         return jsonify({
             "status": "running",
-            "version": "v6.12_independent_pyramiding_3m_rsi",
+            "version": "v6.14_half_ratio_sl_protection_sl_rescue_alert_based",
             "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity),
             "active_positions": positions,
             "cooldown_seconds": COOLDOWN_SECONDS,
-            # 🔥 독립 피라미딩 시스템 정보
-            "independent_pyramiding": {
+            # 🔥 절반 비율 피라미딩 시스템 정보
+            "half_ratio_pyramiding": {
                 "max_total_entries": 10,
                 "max_normal_entries": 5,
                 "max_premium_entries": 5,
                 "normal_signal_multiplier": "70%",
-                "premium_signal_multiplier": "140% (70% × 2배)"
+                "premium_signal_multiplier": "140% (70% × 2배)",
+                "sl_rescue_multiplier": "직전 진입 × 150%"
             },
             "max_sl_rescue_per_position": 3,
-            "pyramiding_entry_ratios": [0.5, 0.8, 2.0, 4.2, 12.0],
-            # 🔥 v6.12 전용 정보 추가
+            # 🔥 절반으로 줄인 진입비율
+            "half_entry_ratios": [5.0, 10.0, 25.0, 60.0, 200.0],
+            "previous_entry_ratios": [10.0, 20.0, 50.0, 120.0, 400.0],
+            "reduction_ratio": "50% (절반)",
+            # 🔥 SL-Rescue 보호 시스템
+            "sl_rescue_protection_system": {
+                "enabled": True,
+                "protection_duration_seconds": 15,
+                "triggers_on": "SL-Rescue situation detected",
+                "blocks": "SL execution during protection period",
+                "method": "TradingView Alert Based Entry"
+            },
+            # v6.14 전용 정보
             "signal_type_multipliers": {
                 "premium_3m_rsi": "140% (70% × 2배)",
                 "normal_signal": "70%",
-                "main": "70%",
-                "hybrid_enhanced": "70%",
-                "backup_enhanced": "70%"
+                "sl_rescue": "직전 진입 비율 × 150%",
+                "main": "70%"
+            },
+            "quantity_weight_changes": {
+                "symbol_weights_removed_from_quantity": True,
+                "symbol_weights_only_for_tp_sl": True,
+                "all_symbols_same_quantity_ratio": True,
+                "half_ratio_applied": True
+            },
+            "sl_rescue_system": {
+                "method": "TradingView Alert Based",
+                "protection_system": "Activated",
+                "all_entries_now_alert_based": True,
+                "sl_blocked_during_rescue": True
             },
             "score_based_weights": {
                 "0-10": "25%", "11-30": "35%", "31-50": "50%", 
@@ -691,7 +808,7 @@ def status():
         return jsonify({"error": str(e)}), 500
 
 # ========================================
-# 15. WebSocket 모니터링 (기존과 동일)
+# 15. 🔥 수정된 WebSocket 모니터링 (SL 보호 기능 적용)
 # ========================================
 
 async def price_monitor():
@@ -709,17 +826,17 @@ async def price_monitor():
                     result = data.get("result")
                     if isinstance(result, list):
                         for item in result:
-                            check_tp_sl(item)
+                            check_tp_sl_with_protection(item)
                     elif isinstance(result, dict):
-                        check_tp_sl(result)
+                        check_tp_sl_with_protection(result)
         except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed) as e:
             log_debug("🔌 웹소켓 연결 문제", f"재연결 시도... ({type(e).__name__})")
         except Exception as e:
             log_debug("❌ 웹소켓 오류", str(e), exc_info=True)
         await asyncio.sleep(5)
 
-def check_tp_sl(ticker):
-    """Pine Script와 완전 동기화된 TP/SL 체크"""
+def check_tp_sl_with_protection(ticker):
+    """🛡️ SL-Rescue 보호 기능이 적용된 TP/SL 체크"""
     try:
         symbol, price = ticker.get("contract"), Decimal(str(ticker.get("last", "0")))
         if not symbol or symbol not in SYMBOL_CONFIG or price <= 0: 
@@ -743,18 +860,18 @@ def check_tp_sl(ticker):
             
             original_tp, original_sl, entry_start_time = get_tp_sl(symbol, total_entry_count)
             
-            # 🔥 수정된 시간 감쇠 계산 (Pine Script와 동일)
+            # Pine Script와 동일한 시간 감쇠 계산
             time_elapsed = time.time() - entry_start_time
             periods_15s = int(time_elapsed / 15)  # 15초 주기
             
-            # 🔥 수정: Pine Script와 동일한 값 사용
-            tp_decay_amt_ps = Decimal("0.002") / 100  # Pine Script tp_decay_amt
-            tp_min_pct_ps = Decimal("0.12") / 100     # Pine Script tp_min_pct_input
+            # Pine Script와 동일한 값 사용
+            tp_decay_amt_ps = Decimal("0.002") / 100
+            tp_min_pct_ps = Decimal("0.12") / 100
             tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp)
             adjusted_tp = max(tp_min_pct_ps * symbol_weight_tp, original_tp - tp_reduction)
             
-            sl_decay_amt_ps = Decimal("0.004") / 100  # Pine Script sl_decay_amt  
-            sl_min_pct_ps = Decimal("0.09") / 100     # Pine Script sl_min_pct
+            sl_decay_amt_ps = Decimal("0.004") / 100
+            sl_min_pct_ps = Decimal("0.09") / 100
             sl_reduction = Decimal(str(periods_15s)) * (sl_decay_amt_ps * symbol_weight_sl)
             adjusted_sl = max(sl_min_pct_ps * symbol_weight_sl, original_sl - sl_reduction)
             
@@ -765,20 +882,37 @@ def check_tp_sl(ticker):
             tp_triggered = (price >= tp_price if side == "buy" else price <= tp_price)
             sl_triggered = (price <= sl_price if side == "buy" else price >= sl_price)
             
+            # TP 실행 (보호와 무관)
             if tp_triggered:
                 log_debug(f"🎯 TP 트리거 ({symbol})", 
                          f"평단가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}")
                 close_position(symbol, "TP")
-            elif sl_triggered:
-                log_debug(f"🛑 SL 트리거 ({symbol})", 
-                         f"평단가: {entry_price:.8f}, 현재가: {price:.8f}, SL가: {sl_price:.8f}")
-                close_position(symbol, "SL")
+                return
+                
+            # 🔥 SL 실행 (보호 기능 적용)
+            if sl_triggered:
+                # SL-Rescue 보호 상태 확인
+                if is_sl_rescue_protected(symbol):
+                    log_debug(f"🛡️ SL 실행 차단 ({symbol})", 
+                             f"SL-Rescue 보호 활성화로 인한 SL 실행 방지 "
+                             f"(평단가: {entry_price:.8f}, 현재가: {price:.8f}, SL가: {sl_price:.8f})")
+                    
+                    # SL-Rescue 가격대인지 확인하여 보호 연장 여부 결정
+                    if is_sl_rescue_price_zone(symbol):
+                        # 이미 SL-Rescue 가격대에 있으므로 보호 연장하지 않음 (Pine Script에서 처리)
+                        pass
+                    return
+                else:
+                    # 보호 상태가 아니면 정상 SL 실행
+                    log_debug(f"🛑 SL 트리거 ({symbol})", 
+                             f"평단가: {entry_price:.8f}, 현재가: {price:.8f}, SL가: {sl_price:.8f}")
+                    close_position(symbol, "SL")
                 
     except Exception as e:
-        log_debug(f"❌ TP/SL 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
+        log_debug(f"❌ 보호기능 TP/SL 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
 
 # ========================================
-# 16. 🔥 수정된 워커 스레드 및 진입 처리 (독립 피라미딩)
+# 16. 🔥 수정된 워커 스레드 및 진입 처리 (절반비율 + SL-Rescue 보호)
 # ========================================
 
 def worker(idx):
@@ -787,7 +921,7 @@ def worker(idx):
         try:
             data = task_q.get(timeout=1)
             try:
-                handle_entry(data)
+                handle_entry_with_protection(data)
             except Exception as e:
                 log_debug(f"❌ 워커-{idx} 처리 오류", f"작업 처리 중 예외: {str(e)}", exc_info=True)
             finally:
@@ -798,37 +932,52 @@ def worker(idx):
             log_debug(f"❌ 워커-{idx} 심각 오류", f"워커 스레드 오류: {str(e)}", exc_info=True)
             time.sleep(1)
 
-def handle_entry(data):
+def handle_entry_with_protection(data):
     symbol_raw = data.get("symbol", "")
     side = data.get("side", "").lower()
     signal_type = data.get("signal", "normal_signal")
     entry_type = data.get("type", "")
     entry_score = data.get("entry_score", 50)
     
-    # 🔥 추가: 독립 피라미딩 정보
+    # 독립 피라미딩 정보
     total_entries = data.get("total_entries", 0)
     normal_entries = data.get("normal_entries", 0)
     premium_entries = data.get("premium_entries", 0)
     rsi_3m = data.get("rsi_3m", 0)
     rsi_15s = data.get("rsi_15s", 0)
     
-    log_debug("📊 독립피라미딩 진입 처리 (v6.12)", 
+    # 🔥 SL-Rescue 보호 정보
+    sl_protection_requested = data.get("sl_rescue_protection", False)
+    
+    log_debug("🚀 v6.14 진입 처리 (절반비율+SL보호+SL-Rescue알림)", 
               f"심볼: {symbol_raw}, 방향: {side}, signal_type: {signal_type}, "
               f"총진입: {total_entries}, 일반: {normal_entries}, 프리미엄: {premium_entries}, "
-              f"3분RSI: {rsi_3m}, 15초RSI: {rsi_15s}, 점수: {entry_score}점")
+              f"3분RSI: {rsi_3m}, 15초RSI: {rsi_15s}, 점수: {entry_score}점, "
+              f"SL보호요청: {sl_protection_requested}")
 
     symbol = normalize_symbol(symbol_raw)
     if not symbol or symbol not in SYMBOL_CONFIG:
         return
 
-    # 🔥 신호 타입별 로깅
+    # 🔥 SL-Rescue 알림 기반 처리 + 보호 활성화
+    if signal_type == "sl_rescue" or "SL_Rescue" in entry_type:
+        log_debug(f"🚨 SL-Rescue 알림 처리 ({symbol})", 
+                  f"TradingView 알림 기반 SL-Rescue 진입 (직전 진입 × 150%)")
+        
+        # 🛡️ SL-Rescue 보호 강제 활성화
+        if sl_protection_requested:
+            activate_sl_rescue_protection(symbol, 15)
+
+    # 신호 타입별 로깅
     if signal_type == "premium_3m_rsi":
         log_debug(f"🌟 프리미엄 신호 수신 ({symbol})", f"3분 RSI 조건 만족 → 140% 수량 적용")
+    elif signal_type == "sl_rescue":
+        log_debug(f"🚨 SL-Rescue 신호 수신 ({symbol})", f"직전 진입 비율 × 150% 수량 적용")
     else:
         log_debug(f"📊 일반 신호 수신 ({symbol})", f"3분 RSI 조건 미충족 → 70% 수량 적용")
 
     update_position_state(symbol)
-    total_entry_count = position_state.get(symbol, {}).get("total_entry_count", 0)  # 🔥 수정
+    total_entry_count = position_state.get(symbol, {}).get("total_entry_count", 0)
     normal_entry_count = position_state.get(symbol, {}).get("normal_entry_count", 0)
     premium_entry_count = position_state.get(symbol, {}).get("premium_entry_count", 0)
     current_pos_side = position_state.get(symbol, {}).get("side")
@@ -849,7 +998,7 @@ def handle_entry(data):
         normal_entry_count = 0
         premium_entry_count = 0
 
-    # 🔥 독립적 진입 제한 체크
+    # 독립적 진입 제한 체크
     if total_entry_count >= 10:
         log_debug(f"⚠️ 총 최대 진입 도달 ({symbol})", f"총 {total_entry_count}/10")
         return
@@ -861,17 +1010,17 @@ def handle_entry(data):
         log_debug(f"⚠️ 일반 최대 진입 도달 ({symbol})", f"일반 {normal_entry_count}/5")
         return
 
-    # SL-Rescue 처리 (기존과 동일)
+    # 🔥 SL-Rescue는 TradingView 알림에서만 처리
     is_sl_rescue_signal = (signal_type == "sl_rescue")
     if is_sl_rescue_signal:
         sl_entry_count = position_state.get(symbol, {}).get("sl_entry_count", 0)
         if sl_entry_count >= 3:
-            return
-        if not is_sl_rescue_condition(symbol):
+            log_debug(f"⚠️ SL-Rescue 최대 도달 ({symbol})", f"SL-Rescue {sl_entry_count}/3")
             return
         position_state[symbol]["sl_entry_count"] = sl_entry_count + 1
+        log_debug(f"🚨 SL-Rescue 진입 승인 ({symbol})", f"알림 기반 SL-Rescue #{sl_entry_count + 1}/3")
     else:
-        if total_entry_count > 0:  # 🔥 수정
+        if total_entry_count > 0:
             current_price = get_price(symbol)
             avg_price = position_state[symbol].get("pine_avg_price") or position_state[symbol]["price"]
             if (current_pos_side == "buy" and current_price >= avg_price) or (current_pos_side == "sell" and current_price <= avg_price):
@@ -885,28 +1034,47 @@ def handle_entry(data):
     if pine_tp > 0 and pine_sl > 0:
         store_tp_sl(symbol, Decimal(str(pine_tp)), Decimal(str(pine_sl)), total_entry_count + 1)
 
-    # 🔥 신호 타입에 따른 현재 카운트 결정
+    # 신호 타입에 따른 현재 카운트 결정
     if signal_type == "premium_3m_rsi":
         current_signal_count = premium_entry_count
+    elif signal_type == "sl_rescue":
+        current_signal_count = 0  # SL-Rescue는 별도 처리
     else:
         current_signal_count = normal_entry_count
 
-    # 🔥 수정된 수량 계산 (독립 피라미딩)
+    # 🔥 수정된 수량 계산 (절반 비율)
     qty = calculate_position_size(symbol, signal_type, get_time_based_multiplier(), entry_score, current_signal_count)
     if qty <= 0:
         return
+    
+    # 🔥 SL-Rescue 직전 진입 비율 × 150% 처리
+    final_position_ratio = Decimal("0")
+    if signal_type == "sl_rescue":
+        last_entry_ratio = position_state.get(symbol, {}).get('last_entry_ratio', Decimal("5.0"))  # 🔥 절반 비율 기본값
+        if last_entry_ratio > 0:
+            # 직전 진입 비율 × 150%로 재계산
+            equity = get_total_collateral()
+            sl_rescue_ratio = last_entry_ratio * Decimal("1.5")
+            position_value = equity * (sl_rescue_ratio / Decimal("100"))
+            contract_value = get_price(symbol) * SYMBOL_CONFIG[symbol]["contract_size"]
+            calculated_qty = (position_value / contract_value / SYMBOL_CONFIG[symbol]["qty_step"]).quantize(Decimal('1'), rounding=ROUND_DOWN) * SYMBOL_CONFIG[symbol]["qty_step"]
+            qty = max(calculated_qty, SYMBOL_CONFIG[symbol]["min_qty"])
+            final_position_ratio = sl_rescue_ratio
+            log_debug(f"🚨 SL-Rescue 절반비율 수량 재계산 ({symbol})", 
+                      f"직전 비율: {float(last_entry_ratio)}% × 150% = {float(sl_rescue_ratio)}%, 수량: {qty}")
         
-    if place_order(symbol, desired_side, qty, signal_type, get_time_based_multiplier()):
-        multiplier_info = "140%" if signal_type == "premium_3m_rsi" else "70%"
+    if place_order(symbol, desired_side, qty, signal_type, get_time_based_multiplier(), final_position_ratio):
+        multiplier_info = "140%" if signal_type == "premium_3m_rsi" else "150% (직전×1.5)" if signal_type == "sl_rescue" else "70%"
         new_total = total_entry_count + 1
-        log_debug(f"✅ 독립피라미딩 진입 성공 ({symbol})", 
+        protection_status = "🛡️보호중" if is_sl_rescue_protected(symbol) else ""
+        log_debug(f"✅ v6.14 절반비율 진입 성공 ({symbol})", 
                   f"{desired_side.upper()} {float(qty)} 계약 (총 #{new_total}/10, "
-                  f"신호: {signal_type}, 수량배수: {multiplier_info}, 점수: {entry_score}점)")
+                  f"신호: {signal_type}, 수량배수: {multiplier_info}, 점수: {entry_score}점) {protection_status}")
     else:
         log_debug(f"❌ 진입 실패 ({symbol})", f"{desired_side.upper()}")
 
 def position_monitor():
-    """포지션 모니터링 (독립 피라미딩 정보 포함)"""
+    """포지션 모니터링 (절반 비율 + SL 보호 정보 포함)"""
     while True:
         time.sleep(30)
         try:
@@ -919,21 +1087,26 @@ def position_monitor():
                 
                 if pos.get("side"):
                     total_value += pos["value"]
-                    # 🔥 독립 피라미딩 정보 추가
+                    
+                    # SL-Rescue 보호 상태 확인
+                    protection_status = "🛡️보호중" if is_sl_rescue_protected(symbol) else ""
+                    
+                    # 절반 비율 피라미딩 정보
                     pyramid_info = (f"총: {pos.get('total_entry_count', 0)}/10, "
                                    f"일반: {pos.get('normal_entry_count', 0)}/5, "
                                    f"프리미엄: {pos.get('premium_entry_count', 0)}/5, "
-                                   f"SL-Rescue: {pos.get('sl_entry_count', 0)}/3")
+                                   f"SL-Rescue: {pos.get('sl_entry_count', 0)}/3, "
+                                   f"직전비율: {pos.get('last_entry_ratio', 0)}%")
                     active_positions_log.append(
                         f"{symbol}: {pos['side']} {pos['size']:.4f} @ "
                         f"{pos.get('pine_avg_price', pos['price']):.8f} "
-                        f"({pyramid_info}, 명목가치: {pos['value']:.2f} USDT)"
+                        f"({pyramid_info}, 명목가치: {pos['value']:.2f} USDT) {protection_status}"
                     )
             
             if active_positions_log:
                 equity = get_total_collateral()
                 exposure_pct = (total_value / equity * 100) if equity > 0 else 0
-                log_debug("📊 독립피라미딩 포지션 현황 (v6.12)", 
+                log_debug("🚀 v6.14 포지션 현황 (절반비율+SL보호+SL-Rescue알림)", 
                          f"활성 포지션: {len(active_positions_log)}개, "
                          f"총 명목가치: {total_value:.2f} USDT, "
                          f"총자산: {equity:.2f} USDT, 노출도: {exposure_pct:.1f}%")
@@ -950,25 +1123,30 @@ def position_monitor():
 # ========================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.12 (독립적 피라미딩 + 3분 RSI 시스템)")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.14 (절반비율 + SL보호 + SL-Rescue 알림기반)")
     log_debug("📊 현재 설정", f"감시 심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초")
-    log_debug("🔥 독립 피라미딩", "일반 신호: 최대 5차 (70% 수량) + 프리미엄 신호: 최대 5차 (140% 수량) = 총 10차")
-    log_debug("🎯 수량 조절", "프리미엄: 140% (3분 RSI 만족), 일반: 70% (3분 RSI 불만족)")
+    log_debug("🔥 절반 비율 피라미딩", "진입비율: 5%/10%/25%/60%/200% (기존 10%/20%/50%/120%/400%에서 절반)")
+    log_debug("🛡️ SL-Rescue 보호", "SL-Rescue 상황에서 15초간 SL 실행 차단")
+    log_debug("🚨 SL-Rescue 변경", "서버 자동 진입 → TradingView 알림 기반 (직전 진입 × 150%)")
+    log_debug("🎯 수량 조절", "코인별 가중치 제거, 프리미엄: 140%, 일반: 70%, SL-Rescue: 150%")
+    log_debug("📡 모든 진입 알림화", "모든 진입 신호가 TradingView 알림 기반으로 통일됨")
     
     equity = get_total_collateral(force=True)
     log_debug("💰 초기 자산 확인", f"{equity:.2f} USDT" if equity > 0 else "자산 조회 실패")
     
-    # 초기 포지션 확인 (독립 카운트 포함)
+    # 초기 포지션 확인
     initial_active_positions = []
     for symbol in SYMBOL_CONFIG:
         update_position_state(symbol)
         pos = position_state.get(symbol, {})
         if pos.get("side"):
+            protection_status = "🛡️보호중" if is_sl_rescue_protected(symbol) else ""
             initial_active_positions.append(
                 f"{symbol}: {pos['side']} {pos['size']:.4f} @ {pos['price']:.8f} "
                 f"(총: {pos.get('total_entry_count', 0)}/10, "
                 f"일반: {pos.get('normal_entry_count', 0)}/5, "
-                f"프리미엄: {pos.get('premium_entry_count', 0)}/5)"
+                f"프리미엄: {pos.get('premium_entry_count', 0)}/5, "
+                f"직전비율: {pos.get('last_entry_ratio', 0)}%) {protection_status}"
             )
     
     log_debug("📊 초기 활성 포지션", 
@@ -977,8 +1155,8 @@ if __name__ == "__main__":
         log_debug("  └", pos_info)
     
     # 백그라운드 스레드 시작
-    for target_func, name in [(position_monitor, "IndependentPyramidingMonitor"), 
-                              (lambda: asyncio.run(price_monitor()), "PriceMonitor")]:
+    for target_func, name in [(position_monitor, "HalfRatioProtectionMonitor"), 
+                              (lambda: asyncio.run(price_monitor()), "ProtectedPriceMonitor")]:
         threading.Thread(target=target_func, daemon=True, name=name).start()
     
     # 워커 스레드 시작
@@ -988,6 +1166,6 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹 서버 시작", f"Flask 서버 0.0.0.0:{port}에서 실행 중")
-    log_debug("✅ 준비 완료", "Pine Script v6.12 독립적 피라미딩 + 3분 RSI 시스템 대기중")
+    log_debug("✅ 준비 완료", "Pine Script v6.14 절반비율 + SL보호 + SL-Rescue 알림기반 시스템 대기중")
     
     app.run(host="0.0.0.0", port=port, debug=False)
