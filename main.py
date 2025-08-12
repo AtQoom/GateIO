@@ -766,8 +766,8 @@ def status():
             },
             "max_sl_rescue_per_position": 3,
             # 🔥 절반으로 줄인 진입비율
-            "half_entry_ratios": [5.0, 10.0, 25.0, 60.0, 200.0],
-            "previous_entry_ratios": [10.0, 20.0, 50.0, 120.0, 400.0],
+            "half_entry_ratios": [10.0, 20.0, 50.0, 120.0, 400.0],
+            "previous_entry_ratios": [20.0, 40.0, 100.0, 240.0, 800.0],
             "reduction_ratio": "50% (절반)",
             # 🔥 SL-Rescue 보호 시스템
             "sl_rescue_protection_system": {
