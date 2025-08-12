@@ -946,7 +946,7 @@ def handle_entry_with_protection(data):
     rsi_3m = data.get("rsi_3m", 0)
     rsi_15s = data.get("rsi_15s", 0)
     
-    # 🔥 SL-Rescue 보호 정보
+    # SL-Rescue 보호 정보
     sl_protection_requested = data.get("sl_rescue_protection", False)
     
     log_debug("🚀 v6.14 진입 처리 (절반비율+SL보호+SL-Rescue알림)", 
@@ -959,12 +959,12 @@ def handle_entry_with_protection(data):
     if not symbol or symbol not in SYMBOL_CONFIG:
         return
 
-    # 🔥 SL-Rescue 알림 기반 처리 + 보호 활성화
+    # SL-Rescue 알림 기반 처리 + 보호 활성화
     if signal_type == "sl_rescue" or "SL_Rescue" in entry_type:
         log_debug(f"🚨 SL-Rescue 알림 처리 ({symbol})", 
                   f"TradingView 알림 기반 SL-Rescue 진입 (직전 진입 × 150%)")
         
-        # 🛡️ SL-Rescue 보호 강제 활성화
+        # SL-Rescue 보호 강제 활성화
         if sl_protection_requested:
             activate_sl_rescue_protection(symbol, 15)
 
@@ -988,8 +988,11 @@ def handle_entry_with_protection(data):
     if pine_avg_price and pine_avg_price > 0:
         position_state.setdefault(symbol, {})["pine_avg_price"] = Decimal(str(pine_avg_price))
 
-    # 반대 포지션 처리
+    # 🔥 수정: 반대 포지션만 청산, 같은 방향은 추가진입
     if current_pos_side and current_pos_side != desired_side:
+        # 반대 방향일 때만 청산
+        log_debug(f"🔄 반대방향 포지션 청산 ({symbol})", 
+                 f"기존: {current_pos_side} → 신규: {desired_side}")
         if not close_position(symbol, "reverse_entry"):
             return
         time.sleep(1)
@@ -997,6 +1000,10 @@ def handle_entry_with_protection(data):
         total_entry_count = 0
         normal_entry_count = 0
         premium_entry_count = 0
+    elif current_pos_side and current_pos_side == desired_side:
+        # 🔥 추가: 같은 방향일 때는 추가진입 로그
+        log_debug(f"➕ 같은방향 추가진입 ({symbol})", 
+                 f"기존 포지션: {current_pos_side}, 신규 알림: {desired_side} → 추가진입 실행")
 
     # 독립적 진입 제한 체크
     if total_entry_count >= 10:
@@ -1010,7 +1017,7 @@ def handle_entry_with_protection(data):
         log_debug(f"⚠️ 일반 최대 진입 도달 ({symbol})", f"일반 {normal_entry_count}/5")
         return
 
-    # 🔥 SL-Rescue는 TradingView 알림에서만 처리
+    # SL-Rescue는 TradingView 알림에서만 처리
     is_sl_rescue_signal = (signal_type == "sl_rescue")
     if is_sl_rescue_signal:
         sl_entry_count = position_state.get(symbol, {}).get("sl_entry_count", 0)
@@ -1020,12 +1027,26 @@ def handle_entry_with_protection(data):
         position_state[symbol]["sl_entry_count"] = sl_entry_count + 1
         log_debug(f"🚨 SL-Rescue 진입 승인 ({symbol})", f"알림 기반 SL-Rescue #{sl_entry_count + 1}/3")
     else:
-        if total_entry_count > 0:
+        # 🔥 수정: 같은 방향 추가진입은 가격조건 체크 완화 또는 생략
+        if total_entry_count > 0 and current_pos_side == desired_side:
+            # 같은 방향 추가진입은 가격조건을 더 관대하게 적용
             current_price = get_price(symbol)
             avg_price = position_state[symbol].get("pine_avg_price") or position_state[symbol]["price"]
-            if (current_pos_side == "buy" and current_price >= avg_price) or (current_pos_side == "sell" and current_price <= avg_price):
-                log_debug(f"⏭️ 가격조건 미충족 ({symbol})", f"현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
-                return
+            
+            # 🔥 수정: 같은 방향일 때 가격조건을 완화 (또는 생략)
+            price_condition_strict = (current_pos_side == "buy" and current_price >= avg_price * 1.05) or \
+                                   (current_pos_side == "sell" and current_price <= avg_price * 0.95)
+            
+            if price_condition_strict:
+                log_debug(f"💡 가격조건 완화 적용 ({symbol})", 
+                         f"같은방향 추가진입: 현재가 {current_price:.8f}, 평단가: {avg_price:.8f}")
+                # 같은 방향이므로 조건을 만족하는 것으로 처리
+            # else:
+                # 같은 방향 추가진입은 가격조건 무시하고 진행
+                # pass
+        elif total_entry_count > 0 and current_pos_side != desired_side:
+            # 반대 방향은 기존 로직 적용 (이미 청산됨)
+            pass
 
     # Pine Script TP/SL 값 저장
     pine_tp = data.get("tp_pct", 0.5) / 100
@@ -1042,15 +1063,15 @@ def handle_entry_with_protection(data):
     else:
         current_signal_count = normal_entry_count
 
-    # 🔥 수정된 수량 계산 (절반 비율)
+    # 수정된 수량 계산 (절반 비율)
     qty = calculate_position_size(symbol, signal_type, get_time_based_multiplier(), entry_score, current_signal_count)
     if qty <= 0:
         return
     
-    # 🔥 SL-Rescue 직전 진입 비율 × 150% 처리
+    # SL-Rescue 직전 진입 비율 × 150% 처리
     final_position_ratio = Decimal("0")
     if signal_type == "sl_rescue":
-        last_entry_ratio = position_state.get(symbol, {}).get('last_entry_ratio', Decimal("5.0"))  # 🔥 절반 비율 기본값
+        last_entry_ratio = position_state.get(symbol, {}).get('last_entry_ratio', Decimal("5.0"))
         if last_entry_ratio > 0:
             # 직전 진입 비율 × 150%로 재계산
             equity = get_total_collateral()
@@ -1067,7 +1088,11 @@ def handle_entry_with_protection(data):
         multiplier_info = "140%" if signal_type == "premium_3m_rsi" else "150% (직전×1.5)" if signal_type == "sl_rescue" else "70%"
         new_total = total_entry_count + 1
         protection_status = "🛡️보호중" if is_sl_rescue_protected(symbol) else ""
-        log_debug(f"✅ v6.14 절반비율 진입 성공 ({symbol})", 
+        
+        # 🔥 추가: 진입 타입 구분 로깅
+        entry_action = "첫진입" if total_entry_count == 0 else "추가진입" if current_pos_side == desired_side else "역전진입"
+        
+        log_debug(f"✅ v6.14 {entry_action} 성공 ({symbol})", 
                   f"{desired_side.upper()} {float(qty)} 계약 (총 #{new_total}/10, "
                   f"신호: {signal_type}, 수량배수: {multiplier_info}, 점수: {entry_score}점) {protection_status}")
     else:
