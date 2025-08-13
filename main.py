@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.15 - 최종 완성 버전 (동적 슬리피지 적용)
-- 고정 비율 슬리피지 문제를 해결하기 위해 '비율'과 '틱' 기반의 동적 허용치 로직 적용
-- 이전 모든 기능 완벽 포함
+Gate.io 자동매매 서버 v6.15 - 최종 완성 버전 (슬리피지 로직 최종 개선)
+- 슬리피지 허용치를 '10틱 또는 0.05% 중 더 큰 값'으로 적용
+- TP는 슬리피지 연동형으로 유지
 """
 
 import os
@@ -49,9 +49,9 @@ unified_api = UnifiedApi(client)
 # 3. 상수 및 설정
 # ========================================
 COOLDOWN_SECONDS = 14
-# 변경: 고정 비율 한도와 '틱' 기반 한도를 함께 설정
-PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0002") # 0.02%
-MAX_SLIPPAGE_TICKS = 5 # 최대 5틱의 슬리피지 허용
+# 변경: 슬리피지 비율을 0.05%로 상향
+PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0005") # 0.05%
+MAX_SLIPPAGE_TICKS = 10
 
 KST = pytz.timezone('Asia/Seoul')
 SYMBOL_MAPPING = {
@@ -70,7 +70,6 @@ PRICE_MULTIPLIERS = {
     "PEPE_USDT": Decimal("100000000.0"),
     "SHIB_USDT": Decimal("1000000.0")
 }
-# 변경: 각 코인별 최소 호가 단위(tick_size) 추가
 SYMBOL_CONFIG = {
     "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55, "tick_size": Decimal("0.1")},
     "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65, "tick_size": Decimal("0.01")},
@@ -147,21 +146,30 @@ def get_entry_weight_from_score(score):
     except Exception: return Decimal("0.25")
 
 # ========================================
-# 7. TP/SL 저장 및 관리
+# 7. TP/SL 및 슬리피지 저장/관리
 # ========================================
-def store_tp_sl(symbol, tp, sl, entry_number):
-    with tpsl_lock: tpsl_storage.setdefault(symbol, {})[entry_number] = {"tp": tp, "sl": sl, "entry_time": time.time()}
+def store_tp_sl(symbol, tp, sl, slippage_pct, entry_number):
+    with tpsl_lock: 
+        tpsl_storage.setdefault(symbol, {})[entry_number] = {
+            "tp": tp, 
+            "sl": sl, 
+            "entry_slippage_pct": slippage_pct,
+            "entry_time": time.time()
+        }
 
 def get_tp_sl(symbol, entry_number=None):
     with tpsl_lock:
         if symbol in tpsl_storage:
-            if entry_number and entry_number in tpsl_storage[symbol]: return tpsl_storage[symbol][entry_number].values()
-            elif tpsl_storage[symbol]: return tpsl_storage[symbol][max(tpsl_storage[symbol].keys())].values()
+            if entry_number and entry_number in tpsl_storage[symbol]: 
+                return tpsl_storage[symbol][entry_number].values()
+            elif tpsl_storage[symbol]: 
+                return tpsl_storage[symbol][max(tpsl_storage[symbol].keys())].values()
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
-    return Decimal("0.005") * Decimal(str(cfg["tp_mult"])), Decimal("0.04") * Decimal(str(cfg["sl_mult"])), time.time()
+    return Decimal("0.005") * Decimal(str(cfg["tp_mult"])), Decimal("0.04") * Decimal(str(cfg["sl_mult"])), Decimal("0"), time.time()
 
 # ========================================
 # 8. 중복 신호 체크
+# ... (이하 코드 변경 없음)
 # ========================================
 def is_duplicate(data):
     with signal_lock:
@@ -174,6 +182,7 @@ def is_duplicate(data):
 
 # ========================================
 # 9. 수량 계산
+# ... (이하 코드 변경 없음)
 # ========================================
 def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_count=0):
     cfg, equity, price = SYMBOL_CONFIG[symbol], get_total_collateral(), get_price(symbol)
@@ -193,6 +202,7 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
 
 # ========================================
 # 10. 포지션 상태 관리
+# ... (이하 코드 변경 없음)
 # ========================================
 def update_position_state(symbol):
     with position_lock:
@@ -219,6 +229,7 @@ def update_position_state(symbol):
 
 # ========================================
 # 11. 주문 실행
+# ... (이하 코드 변경 없음)
 # ========================================
 def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0")):
     with position_lock:
@@ -246,6 +257,7 @@ def close_position(symbol, reason="manual"):
 
 # ========================================
 # 12. 웹훅 라우트 및 관리용 API
+# ... (이하 코드 변경 없음)
 # ========================================
 @app.route("/ping", methods=["GET", "HEAD"])
 def ping():
@@ -267,7 +279,7 @@ def status():
                     "last_entry_ratio": float(pos.get('last_entry_ratio', Decimal("0"))),
                 }
         return jsonify({
-            "status": "running", "version": "v6.15_final_dynamic_slippage",
+            "status": "running", "version": "v6.15_final_max_slippage",
             "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": positions,
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
@@ -298,7 +310,8 @@ def webhook():
         return jsonify({"error": str(e)}), 500
 
 # ========================================
-# 13. 웹소켓 모니터링 (동적 SL 감쇠 포함)
+# 13. 웹소켓 모니터링 (슬리피지 연동형 TP 적용)
+# ... (이하 코드 변경 없음)
 # ========================================
 async def price_monitor():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
@@ -333,8 +346,10 @@ def check_tp_sl(ticker):
             tp_mult = Decimal(str(cfg["tp_mult"]))
             sl_mult = Decimal(str(cfg["sl_mult"]))
             
-            original_tp, original_sl, entry_start_time = get_tp_sl(symbol, entry_count)
+            original_tp, original_sl, entry_slippage_pct, entry_start_time = get_tp_sl(symbol, entry_count)
             if not entry_start_time: return
+            
+            compensated_tp = original_tp - entry_slippage_pct
             
             time_elapsed = time.time() - entry_start_time
             periods_15s = int(time_elapsed / 15) if (entry_start_time and time_elapsed > 0) else 0
@@ -343,7 +358,7 @@ def check_tp_sl(ticker):
             tp_decay_amt = Decimal("0.00002")
             tp_min_pct = Decimal("0.0012")
             tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt * tp_mult)
-            adjusted_tp = max(tp_min_pct * tp_mult, original_tp - tp_reduction)
+            adjusted_tp = max(tp_min_pct * tp_mult, compensated_tp - tp_reduction)
             tp_price = entry_price * (1 + adjusted_tp) if side == "buy" else entry_price * (1 - adjusted_tp)
 
             # 동적 SL 계산
@@ -355,7 +370,7 @@ def check_tp_sl(ticker):
 
             # 청산 실행
             if (side == "buy" and price >= tp_price) or (side == "sell" and price <= tp_price):
-                log_debug(f"🎯 TP 트리거 ({symbol})", f"현재가: {price:.8f}, 동적TP가: {tp_price:.8f}")
+                log_debug(f"🎯 TP 트리거 ({symbol})", f"현재가: {price:.8f}, 동적TP가: {tp_price:.8f} (Slippage Comp: {-entry_slippage_pct:.4%})")
                 close_position(symbol, "TP")
             elif (side == "buy" and price <= sl_price) or (side == "sell" and price >= sl_price):
                 log_debug(f"🛑 SL 트리거 ({symbol})", f"현재가: {price:.8f}, 동적SL가: {sl_price:.8f}")
@@ -365,7 +380,7 @@ def check_tp_sl(ticker):
         log_debug(f"❌ TP/SL 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
 
 # ========================================
-# 14. 워커 스레드 및 진입 처리 (동적 슬리피지 적용)
+# 14. 워커 스레드 및 진입 처리 (최종 슬리피지 로직 적용)
 # ========================================
 def worker(idx):
     while True:
@@ -394,7 +409,7 @@ def handle_entry(data):
         log_debug(f"⚠️ 진입 취소 ({symbol})", "알 수 없는 심볼입니다.")
         return
 
-    # 변경: 동적 슬리피지 보호 로직
+    # 변경: 최종 슬리피지 보호 로직 (max 방식)
     current_price = get_price(symbol)
     price_multiplier = PRICE_MULTIPLIERS.get(symbol, Decimal("1.0"))
     signal_price = Decimal(str(signal_price_raw)) / price_multiplier
@@ -402,8 +417,9 @@ def handle_entry(data):
     if current_price <= 0 or signal_price <= 0: return
         
     price_diff = abs(current_price - signal_price)
+    price_diff_pct = price_diff / signal_price if signal_price > 0 else Decimal("0")
     
-    # 허용치 계산
+    # 허용치 계산 (max(A, B) 방식)
     allowed_slippage_by_pct = signal_price * PRICE_DEVIATION_LIMIT_PCT
     allowed_slippage_by_ticks = Decimal(str(MAX_SLIPPAGE_TICKS)) * cfg['tick_size']
     max_allowed_slippage = max(allowed_slippage_by_pct, allowed_slippage_by_ticks)
@@ -452,12 +468,13 @@ def handle_entry(data):
     if qty > 0:
         if place_order(symbol, desired_side, qty, signal_type, final_position_ratio):
             log_debug(f"✅ {entry_action} 성공 ({symbol})", f"{desired_side.upper()} {float(qty)} 계약 (총 #{pos.get('entry_count',0)+1}/10)")
-            store_tp_sl(symbol, tp_pct, sl_pct, pos.get("entry_count", 0) + 1)
+            store_tp_sl(symbol, tp_pct, sl_pct, price_diff_pct, pos.get("entry_count", 0) + 1)
         else:
             log_debug(f"❌ {entry_action} 실패 ({symbol})", f"{desired_side.upper()} 주문 실행 중 오류 발생")
 
 # ========================================
 # 15. 포지션 모니터링 및 메인 실행
+# ... (이하 코드 변경 없음)
 # ========================================
 def position_monitor():
     while True:
@@ -498,10 +515,10 @@ def position_monitor():
             log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.15 (Final with Dynamic Slippage)")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.15 (Final with Max Slippage)")
     log_debug("📊 현재 설정", f"감시 심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초, 워커: {WORKER_COUNT}개")
     log_debug("🎯 전략 핵심", "독립 피라미딩 + 점수 기반 가중치 + 동적 TP/SL + 레스큐 진입")
-    log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱), 추가 진입 시 평단가 비교")
+    log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱 중 큰 값), TP 슬리피지 연동")
     
     equity = get_total_collateral(force=True)
     log_debug("💰 초기 자산 확인", f"{equity:.2f} USDT" if equity > 0 else "자산 조회 실패")
