@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.15 - 최종 완성 버전 (모든 기능 복원)
-- 서버 시작 시 상세 로깅 기능 복원
-- 포지션 모니터링 상세화
-- 워커 시스템 포함 및 이전 모든 기능 완벽 통합
+Gate.io 자동매매 서버 v6.15 - 최종 완성 버전 (동적 슬리피지 적용)
+- 고정 비율 슬리피지 문제를 해결하기 위해 '비율'과 '틱' 기반의 동적 허용치 로직 적용
+- 이전 모든 기능 완벽 포함
 """
 
 import os
@@ -50,7 +49,9 @@ unified_api = UnifiedApi(client)
 # 3. 상수 및 설정
 # ========================================
 COOLDOWN_SECONDS = 14
-PRICE_DEVIATION_LIMIT = Decimal("0.0002") # 0.02%
+# 변경: 고정 비율 한도와 '틱' 기반 한도를 함께 설정
+PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0002") # 0.02%
+MAX_SLIPPAGE_TICKS = 5 # 최대 5틱의 슬리피지 허용
 
 KST = pytz.timezone('Asia/Seoul')
 SYMBOL_MAPPING = {
@@ -69,17 +70,18 @@ PRICE_MULTIPLIERS = {
     "PEPE_USDT": Decimal("100000000.0"),
     "SHIB_USDT": Decimal("1000000.0")
 }
+# 변경: 각 코인별 최소 호가 단위(tick_size) 추가
 SYMBOL_CONFIG = {
-    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55},
-    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65},
-    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 0.8, "sl_mult": 0.8},
-    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
-    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
-    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
-    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2},
-    "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
-    "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2},
-    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0},
+    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55, "tick_size": Decimal("0.1")},
+    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65, "tick_size": Decimal("0.01")},
+    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 0.8, "sl_mult": 0.8, "tick_size": Decimal("0.001")},
+    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")},
+    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.001")},
+    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.001")},
+    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00000001")},
+    "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")},
+    "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00001")},
+    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")},
 }
 
 # ========================================
@@ -265,7 +267,7 @@ def status():
                     "last_entry_ratio": float(pos.get('last_entry_ratio', Decimal("0"))),
                 }
         return jsonify({
-            "status": "running", "version": "v6.15_final_restored",
+            "status": "running", "version": "v6.15_final_dynamic_slippage",
             "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": positions,
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
@@ -363,7 +365,7 @@ def check_tp_sl(ticker):
         log_debug(f"❌ TP/SL 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
 
 # ========================================
-# 14. 워커 스레드 및 진입 처리 (모든 필터 적용)
+# 14. 워커 스레드 및 진입 처리 (동적 슬리피지 적용)
 # ========================================
 def worker(idx):
     while True:
@@ -386,15 +388,29 @@ def handle_entry(data):
     symbol = normalize_symbol(symbol_raw)
 
     if not symbol or not signal_price_raw: return
+    
+    cfg = SYMBOL_CONFIG.get(symbol)
+    if not cfg:
+        log_debug(f"⚠️ 진입 취소 ({symbol})", "알 수 없는 심볼입니다.")
+        return
 
-    # 슬리피지 보호
+    # 변경: 동적 슬리피지 보호 로직
     current_price = get_price(symbol)
     price_multiplier = PRICE_MULTIPLIERS.get(symbol, Decimal("1.0"))
     signal_price = Decimal(str(signal_price_raw)) / price_multiplier
+    
     if current_price <= 0 or signal_price <= 0: return
-    price_diff_pct = abs(current_price - signal_price) / signal_price
-    if price_diff_pct > PRICE_DEVIATION_LIMIT:
-        log_debug(f"⚠️ 진입 취소: 슬리피지 초과 ({symbol})", f"신호가: {signal_price:.8f}, 현재가: {current_price:.8f}, 차이: {price_diff_pct:.4%}")
+        
+    price_diff = abs(current_price - signal_price)
+    
+    # 허용치 계산
+    allowed_slippage_by_pct = signal_price * PRICE_DEVIATION_LIMIT_PCT
+    allowed_slippage_by_ticks = Decimal(str(MAX_SLIPPAGE_TICKS)) * cfg['tick_size']
+    max_allowed_slippage = max(allowed_slippage_by_pct, allowed_slippage_by_ticks)
+    
+    if price_diff > max_allowed_slippage:
+        log_debug(f"⚠️ 진입 취소: 슬리피지 초과 ({symbol})", 
+                  f"신호가: {signal_price:.8f}, 현재가: {current_price:.8f}, 실제차이: {price_diff:.8f}, 허용치: {max_allowed_slippage:.8f}")
         return
 
     update_position_state(symbol)
@@ -428,9 +444,9 @@ def handle_entry(data):
     if "rescue" in signal_type:
         last_ratio = pos.get('last_entry_ratio', Decimal("5.0"))
         if last_ratio > 0:
-            equity, contract_val = get_total_collateral(), get_price(symbol) * SYMBOL_CONFIG[symbol]["contract_size"]
+            equity, contract_val = get_total_collateral(), get_price(symbol) * cfg["contract_size"]
             rescue_ratio = last_ratio * Decimal("1.5")
-            qty = max((equity * rescue_ratio / 100 / contract_val).quantize(Decimal('1'), rounding=ROUND_DOWN), SYMBOL_CONFIG[symbol]["min_qty"])
+            qty = max((equity * rescue_ratio / 100 / contract_val).quantize(Decimal('1'), rounding=ROUND_DOWN), cfg["min_qty"])
             final_position_ratio = rescue_ratio
     
     if qty > 0:
@@ -482,28 +498,21 @@ def position_monitor():
             log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
 if __name__ == "__main__":
-    # 복원: 상세한 시작 로그
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.15 (Final Restored Version)")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.15 (Final with Dynamic Slippage)")
     log_debug("📊 현재 설정", f"감시 심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초, 워커: {WORKER_COUNT}개")
     log_debug("🎯 전략 핵심", "독립 피라미딩 + 점수 기반 가중치 + 동적 TP/SL + 레스큐 진입")
-    log_debug("🛡️ 안전장치", f"슬리피지 보호: {PRICE_DEVIATION_LIMIT:.2%}, 추가 진입 시 평단가 비교")
+    log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱), 추가 진입 시 평단가 비교")
     
-    # 복원: 초기 자산 확인
     equity = get_total_collateral(force=True)
     log_debug("💰 초기 자산 확인", f"{equity:.2f} USDT" if equity > 0 else "자산 조회 실패")
     
-    # 복원: 초기 활성 포지션 확인
     initial_active_positions = []
     for symbol in SYMBOL_CONFIG:
         update_position_state(symbol)
         pos = position_state.get(symbol, {})
         if pos.get("side"):
-            pyramid_info = (f"총:{pos.get('entry_count', 0)}/10, "
-                           f"일반:{pos.get('normal_entry_count', 0)}/5, "
-                           f"프리미엄:{pos.get('premium_entry_count', 0)}/5, "
-                           f"레스큐:{pos.get('rescue_entry_count', 0)}/3")
             initial_active_positions.append(
-                f"{symbol}: {pos['side']} {pos['size']:.4f} @ {pos['price']:.8f} ({pyramid_info})"
+                f"{symbol}: {pos['side']} {pos['size']:.4f} @ {pos['price']:.8f}"
             )
     
     log_debug("📊 초기 활성 포지션", 
@@ -511,11 +520,9 @@ if __name__ == "__main__":
     for pos_info in initial_active_positions:
         log_debug("  └", pos_info)
     
-    # 백그라운드 스레드 시작
     threading.Thread(target=position_monitor, daemon=True).start()
     threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
     
-    # 워커 스레드 시작
     for i in range(WORKER_COUNT):
         threading.Thread(target=worker, args=(i,), daemon=True).start()
     
