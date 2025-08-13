@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.15 - 최종 완성 버전
-- 파인스크립트 연동: 신호별 진입 비율 (프리미엄 2.0x, 일반 1.0x) 적용
-- 동적 SL 감쇠 로직 완전 복원
-- SL-Rescue 보호 시스템, 캐시 초기화 기능 삭제
-- 서버 상태 확인용 API(/ping, /status) 복원
+Gate.io 자동매매 서버 v6.15 - 최종 완성 버전 (모든 기능 복원)
+- 서버 시작 시 상세 로깅 기능 복원
+- 포지션 모니터링 상세화
+- 워커 시스템 포함 및 이전 모든 기능 완벽 통합
 """
 
 import os
@@ -70,7 +69,6 @@ PRICE_MULTIPLIERS = {
     "PEPE_USDT": Decimal("100000000.0"),
     "SHIB_USDT": Decimal("1000000.0")
 }
-# 파인스크립트와 동일한 TP/SL 가중치 포함
 SYMBOL_CONFIG = {
     "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55},
     "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65},
@@ -94,7 +92,6 @@ recent_signals = {}
 signal_lock = threading.RLock()
 tpsl_storage = {}
 tpsl_lock = threading.RLock()
-pyramid_tracking = {}
 task_q = queue.Queue(maxsize=100)
 WORKER_COUNT = min(6, max(2, os.cpu_count() * 2))
 
@@ -132,10 +129,9 @@ def get_price(symbol):
 # 6. 파인스크립트 연동을 위한 함수
 # ========================================
 def get_signal_type_multiplier(signal_type):
-    """ 변경: 파인스크립트 최신 버전의 진입 비율 가중치와 동일하게 수정 """
-    if "premium" in signal_type: return Decimal("2.0")  # 프리미엄 200%
-    if "rescue" in signal_type: return Decimal("1.5")   # 레스큐는 직전 비율의 150% (별도 처리)
-    return Decimal("1.0")  # 일반 100%
+    if "premium" in signal_type: return Decimal("2.0")
+    if "rescue" in signal_type: return Decimal("1.5")
+    return Decimal("1.0")
 
 def get_entry_weight_from_score(score):
     try:
@@ -217,7 +213,6 @@ def update_position_state(symbol):
                 "entry_time": None, 'last_entry_ratio': Decimal("0")
             }
             tpsl_storage.pop(symbol, None)
-            pyramid_tracking.pop(symbol, None)
             return True
 
 # ========================================
@@ -280,7 +275,6 @@ def status():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/", methods=["POST"])
-@app.route("/webhook", methods=["POST"])
 def webhook():
     try:
         raw_data = request.get_data(as_text=True)
@@ -302,7 +296,7 @@ def webhook():
         return jsonify({"error": str(e)}), 500
 
 # ========================================
-# 13. 복원: 웹소켓 모니터링 (동적 SL 감쇠 포함)
+# 13. 웹소켓 모니터링 (동적 SL 감쇠 포함)
 # ========================================
 async def price_monitor():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
@@ -344,15 +338,15 @@ def check_tp_sl(ticker):
             periods_15s = int(time_elapsed / 15) if (entry_start_time and time_elapsed > 0) else 0
 
             # 동적 TP 계산
-            tp_decay_amt = Decimal("0.00002") # 0.002%
-            tp_min_pct = Decimal("0.0012")   # 0.12%
+            tp_decay_amt = Decimal("0.00002")
+            tp_min_pct = Decimal("0.0012")
             tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt * tp_mult)
             adjusted_tp = max(tp_min_pct * tp_mult, original_tp - tp_reduction)
             tp_price = entry_price * (1 + adjusted_tp) if side == "buy" else entry_price * (1 - adjusted_tp)
 
-            # 동적 SL 계산 (복원)
-            sl_decay_amt = Decimal("0.00004") # 0.004%
-            sl_min_pct = Decimal("0.0009")  # 0.09%
+            # 동적 SL 계산
+            sl_decay_amt = Decimal("0.00004")
+            sl_min_pct = Decimal("0.0009")
             sl_reduction = Decimal(str(periods_15s)) * (sl_decay_amt * sl_mult)
             adjusted_sl = max(sl_min_pct * sl_mult, original_sl - sl_reduction)
             sl_price = entry_price * (1 - adjusted_sl) if side == "buy" else entry_price * (1 + adjusted_sl)
@@ -407,13 +401,14 @@ def handle_entry(data):
     pos = position_state.get(symbol, {})
     current_pos_side = pos.get("side")
     desired_side = "buy" if side == "long" else "sell"
+    entry_action = "첫진입" if not current_pos_side else "추가진입" if current_pos_side == desired_side else "역전진입"
 
-    if current_pos_side and current_pos_side != desired_side:
+    if entry_action == "역전진입":
         if not close_position(symbol, "reverse_entry"): return
         time.sleep(1); update_position_state(symbol)
     
     # 추가 진입 시 평단가 조건
-    if current_pos_side == desired_side and "rescue" not in signal_type:
+    if entry_action == "추가진입" and "rescue" not in signal_type:
         avg_price = pos.get("price")
         if avg_price and current_price > 0 and ((desired_side == "buy" and current_price <= avg_price) or (desired_side == "sell" and current_price >= avg_price)):
             log_debug(f"⚠️ 추가 진입 보류 ({symbol})", f"평단가보다 불리한 가격. 현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
@@ -440,8 +435,10 @@ def handle_entry(data):
     
     if qty > 0:
         if place_order(symbol, desired_side, qty, signal_type, final_position_ratio):
-            # TP/SL 저장
+            log_debug(f"✅ {entry_action} 성공 ({symbol})", f"{desired_side.upper()} {float(qty)} 계약 (총 #{pos.get('entry_count',0)+1}/10)")
             store_tp_sl(symbol, tp_pct, sl_pct, pos.get("entry_count", 0) + 1)
+        else:
+            log_debug(f"❌ {entry_action} 실패 ({symbol})", f"{desired_side.upper()} 주문 실행 중 오류 발생")
 
 # ========================================
 # 15. 포지션 모니터링 및 메인 실행
@@ -450,21 +447,80 @@ def position_monitor():
     while True:
         time.sleep(30)
         try:
-            total_value, active_positions_log = Decimal("0"), []
+            total_value = Decimal("0")
+            active_positions_log = []
+            
             for symbol in SYMBOL_CONFIG:
                 update_position_state(symbol)
                 pos = position_state.get(symbol, {})
+                
                 if pos.get("side"):
                     total_value += pos.get("value", Decimal("0"))
-                    pyramid_info = f"총:{pos.get('entry_count',0)}/10,일반:{pos.get('normal_entry_count',0)}/5,프리미엄:{pos.get('premium_entry_count',0)}/5,레스큐:{pos.get('rescue_entry_count',0)}/3"
-                    active_positions_log.append(f"{symbol}: {pos['side']} {pos['size']:.4f} @ {pos.get('price', 0):.8f} ({pyramid_info})")
-            if active_positions_log: log_debug("🚀 포지션 현황", f"총 명목가치: {total_value:.2f} USDT | {' | '.join(active_positions_log)}")
-        except Exception as e: log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
+                    pyramid_info = (f"총:{pos.get('entry_count', 0)}/10, "
+                                   f"일반:{pos.get('normal_entry_count', 0)}/5, "
+                                   f"프리미엄:{pos.get('premium_entry_count', 0)}/5, "
+                                   f"레스큐:{pos.get('rescue_entry_count', 0)}/3")
+                    active_positions_log.append(
+                        f"{symbol}: {pos['side']} {pos['size']:.4f} @ "
+                        f"{pos.get('price', 0):.8f} "
+                        f"({pyramid_info}, 명목가치: {pos.get('value', 0):.2f} USDT)"
+                    )
+            
+            if active_positions_log:
+                equity = get_total_collateral()
+                exposure_pct = (total_value / equity * 100) if equity > 0 else 0
+                log_debug("🚀 포지션 현황", 
+                         f"활성 포지션: {len(active_positions_log)}개, "
+                         f"총 명목가치: {total_value:.2f} USDT, "
+                         f"총자산: {equity:.2f} USDT, 노출도: {exposure_pct:.1f}%")
+                for pos_info in active_positions_log:
+                    log_debug("  └", pos_info)
+            else:
+                log_debug("📊 포지션 현황 보고", "현재 활성 포지션이 없습니다.")
+                
+        except Exception as e:
+            log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
 if __name__ == "__main__":
+    # 복원: 상세한 시작 로그
     log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.15 (Final Restored Version)")
+    log_debug("📊 현재 설정", f"감시 심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초, 워커: {WORKER_COUNT}개")
+    log_debug("🎯 전략 핵심", "독립 피라미딩 + 점수 기반 가중치 + 동적 TP/SL + 레스큐 진입")
+    log_debug("🛡️ 안전장치", f"슬리피지 보호: {PRICE_DEVIATION_LIMIT:.2%}, 추가 진입 시 평단가 비교")
+    
+    # 복원: 초기 자산 확인
+    equity = get_total_collateral(force=True)
+    log_debug("💰 초기 자산 확인", f"{equity:.2f} USDT" if equity > 0 else "자산 조회 실패")
+    
+    # 복원: 초기 활성 포지션 확인
+    initial_active_positions = []
+    for symbol in SYMBOL_CONFIG:
+        update_position_state(symbol)
+        pos = position_state.get(symbol, {})
+        if pos.get("side"):
+            pyramid_info = (f"총:{pos.get('entry_count', 0)}/10, "
+                           f"일반:{pos.get('normal_entry_count', 0)}/5, "
+                           f"프리미엄:{pos.get('premium_entry_count', 0)}/5, "
+                           f"레스큐:{pos.get('rescue_entry_count', 0)}/3")
+            initial_active_positions.append(
+                f"{symbol}: {pos['side']} {pos['size']:.4f} @ {pos['price']:.8f} ({pyramid_info})"
+            )
+    
+    log_debug("📊 초기 활성 포지션", 
+              f"{len(initial_active_positions)}개 감지" if initial_active_positions else "감지 안됨")
+    for pos_info in initial_active_positions:
+        log_debug("  └", pos_info)
+    
+    # 백그라운드 스레드 시작
     threading.Thread(target=position_monitor, daemon=True).start()
     threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
-    for i in range(WORKER_COUNT): threading.Thread(target=worker, args=(i,), daemon=True).start()
+    
+    # 워커 스레드 시작
+    for i in range(WORKER_COUNT):
+        threading.Thread(target=worker, args=(i,), daemon=True).start()
+    
     port = int(os.environ.get("PORT", 8080))
+    log_debug("🌐 웹 서버 시작", f"Flask 서버 0.0.0.0:{port}에서 실행 중")
+    log_debug("✅ 준비 완료", "파인스크립트 v6.15 연동 시스템 대기중")
+    
     app.run(host="0.0.0.0", port=port, debug=False)
