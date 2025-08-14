@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.15 - 최종 완성 버전 (슬리피지 로직 최종 개선)
-- 슬리피지 허용치를 '10틱 또는 0.05% 중 더 큰 값'으로 적용
+Gate.io 자동매매 서버 v6.15 - 최종 완성 버전 (서버 SL 기능 완전 제거)
+- 서버의 독립적인 SL 청산 로직을 완전히 제거하고, TP 청산만 감시
+- 슬리피지 허용치는 '10틱 또는 0.05% 중 더 큰 값'으로 유지
 - TP는 슬리피지 연동형으로 유지
 """
 
@@ -24,6 +25,7 @@ import urllib.parse
 
 # ========================================
 # 1. 로깅 설정
+# ... (변경 없음)
 # ========================================
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
@@ -35,6 +37,7 @@ def log_debug(tag, msg, exc_info=False):
 
 # ========================================
 # 2. Flask 앱 및 API 설정
+# ... (변경 없음)
 # ========================================
 app = Flask(__name__)
 API_KEY = os.environ.get("API_KEY", "")
@@ -47,9 +50,9 @@ unified_api = UnifiedApi(client)
 
 # ========================================
 # 3. 상수 및 설정
+# ... (변경 없음)
 # ========================================
 COOLDOWN_SECONDS = 14
-# 변경: 슬리피지 비율을 0.05%로 상향
 PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0005") # 0.05%
 MAX_SLIPPAGE_TICKS = 10
 
@@ -85,6 +88,7 @@ SYMBOL_CONFIG = {
 
 # ========================================
 # 4. 전역 변수 및 동기화 객체
+# ... (변경 없음)
 # ========================================
 position_state = {}
 position_lock = threading.RLock()
@@ -98,6 +102,7 @@ WORKER_COUNT = min(6, max(2, os.cpu_count() * 2))
 
 # ========================================
 # 5. 핵심 유틸리티 함수
+# ... (변경 없음)
 # ========================================
 def _get_api_response(api_call, *args, **kwargs):
     max_retries = 3
@@ -128,6 +133,7 @@ def get_price(symbol):
 
 # ========================================
 # 6. 파인스크립트 연동을 위한 함수
+# ... (변경 없음)
 # ========================================
 def get_signal_type_multiplier(signal_type):
     if "premium" in signal_type: return Decimal("2.0")
@@ -147,6 +153,7 @@ def get_entry_weight_from_score(score):
 
 # ========================================
 # 7. TP/SL 및 슬리피지 저장/관리
+# ... (변경 없음)
 # ========================================
 def store_tp_sl(symbol, tp, sl, slippage_pct, entry_number):
     with tpsl_lock: 
@@ -169,7 +176,7 @@ def get_tp_sl(symbol, entry_number=None):
 
 # ========================================
 # 8. 중복 신호 체크
-# ... (이하 코드 변경 없음)
+# ... (변경 없음)
 # ========================================
 def is_duplicate(data):
     with signal_lock:
@@ -182,7 +189,7 @@ def is_duplicate(data):
 
 # ========================================
 # 9. 수량 계산
-# ... (이하 코드 변경 없음)
+# ... (변경 없음)
 # ========================================
 def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_count=0):
     cfg, equity, price = SYMBOL_CONFIG[symbol], get_total_collateral(), get_price(symbol)
@@ -202,7 +209,7 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
 
 # ========================================
 # 10. 포지션 상태 관리
-# ... (이하 코드 변경 없음)
+# ... (변경 없음)
 # ========================================
 def update_position_state(symbol):
     with position_lock:
@@ -229,7 +236,7 @@ def update_position_state(symbol):
 
 # ========================================
 # 11. 주문 실행
-# ... (이하 코드 변경 없음)
+# ... (변경 없음)
 # ========================================
 def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0")):
     with position_lock:
@@ -257,7 +264,7 @@ def close_position(symbol, reason="manual"):
 
 # ========================================
 # 12. 웹훅 라우트 및 관리용 API
-# ... (이하 코드 변경 없음)
+# ... (변경 없음)
 # ========================================
 @app.route("/ping", methods=["GET", "HEAD"])
 def ping():
@@ -279,7 +286,7 @@ def status():
                     "last_entry_ratio": float(pos.get('last_entry_ratio', Decimal("0"))),
                 }
         return jsonify({
-            "status": "running", "version": "v6.15_final_max_slippage",
+            "status": "running", "version": "v6.15_final_tp_only",
             "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": positions,
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
@@ -310,8 +317,7 @@ def webhook():
         return jsonify({"error": str(e)}), 500
 
 # ========================================
-# 13. 웹소켓 모니터링 (슬리피지 연동형 TP 적용)
-# ... (이하 코드 변경 없음)
+# 13. 변경: 웹소켓 모니터링 (TP만 감시)
 # ========================================
 async def price_monitor():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
@@ -323,13 +329,14 @@ async def price_monitor():
                 while True:
                     msg = await asyncio.wait_for(ws.recv(), timeout=45)
                     result = json.loads(msg).get("result")
-                    if isinstance(result, list): [check_tp_sl(item) for item in result]
-                    elif isinstance(result, dict): check_tp_sl(result)
+                    if isinstance(result, list): [check_tp_only(item) for item in result]
+                    elif isinstance(result, dict): check_tp_only(result)
         except Exception as e:
             log_debug("🔌 웹소켓 연결 문제", f"재연결 시도... ({type(e).__name__})")
             await asyncio.sleep(5)
 
-def check_tp_sl(ticker):
+# 변경: SL 청산 로직을 제거하고 TP만 감시하도록 수정
+def check_tp_only(ticker):
     try:
         symbol, price = ticker.get("contract"), Decimal(str(ticker.get("last", "0")))
         if not symbol or symbol not in SYMBOL_CONFIG or price <= 0: return
@@ -344,11 +351,12 @@ def check_tp_sl(ticker):
             
             cfg = SYMBOL_CONFIG[symbol]
             tp_mult = Decimal(str(cfg["tp_mult"]))
-            sl_mult = Decimal(str(cfg["sl_mult"]))
             
-            original_tp, original_sl, entry_slippage_pct, entry_start_time = get_tp_sl(symbol, entry_count)
+            # 슬리피지 값을 함께 가져옴
+            original_tp, _, entry_slippage_pct, entry_start_time = get_tp_sl(symbol, entry_count)
             if not entry_start_time: return
             
+            # 슬리피지를 차감하여 TP 목표 보정
             compensated_tp = original_tp - entry_slippage_pct
             
             time_elapsed = time.time() - entry_start_time
@@ -361,26 +369,17 @@ def check_tp_sl(ticker):
             adjusted_tp = max(tp_min_pct * tp_mult, compensated_tp - tp_reduction)
             tp_price = entry_price * (1 + adjusted_tp) if side == "buy" else entry_price * (1 - adjusted_tp)
 
-            # 동적 SL 계산
-            sl_decay_amt = Decimal("0.00004")
-            sl_min_pct = Decimal("0.0009")
-            sl_reduction = Decimal(str(periods_15s)) * (sl_decay_amt * sl_mult)
-            adjusted_sl = max(sl_min_pct * sl_mult, original_sl - sl_reduction)
-            sl_price = entry_price * (1 - adjusted_sl) if side == "buy" else entry_price * (1 + adjusted_sl)
-
-            # 청산 실행
+            # 청산 실행 (TP만)
             if (side == "buy" and price >= tp_price) or (side == "sell" and price <= tp_price):
                 log_debug(f"🎯 TP 트리거 ({symbol})", f"현재가: {price:.8f}, 동적TP가: {tp_price:.8f} (Slippage Comp: {-entry_slippage_pct:.4%})")
                 close_position(symbol, "TP")
-            elif (side == "buy" and price <= sl_price) or (side == "sell" and price >= sl_price):
-                log_debug(f"🛑 SL 트리거 ({symbol})", f"현재가: {price:.8f}, 동적SL가: {sl_price:.8f}")
-                close_position(symbol, "SL")
                 
     except Exception as e:
-        log_debug(f"❌ TP/SL 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
+        log_debug(f"❌ TP 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
 
 # ========================================
-# 14. 워커 스레드 및 진입 처리 (최종 슬리피지 로직 적용)
+# 14. 워커 스레드 및 진입 처리
+# ... (변경 없음)
 # ========================================
 def worker(idx):
     while True:
@@ -409,7 +408,7 @@ def handle_entry(data):
         log_debug(f"⚠️ 진입 취소 ({symbol})", "알 수 없는 심볼입니다.")
         return
 
-    # 변경: 최종 슬리피지 보호 로직 (max 방식)
+    # 최종 슬리피지 보호 로직 (max 방식)
     current_price = get_price(symbol)
     price_multiplier = PRICE_MULTIPLIERS.get(symbol, Decimal("1.0"))
     signal_price = Decimal(str(signal_price_raw)) / price_multiplier
@@ -439,21 +438,18 @@ def handle_entry(data):
         if not close_position(symbol, "reverse_entry"): return
         time.sleep(1); update_position_state(symbol)
     
-    # 추가 진입 시 평단가 조건
     if entry_action == "추가진입" and "rescue" not in signal_type:
         avg_price = pos.get("price")
         if avg_price and current_price > 0 and ((desired_side == "buy" and current_price <= avg_price) or (desired_side == "sell" and current_price >= avg_price)):
             log_debug(f"⚠️ 추가 진입 보류 ({symbol})", f"평단가보다 불리한 가격. 현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
             return
 
-    # 피라미딩 제한
     pos = position_state.get(symbol, {})
     if pos.get("entry_count", 0) >= 10: return
     if "premium" in signal_type and pos.get("premium_entry_count", 0) >= 5: return
     if "normal" in signal_type and pos.get("normal_entry_count", 0) >= 5: return
     if "rescue" in signal_type and pos.get("rescue_entry_count", 0) >= 3: return
 
-    # 수량 계산
     current_signal_count = pos.get("premium_entry_count", 0) if "premium" in signal_type else pos.get("normal_entry_count", 0)
     qty = calculate_position_size(symbol, signal_type, entry_score, current_signal_count)
     final_position_ratio = Decimal("0")
@@ -474,7 +470,7 @@ def handle_entry(data):
 
 # ========================================
 # 15. 포지션 모니터링 및 메인 실행
-# ... (이하 코드 변경 없음)
+# ... (변경 없음)
 # ========================================
 def position_monitor():
     while True:
@@ -515,9 +511,9 @@ def position_monitor():
             log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.15 (Final with Max Slippage)")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.15 (Final TP-Only Version)")
     log_debug("📊 현재 설정", f"감시 심볼: {len(SYMBOL_CONFIG)}개, 쿨다운: {COOLDOWN_SECONDS}초, 워커: {WORKER_COUNT}개")
-    log_debug("🎯 전략 핵심", "독립 피라미딩 + 점수 기반 가중치 + 동적 TP/SL + 레스큐 진입")
+    log_debug("🎯 전략 핵심", "독립 피라미딩 + 점수 기반 가중치 + 슬리피지 연동형 동적 TP + 레스큐 진입")
     log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱 중 큰 값), TP 슬리피지 연동")
     
     equity = get_total_collateral(force=True)
