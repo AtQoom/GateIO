@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (초기 로그 복원)
-- 서버 시작 시, 초기 자산 및 활성 포지션 디버그 로그 출력 기능 복원
+Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (전체 자산 계산 수정)
+- 자산 계산 기준을 'available'에서 'total'로 변경하여 미실현 손익 완벽 반영
 - 양방향 모드 완벽 지원
 """
 
@@ -81,7 +81,7 @@ def initialize_states():
                 tpsl_storage[sym] = {"long": {}, "short": {}}
 
 # ========================================
-# 5. 핵심 유틸리티 함수 (변경 없음)
+# [수정] 5. 핵심 유틸리티 함수 (전체 자산 계산 방식 수정)
 # ========================================
 def _get_api_response(api_call, *args, **kwargs):
     max_retries = 3
@@ -100,7 +100,8 @@ def get_total_collateral(force=False):
     now = time.time()
     if not force and account_cache["time"] > now - 30 and account_cache["data"]: return account_cache["data"]
     acc = _get_api_response(api.list_futures_accounts, SETTLE)
-    equity = Decimal(str(getattr(acc, 'available', '0'))) if acc else Decimal("0")
+    # [수정] 'available'이 아닌 'total'을 사용하여 미실현 손익이 포함된 '전체 자산'을 가져옴
+    equity = Decimal(str(getattr(acc, 'total', '0'))) if acc else Decimal("0")
     account_cache.update({"time": now, "data": equity})
     return equity
 
@@ -108,6 +109,9 @@ def get_price(symbol):
     ticker = _get_api_response(api.list_futures_tickers, SETTLE, contract=symbol)
     if ticker and isinstance(ticker, list) and len(ticker) > 0: return Decimal(str(ticker[0].last))
     return Decimal("0")
+
+# 이하 코드는 변경 사항 없습니다.
+# ... (이전과 동일한 나머지 코드)
 
 # ========================================
 # 6. 파인스크립트 연동 함수 (변경 없음)
@@ -187,8 +191,7 @@ def update_all_position_states():
 
         api_pos_map = {}
         for pos_info in all_positions_from_api:
-            symbol = pos_info.contract
-            side = pos_info.mode
+            symbol, side = pos_info.contract, pos_info.mode
             if symbol not in api_pos_map: api_pos_map[symbol] = {}
             api_pos_map[symbol][side] = pos_info
 
@@ -267,8 +270,7 @@ def webhook():
     try:
         data = json.loads(request.get_data(as_text=True))
         action = data.get("action", "").lower()
-        symbol = normalize_symbol(data.get("symbol", ""))
-        side = data.get("side", "").lower()
+        symbol, side = normalize_symbol(data.get("symbol", "")), data.get("side", "").lower()
 
         if not symbol or not side: return jsonify({"error": "Invalid symbol or side"}), 400
         
@@ -276,14 +278,12 @@ def webhook():
             if is_duplicate(data): return jsonify({"status": "duplicate_ignored"}), 200
             task_q.put_nowait(data)
             return jsonify({"status": "queued"}), 200
-        
         elif action == "exit":
             reason = data.get("reason", "").upper()
             update_all_position_states()
             if position_state.get(symbol, {}).get(side, {}).get("size", Decimal(0)) > 0:
                 close_position(symbol, side, reason)
             return jsonify({"status": "exit_processed"}), 200
-            
         return jsonify({"error": "Invalid action"}), 400
     except Exception as e:
         log_debug("❌ 웹훅 처리 중 예외 발생", str(e), exc_info=True)
@@ -419,7 +419,7 @@ def handle_entry(data):
             log_debug(f"❌ {entry_action} 실패 ({symbol}_{side.upper()})", "주문 실행 중 오류 발생")
 
 # ========================================
-# [수정] 15. 포지션 모니터링 및 메인 실행 (초기 로그 추가)
+# 15. 포지션 모니터링 및 메인 실행 (변경 없음)
 # ========================================
 def position_monitor():
     while True:
@@ -458,7 +458,7 @@ if __name__ == "__main__":
 
     # [추가] 초기 자산 확인 로그
     equity = get_total_collateral(force=True)
-    log_debug("💰 초기 자산 확인", f"{equity:.2f} USDT" if equity > 0 else "자산 조회 실패")
+    log_debug("💰 초기 자산 확인", f"전체 자산: {equity:.2f} USDT" if equity > 0 else "자산 조회 실패")
 
     # [추가] 초기 상태 초기화 및 활성 포지션 확인 로그
     initialize_states()
@@ -473,8 +473,7 @@ if __name__ == "__main__":
                         f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data['price']:.8f}"
                     )
     
-    log_debug("📊 초기 활성 포지션", 
-              f"{len(initial_active_positions)}개 감지" if initial_active_positions else "감지 안됨")
+    log_debug("📊 초기 활성 포지션", f"{len(initial_active_positions)}개 감지" if initial_active_positions else "감지 안됨")
     for pos_info in initial_active_positions:
         log_debug("  └", pos_info)
 
