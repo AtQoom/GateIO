@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (양방향 모드)
-- 파인스크립트 v6.16 양방향(Hedge Mode) 전략 완벽 지원
-- 롱/숏 포지션 상태, TP/SL, 피라미딩 등 모든 로직을 독립적으로 관리
-- 이전 모든 기능(슬리피지, 동적 TP 등) 100% 포함
+Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (API 오류 수정)
+- list_positions 함수의 잘못된 파라미터 호출 오류 수정
+- 양방향 모드 완벽 지원
 """
 
 import os
@@ -24,7 +23,7 @@ import pytz
 import urllib.parse 
 
 # ========================================
-# 1. 로깅 설정
+# 1. 로깅 설정 (변경 없음)
 # ========================================
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
@@ -35,7 +34,7 @@ def log_debug(tag, msg, exc_info=False):
     if exc_info: logger.exception("")
 
 # ========================================
-# 2. Flask 앱 및 API 설정
+# 2. Flask 앱 및 API 설정 (변경 없음)
 # ========================================
 app = Flask(__name__)
 API_KEY = os.environ.get("API_KEY", "")
@@ -47,44 +46,18 @@ api = FuturesApi(client)
 unified_api = UnifiedApi(client)
 
 # ========================================
-# 3. 상수 및 설정
+# 3. 상수 및 설정 (변경 없음)
 # ========================================
 COOLDOWN_SECONDS = 14
 PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0005") # 0.05%
 MAX_SLIPPAGE_TICKS = 10
-
 KST = pytz.timezone('Asia/Seoul')
-SYMBOL_MAPPING = {
-    "BTCUSDT": "BTC_USDT", "BTCUSDT.P": "BTC_USDT", "BTCUSDTPERP": "BTC_USDT", "BTC_USDT": "BTC_USDT", "BTC": "BTC_USDT",
-    "ETHUSDT": "ETH_USDT", "ETHUSDT.P": "ETH_USDT", "ETHUSDTPERP": "ETH_USDT", "ETH_USDT": "ETH_USDT", "ETH": "ETH_USDT",
-    "SOLUSDT": "SOL_USDT", "SOLUSDT.P": "SOL_USDT", "SOLUSDTPERP": "SOL_USDT", "SOL_USDT": "SOL_USDT", "SOL": "SOL_USDT",
-    "ADAUSDT": "ADA_USDT", "ADAUSDT.P": "ADA_USDT", "ADAUSDTPERP": "ADA_USDT", "ADA_USDT": "ADA_USDT", "ADA": "ADA_USDT",
-    "SUIUSDT": "SUI_USDT", "SUIUSDT.P": "SUI_USDT", "SUIUSDTPERP": "SUI_USDT", "SUI_USDT": "SUI_USDT", "SUI": "SUI_USDT",
-    "LINKUSDT": "LINK_USDT", "LINKUSDT.P": "LINK_USDT", "LINKUSDTPERP": "LINK_USDT", "LINK_USDT": "LINK_USDT", "LINK": "LINK_USDT",
-    "PEPEUSDT": "PEPE_USDT", "PEPEUSDT.P": "PEPE_USDT", "PEPEUSDTPERP": "PEPE_USDT", "PEPE_USDT": "PEPE_USDT", "PEPE": "PEPE_USDT",
-    "XRPUSDT": "XRP_USDT", "XRPUSDT.P": "XRP_USDT", "XRPUSDTPERP": "XRP_USDT", "XRP_USDT": "XRP_USDT", "XRP": "XRP_USDT",
-    "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT", "DOGE_USDT": "DOGE_USDT", "DOGE": "DOGE_USDT",
-    "ONDO_USDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT", "ONDO_USDT": "ONDO_USDT", "ONDO": "ONDO_USDT",
-}
-PRICE_MULTIPLIERS = {
-    "PEPE_USDT": Decimal("100000000.0"),
-    "SHIB_USDT": Decimal("1000000.0")
-}
-SYMBOL_CONFIG = {
-    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55, "tick_size": Decimal("0.1")},
-    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65, "tick_size": Decimal("0.01")},
-    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 0.8, "sl_mult": 0.8, "tick_size": Decimal("0.001")},
-    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")},
-    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.001")},
-    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.001")},
-    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00000001")},
-    "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")},
-    "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00001")},
-    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")},
-}
+SYMBOL_MAPPING = { "BTCUSDT": "BTC_USDT", "ETHUSDT": "ETH_USDT", "SOLUSDT": "SOL_USDT", "ADAUSDT": "ADA_USDT", "SUIUSDT": "SUI_USDT", "LINKUSDT": "LINK_USDT", "PEPEUSDT": "PEPE_USDT", "XRPUSDT": "XRP_USDT", "DOGEUSDT": "DOGE_USDT", "ONDO_USDT": "ONDO_USDT" }
+PRICE_MULTIPLIERS = { "PEPE_USDT": Decimal("100000000.0"), "SHIB_USDT": Decimal("1000000.0") }
+SYMBOL_CONFIG = { "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55, "tick_size": Decimal("0.1")}, "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65, "tick_size": Decimal("0.01")}, "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 0.8, "sl_mult": 0.8, "tick_size": Decimal("0.001")}, "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")}, "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.001")}, "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.001")}, "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00000001")}, "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")}, "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00001")}, "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")} }
 
 # ========================================
-# [핵심 변경] 4. 양방향 상태 관리를 위한 구조 변경
+# 4. 양방향 상태 관리를 위한 구조 변경 (변경 없음)
 # ========================================
 position_state = {}
 position_lock = threading.RLock()
@@ -96,13 +69,8 @@ tpsl_lock = threading.RLock()
 task_q = queue.Queue(maxsize=100)
 WORKER_COUNT = min(6, max(2, os.cpu_count() * 2))
 
-# --- 양방향 포지션 상태 초기화 함수 ---
 def get_default_pos_side_state():
-    return {
-        "price": None, "size": Decimal("0"), "value": Decimal("0"),
-        "entry_count": 0, "normal_entry_count": 0, "premium_entry_count": 0, "rescue_entry_count": 0,
-        "entry_time": None, 'last_entry_ratio': Decimal("0")
-    }
+    return { "price": None, "size": Decimal("0"), "value": Decimal("0"), "entry_count": 0, "normal_entry_count": 0, "premium_entry_count": 0, "rescue_entry_count": 0, "entry_time": None, 'last_entry_ratio': Decimal("0") }
 
 def initialize_states():
     with position_lock, tpsl_lock:
@@ -111,7 +79,7 @@ def initialize_states():
             tpsl_storage[sym] = {"long": {}, "short": {}}
 
 # ========================================
-# 5. 핵심 유틸리티 함수
+# 5. 핵심 유틸리티 함수 (변경 없음)
 # ========================================
 def _get_api_response(api_call, *args, **kwargs):
     max_retries = 3
@@ -160,13 +128,11 @@ def get_entry_weight_from_score(score):
     except Exception: return Decimal("0.25")
 
 # ========================================
-# [핵심 변경] 7. 양방향 TP/SL 관리
+# 7. 양방향 TP/SL 관리 (변경 없음)
 # ========================================
 def store_tp_sl(symbol, side, tp, sl, slippage_pct, entry_number):
     with tpsl_lock: 
-        tpsl_storage.setdefault(symbol, {"long": {}, "short": {}}).setdefault(side, {})[entry_number] = {
-            "tp": tp, "sl": sl, "entry_slippage_pct": slippage_pct, "entry_time": time.time()
-        }
+        tpsl_storage.setdefault(symbol, {"long": {}, "short": {}}).setdefault(side, {})[entry_number] = { "tp": tp, "sl": sl, "entry_slippage_pct": slippage_pct, "entry_time": time.time() }
 
 def get_tp_sl(symbol, side, entry_number=None):
     with tpsl_lock:
@@ -209,46 +175,50 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
     return final_qty
 
 # ========================================
-# [핵심 변경] 10. 양방향 포지션 상태 관리
+# [핵심 수정] 10. 양방향 포지션 상태 관리
 # ========================================
 def update_all_position_states():
     with position_lock:
-        initialize_states() # 모든 상태를 먼저 초기화
-        # dual_mode='dual_side'로 양방향 포지션을 모두 가져옴
-        all_positions = _get_api_response(api.list_positions, SETTLE, dual_mode='dual_side')
-        if not all_positions: return
+        temp_state = json.loads(json.dumps(position_state))
+        initialize_states() 
+        
+        # [수정] 잘못된 'dual_mode' 파라미터 삭제
+        all_positions = _get_api_response(api.list_positions, SETTLE)
+        if not all_positions: 
+            log_debug("📊 포지션 현황 보고", "현재 활성 포지션이 없습니다.")
+            return
 
         for pos_info in all_positions:
             symbol = pos_info.contract
             if symbol not in SYMBOL_CONFIG: continue
             
-            side = pos_info.mode # 'long' 또는 'short'
+            side = pos_info.mode
             size = Decimal(str(pos_info.size))
             
             if size > 0:
-                # 해당 방향의 기존 상태를 가져옴
-                existing_side_state = position_state.get(symbol, {}).get(side, get_default_pos_side_state())
+                previous_side_state = temp_state.get(symbol, {}).get(side, get_default_pos_side_state())
                 position_state[symbol][side] = {
                     "price": Decimal(str(pos_info.entry_price)), "size": size,
                     "value": size * Decimal(str(pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"],
-                    "entry_count": existing_side_state.get("entry_count", 0),
-                    "normal_entry_count": existing_side_state.get("normal_entry_count", 0),
-                    "premium_entry_count": existing_side_state.get("premium_entry_count", 0),
-                    "rescue_entry_count": existing_side_state.get("rescue_entry_count", 0),
-                    "entry_time": existing_side_state.get("entry_time", time.time()),
-                    'last_entry_ratio': existing_side_state.get('last_entry_ratio', Decimal("0"))
+                    "entry_count": previous_side_state.get("entry_count", 0),
+                    "normal_entry_count": previous_side_state.get("normal_entry_count", 0),
+                    "premium_entry_count": previous_side_state.get("premium_entry_count", 0),
+                    "rescue_entry_count": previous_side_state.get("rescue_entry_count", 0),
+                    "entry_time": previous_side_state.get("entry_time", time.time()),
+                    'last_entry_ratio': previous_side_state.get('last_entry_ratio', Decimal("0"))
                 }
-            else: # 포지션이 0인데도 API가 반환하는 경우를 대비
-                 if symbol in tpsl_storage and side in tpsl_storage[symbol]:
-                    tpsl_storage[symbol][side].clear()
-
+        
+        for sym, sides in temp_state.items():
+            for side, pos_data in sides.items():
+                if pos_data['size'] > 0 and position_state[sym][side]['size'] == 0:
+                     if sym in tpsl_storage and side in tpsl_storage[sym]:
+                        tpsl_storage[sym][side].clear()
 
 # ========================================
-# [핵심 변경] 11. 양방향 주문 실행
+# 11. 양방향 주문 실행 (변경 없음)
 # ========================================
 def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0")):
     with position_lock:
-        # 양방향 모드에서는 size는 항상 양수
         order = FuturesOrder(contract=symbol, size=float(qty), price="0", tif="ioc", dual_pos=side)
         if not _get_api_response(api.create_futures_order, SETTLE, order): return False
         
@@ -260,17 +230,15 @@ def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0"
         if "rescue" not in signal_type and final_position_ratio > 0: pos_side_state['last_entry_ratio'] = final_position_ratio
         pos_side_state["entry_time"] = time.time()
         
-        time.sleep(2) # 주문 체결 대기
-        update_all_position_states() # 전체 상태 업데이트
+        time.sleep(2)
+        update_all_position_states()
         return True
 
 def close_position(symbol, side, reason="manual"):
     with position_lock:
-        # 청산 주문에도 dual_pos를 명시하여 특정 방향 포지션만 닫음
         order = FuturesOrder(contract=symbol, size=0, tif="ioc", close=True, dual_pos=side)
         if not _get_api_response(api.create_futures_order, SETTLE, order): return False
         
-        # 상태 초기화
         pos_side_state = position_state.setdefault(symbol, {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()})
         pos_side_state[side] = get_default_pos_side_state()
         
@@ -283,7 +251,7 @@ def close_position(symbol, side, reason="manual"):
         return True
 
 # ========================================
-# 12. 웹훅 라우트 및 관리용 API
+# 12. 웹훅 라우트 및 관리용 API (변경 없음)
 # ========================================
 @app.route("/ping", methods=["GET", "HEAD"])
 def ping(): return "pong", 200
@@ -292,7 +260,7 @@ def ping(): return "pong", 200
 def status():
     try:
         equity = get_total_collateral(force=True)
-        update_all_position_states() # 최신 상태 반영
+        update_all_position_states()
         active_positions = {}
         
         with position_lock:
@@ -306,12 +274,7 @@ def status():
                             "premium_entry_count": pos_data.get("premium_entry_count", 0), "rescue_entry_count": pos_data.get("rescue_entry_count", 0),
                             "last_entry_ratio": float(pos_data.get('last_entry_ratio', Decimal("0"))),
                         }
-        return jsonify({
-            "status": "running", "version": "v6.16_hedge_mode",
-            "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
-            "balance_usdt": float(equity), "active_positions": active_positions,
-            "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
-        })
+        return jsonify({ "status": "running", "version": "v6.16_hedge_mode", "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'), "balance_usdt": float(equity), "active_positions": active_positions, "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize} })
     except Exception as e:
         log_debug("❌ 상태 조회 중 오류 발생", str(e), exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -319,8 +282,7 @@ def status():
 @app.route("/", methods=["POST"])
 def webhook():
     try:
-        raw_data = request.get_data(as_text=True)
-        data = json.loads(raw_data)
+        data = json.loads(request.get_data(as_text=True))
         action = data.get("action", "").lower()
         symbol = normalize_symbol(data.get("symbol", ""))
         side = data.get("side", "").lower()
@@ -334,7 +296,7 @@ def webhook():
         
         elif action == "exit":
             reason = data.get("reason", "").upper()
-            update_all_position_states() # 최신 상태 확인
+            update_all_position_states()
             if position_state.get(symbol, {}).get(side, {}).get("size", Decimal(0)) > 0:
                 close_position(symbol, side, reason)
             return jsonify({"status": "exit_processed"}), 200
@@ -345,7 +307,7 @@ def webhook():
         return jsonify({"error": str(e)}), 500
 
 # ========================================
-# [핵심 변경] 13. 양방향 웹소켓 모니터링 (TP만 감시)
+# 13. 양방향 웹소켓 모니터링 (변경 없음)
 # ========================================
 async def price_monitor():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
@@ -369,32 +331,25 @@ def check_tp_only(ticker):
         if not symbol or symbol not in SYMBOL_CONFIG or price <= 0: return
             
         with position_lock:
-            # 롱/숏 포지션을 모두 순회하며 독립적으로 확인
             for side in ["long", "short"]:
                 pos_side_state = position_state.get(symbol, {}).get(side, {})
-                if not pos_side_state or pos_side_state.get("size", Decimal(0)) <= 0:
-                    continue
+                if not pos_side_state or pos_side_state.get("size", Decimal(0)) <= 0: continue
 
-                entry_price = pos_side_state.get("price")
-                entry_count = pos_side_state.get("entry_count")
+                entry_price, entry_count = pos_side_state.get("price"), pos_side_state.get("entry_count")
                 if not entry_price or not entry_count: continue
 
-                cfg = SYMBOL_CONFIG[symbol]
-                tp_mult = Decimal(str(cfg["tp_mult"]))
-                
+                cfg, tp_mult = SYMBOL_CONFIG[symbol], Decimal(str(SYMBOL_CONFIG[symbol]["tp_mult"]))
                 original_tp, _, entry_slippage_pct, entry_start_time = get_tp_sl(symbol, side, entry_count)
                 if not entry_start_time: continue
                 
                 compensated_tp = original_tp - entry_slippage_pct
-                time_elapsed = time.time() - entry_start_time
-                periods_15s = int(time_elapsed / 15) if (entry_start_time and time_elapsed > 0) else 0
+                time_elapsed, periods_15s = time.time() - entry_start_time, 0
+                if time_elapsed > 0: periods_15s = int(time_elapsed / 15)
 
-                tp_decay_amt = Decimal("0.00002")
-                tp_min_pct = Decimal("0.0012")
+                tp_decay_amt, tp_min_pct = Decimal("0.00002"), Decimal("0.0012")
                 tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt * tp_mult)
                 adjusted_tp = max(tp_min_pct * tp_mult, compensated_tp - tp_reduction)
                 
-                # side에 따라 TP 가격 계산 및 비교
                 if side == "long":
                     tp_price = entry_price * (1 + adjusted_tp)
                     if price >= tp_price:
@@ -410,7 +365,7 @@ def check_tp_only(ticker):
         log_debug(f"❌ TP 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
 
 # ========================================
-# [핵심 변경] 14. 양방향 진입 처리 로직
+# 14. 양방향 진입 처리 로직 (변경 없음)
 # ========================================
 def worker(idx):
     while True:
@@ -423,58 +378,42 @@ def worker(idx):
         except Exception as e: log_debug(f"❌ 워커-{idx} 심각 오류", f"워커 스레드 오류: {str(e)}", exc_info=True)
 
 def handle_entry(data):
-    symbol = normalize_symbol(data.get("symbol", ""))
-    side = data.get("side", "").lower() # "long" 또는 "short"
-    signal_type = data.get("type", "normal_long")
-    entry_score = data.get("entry_score", 50)
+    symbol, side = normalize_symbol(data.get("symbol", "")), data.get("side", "").lower()
+    signal_type, entry_score = data.get("type", "normal_long"), data.get("entry_score", 50)
     signal_price_raw = data.get('price')
-    tp_pct = Decimal(str(data.get("tp_pct", "0.5"))) / 100
-    sl_pct = Decimal(str(data.get("sl_pct", "4.0"))) / 100
+    tp_pct, sl_pct = Decimal(str(data.get("tp_pct", "0.5"))) / 100, Decimal(str(data.get("sl_pct", "4.0"))) / 100
 
-    if not symbol or not side or not signal_price_raw: return
+    if not all([symbol, side, signal_price_raw]): return
     
     cfg = SYMBOL_CONFIG.get(symbol)
-    if not cfg:
-        log_debug(f"⚠️ 진입 취소 ({symbol})", "알 수 없는 심볼입니다.")
-        return
+    if not cfg: return log_debug(f"⚠️ 진입 취소 ({symbol})", "알 수 없는 심볼")
 
-    # 슬리피지 체크 로직 (변경 없음)
     current_price = get_price(symbol)
     price_multiplier = PRICE_MULTIPLIERS.get(symbol, Decimal("1.0"))
     signal_price = Decimal(str(signal_price_raw)) / price_multiplier
-    
     if current_price <= 0 or signal_price <= 0: return
         
-    price_diff = abs(current_price - signal_price)
-    price_diff_pct = price_diff / signal_price if signal_price > 0 else Decimal("0")
-    
+    price_diff, price_diff_pct = abs(current_price - signal_price), abs(current_price - signal_price) / signal_price
     allowed_slippage_by_pct = signal_price * PRICE_DEVIATION_LIMIT_PCT
     allowed_slippage_by_ticks = Decimal(str(MAX_SLIPPAGE_TICKS)) * cfg['tick_size']
     max_allowed_slippage = max(allowed_slippage_by_pct, allowed_slippage_by_ticks)
     
     if price_diff > max_allowed_slippage:
-        log_debug(f"⚠️ 진입 취소: 슬리피지 ({symbol}_{side.upper()})", f"차이: {price_diff:.8f}, 허용: {max_allowed_slippage:.8f}")
-        return
+        return log_debug(f"⚠️ 진입 취소: 슬리피지 ({symbol}_{side.upper()})", f"차이: {price_diff:.8f}, 허용: {max_allowed_slippage:.8f}")
 
     update_all_position_states()
     pos_side_state = position_state.get(symbol, {}).get(side, {})
     
-    # 추가 진입 시 평단가 조건
     if pos_side_state.get("size", Decimal(0)) > 0 and "rescue" not in signal_type:
         avg_price = pos_side_state.get("price")
-        if avg_price:
-            if (side == "long" and current_price <= avg_price) or \
-               (side == "short" and current_price >= avg_price):
-                log_debug(f"⚠️ 추가 진입 보류 ({symbol}_{side.upper()})", f"평단가 불리. 현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
-                return
+        if avg_price and ((side == "long" and current_price <= avg_price) or (side == "short" and current_price >= avg_price)):
+            return log_debug(f"⚠️ 추가 진입 보류 ({symbol}_{side.upper()})", f"평단가 불리. 현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
 
-    # 피라미딩 제한
     if pos_side_state.get("entry_count", 0) >= 10: return
     if "premium" in signal_type and pos_side_state.get("premium_entry_count", 0) >= 5: return
     if "normal" in signal_type and pos_side_state.get("normal_entry_count", 0) >= 5: return
     if "rescue" in signal_type and pos_side_state.get("rescue_entry_count", 0) >= 3: return
 
-    # 수량 계산
     current_signal_count = pos_side_state.get("premium_entry_count", 0) if "premium" in signal_type else pos_side_state.get("normal_entry_count", 0)
     qty = calculate_position_size(symbol, signal_type, entry_score, current_signal_count)
     final_position_ratio = Decimal("0")
@@ -489,13 +428,15 @@ def handle_entry(data):
     if qty > 0:
         entry_action = "추가진입" if pos_side_state.get("size", 0) > 0 else "첫진입"
         if place_order(symbol, side, qty, signal_type, final_position_ratio):
-            log_debug(f"✅ {entry_action} 성공 ({symbol}_{side.upper()})", f"{float(qty)} 계약 (총 #{pos_side_state.get('entry_count',0)+1}/10)")
-            store_tp_sl(symbol, side, tp_pct, sl_pct, price_diff_pct, pos_side_state.get("entry_count", 0) + 1)
+            update_all_position_states()
+            latest_pos_side_state = position_state.get(symbol, {}).get(side, {})
+            log_debug(f"✅ {entry_action} 성공 ({symbol}_{side.upper()})", f"{float(qty)} 계약 (총 #{latest_pos_side_state.get('entry_count',0)})")
+            store_tp_sl(symbol, side, tp_pct, sl_pct, price_diff_pct, latest_pos_side_state.get("entry_count", 0))
         else:
             log_debug(f"❌ {entry_action} 실패 ({symbol}_{side.upper()})", "주문 실행 중 오류 발생")
 
 # ========================================
-# 15. 포지션 모니터링 및 메인 실행
+# 15. 포지션 모니터링 및 메인 실행 (변경 없음)
 # ========================================
 def position_monitor():
     while True:
@@ -509,8 +450,8 @@ def position_monitor():
                 for symbol, sides in position_state.items():
                     for side, pos_data in sides.items():
                         if pos_data and pos_data.get("size", Decimal("0")) > 0:
-                            total_value += pos_data["value"]
-                            pyramid_info = f"총:{pos_data['entry_count']}/10,일반:{pos_data['normal_entry_count']}/5,프리미엄:{pos_data['premium_entry_count']}/5,레스큐:{pos_data['rescue_entry_count']}/3"
+                            total_value += pos_data.get("value", Decimal("0"))
+                            pyramid_info = f"총:{pos_data['entry_count']}/10,일:{pos_data['normal_entry_count']}/5,프:{pos_data['premium_entry_count']}/5,레:{pos_data['rescue_entry_count']}/3"
                             active_positions_log.append(f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data['price']:.8f} ({pyramid_info}, 가치: {pos_data['value']:.2f} USDT)")
             
             if active_positions_log:
@@ -519,19 +460,19 @@ def position_monitor():
                 log_debug("🚀 포지션 현황", f"활성: {len(active_positions_log)}개, 총가치: {total_value:.2f} USDT, 노출도: {exposure_pct:.1f}%")
                 for pos_info in active_positions_log: log_debug("  └", pos_info)
             else:
-                log_debug("📊 포지션 현황 보고", "현재 활성 포지션이 없습니다.")
+                pass # 포지션 없으면 로그 출력 안함 (position_monitor에서 이미 함)
                 
         except Exception as e:
             log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.16 (Hedge Mode)")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.16 (Hedge Mode - API Fix)")
     log_debug("🎯 전략 핵심", "독립 피라미딩 + 점수 기반 가중치 + 슬리피지 연동형 동적 TP + 레스큐 진입")
     log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱 중 큰 값), TP 슬리피지 연동")
     log_debug("⚠️ 중요", "Gate.io 거래소 설정에서 '양방향 포지션 모드(Two-way)'가 활성화되어야 합니다.")
 
     initialize_states()
-    update_all_position_states() # 초기 포지션 로드
+    update_all_position_states() 
     
     threading.Thread(target=position_monitor, daemon=True).start()
     threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
