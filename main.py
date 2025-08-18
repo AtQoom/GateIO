@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (전체 자산 계산 수정)
-- 자산 계산 기준을 'available'에서 'total'로 변경하여 미실현 손익 완벽 반영
-- 양방향 모드 완벽 지원
+Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (초기 포지션 인식 오류 수정)
+- 서버 시작 시, 수동 진입을 포함한 모든 활성 포지션을 정확하게 인식하도록 수정
+- 기존 서버의 안정적인 상태 업데이트 방식을 양방향 모드에 맞게 재구성
 """
 
 import os
@@ -81,7 +81,7 @@ def initialize_states():
                 tpsl_storage[sym] = {"long": {}, "short": {}}
 
 # ========================================
-# [수정] 5. 핵심 유틸리티 함수 (전체 자산 계산 방식 수정)
+# 5. 핵심 유틸리티 함수 (변경 없음)
 # ========================================
 def _get_api_response(api_call, *args, **kwargs):
     max_retries = 3
@@ -100,7 +100,6 @@ def get_total_collateral(force=False):
     now = time.time()
     if not force and account_cache["time"] > now - 30 and account_cache["data"]: return account_cache["data"]
     acc = _get_api_response(api.list_futures_accounts, SETTLE)
-    # [수정] 'available'이 아닌 'total'을 사용하여 미실현 손익이 포함된 '전체 자산'을 가져옴
     equity = Decimal(str(getattr(acc, 'total', '0'))) if acc else Decimal("0")
     account_cache.update({"time": now, "data": equity})
     return equity
@@ -109,9 +108,6 @@ def get_price(symbol):
     ticker = _get_api_response(api.list_futures_tickers, SETTLE, contract=symbol)
     if ticker and isinstance(ticker, list) and len(ticker) > 0: return Decimal(str(ticker[0].last))
     return Decimal("0")
-
-# 이하 코드는 변경 사항 없습니다.
-# ... (이전과 동일한 나머지 코드)
 
 # ========================================
 # 6. 파인스크립트 연동 함수 (변경 없음)
@@ -180,7 +176,7 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
     return final_qty
 
 # ========================================
-# 10. 양방향 포지션 상태 관리 (변경 없음)
+# [핵심 수정] 10. 양방향 포지션 상태 관리 (안정화 버전)
 # ========================================
 def update_all_position_states():
     with position_lock:
@@ -204,6 +200,12 @@ def update_all_position_states():
                     current_side_state["price"] = Decimal(str(api_pos_info.entry_price))
                     current_side_state["size"] = Decimal(str(api_pos_info.size))
                     current_side_state["value"] = Decimal(str(api_pos_info.size)) * Decimal(str(api_pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
+                    # 수동으로 진입했거나 서버 재시작 시, entry_count가 0이면 1로 설정
+                    if current_side_state["entry_count"] == 0:
+                        log_debug("🔄 수동 포지션 감지", f"{symbol} {side.upper()} 포지션을 상태에 추가합니다.")
+                        current_side_state["entry_count"] = 1
+                        current_side_state["entry_time"] = time.time()
+
                 elif current_side_state["size"] > 0:
                     position_state[symbol][side] = get_default_pos_side_state()
                     if symbol in tpsl_storage and side in tpsl_storage[symbol]: tpsl_storage[symbol][side].clear()
@@ -269,10 +271,9 @@ def status():
 def webhook():
     try:
         data = json.loads(request.get_data(as_text=True))
-        action = data.get("action", "").lower()
-        symbol, side = normalize_symbol(data.get("symbol", "")), data.get("side", "").lower()
+        action, symbol, side = data.get("action", "").lower(), normalize_symbol(data.get("symbol", "")), data.get("side", "").lower()
 
-        if not symbol or not side: return jsonify({"error": "Invalid symbol or side"}), 400
+        if not all([action, symbol, side]): return jsonify({"error": "Invalid payload"}), 400
         
         if action == "entry":
             if is_duplicate(data): return jsonify({"status": "duplicate_ignored"}), 200
@@ -456,12 +457,10 @@ if __name__ == "__main__":
     log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱 중 큰 값)")
     log_debug("⚠️ 중요", "Gate.io 거래소 설정에서 '양방향 포지션 모드(Two-way)'가 활성화되어야 합니다.")
 
-    # [추가] 초기 자산 확인 로그
-    equity = get_total_collateral(force=True)
-    log_debug("💰 초기 자산 확인", f"전체 자산: {equity:.2f} USDT" if equity > 0 else "자산 조회 실패")
-
-    # [추가] 초기 상태 초기화 및 활성 포지션 확인 로그
     initialize_states()
+    
+    # [수정] 서버 시작 시 초기 상태를 완벽하게 로드하고 로그로 출력
+    log_debug("📊 초기 상태 로드", "현재 계좌의 모든 포지션 정보를 불러옵니다...")
     update_all_position_states() 
     
     initial_active_positions = []
@@ -476,6 +475,9 @@ if __name__ == "__main__":
     log_debug("📊 초기 활성 포지션", f"{len(initial_active_positions)}개 감지" if initial_active_positions else "감지 안됨")
     for pos_info in initial_active_positions:
         log_debug("  └", pos_info)
+
+    equity = get_total_collateral(force=True)
+    log_debug("💰 초기 자산 확인", f"전체 자산: {equity:.2f} USDT" if equity > 0 else "자산 조회 실패")
 
     threading.Thread(target=position_monitor, daemon=True).start()
     threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
