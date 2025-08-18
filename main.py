@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (포지션 인식 오류 최종 수정)
-- 수동 진입을 포함한 모든 활성 포지션을 100% 정확하게 인식하도록 로직 수정
-- 기존 서버의 안정적인 상태 업데이트 방식을 양방향 모드에 맞게 완벽 복원
+Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (KeyError 최종 수정)
+- API의 'dual_short' 응답을 내부적으로 'short'로 변환하여 KeyError 해결
+- 모든 포지션 인식 및 상태 관리 로직 완벽 정상화
 """
 
 import os
@@ -176,40 +176,43 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
     return final_qty
 
 # ========================================
-# [핵심 수정] 10. 양방향 포지션 상태 관리 (최종 안정화 버전)
+# [핵심 수정] 10. 양방향 포지션 상태 관리 (API 응답 변환 로직 추가)
 # ========================================
 def update_all_position_states():
     with position_lock:
-        # 1. API에서 현재 열려있는 모든 포지션 정보를 '정답지'로 가져옴
         all_positions_from_api = _get_api_response(api.list_positions, SETTLE)
         if all_positions_from_api is None:
             log_debug("❌ 포지션 업데이트 실패", "API 호출에 실패하여 상태를 업데이트할 수 없습니다.")
             return
 
-        # 2. 현재 API에 존재하는 포지션들을 set으로 만들어 쉽게 조회하도록 함
         active_positions_set = set()
         for pos_info in all_positions_from_api:
-            symbol, side = pos_info.contract, pos_info.mode
-            if symbol not in SYMBOL_CONFIG: continue # 서버가 관리하지 않는 코인이면 무시
+            symbol = pos_info.contract
+            api_side = pos_info.mode  # 'dual_long' 또는 'dual_short'
 
-            # 2-1. 서버 메모리에 해당 심볼/방향 상태가 없으면 초기화
-            if symbol not in position_state: position_state[symbol] = {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()}
+            # [수정] API 응답을 내부 키 값('long', 'short')으로 변환
+            if api_side == 'dual_long':
+                side = 'long'
+            elif api_side == 'dual_short':
+                side = 'short'
+            else:
+                continue # 양방향 모드가 아닌 포지션은 무시
+
+            if symbol not in SYMBOL_CONFIG: continue
+            if symbol not in position_state: initialize_states()
             
-            # 2-2. API 정보를 바탕으로 서버 메모리 상태 업데이트
             current_side_state = position_state[symbol][side]
             current_side_state["price"] = Decimal(str(pos_info.entry_price))
             current_side_state["size"] = Decimal(str(pos_info.size))
             current_side_state["value"] = Decimal(str(pos_info.size)) * Decimal(str(pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
 
-            # 2-3. 수동 진입 또는 서버 재시작으로 인한 상태 복원
-            if current_side_state["entry_count"] == 0:
+            if current_side_state["entry_count"] == 0 and current_side_state["size"] > 0:
                 log_debug("🔄 수동 포지션 감지", f"{symbol} {side.upper()} 포지션을 상태에 추가합니다.")
                 current_side_state["entry_count"] = 1
                 current_side_state["entry_time"] = time.time()
 
             active_positions_set.add((symbol, side))
 
-        # 3. API에는 없는데 메모리에만 남아있는 '유령 포지션' 정리
         for symbol, sides in position_state.items():
             for side in ["long", "short"]:
                 if (symbol, side) not in active_positions_set and sides[side]["size"] > 0:
@@ -217,6 +220,8 @@ def update_all_position_states():
                     position_state[symbol][side] = get_default_pos_side_state()
                     if symbol in tpsl_storage and side in tpsl_storage[symbol]: tpsl_storage[symbol][side].clear()
 
+# 이하 코드는 변경 사항 없습니다.
+# ... (이전과 동일한 나머지 코드)
 # ========================================
 # 11. 양방향 주문 실행 (변경 없음)
 # ========================================
