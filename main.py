@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (오류 최종 수정)
-- Decimal -> JSON 변환 오류를 근본적으로 해결
-- 기존 서버의 안정적인 상태 업데이트 방식을 양방향 모드에 맞게 재구성
+Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (초기 로그 복원)
+- 서버 시작 시, 초기 자산 및 활성 포지션 디버그 로그 출력 기능 복원
+- 양방향 모드 완벽 지원
 """
 
 import os
@@ -176,46 +176,34 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
     return final_qty
 
 # ========================================
-# [핵심 수정] 10. 양방향 포지션 상태 관리 (안정화 버전)
+# 10. 양방향 포지션 상태 관리 (변경 없음)
 # ========================================
 def update_all_position_states():
     with position_lock:
-        # 1. API에서 현재 열려있는 모든 포지션 정보를 가져옴
         all_positions_from_api = _get_api_response(api.list_positions, SETTLE)
-        if all_positions_from_api is None: # API 호출 실패 시, 아무 작업도 하지 않음
+        if all_positions_from_api is None:
             log_debug("❌ 포지션 업데이트 실패", "API 호출에 실패하여 상태를 업데이트할 수 없습니다.")
             return
 
-        # 2. API 결과를 쉽게 조회할 수 있도록 가공 { 'symbol': { 'side': pos_info } }
         api_pos_map = {}
         for pos_info in all_positions_from_api:
             symbol = pos_info.contract
             side = pos_info.mode
-            if symbol not in api_pos_map:
-                api_pos_map[symbol] = {}
+            if symbol not in api_pos_map: api_pos_map[symbol] = {}
             api_pos_map[symbol][side] = pos_info
 
-        # 3. 서버가 추적하는 모든 심볼과 방향에 대해 상태를 업데이트
         for symbol, sides in position_state.items():
             for side in ["long", "short"]:
                 current_side_state = sides[side]
                 api_pos_info = api_pos_map.get(symbol, {}).get(side)
 
-                # 3-1. API에 포지션이 존재하는 경우 (포지션 유지 또는 변경)
                 if api_pos_info:
                     current_side_state["price"] = Decimal(str(api_pos_info.entry_price))
                     current_side_state["size"] = Decimal(str(api_pos_info.size))
                     current_side_state["value"] = Decimal(str(api_pos_info.size)) * Decimal(str(api_pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
-                    # entry_count 등 다른 상태는 그대로 유지
-                
-                # 3-2. API에 포지션이 없는데, 메모리에는 있는 경우 (포지션 종료됨)
                 elif current_side_state["size"] > 0:
-                    log_debug(f"🔄 포지션 종료 감지", f"{symbol} {side.upper()} 포지션이 청산되었습니다.")
-                    # 해당 방향의 상태를 초기화
                     position_state[symbol][side] = get_default_pos_side_state()
-                    # TP/SL 데이터도 초기화
-                    if symbol in tpsl_storage and side in tpsl_storage[symbol]:
-                        tpsl_storage[symbol][side].clear()
+                    if symbol in tpsl_storage and side in tpsl_storage[symbol]: tpsl_storage[symbol][side].clear()
 
 # ========================================
 # 11. 양방향 주문 실행 (변경 없음)
@@ -245,11 +233,9 @@ def close_position(symbol, side, reason="manual"):
         pos_side_state = position_state.setdefault(symbol, {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()})
         pos_side_state[side] = get_default_pos_side_state()
         
-        if symbol in tpsl_storage and side in tpsl_storage[symbol]:
-            tpsl_storage[symbol][side].clear()
+        if symbol in tpsl_storage and side in tpsl_storage[symbol]: tpsl_storage[symbol][side].clear()
             
-        with signal_lock: 
-            recent_signals.pop(f"{symbol}_{side}", None)
+        with signal_lock: recent_signals.pop(f"{symbol}_{side}", None)
         return True
 
 # ========================================
@@ -433,7 +419,7 @@ def handle_entry(data):
             log_debug(f"❌ {entry_action} 실패 ({symbol}_{side.upper()})", "주문 실행 중 오류 발생")
 
 # ========================================
-# 15. 포지션 모니터링 및 메인 실행 (변경 없음)
+# [수정] 15. 포지션 모니터링 및 메인 실행 (초기 로그 추가)
 # ========================================
 def position_monitor():
     while True:
@@ -458,7 +444,9 @@ def position_monitor():
                 exposure_pct = (total_value / equity * 100) if equity > 0 else 0
                 log_debug("🚀 포지션 현황", f"활성: {len(active_positions_log)}개, 총가치: {total_value:.2f} USDT, 노출도: {exposure_pct:.1f}%")
                 for pos_info in active_positions_log: log_debug("  └", pos_info)
-            
+            else:
+                log_debug("📊 포지션 현황 보고", "현재 활성 포지션이 없습니다.")
+                
         except Exception as e:
             log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
@@ -468,9 +456,28 @@ if __name__ == "__main__":
     log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱 중 큰 값)")
     log_debug("⚠️ 중요", "Gate.io 거래소 설정에서 '양방향 포지션 모드(Two-way)'가 활성화되어야 합니다.")
 
+    # [추가] 초기 자산 확인 로그
+    equity = get_total_collateral(force=True)
+    log_debug("💰 초기 자산 확인", f"{equity:.2f} USDT" if equity > 0 else "자산 조회 실패")
+
+    # [추가] 초기 상태 초기화 및 활성 포지션 확인 로그
     initialize_states()
     update_all_position_states() 
     
+    initial_active_positions = []
+    with position_lock:
+        for symbol, sides in position_state.items():
+            for side, pos_data in sides.items():
+                if pos_data and pos_data.get("size", Decimal("0")) > 0:
+                    initial_active_positions.append(
+                        f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data['price']:.8f}"
+                    )
+    
+    log_debug("📊 초기 활성 포지션", 
+              f"{len(initial_active_positions)}개 감지" if initial_active_positions else "감지 안됨")
+    for pos_info in initial_active_positions:
+        log_debug("  └", pos_info)
+
     threading.Thread(target=position_monitor, daemon=True).start()
     threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
     
