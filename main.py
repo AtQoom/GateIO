@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (API 오류 수정)
-- list_positions 함수의 잘못된 파라미터 호출 오류 수정
-- 양방향 모드 완벽 지원
+Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (오류 최종 수정)
+- Decimal -> JSON 변환 오류를 근본적으로 해결
+- 기존 서버의 안정적인 상태 업데이트 방식을 양방향 모드에 맞게 재구성
 """
 
 import os
@@ -49,7 +49,7 @@ unified_api = UnifiedApi(client)
 # 3. 상수 및 설정 (변경 없음)
 # ========================================
 COOLDOWN_SECONDS = 14
-PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0005") # 0.05%
+PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0005")
 MAX_SLIPPAGE_TICKS = 10
 KST = pytz.timezone('Asia/Seoul')
 SYMBOL_MAPPING = { "BTCUSDT": "BTC_USDT", "ETHUSDT": "ETH_USDT", "SOLUSDT": "SOL_USDT", "ADAUSDT": "ADA_USDT", "SUIUSDT": "SUI_USDT", "LINKUSDT": "LINK_USDT", "PEPEUSDT": "PEPE_USDT", "XRPUSDT": "XRP_USDT", "DOGEUSDT": "DOGE_USDT", "ONDO_USDT": "ONDO_USDT" }
@@ -57,7 +57,7 @@ PRICE_MULTIPLIERS = { "PEPE_USDT": Decimal("100000000.0"), "SHIB_USDT": Decimal(
 SYMBOL_CONFIG = { "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55, "tick_size": Decimal("0.1")}, "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65, "tick_size": Decimal("0.01")}, "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 0.8, "sl_mult": 0.8, "tick_size": Decimal("0.001")}, "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")}, "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.001")}, "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.001")}, "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00000001")}, "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")}, "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00001")}, "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")} }
 
 # ========================================
-# 4. 양방향 상태 관리를 위한 구조 변경 (변경 없음)
+# 4. 양방향 상태 관리 (변경 없음)
 # ========================================
 position_state = {}
 position_lock = threading.RLock()
@@ -75,8 +75,10 @@ def get_default_pos_side_state():
 def initialize_states():
     with position_lock, tpsl_lock:
         for sym in SYMBOL_CONFIG:
-            position_state[sym] = {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()}
-            tpsl_storage[sym] = {"long": {}, "short": {}}
+            if sym not in position_state:
+                position_state[sym] = {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()}
+            if sym not in tpsl_storage:
+                tpsl_storage[sym] = {"long": {}, "short": {}}
 
 # ========================================
 # 5. 핵심 유틸리티 함수 (변경 없음)
@@ -84,8 +86,7 @@ def initialize_states():
 def _get_api_response(api_call, *args, **kwargs):
     max_retries = 3
     for attempt in range(max_retries):
-        try:
-            return api_call(*args, **kwargs)
+        try: return api_call(*args, **kwargs)
         except Exception as e:
             if isinstance(e, gate_api_exceptions.ApiException): error_msg = f"API Error {e.status}: {e.body if hasattr(e, 'body') else e.reason}"
             else: error_msg = str(e)
@@ -93,7 +94,7 @@ def _get_api_response(api_call, *args, **kwargs):
             else: log_debug("❌ API 호출 최종 실패", error_msg, exc_info=True)
     return None
 
-def normalize_symbol(raw_symbol): return SYMBOL_MAPPING.get(str(raw_symbol).upper().strip())
+def normalize_symbol(raw_symbol): return SYMBOL_MAPPING.get(str(raw_symbol).upper().strip().replace("/", "_"))
 
 def get_total_collateral(force=False):
     now = time.time()
@@ -175,44 +176,46 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
     return final_qty
 
 # ========================================
-# [핵심 수정] 10. 양방향 포지션 상태 관리
+# [핵심 수정] 10. 양방향 포지션 상태 관리 (안정화 버전)
 # ========================================
 def update_all_position_states():
     with position_lock:
-        temp_state = json.loads(json.dumps(position_state))
-        initialize_states() 
-        
-        # [수정] 잘못된 'dual_mode' 파라미터 삭제
-        all_positions = _get_api_response(api.list_positions, SETTLE)
-        if not all_positions: 
-            log_debug("📊 포지션 현황 보고", "현재 활성 포지션이 없습니다.")
+        # 1. API에서 현재 열려있는 모든 포지션 정보를 가져옴
+        all_positions_from_api = _get_api_response(api.list_positions, SETTLE)
+        if all_positions_from_api is None: # API 호출 실패 시, 아무 작업도 하지 않음
+            log_debug("❌ 포지션 업데이트 실패", "API 호출에 실패하여 상태를 업데이트할 수 없습니다.")
             return
 
-        for pos_info in all_positions:
+        # 2. API 결과를 쉽게 조회할 수 있도록 가공 { 'symbol': { 'side': pos_info } }
+        api_pos_map = {}
+        for pos_info in all_positions_from_api:
             symbol = pos_info.contract
-            if symbol not in SYMBOL_CONFIG: continue
-            
             side = pos_info.mode
-            size = Decimal(str(pos_info.size))
-            
-            if size > 0:
-                previous_side_state = temp_state.get(symbol, {}).get(side, get_default_pos_side_state())
-                position_state[symbol][side] = {
-                    "price": Decimal(str(pos_info.entry_price)), "size": size,
-                    "value": size * Decimal(str(pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"],
-                    "entry_count": previous_side_state.get("entry_count", 0),
-                    "normal_entry_count": previous_side_state.get("normal_entry_count", 0),
-                    "premium_entry_count": previous_side_state.get("premium_entry_count", 0),
-                    "rescue_entry_count": previous_side_state.get("rescue_entry_count", 0),
-                    "entry_time": previous_side_state.get("entry_time", time.time()),
-                    'last_entry_ratio': previous_side_state.get('last_entry_ratio', Decimal("0"))
-                }
-        
-        for sym, sides in temp_state.items():
-            for side, pos_data in sides.items():
-                if pos_data['size'] > 0 and position_state[sym][side]['size'] == 0:
-                     if sym in tpsl_storage and side in tpsl_storage[sym]:
-                        tpsl_storage[sym][side].clear()
+            if symbol not in api_pos_map:
+                api_pos_map[symbol] = {}
+            api_pos_map[symbol][side] = pos_info
+
+        # 3. 서버가 추적하는 모든 심볼과 방향에 대해 상태를 업데이트
+        for symbol, sides in position_state.items():
+            for side in ["long", "short"]:
+                current_side_state = sides[side]
+                api_pos_info = api_pos_map.get(symbol, {}).get(side)
+
+                # 3-1. API에 포지션이 존재하는 경우 (포지션 유지 또는 변경)
+                if api_pos_info:
+                    current_side_state["price"] = Decimal(str(api_pos_info.entry_price))
+                    current_side_state["size"] = Decimal(str(api_pos_info.size))
+                    current_side_state["value"] = Decimal(str(api_pos_info.size)) * Decimal(str(api_pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
+                    # entry_count 등 다른 상태는 그대로 유지
+                
+                # 3-2. API에 포지션이 없는데, 메모리에는 있는 경우 (포지션 종료됨)
+                elif current_side_state["size"] > 0:
+                    log_debug(f"🔄 포지션 종료 감지", f"{symbol} {side.upper()} 포지션이 청산되었습니다.")
+                    # 해당 방향의 상태를 초기화
+                    position_state[symbol][side] = get_default_pos_side_state()
+                    # TP/SL 데이터도 초기화
+                    if symbol in tpsl_storage and side in tpsl_storage[symbol]:
+                        tpsl_storage[symbol][side].clear()
 
 # ========================================
 # 11. 양방향 주문 실행 (변경 없음)
@@ -247,7 +250,6 @@ def close_position(symbol, side, reason="manual"):
             
         with signal_lock: 
             recent_signals.pop(f"{symbol}_{side}", None)
-        
         return True
 
 # ========================================
@@ -268,13 +270,8 @@ def status():
                 for side, pos_data in sides.items():
                     if pos_data and pos_data.get("size", Decimal("0")) > 0:
                         pos_key = f"{symbol}_{side.upper()}"
-                        active_positions[pos_key] = {
-                            "side": side, "size": float(pos_data["size"]), "price": float(pos_data["price"]), "value": float(pos_data["value"]),
-                            "entry_count": pos_data.get("entry_count", 0), "normal_entry_count": pos_data.get("normal_entry_count", 0),
-                            "premium_entry_count": pos_data.get("premium_entry_count", 0), "rescue_entry_count": pos_data.get("rescue_entry_count", 0),
-                            "last_entry_ratio": float(pos_data.get('last_entry_ratio', Decimal("0"))),
-                        }
-        return jsonify({ "status": "running", "version": "v6.16_hedge_mode", "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'), "balance_usdt": float(equity), "active_positions": active_positions, "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize} })
+                        active_positions[pos_key] = { "side": side, "size": float(pos_data["size"]), "price": float(pos_data["price"]), "value": float(pos_data["value"]), "entry_count": pos_data.get("entry_count", 0), "normal_entry_count": pos_data.get("normal_entry_count", 0), "premium_entry_count": pos_data.get("premium_entry_count", 0), "rescue_entry_count": pos_data.get("rescue_entry_count", 0), "last_entry_ratio": float(pos_data.get('last_entry_ratio', Decimal("0"))), }
+        return jsonify({ "status": "running", "version": "v6.16_hedge_final", "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'), "balance_usdt": float(equity), "active_positions": active_positions, "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize} })
     except Exception as e:
         log_debug("❌ 상태 조회 중 오류 발생", str(e), exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -447,28 +444,28 @@ def position_monitor():
             active_positions_log = []
             
             with position_lock:
+                is_any_position_active = False
                 for symbol, sides in position_state.items():
                     for side, pos_data in sides.items():
                         if pos_data and pos_data.get("size", Decimal("0")) > 0:
+                            is_any_position_active = True
                             total_value += pos_data.get("value", Decimal("0"))
                             pyramid_info = f"총:{pos_data['entry_count']}/10,일:{pos_data['normal_entry_count']}/5,프:{pos_data['premium_entry_count']}/5,레:{pos_data['rescue_entry_count']}/3"
                             active_positions_log.append(f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data['price']:.8f} ({pyramid_info}, 가치: {pos_data['value']:.2f} USDT)")
             
-            if active_positions_log:
+            if is_any_position_active:
                 equity = get_total_collateral()
                 exposure_pct = (total_value / equity * 100) if equity > 0 else 0
                 log_debug("🚀 포지션 현황", f"활성: {len(active_positions_log)}개, 총가치: {total_value:.2f} USDT, 노출도: {exposure_pct:.1f}%")
                 for pos_info in active_positions_log: log_debug("  └", pos_info)
-            else:
-                pass # 포지션 없으면 로그 출력 안함 (position_monitor에서 이미 함)
-                
+            
         except Exception as e:
             log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.16 (Hedge Mode - API Fix)")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.16 (Hedge Mode - Final)")
     log_debug("🎯 전략 핵심", "독립 피라미딩 + 점수 기반 가중치 + 슬리피지 연동형 동적 TP + 레스큐 진입")
-    log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱 중 큰 값), TP 슬리피지 연동")
+    log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱 중 큰 값)")
     log_debug("⚠️ 중요", "Gate.io 거래소 설정에서 '양방향 포지션 모드(Two-way)'가 활성화되어야 합니다.")
 
     initialize_states()
