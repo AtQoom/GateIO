@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (초기 포지션 인식 오류 수정)
-- 서버 시작 시, 수동 진입을 포함한 모든 활성 포지션을 정확하게 인식하도록 수정
-- 기존 서버의 안정적인 상태 업데이트 방식을 양방향 모드에 맞게 재구성
+Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (포지션 인식 오류 최종 수정)
+- 수동 진입을 포함한 모든 활성 포지션을 100% 정확하게 인식하도록 로직 수정
+- 기존 서버의 안정적인 상태 업데이트 방식을 양방향 모드에 맞게 완벽 복원
 """
 
 import os
@@ -176,37 +176,44 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
     return final_qty
 
 # ========================================
-# [핵심 수정] 10. 양방향 포지션 상태 관리 (안정화 버전)
+# [핵심 수정] 10. 양방향 포지션 상태 관리 (최종 안정화 버전)
 # ========================================
 def update_all_position_states():
     with position_lock:
+        # 1. API에서 현재 열려있는 모든 포지션 정보를 '정답지'로 가져옴
         all_positions_from_api = _get_api_response(api.list_positions, SETTLE)
         if all_positions_from_api is None:
             log_debug("❌ 포지션 업데이트 실패", "API 호출에 실패하여 상태를 업데이트할 수 없습니다.")
             return
 
-        api_pos_map = {}
+        # 2. 현재 API에 존재하는 포지션들을 set으로 만들어 쉽게 조회하도록 함
+        active_positions_set = set()
         for pos_info in all_positions_from_api:
             symbol, side = pos_info.contract, pos_info.mode
-            if symbol not in api_pos_map: api_pos_map[symbol] = {}
-            api_pos_map[symbol][side] = pos_info
+            if symbol not in SYMBOL_CONFIG: continue # 서버가 관리하지 않는 코인이면 무시
 
+            # 2-1. 서버 메모리에 해당 심볼/방향 상태가 없으면 초기화
+            if symbol not in position_state: position_state[symbol] = {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()}
+            
+            # 2-2. API 정보를 바탕으로 서버 메모리 상태 업데이트
+            current_side_state = position_state[symbol][side]
+            current_side_state["price"] = Decimal(str(pos_info.entry_price))
+            current_side_state["size"] = Decimal(str(pos_info.size))
+            current_side_state["value"] = Decimal(str(pos_info.size)) * Decimal(str(pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
+
+            # 2-3. 수동 진입 또는 서버 재시작으로 인한 상태 복원
+            if current_side_state["entry_count"] == 0:
+                log_debug("🔄 수동 포지션 감지", f"{symbol} {side.upper()} 포지션을 상태에 추가합니다.")
+                current_side_state["entry_count"] = 1
+                current_side_state["entry_time"] = time.time()
+
+            active_positions_set.add((symbol, side))
+
+        # 3. API에는 없는데 메모리에만 남아있는 '유령 포지션' 정리
         for symbol, sides in position_state.items():
             for side in ["long", "short"]:
-                current_side_state = sides[side]
-                api_pos_info = api_pos_map.get(symbol, {}).get(side)
-
-                if api_pos_info:
-                    current_side_state["price"] = Decimal(str(api_pos_info.entry_price))
-                    current_side_state["size"] = Decimal(str(api_pos_info.size))
-                    current_side_state["value"] = Decimal(str(api_pos_info.size)) * Decimal(str(api_pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
-                    # 수동으로 진입했거나 서버 재시작 시, entry_count가 0이면 1로 설정
-                    if current_side_state["entry_count"] == 0:
-                        log_debug("🔄 수동 포지션 감지", f"{symbol} {side.upper()} 포지션을 상태에 추가합니다.")
-                        current_side_state["entry_count"] = 1
-                        current_side_state["entry_time"] = time.time()
-
-                elif current_side_state["size"] > 0:
+                if (symbol, side) not in active_positions_set and sides[side]["size"] > 0:
+                    log_debug(f"👻 유령 포지션 정리", f"{symbol} {side.upper()} 포지션을 메모리에서 삭제합니다.")
                     position_state[symbol][side] = get_default_pos_side_state()
                     if symbol in tpsl_storage and side in tpsl_storage[symbol]: tpsl_storage[symbol][side].clear()
 
@@ -459,7 +466,6 @@ if __name__ == "__main__":
 
     initialize_states()
     
-    # [수정] 서버 시작 시 초기 상태를 완벽하게 로드하고 로그로 출력
     log_debug("📊 초기 상태 로드", "현재 계좌의 모든 포지션 정보를 불러옵니다...")
     update_all_position_states() 
     
@@ -469,7 +475,7 @@ if __name__ == "__main__":
             for side, pos_data in sides.items():
                 if pos_data and pos_data.get("size", Decimal("0")) > 0:
                     initial_active_positions.append(
-                        f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data['price']:.8f}"
+                        f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data.get('price', 0):.8f}"
                     )
     
     log_debug("📊 초기 활성 포지션", f"{len(initial_active_positions)}개 감지" if initial_active_positions else "감지 안됨")
