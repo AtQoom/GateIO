@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.25 - 트레이딩뷰 TP 동기화 완전 구현
+Gate.io 자동매매 서버 v6.25 - Gate.io API 오류 수정
 """
 import os
 import json
@@ -14,7 +14,8 @@ import sys
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi, FuturesPriceTriggeredOrder
+from gate_api import (ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi, 
+                      FuturesPriceTriggeredOrder, FuturesPriceTrigger)
 from gate_api import exceptions as gate_api_exceptions
 import queue
 import pytz
@@ -68,12 +69,11 @@ except Exception as e:
 # ========
 # 3. 상수 및 설정
 # ========
-COOLDOWN_SECONDS = 15  # 파인스크립트와 동기화
+COOLDOWN_SECONDS = 15
 PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0005")
 MAX_SLIPPAGE_TICKS = 10
 KST = pytz.timezone('Asia/Seoul')
 
-# 파인스크립트와 동일한 매핑
 SYMBOL_MAPPING = {
     "BTCUSDT": "BTC_USDT", "BTCUSDT.P": "BTC_USDT", "BTCUSDTPERP": "BTC_USDT", "BTC_USDT": "BTC_USDT", "BTC": "BTC_USDT",
     "ETHUSDT": "ETH_USDT", "ETHUSDT.P": "ETH_USDT", "ETHUSDTPERP": "ETH_USDT", "ETH_USDT": "ETH_USDT", "ETH": "ETH_USDT",
@@ -87,7 +87,6 @@ SYMBOL_MAPPING = {
     "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT", "ONDO_USDT": "ONDO_USDT", "ONDO": "ONDO_USDT",
 }
 
-# 파인스크립트와 동일한 설정
 SYMBOL_CONFIG = {
     "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55, "tick_size": Decimal("0.1")},
     "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65, "tick_size": Decimal("0.01")},
@@ -102,7 +101,7 @@ SYMBOL_CONFIG = {
 }
 
 # ========
-# 4. 양방향 상태 관리 (트레이딩뷰 동기화 정보 추가)
+# 4. 양방향 상태 관리
 # ========
 position_state = {}
 position_lock = threading.RLock()
@@ -119,12 +118,9 @@ def get_default_pos_side_state():
         "price": None, "size": Decimal("0"), "value": Decimal("0"), "entry_count": 0,
         "normal_entry_count": 0, "premium_entry_count": 0, "rescue_entry_count": 0,
         "entry_time": None, 'last_entry_ratio': Decimal("0"),
-        "tp_order_id": None,  # Gate.io TP 주문 ID
-        "last_tp_update": None,  # 마지막 TP 업데이트 시간
-        "tv_sync_tp_price": None,  # 트레이딩뷰 동기화 TP 가격
-        "tv_signal_price": None,  # 트레이딩뷰 알림 가격
-        "tv_tp_pct": None,  # 트레이딩뷰 TP 비율
-        "actual_tp_pct": None  # 서버에서 계산된 실제 TP 비율
+        "tp_order_id": None, "last_tp_update": None,
+        "tv_sync_tp_price": None, "tv_signal_price": None,
+        "tv_tp_pct": None, "actual_tp_pct": None
     }
 
 def initialize_states():
@@ -176,7 +172,7 @@ def get_price(symbol):
     if ticker and isinstance(ticker, list) and len(ticker) > 0:
         return Decimal(str(ticker[0].last))
     return Decimal("0")
-
+    
 # ========
 # 6. 파인스크립트 연동 함수
 # ========
@@ -280,32 +276,38 @@ def get_tp_sl(symbol, side, entry_number=None):
             time.time())
 
 # ========
-# 9. Gate.io API TP 주문 관리
+# 9. Gate.io API TP 주문 관리 (수정됨)
 # ========
 def place_tp_order(symbol, side, entry_price, tp_pct, position_size):
-    """Gate.io API를 사용한 실제 TP 주문 생성"""
+    """Gate.io API를 사용한 실제 TP 주문 생성 (수정됨)"""
     try:
         if side == "long":
             tp_price = entry_price * (1 + tp_pct)
             close_size = -int(position_size)  # 롱 포지션 청산은 음수
+            trigger_rule = 1  # >= (현재가가 TP 가격 이상일 때)
         else:
             tp_price = entry_price * (1 - tp_pct)
             close_size = int(position_size)   # 숏 포지션 청산은 양수
+            trigger_rule = 2  # <= (현재가가 TP 가격 이하일 때)
         
-        # Gate.io TP 조건부 주문 생성
+        # 올바른 Gate.io TP 조건부 주문 구조
+        trigger = FuturesPriceTrigger(
+            strategy_type=0,  # 0: 현재가 기준
+            price_type=0,     # 0: 최신가
+            rule=trigger_rule,
+            trigger_price=str(tp_price)
+        )
+        
+        initial_order = FuturesOrder(
+            contract=symbol,
+            size=close_size,
+            price="0",  # 마켓 주문
+            tif="ioc"
+        )
+        
         tp_order = FuturesPriceTriggeredOrder(
-            initial=FuturesOrder(
-                contract=symbol,
-                size=close_size,
-                price="0",  # 마켓 주문
-                tif="ioc"
-            ),
-            trigger={
-                "strategy_type": 0,  # 0: 현재가 기준
-                "price_type": 0,     # 0: 최신가
-                "rule": 1 if side == "long" else 2,  # 1: >=, 2: <=
-                "trigger_price": str(tp_price)
-            }
+            initial=initial_order,
+            trigger=trigger
         )
         
         result = _get_api_response(api.create_price_triggered_order, SETTLE, tp_order)
