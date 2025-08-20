@@ -236,7 +236,7 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
     return final_qty
 
 # ========
-# 10. 양방향 포지션 상태 관리
+# 10. 양방향 포지션 상태 관리 (수정)
 # ========
 def update_all_position_states():
     with position_lock:
@@ -244,10 +244,13 @@ def update_all_position_states():
         if all_positions_from_api is None:
             log_debug("❌ 포지션 업데이트 실패", "API 호출에 실패하여 상태를 업데이트할 수 없습니다.")
             return
+
         active_positions_set = set()
         for pos_info in all_positions_from_api:
+            # [수정] 딕셔너리 방식(pos_info['key']) -> 객체 속성 방식(pos_info.attribute)으로 변경
             symbol = pos_info.contract
             api_side = pos_info.mode
+            
             if api_side == 'dual_long':
                 side = 'long'
             elif api_side == 'dual_short':
@@ -263,7 +266,10 @@ def update_all_position_states():
             current_side_state = position_state[symbol][side]
             current_side_state["price"] = Decimal(str(pos_info.entry_price))
             current_side_state["size"] = Decimal(str(pos_info.size))
-            current_side_state["value"] = Decimal(str(pos_info.size)) * Decimal(str(pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
+            
+            # [수정] mark_price 속성으로 포지션 가치 계산
+            if pos_info.mark_price and SYMBOL_CONFIG[symbol].get("contract_size"):
+                current_side_state["value"] = Decimal(str(pos_info.size)) * Decimal(str(pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
             
             if current_side_state["entry_count"] == 0 and current_side_state["size"] > 0:
                 log_debug("🔄 수동 포지션 감지", f"{symbol} {side.upper()} 포지션을 상태에 추가합니다.")
@@ -271,6 +277,8 @@ def update_all_position_states():
                 current_side_state["entry_time"] = time.time()
                 
             active_positions_set.add((symbol, side))
+            
+        # 메모리에만 존재하는 유령 포지션 정리
         for symbol, sides in position_state.items():
             for side in ["long", "short"]:
                 if (symbol, side) not in active_positions_set and sides[side]["size"] > 0:
@@ -278,7 +286,7 @@ def update_all_position_states():
                     position_state[symbol][side] = get_default_pos_side_state()
                     if symbol in tpsl_storage and side in tpsl_storage[symbol]:
                         tpsl_storage[symbol][side].clear()
-
+                        
 # ========
 # 11. 양방향 주문 실행
 # ========
