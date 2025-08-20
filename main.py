@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.22 - 최종 완성 버전 (실행 및 설정 오류 수정)
-- __name__ 오타를 수정하여 서버가 정상 실행되도록 함
-- SYMBOL_CONFIG에 누락된 코인 설정을 추가하여 '알 수 없는 심볼' 오류 해결
+Gate.io 자동매매 서버 v6.23 - 최종 완성 버전 (피라미딩 제한 오류 수정)
+- 신호 유형(type) 판단 로직을 수정하여 피라미딩 제한이 정확히 작동하도록 함
+- 코인별 상세 설정을 SYMBOL_CONFIG로 통합하여 관리 용이성 개선
 """
 import os
 import json
@@ -25,7 +25,7 @@ import urllib.parse
 # 1. 로깅 설정
 # ========================================
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-logger = logging.getLogger(__name__) # [수정] **name** -> __name__
+logger = logging.getLogger(__name__)
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 def log_debug(tag, msg, exc_info=False):
@@ -36,7 +36,7 @@ def log_debug(tag, msg, exc_info=False):
 # ========================================
 # 2. Flask 앱 및 API 설정
 # ========================================
-app = Flask(__name__) # [수정] **name** -> __name__
+app = Flask(__name__)
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
@@ -47,7 +47,7 @@ api = FuturesApi(client)
 unified_api = UnifiedApi(client)
 
 # ========================================
-# [핵심 수정] 3. 상수 및 설정 (SYMBOL_CONFIG에 ONDO 추가)
+# 3. 상수 및 설정
 # ========================================
 COOLDOWN_SECONDS = 14
 PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0005")
@@ -67,11 +67,6 @@ SYMBOL_MAPPING = {
     "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT", "ONDO_USDT": "ONDO_USDT", "ONDO": "ONDO_USDT",
 }
 
-PRICE_MULTIPLIERS = {
-    "PEPE_USDT": Decimal("100000000.0"),
-    "SHIB_USDT": Decimal("1000000.0")
-}
-
 SYMBOL_CONFIG = {
     "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55, "tick_size": Decimal("0.1")},
     "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65, "tick_size": Decimal("0.01")},
@@ -79,10 +74,10 @@ SYMBOL_CONFIG = {
     "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")},
     "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.001")},
     "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.001")},
-    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00000001")},
+    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00000001"), "price_multiplier": Decimal("100000000.0")},
     "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")},
     "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00001")},
-    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")} # [추가] ONDO 설정 추가
+    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")}
 }
 
 # ========================================
@@ -511,70 +506,90 @@ def worker(idx):
             log_debug(f"❌ 워커-{idx} 심각 오류", f"워커 스레드 오류: {str(e)}", exc_info=True)
 
 def handle_entry(data):
-    symbol = normalize_symbol(data.get("symbol", ""))
+    # 1. 신호(data)로부터 기본 정보 추출
+    symbol = normalize_symbol(data.get("symbol"))
     side = data.get("side", "").lower()
-    signal_type = data.get("type", "normal_long")
+
+    # [수정] 'type' 필드가 없으면 'normal'을 기본으로 하고, side를 조합하여 최종 signal_type 생성
+    base_type = data.get("type", "normal")
+    signal_type = f"{base_type}_{side}"
+    
     entry_score = data.get("entry_score", 50)
     signal_price_raw = data.get('price')
     tp_pct = Decimal(str(data.get("tp_pct", "0.5"))) / 100
     sl_pct = Decimal(str(data.get("sl_pct", "4.0"))) / 100
     
+    # 2. 필수 정보 유효성 검사
     if not all([symbol, side, signal_price_raw]):
+        log_debug("❌ 진입 처리 불가", f"필수 정보 누락: symbol='{symbol}', side='{side}', price='{signal_price_raw}'")
         return
     
     cfg = SYMBOL_CONFIG.get(symbol)
     if not cfg:
-        return log_debug(f"⚠️ 진입 취소 ({symbol})", "알 수 없는 심볼")
+        return log_debug(f"⚠️ 진입 취소 ({symbol})", "SYMBOL_CONFIG에 등록되지 않은 심볼입니다.")
         
+    # 3. 가격 정보 및 슬리피지 계산
     current_price = get_price(symbol)
-    price_multiplier = PRICE_MULTIPLIERS.get(symbol, Decimal("1.0"))
+    price_multiplier = cfg.get("price_multiplier", Decimal("1.0")) # [수정] PRICE_MULTIPLIERS -> SYMBOL_CONFIG
     signal_price = Decimal(str(signal_price_raw)) / price_multiplier
     
     if current_price <= 0 or signal_price <= 0:
-        return
-        
+        return log_debug(f"❌ 진입 취소 ({symbol})", f"유효하지 않은 가격 정보. 현재가: {current_price}, 신호가: {signal_price}")
+
     price_diff = abs(current_price - signal_price)
     price_diff_pct = abs(current_price - signal_price) / signal_price
     
-    allowed_slippage_by_pct = signal_price * PRICE_DEVIATION_LIMIT_PCT
-    allowed_slippage_by_ticks = Decimal(str(MAX_SLIPPAGE_TICKS)) * cfg['tick_size']
-    max_allowed_slippage = max(allowed_slippage_by_pct, allowed_slippage_by_ticks)
-    
-    if price_diff > max_allowed_slippage:
-        return log_debug(f"⚠️ 진입 취소: 슬리피지 ({symbol}_{side.upper()})", f"차이: {price_diff:.8f}, 허용: {max_allowed_slippage:.8f}")
+    allowed_slippage = max(signal_price * PRICE_DEVIATION_LIMIT_PCT, Decimal(str(MAX_SLIPPAGE_TICKS)) * cfg['tick_size'])
+    if price_diff > allowed_slippage:
+        return log_debug(f"⚠️ 진입 취소: 슬리피지 ({symbol}_{side.upper()})", f"가격 차이({price_diff:.8f})가 허용 범위({allowed_slippage:.8f})를 초과했습니다.")
         
+    # 4. 포지션 상태 확인 및 진입 조건 검사
     update_all_position_states()
     pos_side_state = position_state.get(symbol, {}).get(side, {})
     
+    # [수정] 피라미딩 제한 로직 강화
+    entry_limits = {"premium": 5, "normal": 5, "rescue": 3}
+    total_entry_limit = 10
+    
+    entry_type_key = next((k for k in entry_limits if k in signal_type), None)
+
+    # 총 진입 횟수 제한
+    if pos_side_state.get("entry_count", 0) >= total_entry_limit:
+        log_debug(f"⚠️ 추가 진입 제한 ({symbol}_{side.upper()})", f"총 진입 횟수({pos_side_state.get('entry_count', 0)})가 최대치({total_entry_limit})에 도달했습니다.")
+        return
+
+    # 유형별 진입 횟수 제한
+    if entry_type_key and pos_side_state.get(f"{entry_type_key}_entry_count", 0) >= entry_limits[entry_type_key]:
+        log_debug(f"⚠️ 추가 진입 제한 ({symbol}_{side.upper()})", f"'{entry_type_key}' 유형 진입 횟수({pos_side_state.get(f'{entry_type_key}_entry_count', 0)})가 최대치({entry_limits[entry_type_key]})에 도달했습니다.")
+        return
+
+    # 불리한 가격에서의 추가 진입 방지 (레스큐 제외)
     if pos_side_state.get("size", Decimal(0)) > 0 and "rescue" not in signal_type:
         avg_price = pos_side_state.get("price")
         if avg_price and ((side == "long" and current_price <= avg_price) or (side == "short" and current_price >= avg_price)):
             return log_debug(f"⚠️ 추가 진입 보류 ({symbol}_{side.upper()})", f"평단가 불리. 현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
 
-    if pos_side_state.get("entry_count", 0) >= 10: return
-    if "premium" in signal_type and pos_side_state.get("premium_entry_count", 0) >= 5: return
-    if "normal" in signal_type and pos_side_state.get("normal_entry_count", 0) >= 5: return
-    if "rescue" in signal_type and pos_side_state.get("rescue_entry_count", 0) >= 3: return
-        
+    # 5. 주문 수량 계산
     current_signal_count = pos_side_state.get("premium_entry_count", 0) if "premium" in signal_type else pos_side_state.get("normal_entry_count", 0)
     qty = calculate_position_size(symbol, signal_type, entry_score, current_signal_count)
-    
     final_position_ratio = Decimal("0")
+    
     if "rescue" in signal_type:
         last_ratio = pos_side_state.get('last_entry_ratio', Decimal("5.0"))
         if last_ratio > 0:
-            equity = get_total_collateral()
-            contract_val = get_price(symbol) * cfg["contract_size"]
-            rescue_ratio = last_ratio * Decimal("1.5")
-            qty = max((equity * rescue_ratio / 100 / contract_val).quantize(Decimal('1'), rounding=ROUND_DOWN), cfg["min_qty"])
-            final_position_ratio = rescue_ratio
+            equity, contract_val = get_total_collateral(), get_price(symbol) * cfg["contract_size"]
+            if contract_val > 0:
+                rescue_ratio = last_ratio * Decimal("1.5")
+                qty = max((equity * rescue_ratio / 100 / contract_val).quantize(Decimal('1'), rounding=ROUND_DOWN), cfg["min_qty"])
+                final_position_ratio = rescue_ratio
     
+    # 6. 주문 실행
     if qty > 0:
         entry_action = "추가진입" if pos_side_state.get("size", 0) > 0 else "첫진입"
         if place_order(symbol, side, qty, signal_type, final_position_ratio):
             update_all_position_states()
             latest_pos_side_state = position_state.get(symbol, {}).get(side, {})
-            log_debug(f"✅ {entry_action} 성공 ({symbol}_{side.upper()})", f"{float(qty)} 계약 (총 #{latest_pos_side_state.get('entry_count',0)})")
+            log_debug(f"✅ {entry_action} 성공 ({symbol}_{side.upper()})", f"유형: {signal_type}, 수량: {float(qty)} 계약 (총 진입: {latest_pos_side_state.get('entry_count',0)}회)")
             store_tp_sl(symbol, side, tp_pct, sl_pct, price_diff_pct, latest_pos_side_state.get("entry_count", 0))
         else:
             log_debug(f"❌ {entry_action} 실패 ({symbol}_{side.upper()})", "주문 실행 중 오류 발생")
