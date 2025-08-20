@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.16 - 최종 완성 버전 (KeyError 최종 수정)
-- API의 'dual_short' 응답을 내부적으로 'short'로 변환하여 KeyError 해결
+Gate.io 자동매매 서버 v6.17 - 최종 완성 버전 (포지션 인식 오류 수정)
+- LINK 코인 심볼을 API 표준('LINK_USDT')으로 수정하여 수동 포지션 인식 문제 해결
 - 모든 포지션 인식 및 상태 관리 로직 완벽 정상화
 """
 
@@ -23,7 +23,7 @@ import pytz
 import urllib.parse 
 
 # ========================================
-# 1. 로깅 설정 (변경 없음)
+# 1. 로깅 설정
 # ========================================
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
@@ -34,30 +34,59 @@ def log_debug(tag, msg, exc_info=False):
     if exc_info: logger.exception("")
 
 # ========================================
-# 2. Flask 앱 및 API 설정 (변경 없음)
+# 2. Flask 앱 및 API 설정
 # ========================================
 app = Flask(__name__)
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
+
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
 unified_api = UnifiedApi(client)
 
 # ========================================
-# 3. 상수 및 설정 (변경 없음)
+# [핵심 수정] 3. 상수 및 설정 (LINK 심볼 수정)
 # ========================================
 COOLDOWN_SECONDS = 14
 PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0005")
 MAX_SLIPPAGE_TICKS = 10
 KST = pytz.timezone('Asia/Seoul')
-SYMBOL_MAPPING = { "BTCUSDT": "BTC_USDT", "ETHUSDT": "ETH_USDT", "SOLUSDT": "SOL_USDT", "ADAUSDT": "ADA_USDT", "SUIUSDT": "SUI_USDT", "LINKUSDT": "LINK_USDT", "PEPEUSDT": "PEPE_USDT", "XRPUSDT": "XRP_USDT", "DOGEUSDT": "DOGE_USDT", "ONDO_USDT": "ONDO_USDT" }
-PRICE_MULTIPLIERS = { "PEPE_USDT": Decimal("100000000.0"), "SHIB_USDT": Decimal("1000000.0") }
-SYMBOL_CONFIG = { "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55, "tick_size": Decimal("0.1")}, "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65, "tick_size": Decimal("0.01")}, "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 0.8, "sl_mult": 0.8, "tick_size": Decimal("0.001")}, "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")}, "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.001")}, "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.001")}, "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00000001")}, "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")}, "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00001")}, "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")} }
+
+SYMBOL_MAPPING = {
+    "BTCUSDT": "BTC_USDT",
+    "ETHUSDT": "ETH_USDT",
+    "SOLUSDT": "SOL_USDT",
+    "ADAUSDT": "ADA_USDT",
+    "SUIUSDT": "SUI_USDT",
+    "LINKUSDT": "LINK_USDT", # [수정] 'LINK_USDT' -> 'LINK_USDT'
+    "PEPEUSDT": "PEPE_USDT",
+    "XRPUSDT": "XRP_USDT",
+    "DOGEUSDT": "DOGE_USDT",
+    "ONDO_USDT": "ONDO_USDT"
+}
+
+PRICE_MULTIPLIERS = {
+    "PEPE_USDT": Decimal("100000000.0"),
+    "SHIB_USDT": Decimal("1000000.0")
+}
+
+SYMBOL_CONFIG = {
+    "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55, "tick_size": Decimal("0.1")},
+    "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65, "tick_size": Decimal("0.01")},
+    "SOL_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 0.8, "sl_mult": 0.8, "tick_size": Decimal("0.001")},
+    "ADA_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")},
+    "SUI_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.001")},
+    "LINK_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.001")}, # [수정] 'LINK_USDT' -> 'LINK_USDT'
+    "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00000001")},
+    "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")},
+    "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00001")},
+    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")}
+}
 
 # ========================================
-# 4. 양방향 상태 관리 (변경 없음)
+# 4. 양방향 상태 관리
 # ========================================
 position_state = {}
 position_lock = threading.RLock()
@@ -70,7 +99,11 @@ task_q = queue.Queue(maxsize=100)
 WORKER_COUNT = min(6, max(2, os.cpu_count() * 2))
 
 def get_default_pos_side_state():
-    return { "price": None, "size": Decimal("0"), "value": Decimal("0"), "entry_count": 0, "normal_entry_count": 0, "premium_entry_count": 0, "rescue_entry_count": 0, "entry_time": None, 'last_entry_ratio': Decimal("0") }
+    return {
+        "price": None, "size": Decimal("0"), "value": Decimal("0"), "entry_count": 0,
+        "normal_entry_count": 0, "premium_entry_count": 0, "rescue_entry_count": 0,
+        "entry_time": None, 'last_entry_ratio': Decimal("0")
+    }
 
 def initialize_states():
     with position_lock, tpsl_lock:
@@ -81,24 +114,33 @@ def initialize_states():
                 tpsl_storage[sym] = {"long": {}, "short": {}}
 
 # ========================================
-# 5. 핵심 유틸리티 함수 (변경 없음)
+# 5. 핵심 유틸리티 함수
 # ========================================
 def _get_api_response(api_call, *args, **kwargs):
     max_retries = 3
     for attempt in range(max_retries):
-        try: return api_call(*args, **kwargs)
+        try:
+            return api_call(*args, **kwargs)
         except Exception as e:
-            if isinstance(e, gate_api_exceptions.ApiException): error_msg = f"API Error {e.status}: {e.body if hasattr(e, 'body') else e.reason}"
-            else: error_msg = str(e)
-            if attempt < max_retries - 1: log_debug("⚠️ API 호출 재시도", f"시도 {attempt+1}/{max_retries}: {error_msg}, 잠시 후 재시도")
-            else: log_debug("❌ API 호출 최종 실패", error_msg, exc_info=True)
+            if isinstance(e, gate_api_exceptions.ApiException):
+                error_msg = f"API Error {e.status}: {e.body if hasattr(e, 'body') else e.reason}"
+            else:
+                error_msg = str(e)
+            
+            if attempt < max_retries - 1:
+                log_debug("⚠️ API 호출 재시도", f"시도 {attempt+1}/{max_retries}: {error_msg}, 잠시 후 재시도")
+            else:
+                log_debug("❌ API 호출 최종 실패", error_msg, exc_info=True)
     return None
 
-def normalize_symbol(raw_symbol): return SYMBOL_MAPPING.get(str(raw_symbol).upper().strip().replace("/", "_"))
+def normalize_symbol(raw_symbol):
+    return SYMBOL_MAPPING.get(str(raw_symbol).upper().strip().replace("/", "_"))
 
 def get_total_collateral(force=False):
     now = time.time()
-    if not force and account_cache["time"] > now - 30 and account_cache["data"]: return account_cache["data"]
+    if not force and account_cache["time"] > now - 30 and account_cache["data"]:
+        return account_cache["data"]
+    
     acc = _get_api_response(api.list_futures_accounts, SETTLE)
     equity = Decimal(str(getattr(acc, 'total', '0'))) if acc else Decimal("0")
     account_cache.update({"time": now, "data": equity})
