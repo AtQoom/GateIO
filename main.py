@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.18 - 최종 완성 버전 (로그 누락 오류 수정)
+Gate.io 자동매매 서버 v6.22 - 최종 완성 버전 (실행 및 설정 오류 수정)
 - __name__ 오타를 수정하여 서버가 정상 실행되도록 함
-- 중복 신호 발생 시에도 로그를 남기도록 하여 모든 케이스 추적 가능
+- SYMBOL_CONFIG에 누락된 코인 설정을 추가하여 '알 수 없는 심볼' 오류 해결
 """
 import os
 import json
@@ -22,7 +22,7 @@ import pytz
 import urllib.parse 
 
 # ========================================
-# [수정] 1. 로깅 설정
+# 1. 로깅 설정
 # ========================================
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__) # [수정] **name** -> __name__
@@ -34,7 +34,7 @@ def log_debug(tag, msg, exc_info=False):
         logger.exception("")
 
 # ========================================
-# [수정] 2. Flask 앱 및 API 설정
+# 2. Flask 앱 및 API 설정
 # ========================================
 app = Flask(__name__) # [수정] **name** -> __name__
 API_KEY = os.environ.get("API_KEY", "")
@@ -47,7 +47,7 @@ api = FuturesApi(client)
 unified_api = UnifiedApi(client)
 
 # ========================================
-# 3. 상수 및 설정
+# [핵심 수정] 3. 상수 및 설정 (SYMBOL_CONFIG에 ONDO 추가)
 # ========================================
 COOLDOWN_SECONDS = 14
 PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0005")
@@ -64,7 +64,7 @@ SYMBOL_MAPPING = {
     "PEPEUSDT": "PEPE_USDT", "PEPEUSDT.P": "PEPE_USDT", "PEPEUSDTPERP": "PEPE_USDT", "PEPE_USDT": "PEPE_USDT", "PEPE": "PEPE_USDT",
     "XRPUSDT": "XRP_USDT", "XRPUSDT.P": "XRP_USDT", "XRPUSDTPERP": "XRP_USDT", "XRP_USDT": "XRP_USDT", "XRP": "XRP_USDT",
     "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT", "DOGE_USDT": "DOGE_USDT", "DOGE": "DOGE_USDT",
-    "ONDO_USDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT", "ONDO_USDT": "ONDO_USDT", "ONDO": "ONDO_USDT",
+    "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT", "ONDO_USDT": "ONDO_USDT", "ONDO": "ONDO_USDT",
 }
 
 PRICE_MULTIPLIERS = {
@@ -82,10 +82,8 @@ SYMBOL_CONFIG = {
     "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00000001")},
     "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")},
     "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00001")},
-    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")}
+    "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")} # [추가] ONDO 설정 추가
 }
-
-# ... (4번부터 7번까지 변경 없음) ...
 
 # ========================================
 # 4. 양방향 상태 관리
@@ -615,7 +613,7 @@ def position_monitor():
             log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
 if __name__ == "__main__": # [수정] **main** -> __main__
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.18 (Log Fix)")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.22 (Config Fix)")
     log_debug("🎯 전략 핵심", "독립 피라미딩 + 점수 기반 가중치 + 슬리피지 연동형 동적 TP + 레스큐 진입")
     log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱 중 큰 값)")
     log_debug("⚠️ 중요", "Gate.io 거래소 설정에서 '양방향 포지션 모드(Two-way)'가 활성화되어야 합니다.")
@@ -651,3 +649,4 @@ if __name__ == "__main__": # [수정] **main** -> __main__
     log_debug("✅ 준비 완료", "파인스크립트 v6.18 (Hedge) 연동 시스템 대기중")
     
     app.run(host="0.0.0.0", port=port, debug=False)
+
