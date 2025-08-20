@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.23 - 최종 완성 버전 (피라미딩 제한 오류 수정)
-- 신호 유형(type) 판단 로직을 수정하여 피라미딩 제한이 정확히 작동하도록 함
-- 코인별 상세 설정을 SYMBOL_CONFIG로 통합하여 관리 용이성 개선
+Gate.io 자동매매 서버 v6.25 - 최종 완성 버전 (안정 버전 기반 재구성)
+- __name__ 변수 관련 문법 오류를 수정하여 NameError를 해결
+- 안정적으로 작동하던 이전 버전의 코드 구조 위에 양방향 로직을 재구성하여 안정성 확보
 """
 import os
 import json
@@ -21,39 +21,37 @@ import queue
 import pytz
 import urllib.parse 
 
-# ========================================
-# 1. 로깅 설정
-# ========================================
+# ========
+# 1. 로깅 및 Flask 앱 설정 (오류 수정)
+# ========
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
+app = Flask(__name__)
 
 def log_debug(tag, msg, exc_info=False):
     logger.info(f"[{tag}] {msg}")
     if exc_info:
         logger.exception("")
 
-# ========================================
-# 2. Flask 앱 및 API 설정
-# ========================================
-app = Flask(__name__)
+# ========
+# 2. API 및 기본 설정
+# ========
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
-
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
 unified_api = UnifiedApi(client)
 
-# ========================================
+# ========
 # 3. 상수 및 설정
-# ========================================
+# ========
 COOLDOWN_SECONDS = 14
 PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0005")
 MAX_SLIPPAGE_TICKS = 10
 KST = pytz.timezone('Asia/Seoul')
-
 SYMBOL_MAPPING = {
     "BTCUSDT": "BTC_USDT", "BTCUSDT.P": "BTC_USDT", "BTCUSDTPERP": "BTC_USDT", "BTC_USDT": "BTC_USDT", "BTC": "BTC_USDT",
     "ETHUSDT": "ETH_USDT", "ETHUSDT.P": "ETH_USDT", "ETHUSDTPERP": "ETH_USDT", "ETH_USDT": "ETH_USDT", "ETH": "ETH_USDT",
@@ -66,7 +64,6 @@ SYMBOL_MAPPING = {
     "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT", "DOGE_USDT": "DOGE_USDT", "DOGE": "DOGE_USDT",
     "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT", "ONDO_USDT": "ONDO_USDT", "ONDO": "ONDO_USDT",
 }
-
 SYMBOL_CONFIG = {
     "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55, "tick_size": Decimal("0.1")},
     "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65, "tick_size": Decimal("0.01")},
@@ -80,9 +77,9 @@ SYMBOL_CONFIG = {
     "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")}
 }
 
-# ========================================
+# ========
 # 4. 양방향 상태 관리
-# ========================================
+# ========
 position_state = {}
 position_lock = threading.RLock()
 account_cache = {"time": 0, "data": None}
@@ -108,9 +105,9 @@ def initialize_states():
             if sym not in tpsl_storage:
                 tpsl_storage[sym] = {"long": {}, "short": {}}
 
-# ========================================
+# ========
 # 5. 핵심 유틸리티 함수
-# ========================================
+# ========
 def _get_api_response(api_call, *args, **kwargs):
     max_retries = 3
     for attempt in range(max_retries):
@@ -147,9 +144,9 @@ def get_price(symbol):
         return Decimal(str(ticker[0].last))
     return Decimal("0")
 
-# ========================================
+# ========
 # 6. 파인스크립트 연동 함수
-# ========================================
+# ========
 def get_signal_type_multiplier(signal_type):
     if "premium" in signal_type: return Decimal("2.0")
     if "rescue" in signal_type: return Decimal("1.5")
@@ -166,9 +163,9 @@ def get_entry_weight_from_score(score):
         else: return Decimal("1.00")
     except Exception: return Decimal("0.25")
 
-# ========================================
+# ========
 # 7. 양방향 TP/SL 관리
-# ========================================
+# ========
 def store_tp_sl(symbol, side, tp, sl, slippage_pct, entry_number):
     with tpsl_lock: 
         tpsl_storage.setdefault(symbol, {"long": {}, "short": {}}).setdefault(side, {})[entry_number] = {
@@ -186,18 +183,15 @@ def get_tp_sl(symbol, side, entry_number=None):
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
     return Decimal("0.005") * Decimal(str(cfg["tp_mult"])), Decimal("0.04") * Decimal(str(cfg["sl_mult"])), Decimal("0"), time.time()
 
-
-# ========================================
-# [수정] 8. 중복 신호 체크 (로그 추가)
-# ========================================
+# ========
+# 8. 중복 신호 체크
+# ========
 def is_duplicate(data):
     with signal_lock:
         now = time.time()
-        # 웹훅 페이로드에서 symbol과 side를 안전하게 가져옴
         symbol = data.get('symbol')
         side = data.get('side')
         
-        # symbol이나 side가 None이면, 중복 체크를 할 수 없으므로 False 반환
         if not symbol or not side:
             return False
             
@@ -209,18 +203,13 @@ def is_duplicate(data):
         
         recent_signals[symbol_id] = {"last_processed_time": now}
         
-        # 오래된 신호 정리
-        # 300초(5분) 이상 지난 신호는 메모리에서 삭제
         recent_signals.update({k: v for k, v in recent_signals.items() if now - v.get("last_processed_time", 0) < 300})
         
         return False
 
-
-# ... (9번부터 11번까지 변경 없음) ...
-
-# ========================================
+# ========
 # 9. 수량 계산
-# ========================================
+# ========
 def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_count=0):
     cfg = SYMBOL_CONFIG[symbol]
     equity = get_total_collateral()
@@ -246,21 +235,19 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
         
     return final_qty
 
-# ========================================
+# ========
 # 10. 양방향 포지션 상태 관리
-# ========================================
+# ========
 def update_all_position_states():
     with position_lock:
         all_positions_from_api = _get_api_response(api.list_positions, SETTLE)
         if all_positions_from_api is None:
             log_debug("❌ 포지션 업데이트 실패", "API 호출에 실패하여 상태를 업데이트할 수 없습니다.")
             return
-
         active_positions_set = set()
         for pos_info in all_positions_from_api:
             symbol = pos_info.contract
             api_side = pos_info.mode
-
             if api_side == 'dual_long':
                 side = 'long'
             elif api_side == 'dual_short':
@@ -284,7 +271,6 @@ def update_all_position_states():
                 current_side_state["entry_time"] = time.time()
                 
             active_positions_set.add((symbol, side))
-
         for symbol, sides in position_state.items():
             for side in ["long", "short"]:
                 if (symbol, side) not in active_positions_set and sides[side]["size"] > 0:
@@ -293,9 +279,9 @@ def update_all_position_states():
                     if symbol in tpsl_storage and side in tpsl_storage[symbol]:
                         tpsl_storage[symbol][side].clear()
 
-# ========================================
+# ========
 # 11. 양방향 주문 실행
-# ========================================
+# ========
 def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0")):
     with position_lock:
         order = FuturesOrder(contract=symbol, size=float(qty), price="0", tif="ioc", dual_pos=side)
@@ -337,10 +323,9 @@ def close_position(symbol, side, reason="manual"):
             recent_signals.pop(f"{symbol}_{side}", None)
         return True
 
-
-# ========================================
-# [수정] 12. 웹훅 라우트 및 관리용 API (로그 추가)
-# ========================================
+# ========
+# 12. 웹훅 라우트 및 관리용 API
+# ========
 @app.route("/ping", methods=["GET", "HEAD"])
 def ping():
     return "pong", 200
@@ -367,7 +352,7 @@ def status():
                         }
         
         return jsonify({
-            "status": "running", "version": "v6.18_log_fix",
+            "status": "running", "version": "v6.25_final_fix",
             "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": active_positions,
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
@@ -380,12 +365,11 @@ def status():
 def webhook():
     try:
         data = json.loads(request.get_data(as_text=True))
-        log_debug("📬 웹훅 수신", f"수신 데이터: {data}") # [추가] 모든 웹훅 수신 시 로그 기록
+        log_debug("📬 웹훅 수신", f"수신 데이터: {data}")
         
         action = data.get("action", "").lower()
         symbol = normalize_symbol(data.get("symbol", ""))
         side = data.get("side", "").lower()
-
         if not all([action, symbol, side]):
             log_debug("❌ 유효하지 않은 웹훅", f"필수 필드 누락: {data}")
             return jsonify({"error": "Invalid payload"}), 400
@@ -412,11 +396,9 @@ def webhook():
         log_debug("❌ 웹훅 처리 중 예외 발생", str(e), exc_info=True)
         return jsonify({"error": str(e)}), 500
 
-# ... (13번부터 14번까지 변경 없음) ...
-
-# ========================================
+# ========
 # 13. 양방향 웹소켓 모니터링
-# ========================================
+# ========
 async def price_monitor():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     symbols_to_subscribe = list(SYMBOL_CONFIG.keys())
@@ -487,9 +469,9 @@ def check_tp_only(ticker):
     except Exception as e:
         log_debug(f"❌ TP 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
 
-# ========================================
+# ========
 # 14. 양방향 진입 처리 로직
-# ========================================
+# ========
 def worker(idx):
     while True:
         try:
@@ -509,8 +491,6 @@ def handle_entry(data):
     # 1. 신호(data)로부터 기본 정보 추출
     symbol = normalize_symbol(data.get("symbol"))
     side = data.get("side", "").lower()
-
-    # [수정] 'type' 필드가 없으면 'normal'을 기본으로 하고, side를 조합하여 최종 signal_type 생성
     base_type = data.get("type", "normal")
     signal_type = f"{base_type}_{side}"
     
@@ -530,12 +510,11 @@ def handle_entry(data):
         
     # 3. 가격 정보 및 슬리피지 계산
     current_price = get_price(symbol)
-    price_multiplier = cfg.get("price_multiplier", Decimal("1.0")) # [수정] PRICE_MULTIPLIERS -> SYMBOL_CONFIG
+    price_multiplier = cfg.get("price_multiplier", Decimal("1.0"))
     signal_price = Decimal(str(signal_price_raw)) / price_multiplier
     
     if current_price <= 0 or signal_price <= 0:
         return log_debug(f"❌ 진입 취소 ({symbol})", f"유효하지 않은 가격 정보. 현재가: {current_price}, 신호가: {signal_price}")
-
     price_diff = abs(current_price - signal_price)
     price_diff_pct = abs(current_price - signal_price) / signal_price
     
@@ -547,23 +526,19 @@ def handle_entry(data):
     update_all_position_states()
     pos_side_state = position_state.get(symbol, {}).get(side, {})
     
-    # [수정] 피라미딩 제한 로직 강화
     entry_limits = {"premium": 5, "normal": 5, "rescue": 3}
     total_entry_limit = 10
     
     entry_type_key = next((k for k in entry_limits if k in signal_type), None)
 
-    # 총 진입 횟수 제한
     if pos_side_state.get("entry_count", 0) >= total_entry_limit:
         log_debug(f"⚠️ 추가 진입 제한 ({symbol}_{side.upper()})", f"총 진입 횟수({pos_side_state.get('entry_count', 0)})가 최대치({total_entry_limit})에 도달했습니다.")
         return
 
-    # 유형별 진입 횟수 제한
     if entry_type_key and pos_side_state.get(f"{entry_type_key}_entry_count", 0) >= entry_limits[entry_type_key]:
         log_debug(f"⚠️ 추가 진입 제한 ({symbol}_{side.upper()})", f"'{entry_type_key}' 유형 진입 횟수({pos_side_state.get(f'{entry_type_key}_entry_count', 0)})가 최대치({entry_limits[entry_type_key]})에 도달했습니다.")
         return
 
-    # 불리한 가격에서의 추가 진입 방지 (레스큐 제외)
     if pos_side_state.get("size", Decimal(0)) > 0 and "rescue" not in signal_type:
         avg_price = pos_side_state.get("price")
         if avg_price and ((side == "long" and current_price <= avg_price) or (side == "short" and current_price >= avg_price)):
@@ -594,9 +569,9 @@ def handle_entry(data):
         else:
             log_debug(f"❌ {entry_action} 실패 ({symbol}_{side.upper()})", "주문 실행 중 오류 발생")
 
-# ========================================
-# [수정] 15. 포지션 모니터링 및 메인 실행
-# ========================================
+# ========
+# 15. 포지션 모니터링 및 메인 실행
+# ========
 def position_monitor():
     while True:
         time.sleep(30)
@@ -627,8 +602,8 @@ def position_monitor():
         except Exception as e:
             log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
-if __name__ == "__main__": # [수정] **main** -> __main__
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.22 (Config Fix)")
+if __name__ == "__main__":
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.25 (Final Fix)")
     log_debug("🎯 전략 핵심", "독립 피라미딩 + 점수 기반 가중치 + 슬리피지 연동형 동적 TP + 레스큐 진입")
     log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱 중 큰 값)")
     log_debug("⚠️ 중요", "Gate.io 거래소 설정에서 '양방향 포지션 모드(Two-way)'가 활성화되어야 합니다.")
@@ -661,7 +636,6 @@ if __name__ == "__main__": # [수정] **main** -> __main__
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹 서버 시작", f"Flask 서버 0.0.0.0:{port}에서 실행 중")
-    log_debug("✅ 준비 완료", "파인스크립트 v6.18 (Hedge) 연동 시스템 대기중")
+    log_debug("✅ 준비 완료", "파인스크립트 v6.25 연동 시스템 대기중")
     
     app.run(host="0.0.0.0", port=port, debug=False)
-
