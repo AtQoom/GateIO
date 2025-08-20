@@ -69,7 +69,7 @@ except Exception as e:
 # ========
 # 3. 상수 및 설정
 # ========
-COOLDOWN_SECONDS = 15
+COOLDOWN_SECONDS = 14
 PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0005")
 MAX_SLIPPAGE_TICKS = 10
 KST = pytz.timezone('Asia/Seoul')
@@ -317,6 +317,25 @@ def cancel_tp_order(tp_order_id):
                 return False
     except Exception as e:
         log_debug("❌ TP 주문 취소 오류", str(e), exc_info=True)
+        return False
+
+def verify_tp_order_active(symbol, side, tp_order_id):
+    """TP 주문이 실제로 활성화되었는지 확인"""
+    try:
+        if not tp_order_id:
+            return False
+        
+        # Gate.io API로 TP 주문 상태 확인 (정확한 함수명 사용)
+        result = _get_api_response(api.list_price_triggered_orders, SETTLE, status='active')
+        if result:
+            for order in result:
+                if str(order.id) == str(tp_order_id) and order.status == 'active':
+                    return True
+        
+        log_debug(f"⚠️ TP 주문 비활성 ({symbol}_{side.upper()})", f"주문ID: {tp_order_id}")
+        return False
+    except Exception as e:
+        log_debug(f"❌ TP 주문 상태 확인 오류 ({symbol}_{side.upper()})", str(e))
         return False
 
 def update_synchronized_dynamic_tp(symbol, side, entry_time, tv_signal_price, tv_tp_pct, current_tp_order_id):
@@ -687,6 +706,7 @@ async def price_monitor():
             await asyncio.sleep(5)
 
 def check_tp_backup(ticker):
+    """확실한 백업 TP 체크 - 모든 포지션에 적용"""
     try:
         symbol = ticker.get("contract")
         price = Decimal(str(ticker.get("last", "0")))
@@ -699,19 +719,71 @@ def check_tp_backup(ticker):
                 if not pos_side_state or pos_side_state.get("size", Decimal(0)) <= 0:
                     continue
                     
-                tp_order_id = pos_side_state.get("tp_order_id")
-                tv_sync_tp_price = pos_side_state.get("tv_sync_tp_price")
+                entry_time = pos_side_state.get("entry_time")
+                entry_price = pos_side_state.get("price")
                 
-                if not tp_order_id and tv_sync_tp_price:
-                    if side == "long" and price >= tv_sync_tp_price:
-                        log_debug(f"🎯 백업 롱 TP 트리거 ({symbol})", f"현재가: {price:.8f}, 동기화TP가: {tv_sync_tp_price:.8f}")
-                        close_position(symbol, "long", "BACKUP_SYNC_TP")
-                    elif side == "short" and price <= tv_sync_tp_price:
-                        log_debug(f"🎯 백업 숏 TP 트리거 ({symbol})", f"현재가: {price:.8f}, 동기화TP가: {tv_sync_tp_price:.8f}")
-                        close_position(symbol, "short", "BACKUP_SYNC_TP")
+                # 트레이딩뷰 동기화 데이터가 있는 경우
+                tv_signal_price = pos_side_state.get("tv_signal_price")
+                tv_tp_pct = pos_side_state.get("tv_tp_pct")
+                
+                if entry_time and tv_signal_price and tv_tp_pct:
+                    # 트레이딩뷰 동기화 TP 계산 (기존 코드)
+                    cfg = SYMBOL_CONFIG[symbol]
+                    tp_mult = Decimal(str(cfg["tp_mult"]))
+                    
+                    time_elapsed = time.time() - entry_time
+                    periods_15s = max(0, int(time_elapsed / 15))
+                    
+                    tp_decay_amount = Decimal("0.002") / 100 * tp_mult
+                    tp_min_pct = Decimal("0.12") / 100 * tp_mult
+                    
+                    tp_reduction = Decimal(str(periods_15s)) * tp_decay_amount
+                    current_tp_pct = max(tp_min_pct, tv_tp_pct - tp_reduction)
+                    
+                    if side == "long":
+                        tp_price = tv_signal_price * (1 + current_tp_pct)
+                        if price >= tp_price:
+                            log_debug(f"🎯 확실한 롱 TP 트리거 ({symbol})", 
+                                      f"현재가: {price:.8f}, TP가: {tp_price:.8f}")
+                            close_position(symbol, "long", "GUARANTEED_TP")
+                    elif side == "short":
+                        tp_price = tv_signal_price * (1 - current_tp_pct)
+                        if price <= tp_price:
+                            log_debug(f"🎯 확실한 숏 TP 트리거 ({symbol})", 
+                                      f"현재가: {price:.8f}, TP가: {tp_price:.8f}")
+                            close_position(symbol, "short", "GUARANTEED_TP")
+                
+                # 트레이딩뷰 동기화 데이터가 없는 경우 (수동 진입 등)
+                elif entry_time and entry_price:
+                    cfg = SYMBOL_CONFIG[symbol]
+                    tp_mult = Decimal(str(cfg["tp_mult"]))
+                    
+                    time_elapsed = time.time() - entry_time
+                    periods_15s = max(0, int(time_elapsed / 15))
+                    
+                    # 기본 TP 설정 사용
+                    base_tp_pct = Decimal("0.005") * tp_mult
+                    tp_decay_amount = Decimal("0.002") / 100 * tp_mult
+                    tp_min_pct = Decimal("0.12") / 100 * tp_mult
+                    
+                    tp_reduction = Decimal(str(periods_15s)) * tp_decay_amount
+                    current_tp_pct = max(tp_min_pct, base_tp_pct - tp_reduction)
+                    
+                    if side == "long":
+                        tp_price = entry_price * (1 + current_tp_pct)
+                        if price >= tp_price:
+                            log_debug(f"🎯 기본 롱 TP 트리거 ({symbol})", 
+                                      f"현재가: {price:.8f}, TP가: {tp_price:.8f}")
+                            close_position(symbol, "long", "BASIC_TP")
+                    elif side == "short":
+                        tp_price = entry_price * (1 - current_tp_pct)
+                        if price <= tp_price:
+                            log_debug(f"🎯 기본 숏 TP 트리거 ({symbol})", 
+                                      f"현재가: {price:.8f}, TP가: {tp_price:.8f}")
+                            close_position(symbol, "short", "BASIC_TP")
                 
     except Exception as e:
-        log_debug(f"❌ 백업 TP 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
+        log_debug(f"❌ 확실한 TP 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
 
 # ========
 # 16. 진입 처리 로직
