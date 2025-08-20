@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.25 - Gate.io API TP 주문 완전 구현
+Gate.io 자동매매 서버 v6.25 - 트레이딩뷰 TP 동기화 완전 구현
 """
 import os
 import json
@@ -33,7 +33,7 @@ def log_debug(tag, msg, exc_info=False):
         logger.exception("")
 
 # ========
-# 2. Flask 앱 및 API 설정 (수정)
+# 2. Flask 앱 및 API 설정
 # ========
 try:
     app = Flask(__name__)
@@ -102,7 +102,7 @@ SYMBOL_CONFIG = {
 }
 
 # ========
-# 4. 양방향 상태 관리 (TP 주문 ID 추가)
+# 4. 양방향 상태 관리 (트레이딩뷰 동기화 정보 추가)
 # ========
 position_state = {}
 position_lock = threading.RLock()
@@ -120,7 +120,11 @@ def get_default_pos_side_state():
         "normal_entry_count": 0, "premium_entry_count": 0, "rescue_entry_count": 0,
         "entry_time": None, 'last_entry_ratio': Decimal("0"),
         "tp_order_id": None,  # Gate.io TP 주문 ID
-        "last_tp_update": None  # 마지막 TP 업데이트 시간
+        "last_tp_update": None,  # 마지막 TP 업데이트 시간
+        "tv_sync_tp_price": None,  # 트레이딩뷰 동기화 TP 가격
+        "tv_signal_price": None,  # 트레이딩뷰 알림 가격
+        "tv_tp_pct": None,  # 트레이딩뷰 TP 비율
+        "actual_tp_pct": None  # 서버에서 계산된 실제 TP 비율
     }
 
 def initialize_states():
@@ -174,7 +178,7 @@ def get_price(symbol):
     return Decimal("0")
 
 # ========
-# 6. 파인스크립트 연동 함수 (수정)
+# 6. 파인스크립트 연동 함수
 # ========
 def get_signal_type_multiplier(signal_type):
     if "premium" in signal_type: return Decimal("2.0")
@@ -192,7 +196,6 @@ def get_entry_weight_from_score(score):
         else: return Decimal("1.00")
     except Exception: return Decimal("0.25")
 
-# 파인스크립트와 동일한 단계별 비율 (수정)
 def get_ratio_by_index(idx):
     ratios = [Decimal("5.0"), Decimal("10.0"), Decimal("25.0"), Decimal("60.0"), Decimal("200.0")]
     return ratios[min(idx, len(ratios) - 1)]
@@ -206,7 +209,51 @@ def get_sl_by_index(idx):
     return sls[min(idx, len(sls) - 1)]
 
 # ========
-# 7. 양방향 TP/SL 관리 (수정)
+# 7. 트레이딩뷰 TP 동기화 함수
+# ========
+def calculate_synchronized_tp_price(signal_price, actual_entry_price, tv_tp_pct, side, symbol):
+    """
+    트레이딩뷰 TP 타이밍과 정확히 동기화하는 TP 가격 계산
+    
+    Args:
+        signal_price: 트레이딩뷰 알림에서 받은 가격
+        actual_entry_price: 실제 서버 진입 가격
+        tv_tp_pct: 트레이딩뷰 TP 비율
+        side: 'long' or 'short'
+        symbol: 심볼명
+    
+    Returns:
+        tuple: (트레이딩뷰 TP 가격, 서버에서 사용할 실제 TP 비율)
+    """
+    try:
+        # 트레이딩뷰가 계산한 TP 가격 (알림 가격 기준)
+        if side == "long":
+            tv_tp_price = signal_price * (1 + tv_tp_pct)
+        else:  # short
+            tv_tp_price = signal_price * (1 - tv_tp_pct)
+        
+        # 실제 진입가 기준 TP 비율로 역계산
+        if side == "long":
+            actual_tp_pct = (tv_tp_price - actual_entry_price) / actual_entry_price
+        else:  # short
+            actual_tp_pct = (actual_entry_price - tv_tp_price) / actual_entry_price
+        
+        # 최소 TP 보장 (음수가 되지 않도록)
+        actual_tp_pct = max(actual_tp_pct, Decimal("0.0001"))
+        
+        log_debug(f"🎯 TP 동기화 계산 ({symbol}_{side.upper()})", 
+                  f"TV알림가: {signal_price:.8f}, 실제진입가: {actual_entry_price:.8f}, TV_TP가: {tv_tp_price:.8f}")
+        log_debug(f"🔧 TP 보정 ({symbol}_{side.upper()})", 
+                  f"원래TP: {tv_tp_pct*100:.2f}% → 보정TP: {actual_tp_pct*100:.3f}%")
+        
+        return tv_tp_price, actual_tp_pct
+        
+    except Exception as e:
+        log_debug(f"❌ TP 동기화 계산 오류 ({symbol}_{side.upper()})", str(e), exc_info=True)
+        return signal_price * (1 + tv_tp_pct if side == "long" else 1 - tv_tp_pct), tv_tp_pct
+
+# ========
+# 8. 양방향 TP/SL 관리 (트레이딩뷰 동기화 적용)
 # ========
 def store_tp_sl(symbol, side, tp, sl, slippage_pct, entry_number):
     with tpsl_lock: 
@@ -233,7 +280,7 @@ def get_tp_sl(symbol, side, entry_number=None):
             time.time())
 
 # ========
-# 7.5. Gate.io API TP 주문 관리 (신규 추가)
+# 9. Gate.io API TP 주문 관리
 # ========
 def place_tp_order(symbol, side, entry_price, tp_pct, position_size):
     """Gate.io API를 사용한 실제 TP 주문 생성"""
@@ -288,42 +335,60 @@ def cancel_tp_order(tp_order_id):
         log_debug("❌ TP 주문 취소 오류", str(e), exc_info=True)
         return False
 
-def update_dynamic_tp_order(symbol, side, entry_price, original_tp_pct, entry_time, current_tp_order_id):
-    """동적 TP 업데이트 - 기존 주문 취소 후 새로운 TP 가격으로 재생성"""
+def update_synchronized_dynamic_tp(symbol, side, entry_time, tv_signal_price, tv_tp_pct, current_tp_order_id):
+    """트레이딩뷰와 동기화된 동적 TP 업데이트"""
     try:
-        # 파인스크립트와 동일한 동적 TP 계산
         cfg = SYMBOL_CONFIG[symbol]
         tp_mult = Decimal(str(cfg["tp_mult"]))
         
+        # 파인스크립트와 동일한 TP 감소 로직
         time_elapsed = time.time() - entry_time
-        periods_15s = max(0, int(time_elapsed / 15))  # 15초 주기
+        periods_15s = max(0, int(time_elapsed / 15))
         
         tp_decay_amount = Decimal("0.002") / 100  # 0.002%
         tp_min_pct = Decimal("0.12") / 100        # 0.12%
         
+        # 트레이딩뷰 기준 감소된 TP 계산
         tp_reduction = Decimal(str(periods_15s)) * tp_decay_amount * tp_mult
-        current_tp_pct = max(tp_min_pct * tp_mult, original_tp_pct - tp_reduction)
+        current_tv_tp_pct = max(tp_min_pct * tp_mult, tv_tp_pct - tp_reduction)
+        
+        # 트레이딩뷰 기준 TP 가격 계산
+        if side == "long":
+            tv_tp_price = tv_signal_price * (1 + current_tv_tp_pct)
+        else:
+            tv_tp_price = tv_signal_price * (1 - current_tv_tp_pct)
+        
+        # 현재 실제 진입가 기준 TP 비율로 역계산
+        pos_side_state = position_state.get(symbol, {}).get(side, {})
+        current_entry_price = pos_side_state.get("price", get_price(symbol))
+        
+        if side == "long":
+            actual_tp_pct = (tv_tp_price - current_entry_price) / current_entry_price
+        else:
+            actual_tp_pct = (current_entry_price - tv_tp_price) / current_entry_price
+        
+        actual_tp_pct = max(actual_tp_pct, Decimal("0.0001"))
         
         # 기존 TP 주문 취소
         if current_tp_order_id:
             cancel_tp_order(current_tp_order_id)
         
-        # 새로운 TP 주문 생성
-        pos_side_state = position_state.get(symbol, {}).get(side, {})
         position_size = pos_side_state.get("size", Decimal("0"))
         
         if position_size > 0:
-            new_tp_order_id = place_tp_order(symbol, side, entry_price, current_tp_pct, position_size)
+            new_tp_order_id = place_tp_order(symbol, side, current_entry_price, actual_tp_pct, position_size)
+            log_debug(f"🔄 동기화 TP 업데이트 ({symbol}_{side.upper()})", 
+                      f"TV_TP가: {tv_tp_price:.8f}, 보정비율: {actual_tp_pct*100:.3f}%")
             return new_tp_order_id
         
         return None
         
     except Exception as e:
-        log_debug(f"❌ 동적 TP 업데이트 오류 ({symbol}_{side.upper()})", str(e), exc_info=True)
+        log_debug(f"❌ 동기화 TP 업데이트 오류 ({symbol}_{side.upper()})", str(e), exc_info=True)
         return None
 
 # ========
-# 8. 중복 신호 체크 (수정)
+# 10. 중복 신호 체크
 # ========
 def is_duplicate(data):
     with signal_lock:
@@ -348,7 +413,7 @@ def is_duplicate(data):
         return False
 
 # ========
-# 9. 수량 계산 (파인스크립트와 동기화)
+# 11. 수량 계산 (파인스크립트와 동기화)
 # ========
 def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_count=0):
     cfg = SYMBOL_CONFIG[symbol]
@@ -380,7 +445,7 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
     return final_qty
 
 # ========
-# 10. 양방향 포지션 상태 관리
+# 12. 양방향 포지션 상태 관리
 # ========
 def update_all_position_states():
     with position_lock:
@@ -430,9 +495,9 @@ def update_all_position_states():
                         tpsl_storage[symbol][side].clear()
 
 # ========
-# 11. 양방향 주문 실행 (TP 주문 포함 완전 수정)
+# 13. 양방향 주문 실행 (트레이딩뷰 TP 동기화 적용)
 # ========
-def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0")):
+def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0"), tv_sync_data=None):
     with position_lock:
         try:
             # 양방향 포지션 모드에서 올바른 주문 생성
@@ -474,26 +539,32 @@ def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0"
                 
             pos_side_state["entry_time"] = time.time()
             
+            # 트레이딩뷰 동기화 데이터 저장
+            if tv_sync_data:
+                pos_side_state["tv_sync_tp_price"] = tv_sync_data["tv_tp_price"]
+                pos_side_state["tv_signal_price"] = tv_sync_data["tv_signal_price"]
+                pos_side_state["tv_tp_pct"] = tv_sync_data["tv_tp_pct"]
+                pos_side_state["actual_tp_pct"] = tv_sync_data["actual_tp_pct"]
+            
             # 포지션 상태 업데이트 후 TP 주문 생성
             time.sleep(2)
             update_all_position_states()
             
-            # Gate.io API TP 주문 생성
+            # 트레이딩뷰 동기화 TP 주문 생성
             updated_pos_state = position_state.get(symbol, {}).get(side, {})
-            if updated_pos_state.get("size", Decimal("0")) > 0:
-                tp_pct, _, _, _ = get_tp_sl(symbol, side, updated_pos_state.get("entry_count"))
-                current_price = get_price(symbol)
-                
+            if updated_pos_state.get("size", Decimal("0")) > 0 and tv_sync_data:
                 # 기존 TP 주문이 있으면 취소
                 existing_tp_order_id = updated_pos_state.get("tp_order_id")
                 if existing_tp_order_id:
                     cancel_tp_order(existing_tp_order_id)
                 
-                # 새로운 TP 주문 생성
-                tp_order_id = place_tp_order(symbol, side, current_price, tp_pct, updated_pos_state["size"])
+                # 트레이딩뷰 동기화 TP 주문 생성
+                current_price = get_price(symbol)
+                tp_order_id = place_tp_order(symbol, side, current_price, tv_sync_data["actual_tp_pct"], updated_pos_state["size"])
                 if tp_order_id:
                     updated_pos_state["tp_order_id"] = tp_order_id
                     updated_pos_state["last_tp_update"] = time.time()
+                    log_debug(f"🎯 동기화 TP 설정 완료 ({symbol}_{side.upper()})", f"동기화 TP가: {tv_sync_data['tv_tp_price']:.8f}")
             
             return True
             
@@ -541,7 +612,7 @@ def close_position(symbol, side, reason="manual"):
             return False
 
 # ========
-# 12. 웹훅 라우트 및 관리용 API
+# 14. 웹훅 라우트 및 관리용 API
 # ========
 @app.route("/ping", methods=["GET", "HEAD"])
 def ping():
@@ -567,11 +638,14 @@ def status():
                             "rescue_entry_count": pos_data.get("rescue_entry_count", 0),
                             "last_entry_ratio": float(pos_data.get('last_entry_ratio', Decimal("0"))),
                             "tp_order_id": pos_data.get("tp_order_id"),
-                            "last_tp_update": pos_data.get("last_tp_update")
+                            "last_tp_update": pos_data.get("last_tp_update"),
+                            "tv_sync_tp_price": float(pos_data.get("tv_sync_tp_price", 0)) if pos_data.get("tv_sync_tp_price") else None,
+                            "tv_signal_price": float(pos_data.get("tv_signal_price", 0)) if pos_data.get("tv_signal_price") else None,
+                            "actual_tp_pct": float(pos_data.get("actual_tp_pct", 0)) if pos_data.get("actual_tp_pct") else None
                         }
         
         return jsonify({
-            "status": "running", "version": "v6.25_tp_fixed",
+            "status": "running", "version": "v6.25_tv_sync",
             "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": active_positions,
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
@@ -604,11 +678,20 @@ def webhook():
             
         elif action == "exit":
             reason = data.get("reason", "").upper()
-            log_debug(f"🚪 청산 신호 수신 ({symbol}_{side.upper()})", f"사유: {reason}")
-            update_all_position_states()
-            if position_state.get(symbol, {}).get(side, {}).get("size", Decimal(0)) > 0:
-                close_position(symbol, side, reason)
-            return jsonify({"status": "exit_processed"}), 200
+            price = data.get("price", 0)
+            
+            # 실제 청산하지 않고 로그만 기록
+            log_debug(f"📝 TV 청산 로그 ({symbol}_{side.upper()})", 
+                      f"사유: {reason}, TV청산가: {price}, 시각: {datetime.now(KST).strftime('%H:%M:%S')}")
+            
+            # 추가 정보를 위한 포지션 상태 조회
+            pos_side_state = position_state.get(symbol, {}).get(side, {})
+            if pos_side_state and pos_side_state.get("size", Decimal("0")) > 0:
+                tv_sync_price = pos_side_state.get("tv_sync_tp_price", "N/A")
+                log_debug(f"🔍 동기화 상태 ({symbol}_{side.upper()})", 
+                          f"서버TP가: {tv_sync_price}, TV청산가: {price}")
+            
+            return jsonify({"status": "exit_logged_only"}), 200
             
         return jsonify({"error": "Invalid action"}), 400
     except Exception as e:
@@ -616,7 +699,7 @@ def webhook():
         return jsonify({"error": str(e)}), 500
 
 # ========
-# 13. 양방향 웹소켓 모니터링 (백업용 TP)
+# 15. 양방향 웹소켓 모니터링 (백업용 TP)
 # ========
 async def price_monitor():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
@@ -651,46 +734,23 @@ def check_tp_backup(ticker):
                 if not pos_side_state or pos_side_state.get("size", Decimal(0)) <= 0:
                     continue
                     
-                entry_price = pos_side_state.get("price")
-                entry_time = pos_side_state.get("entry_time")
                 tp_order_id = pos_side_state.get("tp_order_id")
+                tv_sync_tp_price = pos_side_state.get("tv_sync_tp_price")
                 
-                if not entry_price or not entry_time:
-                    continue
-                    
-                # API TP 주문이 없는 경우에만 백업 TP 실행
-                if not tp_order_id:
-                    cfg = SYMBOL_CONFIG[symbol]
-                    tp_mult = Decimal(str(cfg["tp_mult"]))
-                    
-                    original_tp, _, _, _ = get_tp_sl(symbol, side, pos_side_state.get("entry_count"))
-                    
-                    # 파인스크립트와 동일한 동적 TP 계산
-                    time_elapsed = time.time() - entry_time
-                    periods_15s = max(0, int(time_elapsed / 15))
-                    
-                    tp_decay_amount = Decimal("0.002") / 100
-                    tp_min_pct = Decimal("0.12") / 100
-                    
-                    tp_reduction = Decimal(str(periods_15s)) * tp_decay_amount * tp_mult
-                    current_tp_pct = max(tp_min_pct * tp_mult, original_tp - tp_reduction)
-                    
-                    if side == "long":
-                        tp_price = entry_price * (1 + current_tp_pct)
-                        if price >= tp_price:
-                            log_debug(f"🎯 백업 롱 TP 트리거 ({symbol})", f"현재가: {price:.8f}, TP가: {tp_price:.8f}")
-                            close_position(symbol, "long", "BACKUP_TP")
-                    elif side == "short":
-                        tp_price = entry_price * (1 - current_tp_pct)
-                        if price <= tp_price:
-                            log_debug(f"🎯 백업 숏 TP 트리거 ({symbol})", f"현재가: {price:.8f}, TP가: {tp_price:.8f}")
-                            close_position(symbol, "short", "BACKUP_TP")
+                # API TP 주문이 없고 트레이딩뷰 동기화 TP 가격이 있는 경우에만 백업 TP 실행
+                if not tp_order_id and tv_sync_tp_price:
+                    if side == "long" and price >= tv_sync_tp_price:
+                        log_debug(f"🎯 백업 롱 TP 트리거 ({symbol})", f"현재가: {price:.8f}, 동기화TP가: {tv_sync_tp_price:.8f}")
+                        close_position(symbol, "long", "BACKUP_SYNC_TP")
+                    elif side == "short" and price <= tv_sync_tp_price:
+                        log_debug(f"🎯 백업 숏 TP 트리거 ({symbol})", f"현재가: {price:.8f}, 동기화TP가: {tv_sync_tp_price:.8f}")
+                        close_position(symbol, "short", "BACKUP_SYNC_TP")
                 
     except Exception as e:
         log_debug(f"❌ 백업 TP 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
 
 # ========
-# 14. 양방향 진입 처리 로직
+# 16. 양방향 진입 처리 로직 (트레이딩뷰 TP 동기화 적용)
 # ========
 def worker(idx):
     while True:
@@ -716,7 +776,7 @@ def handle_entry(data):
     
     entry_score = data.get("entry_score", 50)
     signal_price_raw = data.get('price')
-    tp_pct = Decimal(str(data.get("tp_pct", "0.5"))) / 100
+    tv_tp_pct = Decimal(str(data.get("tp_pct", "0.5"))) / 100
     sl_pct = Decimal(str(data.get("sl_pct", "4.0"))) / 100
     
     # 2. 필수 정보 유효성 검사
@@ -735,6 +795,7 @@ def handle_entry(data):
     
     if current_price <= 0 or signal_price <= 0:
         return log_debug(f"❌ 진입 취소 ({symbol})", f"유효하지 않은 가격 정보. 현재가: {current_price}, 신호가: {signal_price}")
+    
     price_diff = abs(current_price - signal_price)
     price_diff_pct = abs(current_price - signal_price) / signal_price
     
@@ -742,7 +803,17 @@ def handle_entry(data):
     if price_diff > allowed_slippage:
         return log_debug(f"⚠️ 진입 취소: 슬리피지 ({symbol}_{side.upper()})", f"가격 차이({price_diff:.8f})가 허용 범위({allowed_slippage:.8f})를 초과했습니다.")
         
-    # 4. 포지션 상태 확인 및 진입 조건 검사
+    # 4. 트레이딩뷰 TP 동기화 계산
+    tv_tp_price, actual_tp_pct = calculate_synchronized_tp_price(signal_price, current_price, tv_tp_pct, side, symbol)
+    
+    tv_sync_data = {
+        "tv_tp_price": tv_tp_price,
+        "tv_signal_price": signal_price,
+        "tv_tp_pct": tv_tp_pct,
+        "actual_tp_pct": actual_tp_pct
+    }
+    
+    # 5. 포지션 상태 확인 및 진입 조건 검사
     update_all_position_states()
     pos_side_state = position_state.get(symbol, {}).get(side, {})
     
@@ -764,7 +835,7 @@ def handle_entry(data):
         if avg_price and ((side == "long" and current_price <= avg_price) or (side == "short" and current_price >= avg_price)):
             return log_debug(f"⚠️ 추가 진입 보류 ({symbol}_{side.upper()})", f"평단가 불리. 현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
 
-    # 5. 주문 수량 계산
+    # 6. 주문 수량 계산
     current_signal_count = pos_side_state.get("premium_entry_count", 0) if "premium" in signal_type else pos_side_state.get("normal_entry_count", 0)
     qty = calculate_position_size(symbol, signal_type, entry_score, current_signal_count)
     final_position_ratio = Decimal("0")
@@ -778,19 +849,19 @@ def handle_entry(data):
                 qty = max((equity * rescue_ratio / 100 / contract_val).quantize(Decimal('1'), rounding=ROUND_DOWN), cfg["min_qty"])
                 final_position_ratio = rescue_ratio
     
-    # 6. 주문 실행
+    # 7. 주문 실행 (트레이딩뷰 동기화 데이터 포함)
     if qty > 0:
         entry_action = "추가진입" if pos_side_state.get("size", 0) > 0 else "첫진입"
-        if place_order(symbol, side, qty, signal_type, final_position_ratio):
+        if place_order(symbol, side, qty, signal_type, final_position_ratio, tv_sync_data):
             update_all_position_states()
             latest_pos_side_state = position_state.get(symbol, {}).get(side, {})
             log_debug(f"✅ {entry_action} 성공 ({symbol}_{side.upper()})", f"유형: {signal_type}, 수량: {float(qty)} 계약 (총 진입: {latest_pos_side_state.get('entry_count',0)}회)")
-            store_tp_sl(symbol, side, tp_pct, sl_pct, price_diff_pct, latest_pos_side_state.get("entry_count", 0))
+            store_tp_sl(symbol, side, tv_tp_pct, sl_pct, price_diff_pct, latest_pos_side_state.get("entry_count", 0))
         else:
             log_debug(f"❌ {entry_action} 실패 ({symbol}_{side.upper()})", "주문 실행 중 오류 발생")
 
 # ========
-# 15. 포지션 모니터링
+# 17. 포지션 모니터링
 # ========
 def position_monitor():
     while True:
@@ -807,8 +878,10 @@ def position_monitor():
                         if pos_data and pos_data.get("size", Decimal("0")) > 0:
                             is_any_position_active = True
                             total_value += pos_data.get("value", Decimal("0"))
-                            tp_status = "API_TP" if pos_data.get("tp_order_id") else "백업_TP"
-                            pyramid_info = f"총:{pos_data['entry_count']}/10,일:{pos_data['normal_entry_count']}/5,프:{pos_data['premium_entry_count']}/5,레:{pos_data['rescue_entry_count']}/3,TP:{tp_status}"
+                            tp_status = "SYNC_TP" if pos_data.get("tp_order_id") else "백업_TP"
+                            sync_price = pos_data.get("tv_sync_tp_price")
+                            sync_info = f"동기화TP:{sync_price:.6f}" if sync_price else "일반TP"
+                            pyramid_info = f"총:{pos_data['entry_count']}/10,일:{pos_data['normal_entry_count']}/5,프:{pos_data['premium_entry_count']}/5,레:{pos_data['rescue_entry_count']}/3,{tp_status},{sync_info}"
                             active_positions_log.append(f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data['price']:.8f} ({pyramid_info}, 가치: {pos_data['value']:.2f} USDT)")
             
             if is_any_position_active:
@@ -824,10 +897,10 @@ def position_monitor():
             log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
 # ========
-# 15.5. 동적 TP 업데이트 모니터링
+# 18. 동적 TP 업데이트 모니터링 (트레이딩뷰 동기화)
 # ========
 def dynamic_tp_monitor():
-    """15초마다 모든 포지션의 TP를 동적으로 업데이트"""
+    """15초마다 모든 포지션의 TP를 트레이딩뷰와 동기화하여 업데이트"""
     while True:
         time.sleep(15)  # 15초마다 실행
         try:
@@ -838,20 +911,19 @@ def dynamic_tp_monitor():
                             entry_time = pos_data.get("entry_time")
                             tp_order_id = pos_data.get("tp_order_id")
                             last_tp_update = pos_data.get("last_tp_update", 0)
+                            tv_signal_price = pos_data.get("tv_signal_price")
+                            tv_tp_pct = pos_data.get("tv_tp_pct")
                             
-                            # 15초마다 TP 업데이트 (너무 자주 하지 않기 위해)
-                            if entry_time and tp_order_id and (time.time() - last_tp_update > 15):
-                                original_tp, _, _, _ = get_tp_sl(symbol, side, pos_data.get("entry_count"))
-                                entry_price = pos_data.get("price")
+                            # 트레이딩뷰 동기화 데이터가 있고 15초마다 TP 업데이트
+                            if (entry_time and tp_order_id and tv_signal_price and tv_tp_pct and 
+                                (time.time() - last_tp_update > 15)):
                                 
-                                if entry_price and original_tp:
-                                    new_tp_order_id = update_dynamic_tp_order(
-                                        symbol, side, entry_price, original_tp, entry_time, tp_order_id
-                                    )
-                                    if new_tp_order_id:
-                                        pos_data["tp_order_id"] = new_tp_order_id
-                                        pos_data["last_tp_update"] = time.time()
-                                        log_debug(f"🔄 동적 TP 업데이트 ({symbol}_{side.upper()})", f"새로운 TP 주문 ID: {new_tp_order_id}")
+                                new_tp_order_id = update_synchronized_dynamic_tp(
+                                    symbol, side, entry_time, tv_signal_price, tv_tp_pct, tp_order_id
+                                )
+                                if new_tp_order_id:
+                                    pos_data["tp_order_id"] = new_tp_order_id
+                                    pos_data["last_tp_update"] = time.time()
                                         
         except Exception as e:
             log_debug("❌ 동적 TP 모니터링 오류", str(e), exc_info=True)
@@ -860,11 +932,12 @@ def dynamic_tp_monitor():
 # 메인 실행부
 # ========
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.25 (Gate.io API TP 완전 구현)")
-    log_debug("🎯 전략 핵심", "독립 피라미딩 + 점수 기반 가중치 + Gate.io API 동적 TP + 레스큐 진입")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.25 (트레이딩뷰 TP 동기화 완전 구현)")
+    log_debug("🎯 전략 핵심", "독립 피라미딩 + 점수 기반 가중치 + 트레이딩뷰 TP 동기화 + 레스큐 진입")
     log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱 중 큰 값)")
     log_debug("⚠️ 중요", "Gate.io 거래소 설정에서 '양방향 포지션 모드(Two-way)'가 활성화되어야 합니다.")
-    log_debug("🎯 TP 시스템", "Gate.io API TP 주문 + 웹소켓 백업 TP로 이중 보호")
+    log_debug("🎯 TP 시스템", "트레이딩뷰 알림 가격 기준 TP 동기화 + Gate.io API TP 주문 + 웹소켓 백업 TP로 삼중 보호")
+    log_debug("📝 청산 알림", "트레이딩뷰 청산 알림은 로그만 기록하고 실제 청산은 서버에서만 수행")
     
     initialize_states()
     
@@ -890,14 +963,14 @@ if __name__ == "__main__":
     # 모든 모니터링 스레드 시작
     threading.Thread(target=position_monitor, daemon=True).start()
     threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
-    threading.Thread(target=dynamic_tp_monitor, daemon=True).start()  # 동적 TP 업데이트 스레드
+    threading.Thread(target=dynamic_tp_monitor, daemon=True).start()  # 트레이딩뷰 동기화 TP 업데이트 스레드
     
     for i in range(WORKER_COUNT):
         threading.Thread(target=worker, args=(i,), daemon=True).start()
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹 서버 시작", f"Flask 서버 0.0.0.0:{port}에서 실행 중")
-    log_debug("✅ 준비 완료", "파인스크립트 v6.25 연동 + Gate.io API TP 시스템 대기중")
+    log_debug("✅ 준비 완료", "파인스크립트 v6.25 연동 + 트레이딩뷰 TP 동기화 시스템 대기중")
     
     try:
         app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
