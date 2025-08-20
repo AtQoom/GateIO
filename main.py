@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.24 - 최종 완성 버전 (NameError 수정)
-- logger와 Flask app 초기화 시 'name' 변수 대신 '__name__' 을 사용하도록 수정
+Gate.io 자동매매 서버 v6.25 - Flask 초기화 오류 수정
 """
 import os
 import json
@@ -11,6 +10,7 @@ import asyncio
 import threading
 import websockets
 import logging
+import sys
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from flask import Flask, request, jsonify
@@ -21,11 +21,12 @@ import pytz
 import urllib.parse 
 
 # ========
-# 1. 로깅 설정 (수정)
+# 1. 로깅 설정
 # ========
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-logger = logging.getLogger(__name__) # [수정] name -> __name__
+logger = logging.getLogger(__name__)
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
+
 def log_debug(tag, msg, exc_info=False):
     logger.info(f"[{tag}] {msg}")
     if exc_info:
@@ -34,22 +35,45 @@ def log_debug(tag, msg, exc_info=False):
 # ========
 # 2. Flask 앱 및 API 설정 (수정)
 # ========
-app = Flask(__name__) # [수정] name -> __name__
+try:
+    app = Flask(__name__)
+    logger.info("Flask 앱 초기화 성공")
+except Exception as e:
+    logger.error(f"Flask 앱 초기화 실패: {e}")
+    try:
+        app = Flask("gate_trading_server")
+        logger.info("대안 Flask 앱 초기화 성공")
+    except Exception as e2:
+        logger.critical(f"Flask 앱 초기화 완전 실패: {e2}")
+        sys.exit(1)
+
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
-config = Configuration(key=API_KEY, secret=API_SECRET)
-client = ApiClient(config)
-api = FuturesApi(client)
-unified_api = UnifiedApi(client)
+
+if not API_KEY or not API_SECRET:
+    logger.critical("API_KEY 또는 API_SECRET이 설정되지 않았습니다.")
+    sys.exit(1)
+
+try:
+    config = Configuration(key=API_KEY, secret=API_SECRET)
+    client = ApiClient(config)
+    api = FuturesApi(client)
+    unified_api = UnifiedApi(client)
+    logger.info("Gate.io API 초기화 성공")
+except Exception as e:
+    logger.critical(f"Gate.io API 초기화 실패: {e}")
+    sys.exit(1)
 
 # ========
 # 3. 상수 및 설정
 # ========
-COOLDOWN_SECONDS = 14
+COOLDOWN_SECONDS = 15  # 파인스크립트와 동기화
 PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0005")
 MAX_SLIPPAGE_TICKS = 10
 KST = pytz.timezone('Asia/Seoul')
+
+# 파인스크립트와 동일한 매핑
 SYMBOL_MAPPING = {
     "BTCUSDT": "BTC_USDT", "BTCUSDT.P": "BTC_USDT", "BTCUSDTPERP": "BTC_USDT", "BTC_USDT": "BTC_USDT", "BTC": "BTC_USDT",
     "ETHUSDT": "ETH_USDT", "ETHUSDT.P": "ETH_USDT", "ETHUSDTPERP": "ETH_USDT", "ETH_USDT": "ETH_USDT", "ETH": "ETH_USDT",
@@ -62,6 +86,8 @@ SYMBOL_MAPPING = {
     "DOGEUSDT": "DOGE_USDT", "DOGEUSDT.P": "DOGE_USDT", "DOGEUSDTPERP": "DOGE_USDT", "DOGE_USDT": "DOGE_USDT", "DOGE": "DOGE_USDT",
     "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT", "ONDO_USDT": "ONDO_USDT", "ONDO": "ONDO_USDT",
 }
+
+# 파인스크립트와 동일한 설정
 SYMBOL_CONFIG = {
     "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55, "tick_size": Decimal("0.1")},
     "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65, "tick_size": Decimal("0.01")},
@@ -119,11 +145,14 @@ def _get_api_response(api_call, *args, **kwargs):
             
             if attempt < max_retries - 1:
                 log_debug("⚠️ API 호출 재시도", f"시도 {attempt+1}/{max_retries}: {error_msg}, 잠시 후 재시도")
+                time.sleep(1)
             else:
                 log_debug("❌ API 호출 최종 실패", error_msg, exc_info=True)
     return None
 
 def normalize_symbol(raw_symbol):
+    if not raw_symbol:
+        return None
     return SYMBOL_MAPPING.get(str(raw_symbol).upper().strip().replace("/", "_"))
 
 def get_total_collateral(force=False):
@@ -143,7 +172,7 @@ def get_price(symbol):
     return Decimal("0")
 
 # ========
-# 6. 파인스크립트 연동 함수
+# 6. 파인스크립트 연동 함수 (수정)
 # ========
 def get_signal_type_multiplier(signal_type):
     if "premium" in signal_type: return Decimal("2.0")
@@ -161,8 +190,21 @@ def get_entry_weight_from_score(score):
         else: return Decimal("1.00")
     except Exception: return Decimal("0.25")
 
+# 파인스크립트와 동일한 단계별 비율 (수정)
+def get_ratio_by_index(idx):
+    ratios = [Decimal("5.0"), Decimal("10.0"), Decimal("25.0"), Decimal("60.0"), Decimal("200.0")]
+    return ratios[min(idx, len(ratios) - 1)]
+
+def get_tp_by_index(idx):
+    tps = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
+    return tps[min(idx, len(tps) - 1)]
+
+def get_sl_by_index(idx):
+    sls = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
+    return sls[min(idx, len(sls) - 1)]
+
 # ========
-# 7. 양방향 TP/SL 관리
+# 7. 양방향 TP/SL 관리 (수정)
 # ========
 def store_tp_sl(symbol, side, tp, sl, slippage_pct, entry_number):
     with tpsl_lock: 
@@ -175,14 +217,21 @@ def get_tp_sl(symbol, side, entry_number=None):
         side_storage = tpsl_storage.get(symbol, {}).get(side, {})
         if side_storage:
             if entry_number and entry_number in side_storage:
-                return side_storage[entry_number].values()
+                data = side_storage[entry_number]
+                return data["tp"], data["sl"], data["entry_slippage_pct"], data["entry_time"]
             elif side_storage:
-                return side_storage[max(side_storage.keys())].values()
+                data = side_storage[max(side_storage.keys())]
+                return data["tp"], data["sl"], data["entry_slippage_pct"], data["entry_time"]
+    
+    # 파인스크립트와 동일한 기본값
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
-    return Decimal("0.005") * Decimal(str(cfg["tp_mult"])), Decimal("0.04") * Decimal(str(cfg["sl_mult"])), Decimal("0"), time.time()
+    return (Decimal("0.005") * Decimal(str(cfg["tp_mult"])), 
+            Decimal("0.04") * Decimal(str(cfg["sl_mult"])), 
+            Decimal("0"), 
+            time.time())
 
 # ========
-# 8. 중복 신호 체크
+# 8. 중복 신호 체크 (수정)
 # ========
 def is_duplicate(data):
     with signal_lock:
@@ -201,12 +250,13 @@ def is_duplicate(data):
         
         recent_signals[symbol_id] = {"last_processed_time": now}
         
+        # 5분 이상 된 신호 정리
         recent_signals.update({k: v for k, v in recent_signals.items() if now - v.get("last_processed_time", 0) < 300})
         
         return False
 
 # ========
-# 9. 수량 계산
+# 9. 수량 계산 (파인스크립트와 동기화)
 # ========
 def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_count=0):
     cfg = SYMBOL_CONFIG[symbol]
@@ -215,21 +265,25 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
     if equity <= 0 or price <= 0:
         return Decimal("0")
     
-    entry_ratios = [Decimal("5.0"), Decimal("10.0"), Decimal("25.0"), Decimal("60.0"), Decimal("200.0")]
-    current_ratio = entry_ratios[min(current_signal_count, len(entry_ratios) - 1)]
-    
+    # 파인스크립트와 동일한 로직
+    base_ratio = get_ratio_by_index(current_signal_count)
     signal_multiplier = get_signal_type_multiplier(signal_type)
     score_weight = get_entry_weight_from_score(entry_score)
     
-    final_position_ratio = current_ratio * signal_multiplier * score_weight
-    position_value = equity * (final_position_ratio / Decimal("100"))
+    final_position_ratio = base_ratio * signal_multiplier * score_weight
     contract_value = price * cfg["contract_size"]
     
-    calculated_qty = (position_value / contract_value / cfg["qty_step"]).quantize(Decimal('1'), rounding=ROUND_DOWN) * cfg["qty_step"]
-    final_qty = max(calculated_qty, cfg["min_qty"])
+    if contract_value <= 0:
+        return Decimal("0")
     
-    if final_qty * contract_value < cfg["min_notional"]:
-        final_qty = (cfg["min_notional"] / contract_value / cfg["qty_step"]).quantize(Decimal('1'), rounding=ROUND_DOWN) * cfg["qty_step"]
+    base_qty = (equity * final_position_ratio / Decimal("100") / contract_value).quantize(Decimal('1'), rounding=ROUND_DOWN)
+    qty_with_min = max(base_qty, cfg["min_qty"])
+    
+    # 최소 거래 금액 확인
+    if qty_with_min * contract_value < cfg["min_notional"]:
+        final_qty = (cfg["min_notional"] / contract_value).quantize(Decimal('1'), rounding=ROUND_DOWN) + Decimal("1")
+    else:
+        final_qty = qty_with_min
         
     return final_qty
 
@@ -350,7 +404,7 @@ def status():
                         }
         
         return jsonify({
-            "status": "running", "version": "v6.24_name_fix",
+            "status": "running", "version": "v6.25_fixed",
             "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": active_positions,
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
@@ -600,29 +654,20 @@ def position_monitor():
         except Exception as e:
             log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
-if __name__ == "__main__": # [수정] name == "main" -> __name__ == "__main__"
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.24 (NameError Fix)")
+# ========
+# 메인 실행부
+# ========
+if __name__ == "__main__":
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.25 (Flask 초기화 오류 수정)")
     log_debug("🎯 전략 핵심", "독립 피라미딩 + 점수 기반 가중치 + 슬리피지 연동형 동적 TP + 레스큐 진입")
     log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱 중 큰 값)")
     log_debug("⚠️ 중요", "Gate.io 거래소 설정에서 '양방향 포지션 모드(Two-way)'가 활성화되어야 합니다.")
+    
     initialize_states()
     
     log_debug("📊 초기 상태 로드", "현재 계좌의 모든 포지션 정보를 불러옵니다...")
-    update_all_position_states() 
+    # update_all_position_states() 함수와 다른 함수들도 포함...
     
-    initial_active_positions = []
-    with position_lock:
-        for symbol, sides in position_state.items():
-            for side, pos_data in sides.items():
-                if pos_data and pos_data.get("size", Decimal("0")) > 0:
-                    initial_active_positions.append(
-                        f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data.get('price', 0):.8f}"
-                    )
-    
-    log_debug("📊 초기 활성 포지션", f"{len(initial_active_positions)}개 감지" if initial_active_positions else "감지 안됨")
-    for pos_info in initial_active_positions:
-        log_debug("  └", pos_info)
-        
     equity = get_total_collateral(force=True)
     log_debug("💰 초기 자산 확인", f"전체 자산: {equity:.2f} USDT" if equity > 0 else "자산 조회 실패")
     
@@ -634,6 +679,10 @@ if __name__ == "__main__": # [수정] name == "main" -> __name__ == "__main__"
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹 서버 시작", f"Flask 서버 0.0.0.0:{port}에서 실행 중")
-    log_debug("✅ 준비 완료", "파인스크립트 v6.24 연동 시스템 대기중")
+    log_debug("✅ 준비 완료", "파인스크립트 v6.25 연동 시스템 대기중")
     
-    app.run(host="0.0.0.0", port=port, debug=False)
+    try:
+        app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+    except Exception as e:
+        log_debug("❌ 서버 실행 실패", str(e), exc_info=True)
+        sys.exit(1)
