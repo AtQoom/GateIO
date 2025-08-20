@@ -332,48 +332,90 @@ def update_all_position_states():
                         tpsl_storage[symbol][side].clear()
 
 # ========
-# 11. 양방향 주문 실행
+# 11. 양방향 주문 실행 (완전 수정)
 # ========
 def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0")):
     with position_lock:
-        order = FuturesOrder(contract=symbol, size=float(qty), price="0", tif="ioc", dual_pos=side)
-        if not _get_api_response(api.create_futures_order, SETTLE, order):
+        try:
+            # 양방향 포지션 모드에서 올바른 주문 생성
+            if side == "long":
+                order_size = int(qty)
+            else:  # side == "short"
+                order_size = -int(qty)
+            
+            order = FuturesOrder(
+                contract=symbol, 
+                size=order_size, 
+                price="0", 
+                tif="ioc"
+            )
+            
+            result = _get_api_response(api.create_futures_order, SETTLE, order)
+            if not result:
+                log_debug(f"❌ 주문 실행 실패 ({symbol}_{side.upper()})", "API 호출 실패")
+                return False
+            
+            log_debug(f"✅ 주문 전송 성공 ({symbol}_{side.upper()})", f"주문 ID: {getattr(result, 'id', 'Unknown')}")
+            
+            pos_side_state = position_state.setdefault(symbol, {
+                "long": get_default_pos_side_state(), 
+                "short": get_default_pos_side_state()
+            })[side]
+            
+            pos_side_state["entry_count"] += 1
+            
+            if "premium" in signal_type:
+                pos_side_state["premium_entry_count"] += 1
+            elif "normal" in signal_type:
+                pos_side_state["normal_entry_count"] += 1
+            elif "rescue" in signal_type:
+                pos_side_state["rescue_entry_count"] += 1
+                
+            if "rescue" not in signal_type and final_position_ratio > 0:
+                pos_side_state['last_entry_ratio'] = final_position_ratio
+                
+            pos_side_state["entry_time"] = time.time()
+            
+            time.sleep(2)
+            update_all_position_states()
+            return True
+            
+        except Exception as e:
+            log_debug(f"❌ 주문 생성 오류 ({symbol}_{side.upper()})", str(e), exc_info=True)
             return False
-        
-        pos_side_state = position_state.setdefault(symbol, {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()})[side]
-        pos_side_state["entry_count"] += 1
-        
-        if "premium" in signal_type:
-            pos_side_state["premium_entry_count"] += 1
-        elif "normal" in signal_type:
-            pos_side_state["normal_entry_count"] += 1
-        elif "rescue" in signal_type:
-            pos_side_state["rescue_entry_count"] += 1
-            
-        if "rescue" not in signal_type and final_position_ratio > 0:
-            pos_side_state['last_entry_ratio'] = final_position_ratio
-            
-        pos_side_state["entry_time"] = time.time()
-        
-        time.sleep(2)
-        update_all_position_states()
-        return True
 
 def close_position(symbol, side, reason="manual"):
     with position_lock:
-        order = FuturesOrder(contract=symbol, size=0, tif="ioc", close=True, dual_pos=side)
-        if not _get_api_response(api.create_futures_order, SETTLE, order):
-            return False
-        
-        pos_side_state = position_state.setdefault(symbol, {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()})
-        pos_side_state[side] = get_default_pos_side_state()
-        
-        if symbol in tpsl_storage and side in tpsl_storage[symbol]:
-            tpsl_storage[symbol][side].clear()
+        try:
+            # 양방향 포지션 청산을 위한 올바른 주문 생성
+            if side == "long":
+                order = FuturesOrder(contract=symbol, size=0, tif="ioc", auto_size="close_long")
+            else:  # side == "short"
+                order = FuturesOrder(contract=symbol, size=0, tif="ioc", auto_size="close_short")
             
-        with signal_lock:
-            recent_signals.pop(f"{symbol}_{side}", None)
-        return True
+            result = _get_api_response(api.create_futures_order, SETTLE, order)
+            if not result:
+                log_debug(f"❌ 청산 주문 실행 실패 ({symbol}_{side.upper()})", "API 호출 실패")
+                return False
+            
+            log_debug(f"✅ 청산 주문 전송 성공 ({symbol}_{side.upper()})", f"사유: {reason}")
+            
+            pos_side_state = position_state.setdefault(symbol, {
+                "long": get_default_pos_side_state(), 
+                "short": get_default_pos_side_state()
+            })
+            pos_side_state[side] = get_default_pos_side_state()
+            
+            if symbol in tpsl_storage and side in tpsl_storage[symbol]:
+                tpsl_storage[symbol][side].clear()
+                
+            with signal_lock:
+                recent_signals.pop(f"{symbol}_{side}", None)
+            return True
+            
+        except Exception as e:
+            log_debug(f"❌ 청산 주문 생성 오류 ({symbol}_{side.upper()})", str(e), exc_info=True)
+            return False
 
 # ========
 # 12. 웹훅 라우트 및 관리용 API
