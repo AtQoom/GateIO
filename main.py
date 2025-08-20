@@ -262,7 +262,7 @@ def get_tp_sl(symbol, side, entry_number=None):
 # 9. Gate.io API TP 주문 관리 (수정됨)
 # ========
 def place_tp_order(symbol, side, entry_price, tp_pct, position_size):
-    """Gate.io API를 사용한 실제 TP 주문 생성 (수정됨)"""
+    """개선된 TP 주문 생성"""
     try:
         if side == "long":
             tp_price = entry_price * (1 + tp_pct)
@@ -273,11 +273,16 @@ def place_tp_order(symbol, side, entry_price, tp_pct, position_size):
             close_size = int(position_size)
             trigger_rule = 2
         
+        # 가격 정확성 보장
+        cfg = SYMBOL_CONFIG.get(symbol, {})
+        tick_size = cfg.get("tick_size", Decimal("0.01"))
+        tp_price = (tp_price / tick_size).quantize(Decimal('1'), rounding=ROUND_DOWN) * tick_size
+        
         trigger = FuturesPriceTrigger(
             strategy_type=0,
             price_type=0,
             rule=trigger_rule,
-            price=str(tp_price)  # ✅ trigger_price → price로 수정
+            price=f"{tp_price:.8f}".rstrip('0').rstrip('.')  # 올바른 가격 형식
         )
         
         initial_order = FuturesOrder(
@@ -292,12 +297,18 @@ def place_tp_order(symbol, side, entry_price, tp_pct, position_size):
             trigger=trigger
         )
         
+        # 더 상세한 로깅
+        log_debug(f"🎯 TP 주문 요청 ({symbol}_{side.upper()})", 
+                  f"TP가: {tp_price:.8f}, 사이즈: {close_size}, 룰: {trigger_rule}")
+        
         result = _get_api_response(api.create_price_triggered_order, SETTLE, tp_order)
-        if result:
-            log_debug(f"✅ TP 주문 생성 성공 ({symbol}_{side.upper()})", f"TP가: {tp_price:.8f}, 주문ID: {getattr(result, 'id', 'Unknown')}")
-            return getattr(result, 'id', None)
+        if result and hasattr(result, 'id'):
+            log_debug(f"✅ TP 주문 생성 성공 ({symbol}_{side.upper()})", 
+                      f"주문ID: {result.id}, 상태: {getattr(result, 'status', 'Unknown')}")
+            return result.id
         else:
-            log_debug(f"❌ TP 주문 생성 실패 ({symbol}_{side.upper()})", "API 호출 실패")
+            log_debug(f"❌ TP 주문 생성 실패 ({symbol}_{side.upper()})", 
+                      f"응답: {result}")
             return None
             
     except Exception as e:
@@ -320,20 +331,21 @@ def cancel_tp_order(tp_order_id):
         return False
 
 def verify_tp_order_active(symbol, side, tp_order_id):
-    """TP 주문이 실제로 활성화되었는지 확인"""
+    """TP 주문 상태 정확한 확인"""
     try:
         if not tp_order_id:
             return False
         
-        # Gate.io API로 TP 주문 상태 확인 (정확한 함수명 사용)
-        result = _get_api_response(api.list_price_triggered_orders, SETTLE, status='active')
+        # 개별 주문 조회로 변경
+        result = _get_api_response(api.get_price_triggered_order, SETTLE, str(tp_order_id))
         if result:
-            for order in result:
-                if str(order.id) == str(tp_order_id) and order.status == 'active':
-                    return True
-        
-        log_debug(f"⚠️ TP 주문 비활성 ({symbol}_{side.upper()})", f"주문ID: {tp_order_id}")
-        return False
+            status = getattr(result, 'status', None)
+            log_debug(f"🔍 TP 주문 상태 ({symbol}_{side.upper()})", 
+                      f"주문ID: {tp_order_id}, 상태: {status}")
+            return status == 'active'
+        else:
+            log_debug(f"⚠️ TP 주문 조회 실패 ({symbol}_{side.upper()})", f"주문ID: {tp_order_id}")
+            return False
     except Exception as e:
         log_debug(f"❌ TP 주문 상태 확인 오류 ({symbol}_{side.upper()})", str(e))
         return False
@@ -445,8 +457,9 @@ def update_all_position_states():
     with position_lock:
         all_positions_from_api = _get_api_response(api.list_positions, SETTLE)
         if all_positions_from_api is None:
-            log_debug("❌ 포지션 업데이트 실패", "API 호출에 실패하여 상태를 업데이트할 수 없습니다.")
+            log_debug("❌ 포지션 업데이트 실패", "API 호출 실패")
             return
+            
         active_positions_set = set()
         for pos_info in all_positions_from_api:
             symbol = pos_info.contract
@@ -468,21 +481,33 @@ def update_all_position_states():
             current_side_state["size"] = Decimal(str(pos_info.size))
             current_side_state["value"] = Decimal(str(pos_info.size)) * Decimal(str(pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
             
+            # 수동 포지션 감지 및 TP 설정
             if current_side_state["entry_count"] == 0 and current_side_state["size"] > 0:
-                log_debug("🔄 수동 포지션 감지", f"{symbol} {side.upper()} 포지션을 상태에 추가합니다.")
+                log_debug("🔄 수동 포지션 감지", f"{symbol} {side.upper()} 포지션 TP 설정")
                 current_side_state["entry_count"] = 1
                 current_side_state["entry_time"] = time.time()
                 
+                # 수동 포지션에 즉시 TP 설정
+                cfg = SYMBOL_CONFIG[symbol]
+                base_tp_pct = Decimal("0.005") * Decimal(str(cfg["tp_mult"]))
+                tp_order_id = place_tp_order(symbol, side, current_side_state["price"], 
+                                           base_tp_pct, current_side_state["size"])
+                if tp_order_id:
+                    current_side_state["tp_order_id"] = tp_order_id
+                    current_side_state["last_tp_update"] = time.time()
+                    log_debug(f"✅ 수동 포지션 TP 설정 완료 ({symbol}_{side.upper()})", 
+                              f"TP 주문ID: {tp_order_id}")
+                
             active_positions_set.add((symbol, side))
+            
+        # 유령 포지션 정리
         for symbol, sides in position_state.items():
             for side in ["long", "short"]:
                 if (symbol, side) not in active_positions_set and sides[side]["size"] > 0:
-                    log_debug(f"👻 유령 포지션 정리", f"{symbol} {side.upper()} 포지션을 메모리에서 삭제합니다.")
-                    
+                    log_debug(f"👻 유령 포지션 정리", f"{symbol} {side.upper()} 포지션 삭제")
                     existing_tp_order_id = sides[side].get("tp_order_id")
                     if existing_tp_order_id:
                         cancel_tp_order(existing_tp_order_id)
-                    
                     position_state[symbol][side] = get_default_pos_side_state()
                     if symbol in tpsl_storage and side in tpsl_storage[symbol]:
                         tpsl_storage[symbol][side].clear()
@@ -924,9 +949,10 @@ def position_monitor():
             log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
 # ========
-# 18. 동적 TP 업데이트 모니터링
+# 18. 동적 TP 업데이트 모니터링 (강화된 버전)
 # ========
 def dynamic_tp_monitor():
+    """강화된 TP 모니터링"""
     while True:
         time.sleep(15)
         try:
@@ -934,18 +960,30 @@ def dynamic_tp_monitor():
                 for symbol, sides in position_state.items():
                     for side, pos_data in sides.items():
                         if pos_data and pos_data.get("size", Decimal("0")) > 0:
-                            entry_time = pos_data.get("entry_time")
                             tp_order_id = pos_data.get("tp_order_id")
-                            last_tp_update = pos_data.get("last_tp_update", 0)
-                            tv_signal_price = pos_data.get("tv_signal_price")
-                            tv_tp_pct = pos_data.get("tv_tp_pct")
                             
-                            if (entry_time and tp_order_id and tv_signal_price and tv_tp_pct and 
-                                (time.time() - last_tp_update > 15)):
+                            # TP 주문 상태 검증
+                            if tp_order_id and not verify_tp_order_active(symbol, side, tp_order_id):
+                                log_debug(f"🔄 TP 주문 재생성 ({symbol}_{side.upper()})", "기존 주문이 비활성화됨")
                                 
-                                new_tp_order_id = update_synchronized_dynamic_tp(
-                                    symbol, side, entry_time, tv_signal_price, tv_tp_pct, tp_order_id
-                                )
+                                # 트레이딩뷰 동기화 TP 재생성
+                                entry_time = pos_data.get("entry_time")
+                                tv_signal_price = pos_data.get("tv_signal_price")
+                                tv_tp_pct = pos_data.get("tv_tp_pct")
+                                
+                                if entry_time and tv_signal_price and tv_tp_pct:
+                                    new_tp_order_id = update_synchronized_dynamic_tp(
+                                        symbol, side, entry_time, tv_signal_price, tv_tp_pct, tp_order_id
+                                    )
+                                else:
+                                    # 기본 TP 재생성
+                                    cfg = SYMBOL_CONFIG[symbol]
+                                    base_tp_pct = Decimal("0.005") * Decimal(str(cfg["tp_mult"]))
+                                    entry_price = pos_data.get("price")
+                                    if entry_price:
+                                        new_tp_order_id = place_tp_order(symbol, side, entry_price, 
+                                                                       base_tp_pct, pos_data["size"])
+                                
                                 if new_tp_order_id:
                                     pos_data["tp_order_id"] = new_tp_order_id
                                     pos_data["last_tp_update"] = time.time()
