@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.31 - 최종 수정 (안정 버전 기반 포지션 조회 수정)
-- 문제가 발생하기 전의 안정적인 코드(v6.23)를 기반으로 함.
-- 양방향 모드(Hedge Mode)의 포지션을 정확히 인식하도록 'update_all_position_states' 함수만 수정.
-- 각 심볼을 개별적으로 순회하며 list_positions API를 호출하고 'dual_long'/'dual_short'를 파싱하는 가장 안정적인 로직 적용.
+Gate.io 자동매매 서버 v6.24 - 최종 완성 버전 (NameError 수정)
+- logger와 Flask app 초기화 시 'name' 변수 대신 '__name__' 을 사용하도록 수정
 """
 import os
 import json
@@ -23,21 +21,20 @@ import pytz
 import urllib.parse 
 
 # ========
-# 1. 로깅 및 Flask 앱 설정
+# 1. 로깅 설정 (수정)
 # ========
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # [수정] name -> __name__
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
-app = Flask(__name__)
-
 def log_debug(tag, msg, exc_info=False):
     logger.info(f"[{tag}] {msg}")
     if exc_info:
         logger.exception("")
 
 # ========
-# 2. API 및 기본 설정
+# 2. Flask 앱 및 API 설정 (수정)
 # ========
+app = Flask(__name__) # [수정] name -> __name__
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 SETTLE = "usdt"
@@ -237,50 +234,49 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
     return final_qty
 
 # ========
-# 10. 양방향 포지션 상태 관리 (최종 수정)
+# 10. 양방향 포지션 상태 관리
 # ========
 def update_all_position_states():
     with position_lock:
-        active_positions_on_api = set()
-
-        for symbol in list(SYMBOL_CONFIG.keys()):
-            try:
-                positions_for_symbol = _get_api_response(api.list_positions, settle=SETTLE, contract=symbol)
+        all_positions_from_api = _get_api_response(api.list_positions, SETTLE)
+        if all_positions_from_api is None:
+            log_debug("❌ 포지션 업데이트 실패", "API 호출에 실패하여 상태를 업데이트할 수 없습니다.")
+            return
+        active_positions_set = set()
+        for pos_info in all_positions_from_api:
+            symbol = pos_info.contract
+            api_side = pos_info.mode
+            if api_side == 'dual_long':
+                side = 'long'
+            elif api_side == 'dual_short':
+                side = 'short'
+            else:
+                continue
+            
+            if symbol not in SYMBOL_CONFIG:
+                continue
+            if symbol not in position_state:
+                initialize_states()
+            
+            current_side_state = position_state[symbol][side]
+            current_side_state["price"] = Decimal(str(pos_info.entry_price))
+            current_side_state["size"] = Decimal(str(pos_info.size))
+            current_side_state["value"] = Decimal(str(pos_info.size)) * Decimal(str(pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
+            
+            if current_side_state["entry_count"] == 0 and current_side_state["size"] > 0:
+                log_debug("🔄 수동 포지션 감지", f"{symbol} {side.upper()} 포지션을 상태에 추가합니다.")
+                current_side_state["entry_count"] = 1
+                current_side_state["entry_time"] = time.time()
                 
-                if not positions_for_symbol:
-                    continue
-
-                for pos_info in positions_for_symbol:
-                    side = 'long' if pos_info.mode == 'dual_long' else 'short' if pos_info.mode == 'dual_short' else None
-                    if not side: continue
-
-                    size = Decimal(str(pos_info.size))
-                    if size <= 0: continue
-                    
-                    active_positions_on_api.add((symbol, side))
-
-                    current_side_state = position_state.setdefault(symbol, {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()})[side]
-                    
-                    current_side_state["price"] = Decimal(str(pos_info.entry_price))
-                    current_side_state["size"] = size
-                    if pos_info.mark_price:
-                        current_side_state["value"] = size * Decimal(str(pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
-
-                    if current_side_state.get("entry_count", 0) == 0:
-                        log_debug("🔄 수동 포지션 감지", f"{symbol} {side.upper()} 포지션을 상태에 추가합니다.")
-                        current_side_state["entry_count"] = 1
-                        current_side_state["entry_time"] = time.time()
-            except Exception as e:
-                log_debug(f"❌ 포지션 조회 오류 ({symbol})", str(e), exc_info=True)
-
-        for symbol, sides in list(position_state.items()):
+            active_positions_set.add((symbol, side))
+        for symbol, sides in position_state.items():
             for side in ["long", "short"]:
-                if sides[side].get("size", Decimal("0")) > 0 and (symbol, side) not in active_positions_on_api:
-                    log_debug(f"👻 유령 포지션 정리", f"API에 없는 {symbol} {side.upper()} 포지션을 메모리에서 삭제합니다.")
+                if (symbol, side) not in active_positions_set and sides[side]["size"] > 0:
+                    log_debug(f"👻 유령 포지션 정리", f"{symbol} {side.upper()} 포지션을 메모리에서 삭제합니다.")
                     position_state[symbol][side] = get_default_pos_side_state()
                     if symbol in tpsl_storage and side in tpsl_storage[symbol]:
                         tpsl_storage[symbol][side].clear()
-                        
+
 # ========
 # 11. 양방향 주문 실행
 # ========
@@ -345,8 +341,8 @@ def status():
                     if pos_data and pos_data.get("size", Decimal("0")) > 0:
                         pos_key = f"{symbol}_{side.upper()}"
                         active_positions[pos_key] = {
-                            "side": side, "size": float(pos_data["size"]), "price": float(pos_data.get("price", 0)),
-                            "value": float(pos_data.get("value", 0)), "entry_count": pos_data.get("entry_count", 0),
+                            "side": side, "size": float(pos_data["size"]), "price": float(pos_data["price"]),
+                            "value": float(pos_data["value"]), "entry_count": pos_data.get("entry_count", 0),
                             "normal_entry_count": pos_data.get("normal_entry_count", 0),
                             "premium_entry_count": pos_data.get("premium_entry_count", 0),
                             "rescue_entry_count": pos_data.get("rescue_entry_count", 0),
@@ -354,7 +350,7 @@ def status():
                         }
         
         return jsonify({
-            "status": "running", "version": "v6.31_final",
+            "status": "running", "version": "v6.24_name_fix",
             "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": active_positions,
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
@@ -399,7 +395,7 @@ def webhook():
         return jsonify({"error": str(e)}), 500
 
 # ========
-# 13. 양방향 웹소켓 모니터링
+# 13. 양방향 웹소켓 모니터링 (수정)
 # ========
 async def price_monitor():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
@@ -417,7 +413,7 @@ async def price_monitor():
                     elif isinstance(result, dict):
                         check_tp_only(result)
         except Exception as e:
-            log_debug("🔌 웹소켓 연결 문제", f"재연결 시도... ({type(e).__name__})")
+            log_debug("🔌 웹소켓 연결 문제", f"재연결 시도... ({type(e).__name__})") # [수정] type(e).name -> type(e).__name__
             await asyncio.sleep(5)
 
 def check_tp_only(ticker):
@@ -447,7 +443,9 @@ def check_tp_only(ticker):
                 
                 compensated_tp = original_tp - entry_slippage_pct
                 time_elapsed = time.time() - entry_start_time
-                periods_15s = int(time_elapsed / 15) if time_elapsed > 0 else 0
+                periods_15s = 0
+                if time_elapsed > 0:
+                    periods_15s = int(time_elapsed / 15)
                     
                 tp_decay_amt = Decimal("0.00002")
                 tp_min_pct = Decimal("0.0012")
@@ -570,7 +568,7 @@ def handle_entry(data):
             log_debug(f"❌ {entry_action} 실패 ({symbol}_{side.upper()})", "주문 실행 중 오류 발생")
 
 # ========
-# 15. 포지션 모니터링 및 메인 실행
+# 15. 포지션 모니터링 및 메인 실행 (수정)
 # ========
 def position_monitor():
     while True:
@@ -588,7 +586,7 @@ def position_monitor():
                             is_any_position_active = True
                             total_value += pos_data.get("value", Decimal("0"))
                             pyramid_info = f"총:{pos_data['entry_count']}/10,일:{pos_data['normal_entry_count']}/5,프:{pos_data['premium_entry_count']}/5,레:{pos_data['rescue_entry_count']}/3"
-                            active_positions_log.append(f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data.get('price', 0):.8f} ({pyramid_info}, 가치: {pos_data.get('value', 0):.2f} USDT)")
+                            active_positions_log.append(f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data['price']:.8f} ({pyramid_info}, 가치: {pos_data['value']:.2f} USDT)")
             
             if is_any_position_active:
                 equity = get_total_collateral()
@@ -602,12 +600,11 @@ def position_monitor():
         except Exception as e:
             log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
-if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.31 (Final Fix)")
+if __name__ == "__main__": # [수정] name == "main" -> __name__ == "__main__"
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.24 (NameError Fix)")
     log_debug("🎯 전략 핵심", "독립 피라미딩 + 점수 기반 가중치 + 슬리피지 연동형 동적 TP + 레스큐 진입")
     log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱 중 큰 값)")
     log_debug("⚠️ 중요", "Gate.io 거래소 설정에서 '양방향 포지션 모드(Two-way)'가 활성화되어야 합니다.")
-    
     initialize_states()
     
     log_debug("📊 초기 상태 로드", "현재 계좌의 모든 포지션 정보를 불러옵니다...")
@@ -637,6 +634,6 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹 서버 시작", f"Flask 서버 0.0.0.0:{port}에서 실행 중")
-    log_debug("✅ 준비 완료", "파인스크립트 v6.25 연동 시스템 대기중")
+    log_debug("✅ 준비 완료", "파인스크립트 v6.24 연동 시스템 대기중")
     
     app.run(host="0.0.0.0", port=port, debug=False)
