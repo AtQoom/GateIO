@@ -240,53 +240,62 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
 # ========
 def update_all_position_states():
     with position_lock:
-        all_positions_from_api = _get_api_response(api.list_positions, SETTLE)
-        if all_positions_from_api is None:
-            log_debug("❌ 포지션 업데이트 실패", "API 호출에 실패하여 상태를 업데이트할 수 없습니다.")
-            return
+        # 이전에 활성 상태였던 포지션들을 추적하기 위한 집합
+        found_positions_in_api = set()
 
-        active_positions_set = set()
-        for pos_info in all_positions_from_api:
-            # [수정] 딕셔너리 방식(pos_info['key']) -> 객체 속성 방식(pos_info.attribute)으로 변경
-            symbol = pos_info.contract
-            api_side = pos_info.mode
-            
-            if api_side == 'dual_long':
-                side = 'long'
-            elif api_side == 'dual_short':
-                side = 'short'
-            else:
-                continue
-            
-            if symbol not in SYMBOL_CONFIG:
-                continue
-            if symbol not in position_state:
-                initialize_states()
-            
-            current_side_state = position_state[symbol][side]
-            current_side_state["price"] = Decimal(str(pos_info.entry_price))
-            current_side_state["size"] = Decimal(str(pos_info.size))
-            
-            # [수정] mark_price 속성으로 포지션 가치 계산
-            if pos_info.mark_price and SYMBOL_CONFIG[symbol].get("contract_size"):
-                current_side_state["value"] = Decimal(str(pos_info.size)) * Decimal(str(pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
-            
-            if current_side_state["entry_count"] == 0 and current_side_state["size"] > 0:
-                log_debug("🔄 수동 포지션 감지", f"{symbol} {side.upper()} 포지션을 상태에 추가합니다.")
-                current_side_state["entry_count"] = 1
-                current_side_state["entry_time"] = time.time()
+        # 설정된 모든 심볼에 대해 개별적으로 포지션 조회 (안정적인 이전 방식 적용)
+        for symbol in SYMBOL_CONFIG.keys():
+            try:
+                # 해당 심볼의 모든 포지션 정보를 가져옴 (롱/숏 모두 포함될 수 있음)
+                positions_for_symbol = _get_api_response(api.list_positions, SETTLE, contract=symbol)
                 
-            active_positions_set.add((symbol, side))
+                if not positions_for_symbol:
+                    continue
+
+                for pos_info in positions_for_symbol:
+                    # API 응답 객체의 속성으로 데이터 접근
+                    api_side = pos_info.mode
+                    
+                    if api_side == 'dual_long':
+                        side = 'long'
+                    elif api_side == 'dual_short':
+                        side = 'short'
+                    else:
+                        continue # 양방향 포지션이 아니면 건너뜀
+
+                    # API에서 찾은 포지션을 기록
+                    found_positions_in_api.add((symbol, side))
+
+                    # 상태 변수 초기화 및 업데이트
+                    if symbol not in position_state:
+                        initialize_states()
+                    
+                    current_side_state = position_state[symbol][side]
+                    current_side_state["price"] = Decimal(str(pos_info.entry_price))
+                    current_side_state["size"] = Decimal(str(pos_info.size))
+                    
+                    if pos_info.mark_price and SYMBOL_CONFIG[symbol].get("contract_size"):
+                        current_side_state["value"] = Decimal(str(pos_info.size)) * Decimal(str(pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
+                    
+                    # 서버가 꺼져있는 동안 수동으로 잡은 포지션을 인식하는 로직
+                    if current_side_state.get("entry_count", 0) == 0 and current_side_state.get("size", Decimal(0)) > 0:
+                        log_debug("🔄 수동 포지션 감지", f"{symbol} {side.upper()} 포지션을 상태에 추가합니다.")
+                        current_side_state["entry_count"] = 1 # 최소 1회 진입으로 기록
+                        current_side_state["entry_time"] = time.time()
             
-        # 메모리에만 존재하는 유령 포지션 정리
-        for symbol, sides in position_state.items():
-            for side in ["long", "short"]:
-                if (symbol, side) not in active_positions_set and sides[side]["size"] > 0:
-                    log_debug(f"👻 유령 포지션 정리", f"{symbol} {side.upper()} 포지션을 메모리에서 삭제합니다.")
+            except Exception as e:
+                log_debug(f"❌ 포지션 조회 오류 ({symbol})", str(e), exc_info=True)
+                continue # 특정 심볼 조회 실패 시 다음 심볼로 계속 진행
+
+        # API에서 확인되지 않았지만, 메모리에 남아있는 '유령 포지션' 정리
+        for symbol, sides in list(position_state.items()):
+            for side, pos_data in list(sides.items()):
+                if pos_data.get("size", Decimal("0")) > 0 and (symbol, side) not in found_positions_in_api:
+                    log_debug(f"👻 유령 포지션 정리", f"API에서 확인되지 않은 {symbol} {side.upper()} 포지션을 메모리에서 삭제합니다.")
                     position_state[symbol][side] = get_default_pos_side_state()
                     if symbol in tpsl_storage and side in tpsl_storage[symbol]:
                         tpsl_storage[symbol][side].clear()
-                        
+                                                
 # ========
 # 11. 양방향 주문 실행
 # ========
@@ -582,9 +591,11 @@ def handle_entry(data):
 # ========
 def position_monitor():
     while True:
+        # 30초마다 모든 포지션의 최신 상태를 거래소 API를 통해 업데이트
         time.sleep(30)
         try:
             update_all_position_states()
+            
             total_value = Decimal("0")
             active_positions_log = []
             
@@ -596,7 +607,7 @@ def position_monitor():
                             is_any_position_active = True
                             total_value += pos_data.get("value", Decimal("0"))
                             pyramid_info = f"총:{pos_data['entry_count']}/10,일:{pos_data['normal_entry_count']}/5,프:{pos_data['premium_entry_count']}/5,레:{pos_data['rescue_entry_count']}/3"
-                            active_positions_log.append(f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data['price']:.8f} ({pyramid_info}, 가치: {pos_data['value']:.2f} USDT)")
+                            active_positions_log.append(f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data.get('price', 0):.8f} ({pyramid_info}, 가치: {pos_data.get('value', 0):.2f} USDT)")
             
             if is_any_position_active:
                 equity = get_total_collateral()
@@ -611,10 +622,11 @@ def position_monitor():
             log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.25 (Final Fix)")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.28 (Position Fix)")
     log_debug("🎯 전략 핵심", "독립 피라미딩 + 점수 기반 가중치 + 슬리피지 연동형 동적 TP + 레스큐 진입")
     log_debug("🛡️ 안전장치", f"동적 슬리피지 (비율 {PRICE_DEVIATION_LIMIT_PCT:.2%} 또는 {MAX_SLIPPAGE_TICKS}틱 중 큰 값)")
     log_debug("⚠️ 중요", "Gate.io 거래소 설정에서 '양방향 포지션 모드(Two-way)'가 활성화되어야 합니다.")
+    
     initialize_states()
     
     log_debug("📊 초기 상태 로드", "현재 계좌의 모든 포지션 정보를 불러옵니다...")
@@ -647,3 +659,4 @@ if __name__ == "__main__":
     log_debug("✅ 준비 완료", "파인스크립트 v6.25 연동 시스템 대기중")
     
     app.run(host="0.0.0.0", port=port, debug=False)
+
