@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.26 - 수동 청산 보호 기능 추가
-간단한 WebSocket 백업 TP + 수동 청산 충돌 방지 시스템
+Gate.io 자동매매 서버 v6.26 - 프리미엄 TP 배수 + 수동 청산 보호 기능
+간단한 WebSocket 백업 TP + 수동 청산 충돌 방지 + 프리미엄 TP 극대화 시스템
 """
 import os
 import json
@@ -74,6 +74,13 @@ PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0003")  # 0.03%로 더 엄격하게
 MAX_SLIPPAGE_TICKS = 5  # 5틱으로 더 엄격하게
 KST = pytz.timezone('Asia/Seoul')
 
+# 🔥 프리미엄 TP 배수 설정
+PREMIUM_TP_MULTIPLIERS = {
+    "first_entry": Decimal("1.5"),      # 첫 진입이 프리미엄
+    "after_normal": Decimal("1.3"),     # 노멀 → 프리미엄 추가
+    "after_premium": Decimal("1.2")     # 프리미엄 → 프리미엄 추가
+}
+
 SYMBOL_MAPPING = {
     "BTCUSDT": "BTC_USDT", "BTCUSDT.P": "BTC_USDT", "BTCUSDTPERP": "BTC_USDT", "BTC_USDT": "BTC_USDT", "BTC": "BTC_USDT",
     "ETHUSDT": "ETH_USDT", "ETHUSDT.P": "ETH_USDT", "ETHUSDTPERP": "ETH_USDT", "ETH_USDT": "ETH_USDT", "ETH": "ETH_USDT",
@@ -101,7 +108,7 @@ SYMBOL_CONFIG = {
 }
 
 # ========
-# 4. 🔥 간소화된 양방향 상태 관리 + 수동 청산 보호
+# 4. 🔥 간소화된 양방향 상태 관리 + 수동 청산 보호 + 프리미엄 TP 추적
 # ========
 position_state = {}
 position_lock = threading.RLock()
@@ -113,16 +120,18 @@ tpsl_lock = threading.RLock()
 task_q = queue.Queue(maxsize=100)
 WORKER_COUNT = min(6, max(2, os.cpu_count() * 2))
 
-# 🔥 수동 청산 보호 시스템 추가
+# 🔥 수동 청산 보호 시스템
 manual_close_protection = {}
 manual_protection_lock = threading.RLock()
 
 def get_default_pos_side_state():
-    """간소화된 기본 상태"""
+    """간소화된 기본 상태 + 프리미엄 TP 추적"""
     return {
         "price": None, "size": Decimal("0"), "value": Decimal("0"), "entry_count": 0,
         "normal_entry_count": 0, "premium_entry_count": 0, "rescue_entry_count": 0,
-        "entry_time": None, 'last_entry_ratio': Decimal("0")
+        "entry_time": None, 'last_entry_ratio': Decimal("0"),
+        # 🔥 추가: 프리미엄 TP 관련 필드
+        "premium_tp_multiplier": Decimal("1.0"), "base_tp_pct": None, "current_tp_pct": None
     }
 
 def initialize_states():
@@ -156,6 +165,22 @@ def is_manual_close_protected(symbol, side):
                 del manual_close_protection[key]
                 log_debug(f"🛡️ 수동 청산 보호 해제 ({key})", "보호 시간 만료")
         return False
+
+# 🔥 프리미엄 TP 배수 계산 함수
+def get_premium_tp_multiplier(signal_type, normal_count, premium_count):
+    """프리미엄 TP 배수 계산"""
+    if "premium" not in signal_type:
+        return Decimal("1.0")
+    
+    if normal_count == 0:
+        # 첫 진입이 프리미엄인 경우 - 가장 공격적
+        return PREMIUM_TP_MULTIPLIERS["first_entry"]
+    elif premium_count == 0:
+        # 노멀 진입 후 첫 프리미엄 추가진입
+        return PREMIUM_TP_MULTIPLIERS["after_normal"]
+    else:
+        # 프리미엄 → 프리미엄 추가 진입
+        return PREMIUM_TP_MULTIPLIERS["after_premium"]
 
 # ========
 # 5. 핵심 유틸리티 함수
@@ -304,25 +329,35 @@ def calculate_qty_to_match_avg_price(symbol, tv_expected_avg):
         return None
 
 # ========
-# 8. 양방향 TP/SL 관리
+# 8. 🔥 수정: 양방향 TP/SL 관리 (프리미엄 배수 포함)
 # ========
-def store_tp_sl(symbol, side, tp, sl, slippage_pct, entry_number):
+def store_tp_sl(symbol, side, tp, sl, slippage_pct, entry_number, premium_multiplier=Decimal("1.0")):
+    """TP/SL 저장 + 프리미엄 배수 추적"""
     with tpsl_lock: 
         tpsl_storage.setdefault(symbol, {"long": {}, "short": {}}).setdefault(side, {})[entry_number] = {
-            "tp": tp, "sl": sl, "entry_slippage_pct": slippage_pct, "entry_time": time.time()
+            "tp": tp, "sl": sl, "entry_slippage_pct": slippage_pct, "entry_time": time.time(),
+            "premium_multiplier": premium_multiplier  # 🔥 추가
         }
+        
+        # 🔥 포지션 상태에도 프리미엄 TP 정보 업데이트
+        with position_lock:
+            if symbol in position_state and side in position_state[symbol]:
+                pos_side_state = position_state[symbol][side]
+                pos_side_state["premium_tp_multiplier"] = premium_multiplier
+                pos_side_state["base_tp_pct"] = tp
+                pos_side_state["current_tp_pct"] = tp  # 초기값은 base와 동일
 
 def get_tp_sl(symbol, side, entry_number=None):
-    """이전 코드와 호환되는 TP/SL 값 반환"""
+    """이전 코드와 호환되는 TP/SL 값 반환 + 프리미엄 배수"""
     with tpsl_lock:
         side_storage = tpsl_storage.get(symbol, {}).get(side, {})
         if side_storage:
             if entry_number and entry_number in side_storage:
                 data = side_storage[entry_number]
-                return data["tp"], data["sl"], data["entry_slippage_pct"], data["entry_time"]
+                return data["tp"], data["sl"], data["entry_slippage_pct"], data["entry_time"], data.get("premium_multiplier", Decimal("1.0"))
             elif side_storage:
                 data = side_storage[max(side_storage.keys())]
-                return data["tp"], data["sl"], data["entry_slippage_pct"], data["entry_time"]
+                return data["tp"], data["sl"], data["entry_slippage_pct"], data["entry_time"], data.get("premium_multiplier", Decimal("1.0"))
     
     # 🔥 이전 코드와 동일한 기본값 (진입 단계별)
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
@@ -334,7 +369,7 @@ def get_tp_sl(symbol, side, entry_number=None):
     base_tp = tp_map[min(entry_idx, len(tp_map)-1)] * Decimal(str(cfg["tp_mult"]))
     base_sl = sl_map[min(entry_idx, len(sl_map)-1)] * Decimal(str(cfg["sl_mult"]))
     
-    return base_tp, base_sl, Decimal("0"), time.time()
+    return base_tp, base_sl, Decimal("0"), time.time(), Decimal("1.0")
 
 # ========
 # 9. 중복 신호 체크
@@ -666,7 +701,11 @@ def status():
                             "normal_entry_count": pos_data.get("normal_entry_count", 0),
                             "premium_entry_count": pos_data.get("premium_entry_count", 0),
                             "rescue_entry_count": pos_data.get("rescue_entry_count", 0),
-                            "last_entry_ratio": float(pos_data.get('last_entry_ratio', Decimal("0")))
+                            "last_entry_ratio": float(pos_data.get('last_entry_ratio', Decimal("0"))),
+                            # 🔥 추가: 프리미엄 TP 정보
+                            "premium_tp_multiplier": float(pos_data.get('premium_tp_multiplier', Decimal("1.0"))),
+                            "base_tp_pct": float(pos_data.get('base_tp_pct', Decimal("0"))) if pos_data.get('base_tp_pct') else 0,
+                            "current_tp_pct": float(pos_data.get('current_tp_pct', Decimal("0"))) if pos_data.get('current_tp_pct') else 0
                         }
         
         # 🔥 수동 청산 보호 상태 추가
@@ -681,10 +720,15 @@ def status():
                     }
         
         return jsonify({
-            "status": "running", "version": "v6.26_manual_close_protection",
+            "status": "running", "version": "v6.26_premium_tp_multipliers",
             "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": active_positions,
-            "tp_system": "Simple WebSocket TP + Manual Close Protection",
+            "tp_system": "Premium TP Multipliers + Manual Close Protection",
+            "premium_multipliers": {
+                "first_entry": float(PREMIUM_TP_MULTIPLIERS["first_entry"]),
+                "after_normal": float(PREMIUM_TP_MULTIPLIERS["after_normal"]),
+                "after_premium": float(PREMIUM_TP_MULTIPLIERS["after_premium"])
+            },
             "manual_close_protection": protection_status,
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
         })
@@ -716,8 +760,13 @@ def webhook():
             if expected_avg:
                 data["use_avg_matching"] = True
             
+            # 🔥 프리미엄 배수 정보 추가 처리
+            premium_multiplier = data.get("premium_multiplier", 1.0)
+            data["premium_multiplier_received"] = premium_multiplier
+            
             task_q.put_nowait(data)
-            log_debug(f"📥 작업 큐 추가 ({symbol}_{side.upper()})", f"현재 큐 크기: {task_q.qsize()}")
+            log_debug(f"📥 작업 큐 추가 ({symbol}_{side.upper()})", 
+                      f"현재 큐 크기: {task_q.qsize()}, 프리미엄 배수: {premium_multiplier}")
             return jsonify({"status": "queued"}), 200
             
         elif action == "exit":
@@ -734,7 +783,7 @@ def webhook():
         return jsonify({"error": str(e)}), 500
 
 # ========
-# 14. 🔥 수정: WebSocket TP 모니터링 (수동 청산 보호 추가)
+# 14. 🔥 수정: WebSocket TP 모니터링 (프리미엄 배수 + 수동 청산 보호 적용)
 # ========
 async def price_monitor():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
@@ -768,7 +817,7 @@ async def price_monitor():
         await asyncio.sleep(3)
 
 def simple_tp_monitor(ticker):
-    """🔥 수정: 수동 청산 보호 기능이 추가된 TP 모니터링"""
+    """🔥 수정: 프리미엄 배수 + 수동 청산 보호 기능이 추가된 TP 모니터링"""
     try:
         symbol = normalize_symbol(ticker.get("contract"))
         price = Decimal(str(ticker.get("last", "0")))
@@ -791,14 +840,17 @@ def simple_tp_monitor(ticker):
                 entry_time = long_pos.get("entry_time", time.time())
                 entry_count = long_pos.get("entry_count", 0)
                 
+                # 🔥 프리미엄 배수 적용된 TP 계산
+                premium_multiplier = long_pos.get("premium_tp_multiplier", Decimal("1.0"))
+                
                 if entry_price and entry_price > 0 and entry_count > 0:
-                    # 🔥 파인스크립트와 동일한 TP 계산
+                    # 🔥 파인스크립트와 동일한 TP 계산 + 프리미엄 배수
                     cfg = SYMBOL_CONFIG[symbol]
                     symbol_weight_tp = Decimal(str(cfg["tp_mult"]))
                     
-                    # TP/SL 맵핑 (이전 코드 방식)
+                    # TP 맵핑 (프리미엄 배수 적용)
                     tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
-                    base_tp_pct = tp_map[min(entry_count-1, len(tp_map)-1)] * symbol_weight_tp
+                    base_tp_pct = tp_map[min(entry_count-1, len(tp_map)-1)] * symbol_weight_tp * premium_multiplier
                     
                     # 🔥 핵심: 시간 감쇠 적용 (15초마다)
                     time_elapsed = time.time() - entry_time
@@ -808,13 +860,17 @@ def simple_tp_monitor(ticker):
                     
                     tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp)
                     current_tp_pct = max(tp_min_pct_ps * symbol_weight_tp, base_tp_pct - tp_reduction)
+                    
+                    # 🔥 포지션 상태 업데이트
+                    long_pos["current_tp_pct"] = current_tp_pct
+                    
                     tp_price = entry_price * (1 + current_tp_pct)
                     
                     if price >= tp_price:
                         log_debug(f"🎯 롱 TP 실행 ({symbol})", 
                                  f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}, "
-                                 f"감쇠TP: {current_tp_pct*100:.3f}% (기본: {base_tp_pct*100:.3f}%, "
-                                 f"경과: {time_elapsed:.0f}초, {periods_15s}주기)")
+                                 f"프리미엄배수: {premium_multiplier:.2f}x, 감쇠TP: {current_tp_pct*100:.3f}% "
+                                 f"(기본: {base_tp_pct*100:.3f}%, 경과: {time_elapsed:.0f}초)")
                         close_position(symbol, "long", "TP")
             
             # 숏 포지션 TP 체크
@@ -829,14 +885,17 @@ def simple_tp_monitor(ticker):
                 entry_time = short_pos.get("entry_time", time.time())
                 entry_count = short_pos.get("entry_count", 0)
                 
+                # 🔥 프리미엄 배수 적용된 TP 계산
+                premium_multiplier = short_pos.get("premium_tp_multiplier", Decimal("1.0"))
+                
                 if entry_price and entry_price > 0 and entry_count > 0:
-                    # 🔥 파인스크립트와 동일한 TP 계산
+                    # 🔥 파인스크립트와 동일한 TP 계산 + 프리미엄 배수
                     cfg = SYMBOL_CONFIG[symbol]
                     symbol_weight_tp = Decimal(str(cfg["tp_mult"]))
                     
-                    # TP/SL 맵핑 (이전 코드 방식)
+                    # TP 맵핑 (프리미엄 배수 적용)
                     tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
-                    base_tp_pct = tp_map[min(entry_count-1, len(tp_map)-1)] * symbol_weight_tp
+                    base_tp_pct = tp_map[min(entry_count-1, len(tp_map)-1)] * symbol_weight_tp * premium_multiplier
                     
                     # 🔥 핵심: 시간 감쇠 적용 (15초마다)
                     time_elapsed = time.time() - entry_time
@@ -846,20 +905,24 @@ def simple_tp_monitor(ticker):
                     
                     tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp)
                     current_tp_pct = max(tp_min_pct_ps * symbol_weight_tp, base_tp_pct - tp_reduction)
+                    
+                    # 🔥 포지션 상태 업데이트
+                    short_pos["current_tp_pct"] = current_tp_pct
+                    
                     tp_price = entry_price * (1 - current_tp_pct)  # 숏은 반대
                     
                     if price <= tp_price:
                         log_debug(f"🎯 숏 TP 실행 ({symbol})", 
                                  f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}, "
-                                 f"감쇠TP: {current_tp_pct*100:.3f}% (기본: {base_tp_pct*100:.3f}%, "
-                                 f"경과: {time_elapsed:.0f}초, {periods_15s}주기)")
+                                 f"프리미엄배수: {premium_multiplier:.2f}x, 감쇠TP: {current_tp_pct*100:.3f}% "
+                                 f"(기본: {base_tp_pct*100:.3f}%, 경과: {time_elapsed:.0f}초)")
                         close_position(symbol, "short", "TP")
                 
     except Exception as e:
         log_debug(f"❌ TP 모니터링 오류 ({ticker.get('contract', 'Unknown')})", str(e))
 
 # ========
-# 15. 진입 처리 로직
+# 15. 🔥 수정: 진입 처리 로직 (프리미엄 TP 배수 적용)
 # ========
 def worker(idx):
     while True:
@@ -884,10 +947,11 @@ def handle_entry(data):
     
     entry_score = data.get("entry_score", 50)
     signal_price_raw = data.get('price')
-    tv_tp_pct = Decimal(str(data.get("tp_pct", "0.5"))) / 100
+    tv_tp_pct = Decimal(str(data.get("tp_pct", "0.52"))) / 100  # 🔥 기본값 0.52%로 변경
     sl_pct = Decimal(str(data.get("sl_pct", "4.0"))) / 100
     
-    # 🔥 추가: 평단가 매칭 관련 데이터
+    # 🔥 추가: 프리미엄 배수 정보 및 평단가 매칭 관련 데이터
+    premium_multiplier_received = Decimal(str(data.get("premium_multiplier", 1.0)))
     expected_new_avg = data.get("expected_new_avg")
     use_avg_matching = data.get("use_avg_matching", False)
     
@@ -910,6 +974,16 @@ def handle_entry(data):
     update_all_position_states()
     pos_side_state = position_state.get(symbol, {}).get(side, {})
     current_entry_count = pos_side_state.get("entry_count", 0)
+    
+    # 🔥 프리미엄 배수 계산 (서버에서 자체 계산 + TV에서 받은 값 검증)
+    normal_count = pos_side_state.get("normal_entry_count", 0)
+    premium_count = pos_side_state.get("premium_entry_count", 0)
+    calculated_multiplier = get_premium_tp_multiplier(signal_type, normal_count, premium_count)
+    
+    # TV에서 받은 배수와 비교
+    if abs(calculated_multiplier - premium_multiplier_received) > Decimal("0.1"):
+        log_debug(f"⚠️ 프리미엄 배수 불일치 ({symbol}_{side.upper()})", 
+                  f"서버계산: {calculated_multiplier}, TV수신: {premium_multiplier_received}")
     
     # 🔥 수정: 첫 진입에만 가격 필터 적용
     if current_entry_count == 0:
@@ -981,26 +1055,32 @@ def handle_entry(data):
             latest_pos_side_state = position_state.get(symbol, {}).get(side, {})
             current_entry_count = latest_pos_side_state.get("entry_count", 0)
             
-            # 🔥 TP/SL 맵핑 기반 저장
+            # 🔥 TP/SL 맵핑 기반 저장 + 프리미엄 배수 적용
             tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
             sl_map = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
             
             if current_entry_count <= len(tp_map):
                 cfg = SYMBOL_CONFIG[symbol]
-                tp = tp_map[current_entry_count-1] * Decimal(str(cfg["tp_mult"]))
+                base_tp = tp_map[current_entry_count-1] * Decimal(str(cfg["tp_mult"]))
                 sl = sl_map[current_entry_count-1] * Decimal(str(cfg["sl_mult"]))
+                
+                # 🔥 프리미엄 배수 적용된 최종 TP
+                final_tp = base_tp * calculated_multiplier
                 
                 # 슬리피지 계산
                 slippage_pct = abs(current_price - signal_price) / signal_price if signal_price > 0 else Decimal("0")
                 
-                store_tp_sl(symbol, side, tp, sl, slippage_pct, current_entry_count)
+                # 🔥 프리미엄 배수 포함하여 저장
+                store_tp_sl(symbol, side, final_tp, sl, slippage_pct, current_entry_count, calculated_multiplier)
                 
                 log_debug(f"💾 TP/SL 저장 ({symbol}_{side.upper()})", 
-                         f"진입 #{current_entry_count}/13, TP: {tp*100:.3f}%, SL: {sl*100:.3f}%, "
-                         f"슬리피지: {slippage_pct*100:.4f}%")
+                         f"진입 #{current_entry_count}/13, 기본TP: {base_tp*100:.3f}%, "
+                         f"프리미엄배수: {calculated_multiplier:.2f}x, 최종TP: {final_tp*100:.3f}%, "
+                         f"SL: {sl*100:.3f}%, 슬리피지: {slippage_pct*100:.4f}%")
             
             log_debug(f"✅ {entry_action} 성공 ({symbol}_{side.upper()})", 
-                      f"유형: {signal_type}, 수량: {float(qty)} 계약 (총 진입: {current_entry_count}/13)")
+                      f"유형: {signal_type}, 수량: {float(qty)} 계약 (총 진입: {current_entry_count}/13), "
+                      f"프리미엄 배수: {calculated_multiplier:.2f}x")
         else:
             log_debug(f"❌ {entry_action} 실패 ({symbol}_{side.upper()})", "주문 실행 중 오류")
 
@@ -1022,12 +1102,15 @@ def position_monitor():
                             total_value += pos_data.get("value", Decimal("0"))
                             pyramid_info = f"총:{pos_data['entry_count']}/13,일:{pos_data['normal_entry_count']}/5,프:{pos_data['premium_entry_count']}/5,레:{pos_data['rescue_entry_count']}/3"
                             
-                            # 🔥 수동 보호 상태 체크
+                            # 🔥 수동 보호 상태 + 프리미엄 TP 배수 체크
                             protection_status = ""
                             if is_manual_close_protected(symbol, side):
                                 protection_status = " [🛡️보호중]"
+                            
+                            premium_mult = pos_data.get('premium_tp_multiplier', Decimal("1.0"))
+                            premium_info = f" [🚀{premium_mult:.1f}x]" if premium_mult > Decimal("1.0") else ""
                                 
-                            active_positions_log.append(f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data['price']:.8f} ({pyramid_info}, 가치: {pos_data['value']:.2f} USDT){protection_status}")
+                            active_positions_log.append(f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data['price']:.8f} ({pyramid_info}, 가치: {pos_data['value']:.2f} USDT){premium_info}{protection_status}")
             
             if active_positions_log:
                 equity = get_total_collateral()
@@ -1045,9 +1128,10 @@ def position_monitor():
 # 17. 메인 실행
 # ========
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.26 (수동 청산 보호 기능)")
-    log_debug("🎯 TP 시스템", "간단한 WebSocket 백업 TP + 수동 청산 충돌 방지")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.26 (프리미엄 TP 배수 + 수동 청산 보호 기능)")
+    log_debug("🎯 TP 시스템", "프리미엄 TP 배수 시스템 + WebSocket 백업 TP + 수동 청산 충돌 방지")
     log_debug("🛡️ 보호 시스템", "수동 청산 감지 시 10초간 자동 TP 차단")
+    log_debug("🚀 프리미엄 배수", f"첫진입: {PREMIUM_TP_MULTIPLIERS['first_entry']}x, 노멀→프리미엄: {PREMIUM_TP_MULTIPLIERS['after_normal']}x, 프리미엄→프리미엄: {PREMIUM_TP_MULTIPLIERS['after_premium']}x")
     log_debug("🔧 주요 개선", "SOL 심볼 인식, 총 진입 제한 13회, 평단가 매칭, 슬리피지 0.03%/5틱")
     
     initialize_states()
@@ -1060,8 +1144,10 @@ if __name__ == "__main__":
         for symbol, sides in position_state.items():
             for side, pos_data in sides.items():
                 if pos_data and pos_data.get("size", Decimal("0")) > 0:
+                    premium_mult = pos_data.get('premium_tp_multiplier', Decimal("1.0"))
+                    premium_info = f" [🚀{premium_mult:.1f}x]" if premium_mult > Decimal("1.0") else ""
                     initial_active_positions.append(
-                        f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data.get('price', 0):.8f}"
+                        f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data.get('price', 0):.8f}{premium_info}"
                     )
     
     log_debug("📊 초기 활성 포지션", f"{len(initial_active_positions)}개 감지" if initial_active_positions else "감지 안됨")
@@ -1073,7 +1159,7 @@ if __name__ == "__main__":
     
     # 백그라운드 스레드 시작
     threading.Thread(target=position_monitor, daemon=True, name="PositionMonitor").start()
-    threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True, name="SimpleTPMonitor").start()
+    threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True, name="PremiumTPMonitor").start()
     
     # 워커 스레드 시작
     for i in range(WORKER_COUNT):
@@ -1081,7 +1167,7 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹 서버 시작", f"Flask 서버 0.0.0.0:{port}")
-    log_debug("✅ 준비 완료", "수동 청산 보호 시스템 + TP 감쇠 + 평단가 매칭")
+    log_debug("✅ 준비 완료", "프리미엄 TP 배수 시스템 + 수동 청산 보호 + TP 감쇠 + 평단가 매칭")
     
     try:
         app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
