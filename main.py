@@ -947,7 +947,7 @@ def handle_entry(data):
     pos_side_state = position_state.get(symbol, {}).get(side, {})
     
     entry_limits = {"premium": 5, "normal": 5, "rescue": 3}
-    total_entry_limit = 10
+    total_entry_limit = 13
     
     entry_type_key = next((k for k in entry_limits if k in signal_type), None)
 
