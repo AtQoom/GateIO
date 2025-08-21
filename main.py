@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.25 - TP 시스템 간소화
-간단한 WebSocket 백업 TP만 사용, 복잡한 API TP 시스템 제거
+Gate.io 자동매매 서버 v6.26 - 수동 청산 보호 기능 추가
+간단한 WebSocket 백업 TP + 수동 청산 충돌 방지 시스템
 """
 import os
 import json
@@ -70,8 +70,8 @@ except Exception as e:
 # 3. 상수 및 설정
 # ========
 COOLDOWN_SECONDS = 14
-PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0003")
-MAX_SLIPPAGE_TICKS = 5
+PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0003")  # 0.03%로 더 엄격하게
+MAX_SLIPPAGE_TICKS = 5  # 5틱으로 더 엄격하게
 KST = pytz.timezone('Asia/Seoul')
 
 SYMBOL_MAPPING = {
@@ -101,7 +101,7 @@ SYMBOL_CONFIG = {
 }
 
 # ========
-# 4. 🔥 간소화된 양방향 상태 관리
+# 4. 🔥 간소화된 양방향 상태 관리 + 수동 청산 보호
 # ========
 position_state = {}
 position_lock = threading.RLock()
@@ -112,6 +112,10 @@ tpsl_storage = {}
 tpsl_lock = threading.RLock()
 task_q = queue.Queue(maxsize=100)
 WORKER_COUNT = min(6, max(2, os.cpu_count() * 2))
+
+# 🔥 수동 청산 보호 시스템 추가
+manual_close_protection = {}
+manual_protection_lock = threading.RLock()
 
 def get_default_pos_side_state():
     """간소화된 기본 상태"""
@@ -128,6 +132,30 @@ def initialize_states():
                 position_state[sym] = {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()}
             if sym not in tpsl_storage:
                 tpsl_storage[sym] = {"long": {}, "short": {}}
+
+# 🔥 수동 청산 보호 함수
+def set_manual_close_protection(symbol, side, duration=10):
+    """수동 청산 보호 설정 (기본 10초)"""
+    with manual_protection_lock:
+        key = f"{symbol}_{side}"
+        manual_close_protection[key] = {
+            "protected_until": time.time() + duration,
+            "reason": "manual_close_detected"
+        }
+        log_debug(f"🛡️ 수동 청산 보호 활성화 ({key})", f"{duration}초간 자동 TP 차단")
+
+def is_manual_close_protected(symbol, side):
+    """수동 청산 보호 상태 확인"""
+    with manual_protection_lock:
+        key = f"{symbol}_{side}"
+        if key in manual_close_protection:
+            protection = manual_close_protection[key]
+            if time.time() < protection["protected_until"]:
+                return True
+            else:
+                del manual_close_protection[key]
+                log_debug(f"🛡️ 수동 청산 보호 해제 ({key})", "보호 시간 만료")
+        return False
 
 # ========
 # 5. 핵심 유틸리티 함수
@@ -362,7 +390,7 @@ def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_
     return final_qty
 
 # ========
-# 11. 양방향 포지션 상태 관리
+# 11. 🔥 수정: 양방향 포지션 상태 관리 (수동 청산 감지 추가)
 # ========
 def update_all_position_states():
     with position_lock:
@@ -409,11 +437,17 @@ def update_all_position_states():
                 
             active_positions_set.add((symbol, side))
             
-        # 유령 포지션 정리
+        # 🔥 핵심: 수동 청산 감지 (유령 포지션에서)
         for symbol, sides in position_state.items():
             for side in ["long", "short"]:
                 if (symbol, side) not in active_positions_set and sides[side]["size"] > 0:
-                    log_debug(f"👻 유령 포지션 정리", f"{symbol} {side.upper()} 포지션 삭제")
+                    log_debug(f"🔄 수동 청산 감지 ({symbol}_{side.upper()})", 
+                             f"서버 포지션: {sides[side]['size']}, API 포지션: 없음")
+                    
+                    # 🔥 수동 청산 보호 즉시 활성화
+                    set_manual_close_protection(symbol, side, 10)  # 10초 보호
+                    
+                    # 서버 상태 초기화
                     position_state[symbol][side] = get_default_pos_side_state()
                     if symbol in tpsl_storage and side in tpsl_storage[symbol]:
                         tpsl_storage[symbol][side].clear()
@@ -599,7 +633,7 @@ def close_position(symbol, side, reason="manual"):
             return False
 
 # ========
-# 13. Flask 라우트
+# 13. 🔥 수정: Flask 라우트 (보호 상태 추가)
 # ========
 @app.route("/ping", methods=["GET", "HEAD"])
 def ping():
@@ -611,7 +645,9 @@ def clear_cache():
         recent_signals.clear()
     with tpsl_lock: 
         tpsl_storage.clear()
-    log_debug("🔄 캐시 초기화", "모든 신호, TP/SL 캐시가 초기화되었습니다.")
+    with manual_protection_lock:
+        manual_close_protection.clear()
+    log_debug("🔄 캐시 초기화", "모든 신호, TP/SL, 수동 보호 캐시가 초기화되었습니다.")
     return jsonify({"status": "cache_cleared"})
 
 @app.route("/status", methods=["GET"])
@@ -635,11 +671,23 @@ def status():
                             "last_entry_ratio": float(pos_data.get('last_entry_ratio', Decimal("0")))
                         }
         
+        # 🔥 수동 청산 보호 상태 추가
+        protection_status = {}
+        with manual_protection_lock:
+            for key, protection in manual_close_protection.items():
+                remaining = max(0, protection["protected_until"] - time.time())
+                if remaining > 0:
+                    protection_status[key] = {
+                        "remaining_seconds": int(remaining),
+                        "reason": protection["reason"]
+                    }
+        
         return jsonify({
-            "status": "running", "version": "v6.25_simplified_tp",
+            "status": "running", "version": "v6.26_manual_close_protection",
             "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": active_positions,
-            "tp_system": "Simple WebSocket Backup Only",
+            "tp_system": "Simple WebSocket TP + Manual Close Protection",
+            "manual_close_protection": protection_status,
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
         })
     except Exception as e:
@@ -688,7 +736,7 @@ def webhook():
         return jsonify({"error": str(e)}), 500
 
 # ========
-# 14. 🔥 간단한 WebSocket TP 모니터링 (복잡한 시스템 제거)
+# 14. 🔥 수정: WebSocket TP 모니터링 (수동 청산 보호 추가)
 # ========
 async def price_monitor():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
@@ -722,7 +770,7 @@ async def price_monitor():
         await asyncio.sleep(3)
 
 def simple_tp_monitor(ticker):
-    """🔥 파인스크립트와 동일한 TP 모니터링 (감쇠 시스템 포함)"""
+    """🔥 수정: 수동 청산 보호 기능이 추가된 TP 모니터링"""
     try:
         symbol = normalize_symbol(ticker.get("contract"))
         price = Decimal(str(ticker.get("last", "0")))
@@ -736,6 +784,10 @@ def simple_tp_monitor(ticker):
             # 롱 포지션 TP 체크
             long_size = pos_side_state.get("long", {}).get("size", Decimal(0))
             if long_size > 0:
+                # 🔥 수동 청산 보호 체크 (핵심!)
+                if is_manual_close_protected(symbol, "long"):
+                    return  # 보호 중이면 TP 실행 안함
+                
                 long_pos = pos_side_state["long"]
                 entry_price = long_pos.get("price")
                 entry_time = long_pos.get("entry_time", time.time())
@@ -770,6 +822,10 @@ def simple_tp_monitor(ticker):
             # 숏 포지션 TP 체크
             short_size = pos_side_state.get("short", {}).get("size", Decimal(0))
             if short_size > 0:
+                # 🔥 수동 청산 보호 체크 (핵심!)
+                if is_manual_close_protected(symbol, "short"):
+                    return  # 보호 중이면 TP 실행 안함
+                
                 short_pos = pos_side_state["short"]
                 entry_price = short_pos.get("price")
                 entry_time = short_pos.get("entry_time", time.time())
@@ -954,7 +1010,13 @@ def position_monitor():
                         if pos_data and pos_data.get("size", Decimal("0")) > 0:
                             total_value += pos_data.get("value", Decimal("0"))
                             pyramid_info = f"총:{pos_data['entry_count']}/13,일:{pos_data['normal_entry_count']}/5,프:{pos_data['premium_entry_count']}/5,레:{pos_data['rescue_entry_count']}/3"
-                            active_positions_log.append(f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data['price']:.8f} ({pyramid_info}, 가치: {pos_data['value']:.2f} USDT)")
+                            
+                            # 🔥 수동 보호 상태 체크
+                            protection_status = ""
+                            if is_manual_close_protected(symbol, side):
+                                protection_status = " [🛡️보호중]"
+                                
+                            active_positions_log.append(f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data['price']:.8f} ({pyramid_info}, 가치: {pos_data['value']:.2f} USDT){protection_status}")
             
             if active_positions_log:
                 equity = get_total_collateral()
@@ -972,9 +1034,10 @@ def position_monitor():
 # 17. 메인 실행
 # ========
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.25 (TP 시스템 간소화)")
-    log_debug("🎯 TP 시스템", "간단한 WebSocket 백업 TP만 사용 (복잡한 API TP 제거)")
-    log_debug("🔧 주요 개선", "SOL 심볼 인식, 총 진입 제한 13회, 평단가 매칭 지원")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.26 (수동 청산 보호 기능)")
+    log_debug("🎯 TP 시스템", "간단한 WebSocket 백업 TP + 수동 청산 충돌 방지")
+    log_debug("🛡️ 보호 시스템", "수동 청산 감지 시 10초간 자동 TP 차단")
+    log_debug("🔧 주요 개선", "SOL 심볼 인식, 총 진입 제한 13회, 평단가 매칭, 슬리피지 0.03%/5틱")
     
     initialize_states()
     
@@ -1007,7 +1070,7 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹 서버 시작", f"Flask 서버 0.0.0.0:{port}")
-    log_debug("✅ 준비 완료", "간소화된 TP 시스템 + 평단가 매칭 지원")
+    log_debug("✅ 준비 완료", "수동 청산 보호 시스템 + TP 감쇠 + 평단가 매칭")
     
     try:
         app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
