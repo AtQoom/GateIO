@@ -70,8 +70,8 @@ except Exception as e:
 # 3. 상수 및 설정
 # ========
 COOLDOWN_SECONDS = 14
-PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0005")
-MAX_SLIPPAGE_TICKS = 10
+PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0003")
+MAX_SLIPPAGE_TICKS = 5
 KST = pytz.timezone('Asia/Seoul')
 
 SYMBOL_MAPPING = {
