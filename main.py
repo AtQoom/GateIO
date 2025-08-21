@@ -216,10 +216,17 @@ def get_sl_by_index(idx):
 # ========
 def calculate_synchronized_tp_price(signal_price, actual_entry_price, tv_tp_pct, side, symbol):
     try:
+        # ✅ tp_mult 가중치 적용
+        cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0})
+        tp_mult = Decimal(str(cfg["tp_mult"]))
+        
+        # 가중치가 적용된 실제 TP 비율
+        weighted_tp_pct = tv_tp_pct * tp_mult
+        
         if side == "long":
-            tv_tp_price = signal_price * (1 + tv_tp_pct)
+            tv_tp_price = signal_price * (1 + weighted_tp_pct)
         else:
-            tv_tp_price = signal_price * (1 - tv_tp_pct)
+            tv_tp_price = signal_price * (1 - weighted_tp_pct)
         
         if side == "long":
             actual_tp_pct = (tv_tp_price - actual_entry_price) / actual_entry_price
@@ -229,9 +236,9 @@ def calculate_synchronized_tp_price(signal_price, actual_entry_price, tv_tp_pct,
         actual_tp_pct = max(actual_tp_pct, Decimal("0.0001"))
         
         log_debug(f"🎯 TP 동기화 계산 ({symbol}_{side.upper()})", 
-                  f"TV알림가: {signal_price:.8f}, 실제진입가: {actual_entry_price:.8f}, TV_TP가: {tv_tp_price:.8f}")
+                  f"TV알림가: {signal_price:.8f}, 원래TP: {tv_tp_pct*100:.2f}%, 가중치: {tp_mult}, 적용TP: {weighted_tp_pct*100:.2f}%")
         log_debug(f"🔧 TP 보정 ({symbol}_{side.upper()})", 
-                  f"원래TP: {tv_tp_pct*100:.2f}% → 보정TP: {actual_tp_pct*100:.3f}%")
+                  f"TV_TP가: {tv_tp_price:.8f}, 보정TP: {actual_tp_pct*100:.3f}%")
         
         return tv_tp_price, actual_tp_pct
         
@@ -370,10 +377,12 @@ def verify_tp_order_active(symbol, side, tp_order_id):
         return False
 
 def update_synchronized_dynamic_tp(symbol, side, entry_time, tv_signal_price, tv_tp_pct, current_tp_order_id):
-    """트레이딩뷰와 동기화된 동적 TP 업데이트"""
     try:
         cfg = SYMBOL_CONFIG[symbol]
         tp_mult = Decimal(str(cfg["tp_mult"]))
+        
+        # ✅ 가중치가 적용된 초기 TP 비율
+        weighted_initial_tp = tv_tp_pct * tp_mult
         
         time_elapsed = time.time() - entry_time
         periods_15s = max(0, int(time_elapsed / 15))
@@ -382,7 +391,7 @@ def update_synchronized_dynamic_tp(symbol, side, entry_time, tv_signal_price, tv
         tp_min_pct = Decimal("0.12") / 100
         
         tp_reduction = Decimal(str(periods_15s)) * tp_decay_amount * tp_mult
-        current_tv_tp_pct = max(tp_min_pct * tp_mult, tv_tp_pct - tp_reduction)
+        current_tv_tp_pct = max(tp_min_pct * tp_mult, weighted_initial_tp - tp_reduction)
         
         if side == "long":
             tv_tp_price = tv_signal_price * (1 + current_tv_tp_pct)
@@ -481,7 +490,7 @@ def update_all_position_states():
             
         active_positions_set = set()
         for pos_info in all_positions_from_api:
-            symbol = pos_info.contract
+            raw_symbol = pos_info.contract
             api_side = pos_info.mode
             if api_side == 'dual_long':
                 side = 'long'
@@ -490,8 +499,17 @@ def update_all_position_states():
             else:
                 continue
             
-            if symbol not in SYMBOL_CONFIG:
+            # ✅ 수정: normalize_symbol 함수로 심볼 정규화
+            symbol = normalize_symbol(raw_symbol)
+            if not symbol:
+                log_debug(f"⚠️ 알 수 없는 심볼", f"원본: {raw_symbol}, 정규화 실패")
                 continue
+                
+            # ✅ 수정: 정규화된 심볼로 SYMBOL_CONFIG 확인
+            if symbol not in SYMBOL_CONFIG:
+                log_debug(f"⚠️ 미지원 심볼", f"원본: {raw_symbol}, 정규화: {symbol}")
+                continue
+                
             if symbol not in position_state:
                 initialize_states()
             
@@ -785,7 +803,8 @@ async def price_monitor():
 def check_tp_backup(ticker):
     """즉각적인 백업 TP - 로그 강화"""
     try:
-        symbol = ticker.get("contract")
+        raw_symbol = ticker.get("contract")
+        symbol = normalize_symbol(raw_symbol)
         price = Decimal(str(ticker.get("last", "0")))
         
         if not symbol or symbol not in SYMBOL_CONFIG or price <= 0:
@@ -807,6 +826,8 @@ def check_tp_backup(ticker):
                 if entry_time and tv_signal_price and tv_tp_pct:
                     cfg = SYMBOL_CONFIG[symbol]
                     tp_mult = Decimal(str(cfg["tp_mult"]))
+
+                    weighted_initial_tp = tv_tp_pct * tp_mult
                     
                     time_elapsed = time.time() - entry_time
                     periods_15s = max(0, int(time_elapsed / 15))
@@ -814,7 +835,7 @@ def check_tp_backup(ticker):
                     tp_decay_amount = Decimal("0.002") / 100 * tp_mult
                     tp_min_pct = Decimal("0.12") / 100 * tp_mult
                     tp_reduction = Decimal(str(periods_15s)) * tp_decay_amount
-                    current_tp_pct = max(tp_min_pct, tv_tp_pct - tp_reduction)
+                    current_tp_pct = max(tp_min_pct, weighted_initial_tp - tp_reduction)
                     
                     if side == "long":
                         tp_price_calc = tv_signal_price * (1 + current_tp_pct)
