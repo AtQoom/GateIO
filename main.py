@@ -401,8 +401,9 @@ def update_all_position_states():
             
         active_positions_set = set()
         for pos_info in all_positions_from_api:
-            raw_symbol = pos_info.contract
+            raw_symbol = pos_info.contract  # "ETH_USDT"
             api_side = pos_info.mode
+            
             if api_side == 'dual_long':
                 side = 'long'
             elif api_side == 'dual_short':
@@ -410,15 +411,12 @@ def update_all_position_states():
             else:
                 continue
             
-            # 🔥 수정: 강화된 normalize_symbol 함수 사용
-            symbol = normalize_symbol(raw_symbol)
-            if not symbol:
-                log_debug(f"⚠️ 알 수 없는 심볼", f"원본: {raw_symbol}, 정규화 실패")
-                continue
-                
-            # 🔥 수정: 정규화된 심볼로 SYMBOL_CONFIG 확인
+            # 🔥 핵심 수정: API에서 온 심볼을 그대로 사용
+            symbol = raw_symbol  # "ETH_USDT" 그대로 사용
+            
+            # 🔥 추가: SYMBOL_CONFIG에 없으면 스킵
             if symbol not in SYMBOL_CONFIG:
-                log_debug(f"⚠️ 미지원 심볼", f"원본: {raw_symbol}, 정규화: {symbol}")
+                log_debug(f"⚠️ 미지원 심볼", f"API 심볼: {symbol}")
                 continue
                 
             if symbol not in position_state:
