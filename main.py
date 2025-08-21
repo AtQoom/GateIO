@@ -474,7 +474,6 @@ def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0"
 def close_position(symbol, side, reason="manual"):
     with position_lock:
         try:
-            # 🔥 수정: 현재 포지션 사이즈를 직접 조회해서 반대 주문
             pos_side_state = position_state.get(symbol, {}).get(side, {})
             current_size = pos_side_state.get("size", Decimal("0"))
             
@@ -482,27 +481,92 @@ def close_position(symbol, side, reason="manual"):
                 log_debug(f"⚠️ 청산 주문 생략 ({symbol}_{side.upper()})", "포지션 없음")
                 return True
             
-            # 포지션 크기의 반대 주문으로 청산
-            if side == "long":
-                order_size = -int(current_size)  # 롱 포지션 청산은 음수
-            else:
-                order_size = int(current_size)   # 숏 포지션 청산은 양수
+            log_debug(f"🔄 청산 시도 ({symbol}_{side.upper()})", 
+                     f"현재 포지션: {current_size}, 사유: {reason}")
             
-            order = FuturesOrder(
-                contract=symbol, 
-                size=order_size, 
-                price="0", 
-                tif="ioc"
-            )
+            # 🔥 수정: Gate.io 올바른 청산 방식 (3가지 방법 시도)
+            success = False
             
-            result = _get_api_response(api.create_futures_order, SETTLE, order)
-            if not result:
-                log_debug(f"❌ 청산 주문 실행 실패 ({symbol}_{side.upper()})", "API 호출 실패")
+            # 방법 1: close=True 사용 (가장 확실한 방법)
+            try:
+                order1 = FuturesOrder(
+                    contract=symbol, 
+                    size=0,  # 👈 중요: 0으로 설정
+                    price="0",  # 시장가
+                    tif="ioc",
+                    close=True  # 👈 핵심: close=True
+                )
+                
+                result1 = _get_api_response(api.create_futures_order, SETTLE, order1)
+                if result1:
+                    log_debug(f"✅ 청산 방법1 성공 ({symbol}_{side.upper()})", 
+                             f"close=True 방식, 주문ID: {getattr(result1, 'id', 'Unknown')}")
+                    success = True
+                else:
+                    log_debug(f"⚠️ 청산 방법1 실패 ({symbol}_{side.upper()})", "close=True 방식 실패")
+                    
+            except Exception as e:
+                log_debug(f"⚠️ 청산 방법1 예외 ({symbol}_{side.upper()})", str(e))
+            
+            # 방법 2: reduce_only 사용 (방법1 실패시)
+            if not success:
+                try:
+                    # 반대 방향으로 같은 수량 주문 (reduce_only=True)
+                    if side == "long":
+                        order_size = -int(current_size)  # 롱 청산은 음수 (매도)
+                    else:
+                        order_size = int(current_size)   # 숏 청산은 양수 (매수)
+                    
+                    order2 = FuturesOrder(
+                        contract=symbol, 
+                        size=order_size,
+                        price="0",  # 시장가
+                        tif="ioc",
+                        reduce_only=True  # 👈 핵심: reduce_only=True
+                    )
+                    
+                    result2 = _get_api_response(api.create_futures_order, SETTLE, order2)
+                    if result2:
+                        log_debug(f"✅ 청산 방법2 성공 ({symbol}_{side.upper()})", 
+                                 f"reduce_only=True 방식, 수량: {order_size}, 주문ID: {getattr(result2, 'id', 'Unknown')}")
+                        success = True
+                    else:
+                        log_debug(f"⚠️ 청산 방법2 실패 ({symbol}_{side.upper()})", "reduce_only=True 방식 실패")
+                        
+                except Exception as e:
+                    log_debug(f"⚠️ 청산 방법2 예외 ({symbol}_{side.upper()})", str(e))
+            
+            # 방법 3: 직접 반대 포지션 (방법1,2 모두 실패시)
+            if not success:
+                try:
+                    if side == "long":
+                        order_size = -int(current_size)
+                    else:
+                        order_size = int(current_size)
+                    
+                    order3 = FuturesOrder(
+                        contract=symbol, 
+                        size=order_size,
+                        price="0",  # 시장가
+                        tif="ioc"  # reduce_only나 close 없이
+                    )
+                    
+                    result3 = _get_api_response(api.create_futures_order, SETTLE, order3)
+                    if result3:
+                        log_debug(f"✅ 청산 방법3 성공 ({symbol}_{side.upper()})", 
+                                 f"반대 포지션 방식, 수량: {order_size}, 주문ID: {getattr(result3, 'id', 'Unknown')}")
+                        success = True
+                    else:
+                        log_debug(f"⚠️ 청산 방법3 실패 ({symbol}_{side.upper()})", "반대 포지션 방식 실패")
+                        
+                except Exception as e:
+                    log_debug(f"⚠️ 청산 방법3 예외 ({symbol}_{side.upper()})", str(e))
+            
+            if not success:
+                log_debug(f"❌ 모든 청산 방법 실패 ({symbol}_{side.upper()})", "3가지 방법 모두 실패")
                 return False
             
-            log_debug(f"✅ 청산 주문 전송 성공 ({symbol}_{side.upper()})", f"사유: {reason}, 수량: {order_size}")
-            
-            # 내부 상태 초기화
+            # 청산 성공시 내부 상태 초기화
             pos_side_state = position_state.setdefault(symbol, {
                 "long": get_default_pos_side_state(), 
                 "short": get_default_pos_side_state()
@@ -514,7 +578,21 @@ def close_position(symbol, side, reason="manual"):
                 
             with signal_lock:
                 recent_signals.pop(f"{symbol}_{side}", None)
-            return True
+            
+            # 2초 후 실제 포지션 확인
+            time.sleep(2)
+            update_all_position_states()
+            
+            # 실제로 청산되었는지 확인
+            final_size = position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0"))
+            if final_size > 0:
+                log_debug(f"⚠️ 청산 확인 실패 ({symbol}_{side.upper()})", 
+                         f"주문은 성공했지만 포지션이 남음: {final_size}")
+                return False
+            else:
+                log_debug(f"🎉 청산 확인 성공 ({symbol}_{side.upper()})", 
+                         f"포지션 완전 청산 확인, 사유: {reason}")
+                return True
             
         except Exception as e:
             log_debug(f"❌ 청산 주문 생성 오류 ({symbol}_{side.upper()})", str(e), exc_info=True)
