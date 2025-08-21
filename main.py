@@ -908,17 +908,28 @@ def handle_entry(data):
     if current_price <= 0 or signal_price <= 0:
         return log_debug(f"❌ 진입 취소 ({symbol})", f"유효하지 않은 가격")
     
-    price_diff = abs(current_price - signal_price)
-    allowed_slippage = max(signal_price * PRICE_DEVIATION_LIMIT_PCT, Decimal(str(MAX_SLIPPAGE_TICKS)) * cfg['tick_size'])
-    if price_diff > allowed_slippage:
-        return log_debug(f"⚠️ 진입 취소: 슬리피지 ({symbol}_{side.upper()})", f"가격 차이 초과")
-        
+    # 🔥 핵심 수정: 포지션 상태 먼저 확인
     update_all_position_states()
     pos_side_state = position_state.get(symbol, {}).get(side, {})
+    current_entry_count = pos_side_state.get("entry_count", 0)
+    
+    # 🔥 수정: 첫 진입에만 가격 필터 적용
+    if current_entry_count == 0:
+        # 첫 진입인 경우에만 가격 필터 적용
+        price_diff = abs(current_price - signal_price)
+        allowed_slippage = max(signal_price * PRICE_DEVIATION_LIMIT_PCT, Decimal(str(MAX_SLIPPAGE_TICKS)) * cfg['tick_size'])
+        if price_diff > allowed_slippage:
+            return log_debug(f"⚠️ 첫 진입 취소: 슬리피지 ({symbol}_{side.upper()})", 
+                            f"가격 차이: {price_diff:.8f} > 허용: {allowed_slippage:.8f}")
+    else:
+        # 추가 진입인 경우 가격 필터 생략 (평단가 매칭 우선)
+        price_diff = abs(current_price - signal_price)
+        log_debug(f"📊 추가 진입 허용 ({symbol}_{side.upper()})", 
+                  f"진입 #{current_entry_count+1}/13 - 가격 필터 생략 (차이: {price_diff:.8f}, 평단가 매칭 우선)")
     
     # 🔥 수정: 총 진입 제한을 13으로 변경
     entry_limits = {"premium": 5, "normal": 5, "rescue": 3}
-    total_entry_limit = 13  # 🔥 10에서 13으로 수정
+    total_entry_limit = 13
     
     entry_type_key = next((k for k in entry_limits if k in signal_type), None)
 
@@ -930,10 +941,12 @@ def handle_entry(data):
         log_debug(f"⚠️ 추가 진입 제한 ({symbol}_{side.upper()})", f"'{entry_type_key}' 유형 최대치 도달: {entry_limits[entry_type_key]}")
         return
 
+    # 🔥 추가 진입 시 평단가 불리 체크 (레스큐 제외)
     if pos_side_state.get("size", Decimal(0)) > 0 and "rescue" not in signal_type:
         avg_price = pos_side_state.get("price")
         if avg_price and ((side == "long" and current_price <= avg_price) or (side == "short" and current_price >= avg_price)):
-            return log_debug(f"⚠️ 추가 진입 보류 ({symbol}_{side.upper()})", f"평단가 불리")
+            return log_debug(f"⚠️ 추가 진입 보류 ({symbol}_{side.upper()})", 
+                           f"평단가 불리 - 현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
 
     current_signal_count = pos_side_state.get("premium_entry_count", 0) if "premium" in signal_type else pos_side_state.get("normal_entry_count", 0)
     
