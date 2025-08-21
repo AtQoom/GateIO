@@ -285,6 +285,7 @@ def store_tp_sl(symbol, side, tp, sl, slippage_pct, entry_number):
         }
 
 def get_tp_sl(symbol, side, entry_number=None):
+    """이전 코드와 호환되는 TP/SL 값 반환"""
     with tpsl_lock:
         side_storage = tpsl_storage.get(symbol, {}).get(side, {})
         if side_storage:
@@ -295,11 +296,17 @@ def get_tp_sl(symbol, side, entry_number=None):
                 data = side_storage[max(side_storage.keys())]
                 return data["tp"], data["sl"], data["entry_slippage_pct"], data["entry_time"]
     
+    # 🔥 이전 코드와 동일한 기본값 (진입 단계별)
     cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
-    return (Decimal("0.005") * Decimal(str(cfg["tp_mult"])), 
-            Decimal("0.04") * Decimal(str(cfg["sl_mult"])), 
-            Decimal("0"), 
-            time.time())
+    entry_idx = (entry_number or 1) - 1
+    
+    tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
+    sl_map = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
+    
+    base_tp = tp_map[min(entry_idx, len(tp_map)-1)] * Decimal(str(cfg["tp_mult"]))
+    base_sl = sl_map[min(entry_idx, len(sl_map)-1)] * Decimal(str(cfg["sl_mult"]))
+    
+    return base_tp, base_sl, Decimal("0"), time.time()
 
 # ========
 # 9. 중복 신호 체크
@@ -637,7 +644,7 @@ async def price_monitor():
         await asyncio.sleep(3)
 
 def simple_tp_monitor(ticker):
-    """🔥 간단하고 확실한 TP 모니터링 (복잡한 시스템 제거)"""
+    """🔥 파인스크립트와 동일한 TP 모니터링 (감쇠 시스템 포함)"""
     try:
         symbol = normalize_symbol(ticker.get("contract"))
         price = Decimal(str(ticker.get("last", "0")))
@@ -654,22 +661,32 @@ def simple_tp_monitor(ticker):
                 long_pos = pos_side_state["long"]
                 entry_price = long_pos.get("price")
                 entry_time = long_pos.get("entry_time", time.time())
+                entry_count = long_pos.get("entry_count", 0)
                 
-                if entry_price and entry_price > 0:
+                if entry_price and entry_price > 0 and entry_count > 0:
+                    # 🔥 파인스크립트와 동일한 TP 계산
                     cfg = SYMBOL_CONFIG[symbol]
-                    base_tp_pct = Decimal("0.005") * Decimal(str(cfg["tp_mult"]))
+                    symbol_weight_tp = Decimal(str(cfg["tp_mult"]))
                     
+                    # TP/SL 맵핑 (이전 코드 방식)
+                    tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
+                    base_tp_pct = tp_map[min(entry_count-1, len(tp_map)-1)] * symbol_weight_tp
+                    
+                    # 🔥 핵심: 시간 감쇠 적용 (15초마다)
                     time_elapsed = time.time() - entry_time
                     periods_15s = max(0, int(time_elapsed / 15))
-                    tp_decay = Decimal("0.002") / 100 * Decimal(str(cfg["tp_mult"]))
-                    tp_min = Decimal("0.12") / 100 * Decimal(str(cfg["tp_mult"]))
+                    tp_decay_amt_ps = Decimal("0.002") / 100  # 0.002%씩 감소
+                    tp_min_pct_ps = Decimal("0.12") / 100     # 최소 0.12%
                     
-                    current_tp_pct = max(tp_min, base_tp_pct - periods_15s * tp_decay)
+                    tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp)
+                    current_tp_pct = max(tp_min_pct_ps * symbol_weight_tp, base_tp_pct - tp_reduction)
                     tp_price = entry_price * (1 + current_tp_pct)
                     
                     if price >= tp_price:
                         log_debug(f"🎯 롱 TP 실행 ({symbol})", 
-                                 f"현재가: {price:.8f}, TP가: {tp_price:.8f}, 포지션: {long_size}")
+                                 f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}, "
+                                 f"감쇠TP: {current_tp_pct*100:.3f}% (기본: {base_tp_pct*100:.3f}%, "
+                                 f"경과: {time_elapsed:.0f}초, {periods_15s}주기)")
                         close_position(symbol, "long", "TP")
             
             # 숏 포지션 TP 체크
@@ -678,26 +695,36 @@ def simple_tp_monitor(ticker):
                 short_pos = pos_side_state["short"]
                 entry_price = short_pos.get("price")
                 entry_time = short_pos.get("entry_time", time.time())
+                entry_count = short_pos.get("entry_count", 0)
                 
-                if entry_price and entry_price > 0:
+                if entry_price and entry_price > 0 and entry_count > 0:
+                    # 🔥 파인스크립트와 동일한 TP 계산
                     cfg = SYMBOL_CONFIG[symbol]
-                    base_tp_pct = Decimal("0.005") * Decimal(str(cfg["tp_mult"]))
+                    symbol_weight_tp = Decimal(str(cfg["tp_mult"]))
                     
+                    # TP/SL 맵핑 (이전 코드 방식)
+                    tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
+                    base_tp_pct = tp_map[min(entry_count-1, len(tp_map)-1)] * symbol_weight_tp
+                    
+                    # 🔥 핵심: 시간 감쇠 적용 (15초마다)
                     time_elapsed = time.time() - entry_time
                     periods_15s = max(0, int(time_elapsed / 15))
-                    tp_decay = Decimal("0.002") / 100 * Decimal(str(cfg["tp_mult"]))
-                    tp_min = Decimal("0.12") / 100 * Decimal(str(cfg["tp_mult"]))
+                    tp_decay_amt_ps = Decimal("0.002") / 100  # 0.002%씩 감소
+                    tp_min_pct_ps = Decimal("0.12") / 100     # 최소 0.12%
                     
-                    current_tp_pct = max(tp_min, base_tp_pct - periods_15s * tp_decay)
-                    tp_price = entry_price * (1 - current_tp_pct)
+                    tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp)
+                    current_tp_pct = max(tp_min_pct_ps * symbol_weight_tp, base_tp_pct - tp_reduction)
+                    tp_price = entry_price * (1 - current_tp_pct)  # 숏은 반대
                     
                     if price <= tp_price:
                         log_debug(f"🎯 숏 TP 실행 ({symbol})", 
-                                 f"현재가: {price:.8f}, TP가: {tp_price:.8f}, 포지션: {short_size}")
+                                 f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}, "
+                                 f"감쇠TP: {current_tp_pct*100:.3f}% (기본: {base_tp_pct*100:.3f}%, "
+                                 f"경과: {time_elapsed:.0f}초, {periods_15s}주기)")
                         close_position(symbol, "short", "TP")
                 
     except Exception as e:
-        log_debug(f"❌ 간단 TP 모니터링 오류 ({ticker.get('contract', 'Unknown')})", str(e))
+        log_debug(f"❌ TP 모니터링 오류 ({ticker.get('contract', 'Unknown')})", str(e))
 
 # ========
 # 15. 진입 처리 로직
@@ -807,9 +834,28 @@ def handle_entry(data):
         if place_order(symbol, side, qty, signal_type, final_position_ratio):
             update_all_position_states()
             latest_pos_side_state = position_state.get(symbol, {}).get(side, {})
+            current_entry_count = latest_pos_side_state.get("entry_count", 0)
+            
+            # 🔥 TP/SL 맵핑 기반 저장
+            tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
+            sl_map = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
+            
+            if current_entry_count <= len(tp_map):
+                cfg = SYMBOL_CONFIG[symbol]
+                tp = tp_map[current_entry_count-1] * Decimal(str(cfg["tp_mult"]))
+                sl = sl_map[current_entry_count-1] * Decimal(str(cfg["sl_mult"]))
+                
+                # 슬리피지 계산
+                slippage_pct = abs(current_price - signal_price) / signal_price if signal_price > 0 else Decimal("0")
+                
+                store_tp_sl(symbol, side, tp, sl, slippage_pct, current_entry_count)
+                
+                log_debug(f"💾 TP/SL 저장 ({symbol}_{side.upper()})", 
+                         f"진입 #{current_entry_count}/13, TP: {tp*100:.3f}%, SL: {sl*100:.3f}%, "
+                         f"슬리피지: {slippage_pct*100:.4f}%")
+            
             log_debug(f"✅ {entry_action} 성공 ({symbol}_{side.upper()})", 
-                      f"유형: {signal_type}, 수량: {float(qty)} 계약 (총 진입: {latest_pos_side_state.get('entry_count',0)}/13)")
-            store_tp_sl(symbol, side, tv_tp_pct, sl_pct, abs(current_price - signal_price) / signal_price, latest_pos_side_state.get("entry_count", 0))
+                      f"유형: {signal_type}, 수량: {float(qty)} 계약 (총 진입: {current_entry_count}/13)")
         else:
             log_debug(f"❌ {entry_action} 실패 ({symbol}_{side.upper()})", "주문 실행 중 오류")
 
