@@ -1136,6 +1136,11 @@ if __name__ == "__main__":
     
     initialize_states()
     
+    # 🔥 추가: 초기 자본금 조회
+    log_debug("💰 초기 자산 조회", "현재 계정 자본금 확인 중...")
+    equity = get_total_collateral(force=True)
+    log_debug("💰 초기 자산", f"{equity:.2f} USDT" if equity > 0 else "조회 실패")
+    
     log_debug("📊 초기 상태 로드", "현재 포지션 정보 불러오는 중...")
     update_all_position_states()
     
@@ -1153,9 +1158,6 @@ if __name__ == "__main__":
     log_debug("📊 초기 활성 포지션", f"{len(initial_active_positions)}개 감지" if initial_active_positions else "감지 안됨")
     for pos_info in initial_active_positions:
         log_debug("  └", pos_info)
-        
-    equity = get_total_collateral(force=True)
-    log_debug("💰 초기 자산", f"{equity:.2f} USDT" if equity > 0 else "조회 실패")
     
     # 백그라운드 스레드 시작
     threading.Thread(target=position_monitor, daemon=True, name="PositionMonitor").start()
