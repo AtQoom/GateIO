@@ -637,6 +637,7 @@ async def price_monitor():
         await asyncio.sleep(3)
 
 def simple_tp_monitor(ticker):
+    """🔥 간단하고 확실한 TP 모니터링 (복잡한 시스템 제거)"""
     try:
         symbol = normalize_symbol(ticker.get("contract"))
         price = Decimal(str(ticker.get("last", "0")))
@@ -644,22 +645,22 @@ def simple_tp_monitor(ticker):
         if not symbol or symbol not in SYMBOL_CONFIG or price <= 0:
             return
             
-        # 🔥 추가: 청산 전 포지션 상태 재동기화
-        update_all_position_states()
-            
         with position_lock:
             pos_side_state = position_state.get(symbol, {})
             
             # 롱 포지션 TP 체크
-            if pos_side_state.get("long", {}).get("size", Decimal(0)) > 0:
+            long_size = pos_side_state.get("long", {}).get("size", Decimal(0))
+            if long_size > 0:
                 long_pos = pos_side_state["long"]
                 entry_price = long_pos.get("price")
                 entry_time = long_pos.get("entry_time", time.time())
                 
                 if entry_price and entry_price > 0:
+                    # 간단한 TP 계산 (서버 기준 0.50% - 버퍼 없음)
                     cfg = SYMBOL_CONFIG[symbol]
                     base_tp_pct = Decimal("0.005") * Decimal(str(cfg["tp_mult"]))
                     
+                    # 시간 감쇠 적용
                     time_elapsed = time.time() - entry_time
                     periods_15s = max(0, int(time_elapsed / 15))
                     tp_decay = Decimal("0.002") / 100 * Decimal(str(cfg["tp_mult"]))
@@ -670,11 +671,37 @@ def simple_tp_monitor(ticker):
                     
                     if price >= tp_price:
                         log_debug(f"🎯 롱 TP 실행 ({symbol})", 
-                                 f"현재가: {price:.8f}, TP가: {tp_price:.8f}, 포지션: {long_pos.get('size')}")
+                                 f"현재가: {price:.8f}, TP가: {tp_price:.8f}, 포지션: {long_size}")
                         close_position(symbol, "long", "TP")
-                        
+            
+            # 숏 포지션 TP 체크
+            short_size = pos_side_state.get("short", {}).get("size", Decimal(0))
+            if short_size > 0:
+                short_pos = pos_side_state["short"]
+                entry_price = short_pos.get("price")
+                entry_time = short_pos.get("entry_time", time.time())
+                
+                if entry_price and entry_price > 0:
+                    # 간단한 TP 계산 (서버 기준 0.50% - 버퍼 없음)
+                    cfg = SYMBOL_CONFIG[symbol]
+                    base_tp_pct = Decimal("0.005") * Decimal(str(cfg["tp_mult"]))
+                    
+                    # 시간 감쇠 적용
+                    time_elapsed = time.time() - entry_time
+                    periods_15s = max(0, int(time_elapsed / 15))
+                    tp_decay = Decimal("0.002") / 100 * Decimal(str(cfg["tp_mult"]))
+                    tp_min = Decimal("0.12") / 100 * Decimal(str(cfg["tp_mult"]))
+                    
+                    current_tp_pct = max(tp_min, base_tp_pct - periods_15s * tp_decay)
+                    tp_price = entry_price * (1 - current_tp_pct)
+                    
+                    if price <= tp_price:
+                        log_debug(f"🎯 숏 TP 실행 ({symbol})", 
+                                 f"현재가: {price:.8f}, TP가: {tp_price:.8f}, 포지션: {short_size}")
+                        close_position(symbol, "short", "TP")
+                
     except Exception as e:
-        log_debug(f"❌ 간단 TP 모니터링 오류", str(e))
+        log_debug(f"❌ 간단 TP 모니터링 오류 ({ticker.get('contract', 'Unknown')})", str(e))
             
             # 숏 포지션 TP 체크
             if pos_side_state.get("short", {}).get("size", Decimal(0)) > 0:
