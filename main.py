@@ -467,18 +467,35 @@ def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0"
 def close_position(symbol, side, reason="manual"):
     with position_lock:
         try:
+            # 🔥 수정: 현재 포지션 사이즈를 직접 조회해서 반대 주문
+            pos_side_state = position_state.get(symbol, {}).get(side, {})
+            current_size = pos_side_state.get("size", Decimal("0"))
+            
+            if current_size <= 0:
+                log_debug(f"⚠️ 청산 주문 생략 ({symbol}_{side.upper()})", "포지션 없음")
+                return True
+            
+            # 포지션 크기의 반대 주문으로 청산
             if side == "long":
-                order = FuturesOrder(contract=symbol, size=0, tif="ioc", auto_size="close_long")
+                order_size = -int(current_size)  # 롱 포지션 청산은 음수
             else:
-                order = FuturesOrder(contract=symbol, size=0, tif="ioc", auto_size="close_short")
+                order_size = int(current_size)   # 숏 포지션 청산은 양수
+            
+            order = FuturesOrder(
+                contract=symbol, 
+                size=order_size, 
+                price="0", 
+                tif="ioc"
+            )
             
             result = _get_api_response(api.create_futures_order, SETTLE, order)
             if not result:
                 log_debug(f"❌ 청산 주문 실행 실패 ({symbol}_{side.upper()})", "API 호출 실패")
                 return False
             
-            log_debug(f"✅ 청산 주문 전송 성공 ({symbol}_{side.upper()})", f"사유: {reason}")
+            log_debug(f"✅ 청산 주문 전송 성공 ({symbol}_{side.upper()})", f"사유: {reason}, 수량: {order_size}")
             
+            # 내부 상태 초기화
             pos_side_state = position_state.setdefault(symbol, {
                 "long": get_default_pos_side_state(), 
                 "short": get_default_pos_side_state()
@@ -620,13 +637,15 @@ async def price_monitor():
         await asyncio.sleep(3)
 
 def simple_tp_monitor(ticker):
-    """🔥 간단하고 확실한 TP 모니터링 (복잡한 시스템 제거)"""
     try:
         symbol = normalize_symbol(ticker.get("contract"))
         price = Decimal(str(ticker.get("last", "0")))
         
         if not symbol or symbol not in SYMBOL_CONFIG or price <= 0:
             return
+            
+        # 🔥 추가: 청산 전 포지션 상태 재동기화
+        update_all_position_states()
             
         with position_lock:
             pos_side_state = position_state.get(symbol, {})
@@ -638,11 +657,9 @@ def simple_tp_monitor(ticker):
                 entry_time = long_pos.get("entry_time", time.time())
                 
                 if entry_price and entry_price > 0:
-                    # 간단한 TP 계산 (서버 기준 0.50% - 버퍼 없음)
                     cfg = SYMBOL_CONFIG[symbol]
                     base_tp_pct = Decimal("0.005") * Decimal(str(cfg["tp_mult"]))
                     
-                    # 시간 감쇠 적용
                     time_elapsed = time.time() - entry_time
                     periods_15s = max(0, int(time_elapsed / 15))
                     tp_decay = Decimal("0.002") / 100 * Decimal(str(cfg["tp_mult"]))
@@ -653,8 +670,11 @@ def simple_tp_monitor(ticker):
                     
                     if price >= tp_price:
                         log_debug(f"🎯 롱 TP 실행 ({symbol})", 
-                                 f"현재가: {price:.8f}, TP가: {tp_price:.8f}")
+                                 f"현재가: {price:.8f}, TP가: {tp_price:.8f}, 포지션: {long_pos.get('size')}")
                         close_position(symbol, "long", "TP")
+                        
+    except Exception as e:
+        log_debug(f"❌ 간단 TP 모니터링 오류", str(e))
             
             # 숏 포지션 TP 체크
             if pos_side_state.get("short", {}).get("size", Decimal(0)) > 0:
