@@ -33,6 +33,13 @@ def log_debug(tag, msg, exc_info=False):
     if exc_info:
         logger.exception("")
 
+# 모든 TP 관련 로그에 시간스탬프 추가
+def enhanced_log_debug(tag, msg, exc_info=False):
+    timestamp = datetime.now(KST).strftime('%H:%M:%S.%f')[:-3]
+    logger.info(f"[{timestamp}] [{tag}] {msg}")
+    if exc_info:
+        logger.exception("")
+
 # ========
 # 2. Flask 앱 및 API 설정
 # ========
@@ -262,7 +269,7 @@ def get_tp_sl(symbol, side, entry_number=None):
 # 9. Gate.io API TP 주문 관리 (수정됨)
 # ========
 def place_tp_order(symbol, side, entry_price, tp_pct, position_size):
-    """개선된 TP 주문 생성"""
+    """완전히 개선된 TP 주문 생성"""
     try:
         if side == "long":
             tp_price = entry_price * (1 + tp_pct)
@@ -273,16 +280,21 @@ def place_tp_order(symbol, side, entry_price, tp_pct, position_size):
             close_size = int(position_size)
             trigger_rule = 2
         
-        # 가격 정확성 보장
+        # Gate.io 요구사항에 맞는 정확한 가격 처리
         cfg = SYMBOL_CONFIG.get(symbol, {})
         tick_size = cfg.get("tick_size", Decimal("0.01"))
-        tp_price = (tp_price / tick_size).quantize(Decimal('1'), rounding=ROUND_DOWN) * tick_size
+        
+        # 더 정확한 가격 라운딩
+        tp_price_rounded = (tp_price / tick_size).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_size
+        
+        # Gate.io API 요구에 맞는 가격 문자열 (소수점 제거하지 않음)
+        price_str = f"{tp_price_rounded:.{len(str(tick_size).split('.')[-1])}f}"
         
         trigger = FuturesPriceTrigger(
             strategy_type=0,
             price_type=0,
             rule=trigger_rule,
-            price=f"{tp_price:.8f}".rstrip('0').rstrip('.')  # 올바른 가격 형식
+            price=price_str
         )
         
         initial_order = FuturesOrder(
@@ -297,22 +309,29 @@ def place_tp_order(symbol, side, entry_price, tp_pct, position_size):
             trigger=trigger
         )
         
-        # 더 상세한 로깅
-        log_debug(f"🎯 TP 주문 요청 ({symbol}_{side.upper()})", 
-                  f"TP가: {tp_price:.8f}, 사이즈: {close_size}, 룰: {trigger_rule}")
+        # 더 상세한 디버깅 로그
+        log_debug(f"🎯 TP 주문 세부정보 ({symbol}_{side.upper()})", 
+                  f"진입가: {entry_price:.8f}, TP가: {tp_price_rounded:.8f}, 사이즈: {close_size}, 가격문자열: '{price_str}'")
         
         result = _get_api_response(api.create_price_triggered_order, SETTLE, tp_order)
         if result and hasattr(result, 'id'):
-            log_debug(f"✅ TP 주문 생성 성공 ({symbol}_{side.upper()})", 
-                      f"주문ID: {result.id}, 상태: {getattr(result, 'status', 'Unknown')}")
-            return result.id
+            # TP 주문 생성 직후 상태 확인
+            time.sleep(1)
+            if verify_tp_order_active(symbol, side, result.id):
+                log_debug(f"✅ TP 주문 생성 및 활성화 성공 ({symbol}_{side.upper()})", 
+                          f"주문ID: {result.id}")
+                return result.id
+            else:
+                log_debug(f"⚠️ TP 주문 생성됐지만 비활성 ({symbol}_{side.upper()})", 
+                          f"주문ID: {result.id}")
+                return None
         else:
-            log_debug(f"❌ TP 주문 생성 실패 ({symbol}_{side.upper()})", 
-                      f"응답: {result}")
+            log_debug(f"❌ TP 주문 생성 완전 실패 ({symbol}_{side.upper()})", 
+                      f"API 응답: {result}")
             return None
             
     except Exception as e:
-        log_debug(f"❌ TP 주문 생성 오류 ({symbol}_{side.upper()})", str(e), exc_info=True)
+        log_debug(f"❌ TP 주문 생성 예외 ({symbol}_{side.upper()})", str(e), exc_info=True)
         return None
 
 def cancel_tp_order(tp_order_id):
@@ -666,6 +685,26 @@ def status():
         log_debug("❌ 상태 조회 중 오류 발생", str(e), exc_info=True)
         return jsonify({"error": str(e)}), 500
 
+# /debug_tp 엔드포인트 추가
+@app.route("/debug_tp", methods=["GET"])
+def debug_tp():
+    debug_info = {}
+    with position_lock:
+        for symbol, sides in position_state.items():
+            for side, pos_data in sides.items():
+                if pos_data.get("size", Decimal("0")) > 0:
+                    current_price = get_price(symbol)
+                    debug_info[f"{symbol}_{side}"] = {
+                        "position_size": float(pos_data["size"]),
+                        "entry_price": float(pos_data.get("price", 0)),
+                        "current_price": float(current_price),
+                        "tp_order_id": pos_data.get("tp_order_id"),
+                        "tv_sync_tp_price": float(pos_data.get("tv_sync_tp_price", 0)) if pos_data.get("tv_sync_tp_price") else None,
+                        "entry_time": pos_data.get("entry_time"),
+                        "time_elapsed": time.time() - pos_data.get("entry_time", time.time()) if pos_data.get("entry_time") else 0
+                    }
+    return jsonify(debug_info)
+
 @app.route("/", methods=["POST"])
 def webhook():
     try:
@@ -716,25 +755,39 @@ async def price_monitor():
     symbols_to_subscribe = list(SYMBOL_CONFIG.keys())
     while True:
         try:
-            async with websockets.connect(uri) as ws:
-                await ws.send(json.dumps({"time": int(time.time()), "channel": "futures.tickers", "event": "subscribe", "payload": symbols_to_subscribe}))
+            async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
+                subscribe_msg = {
+                    "time": int(time.time()), 
+                    "channel": "futures.tickers", 
+                    "event": "subscribe", 
+                    "payload": symbols_to_subscribe
+                }
+                await ws.send(json.dumps(subscribe_msg))
+                log_debug("🔌 웹소켓 구독", f"심볼: {len(symbols_to_subscribe)}개")
+                
                 while True:
-                    msg = await asyncio.wait_for(ws.recv(), timeout=45)
+                    # 타임아웃을 15초로 단축
+                    msg = await asyncio.wait_for(ws.recv(), timeout=15)
                     result = json.loads(msg).get("result")
                     if isinstance(result, list):
                         for item in result:
                             check_tp_backup(item)
                     elif isinstance(result, dict):
                         check_tp_backup(result)
+                        
+        except asyncio.TimeoutError:
+            log_debug("🔌 웹소켓 타임아웃", "15초 내 메시지 수신 없음, 재연결")
         except Exception as e:
-            log_debug("🔌 웹소켓 연결 문제", f"재연결 시도... ({type(e).__name__})")
-            await asyncio.sleep(5)
+            log_debug("🔌 웹소켓 오류", f"재연결 시도... {type(e).__name__}: {str(e)}")
+        
+        await asyncio.sleep(3)  # 재연결 간격 단축
 
 def check_tp_backup(ticker):
-    """확실한 백업 TP 체크 - 모든 포지션에 적용"""
+    """즉각적인 백업 TP - 로그 강화"""
     try:
         symbol = ticker.get("contract")
         price = Decimal(str(ticker.get("last", "0")))
+        
         if not symbol or symbol not in SYMBOL_CONFIG or price <= 0:
             return
             
@@ -746,13 +799,12 @@ def check_tp_backup(ticker):
                     
                 entry_time = pos_side_state.get("entry_time")
                 entry_price = pos_side_state.get("price")
-                
-                # 트레이딩뷰 동기화 데이터가 있는 경우
                 tv_signal_price = pos_side_state.get("tv_signal_price")
                 tv_tp_pct = pos_side_state.get("tv_tp_pct")
+                tp_order_id = pos_side_state.get("tp_order_id")
                 
+                # 트레이딩뷰 동기화 TP
                 if entry_time and tv_signal_price and tv_tp_pct:
-                    # 트레이딩뷰 동기화 TP 계산 (기존 코드)
                     cfg = SYMBOL_CONFIG[symbol]
                     tp_mult = Decimal(str(cfg["tp_mult"]))
                     
@@ -761,24 +813,26 @@ def check_tp_backup(ticker):
                     
                     tp_decay_amount = Decimal("0.002") / 100 * tp_mult
                     tp_min_pct = Decimal("0.12") / 100 * tp_mult
-                    
                     tp_reduction = Decimal(str(periods_15s)) * tp_decay_amount
                     current_tp_pct = max(tp_min_pct, tv_tp_pct - tp_reduction)
                     
                     if side == "long":
-                        tp_price = tv_signal_price * (1 + current_tp_pct)
-                        if price >= tp_price:
-                            log_debug(f"🎯 확실한 롱 TP 트리거 ({symbol})", 
-                                      f"현재가: {price:.8f}, TP가: {tp_price:.8f}")
-                            close_position(symbol, "long", "GUARANTEED_TP")
+                        tp_price_calc = tv_signal_price * (1 + current_tp_pct)
+                        if price >= tp_price_calc:
+                            # 즉시 상세 로그 출력
+                            log_debug(f"🎯🔥 백업 롱 TP 즉시 실행 ({symbol})", 
+                                      f"현재가: {price:.8f} >= TP가: {tp_price_calc:.8f}, API_TP주문: {tp_order_id}")
+                            close_position(symbol, "long", "BACKUP_TV_TP")
+                            return  # 한 번에 하나씩만 처리
                     elif side == "short":
-                        tp_price = tv_signal_price * (1 - current_tp_pct)
-                        if price <= tp_price:
-                            log_debug(f"🎯 확실한 숏 TP 트리거 ({symbol})", 
-                                      f"현재가: {price:.8f}, TP가: {tp_price:.8f}")
-                            close_position(symbol, "short", "GUARANTEED_TP")
+                        tp_price_calc = tv_signal_price * (1 - current_tp_pct)
+                        if price <= tp_price_calc:
+                            log_debug(f"🎯🔥 백업 숏 TP 즉시 실행 ({symbol})", 
+                                      f"현재가: {price:.8f} <= TP가: {tp_price_calc:.8f}, API_TP주문: {tp_order_id}")
+                            close_position(symbol, "short", "BACKUP_TV_TP")
+                            return
                 
-                # 트레이딩뷰 동기화 데이터가 없는 경우 (수동 진입 등)
+                # 기본 TP (수동 진입 등)
                 elif entry_time and entry_price:
                     cfg = SYMBOL_CONFIG[symbol]
                     tp_mult = Decimal(str(cfg["tp_mult"]))
@@ -786,29 +840,29 @@ def check_tp_backup(ticker):
                     time_elapsed = time.time() - entry_time
                     periods_15s = max(0, int(time_elapsed / 15))
                     
-                    # 기본 TP 설정 사용
                     base_tp_pct = Decimal("0.005") * tp_mult
                     tp_decay_amount = Decimal("0.002") / 100 * tp_mult
                     tp_min_pct = Decimal("0.12") / 100 * tp_mult
-                    
                     tp_reduction = Decimal(str(periods_15s)) * tp_decay_amount
                     current_tp_pct = max(tp_min_pct, base_tp_pct - tp_reduction)
                     
                     if side == "long":
-                        tp_price = entry_price * (1 + current_tp_pct)
-                        if price >= tp_price:
-                            log_debug(f"🎯 기본 롱 TP 트리거 ({symbol})", 
-                                      f"현재가: {price:.8f}, TP가: {tp_price:.8f}")
-                            close_position(symbol, "long", "BASIC_TP")
+                        tp_price_calc = entry_price * (1 + current_tp_pct)
+                        if price >= tp_price_calc:
+                            log_debug(f"🎯🔥 백업 기본 롱 TP 즉시 실행 ({symbol})", 
+                                      f"현재가: {price:.8f} >= TP가: {tp_price_calc:.8f}")
+                            close_position(symbol, "long", "BACKUP_BASIC_TP")
+                            return
                     elif side == "short":
-                        tp_price = entry_price * (1 - current_tp_pct)
-                        if price <= tp_price:
-                            log_debug(f"🎯 기본 숏 TP 트리거 ({symbol})", 
-                                      f"현재가: {price:.8f}, TP가: {tp_price:.8f}")
-                            close_position(symbol, "short", "BASIC_TP")
+                        tp_price_calc = entry_price * (1 - current_tp_pct)
+                        if price <= tp_price_calc:
+                            log_debug(f"🎯🔥 백업 기본 숏 TP 즉시 실행 ({symbol})", 
+                                      f"현재가: {price:.8f} <= TP가: {tp_price_calc:.8f}")
+                            close_position(symbol, "short", "BACKUP_BASIC_TP")
+                            return
                 
     except Exception as e:
-        log_debug(f"❌ 확실한 TP 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
+        log_debug(f"❌ 백업 TP 체크 오류 ({ticker.get('contract', 'Unknown')})", str(e), exc_info=True)
 
 # ========
 # 16. 진입 처리 로직
