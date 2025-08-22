@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gate.io 자동매매 서버 v6.26 - 프리미엄 TP 배수 + 수동 청산 보호 기능
-간단한 WebSocket 백업 TP + 수동 청산 충돌 방지 + 프리미엄 TP 극대화 시스템
+Gate.io 자동매매 서버 v6.26 - 프리미엄 TP 배수 + 수동 청산 보호 + 안전장치 강화
+간단한 WebSocket 백업 TP + 수동 청산 충돌 방지 + 프리미엄 TP 극대화 + 안전장치 시스템
 """
 import os
 import json
@@ -94,6 +94,17 @@ SYMBOL_MAPPING = {
     "ONDOUSDT": "ONDO_USDT", "ONDOUSDT.P": "ONDO_USDT", "ONDOUSDTPERP": "ONDO_USDT", "ONDO_USDT": "ONDO_USDT", "ONDO": "ONDO_USDT",
 }
 
+# 🔥 완전성 강화: 기본 심볼 설정
+DEFAULT_SYMBOL_CONFIG = {
+    "min_qty": Decimal("1"), 
+    "qty_step": Decimal("1"), 
+    "contract_size": Decimal("1"), 
+    "min_notional": Decimal("5"), 
+    "tp_mult": 1.0, 
+    "sl_mult": 1.0, 
+    "tick_size": Decimal("0.001")
+}
+
 SYMBOL_CONFIG = {
     "BTC_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.0001"), "min_notional": Decimal("5"), "tp_mult": 0.55, "sl_mult": 0.55, "tick_size": Decimal("0.1")},
     "ETH_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("0.01"), "min_notional": Decimal("5"), "tp_mult": 0.65, "sl_mult": 0.65, "tick_size": Decimal("0.01")},
@@ -104,8 +115,23 @@ SYMBOL_CONFIG = {
     "PEPE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10000000"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00000001"), "price_multiplier": Decimal("100000000.0")},
     "XRP_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")},
     "DOGE_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("10"), "min_notional": Decimal("5"), "tp_mult": 1.2, "sl_mult": 1.2, "tick_size": Decimal("0.00001")},
+    # 🔥 추가: ONDO_USDT 설정 추가
     "ONDO_USDT": {"min_qty": Decimal("1"), "qty_step": Decimal("1"), "contract_size": Decimal("1"), "min_notional": Decimal("5"), "tp_mult": 1.0, "sl_mult": 1.0, "tick_size": Decimal("0.0001")}
 }
+
+# 🔥 심볼 설정 완전성 검증 함수
+def get_symbol_config(symbol):
+    """심볼 설정 조회 + 누락된 심볼 자동 처리"""
+    if symbol in SYMBOL_CONFIG:
+        return SYMBOL_CONFIG[symbol]
+    
+    # 누락된 심볼 감지 및 경고
+    log_debug(f"⚠️ 누락된 심볼 설정 ({symbol})", f"기본값 설정으로 서비스 계속 진행")
+    
+    # 기본값으로 임시 설정 추가
+    SYMBOL_CONFIG[symbol] = DEFAULT_SYMBOL_CONFIG.copy()
+    
+    return SYMBOL_CONFIG[symbol]
 
 # ========
 # 4. 🔥 간소화된 양방향 상태 관리 + 수동 청산 보호 + 프리미엄 TP 추적
@@ -276,10 +302,10 @@ def get_sl_by_index(idx):
     return sls[min(idx, len(sls) - 1)]
 
 # ========
-# 7. 🔥 평단가 매칭 수량 계산 함수 추가
+# 7. 🔥 강화된 평단가 매칭 수량 계산 함수 (안전장치 추가)
 # ========
 def calculate_qty_to_match_avg_price(symbol, tv_expected_avg):
-    """TradingView 예상 평단가에 맞추는 수량 계산"""
+    """TradingView 예상 평단가에 맞추는 수량 계산 (안전장치 강화)"""
     try:
         # 현재 서버 포지션 정보
         pos_side_state = position_state.get(symbol, {})
@@ -292,25 +318,45 @@ def calculate_qty_to_match_avg_price(symbol, tv_expected_avg):
         # 현재 시장가
         current_price = get_price(symbol)
         
+        # 🔥 안전장치 1: 첫 진입이면 평단가 매칭 실행 안함
         if current_qty == 0 or current_avg == 0:
-            # 첫 진입이면 정상 계산
+            log_debug(f"📊 평단가 매칭 생략 ({symbol})", "첫 진입이므로 평단가 매칭 불필요")
             return None
         
         # TV 예상 평단가에 맞는 수량 역계산
         target_avg = Decimal(str(tv_expected_avg))
         
+        # 🔥 안전장치 2: 분모가 0에 가까우면 계산 포기 (수학적 불안정성 방지)
+        price_diff = abs(target_avg - current_price)
+        min_price_diff = Decimal("0.01")  # 0.01달러 이하 차이면 포기
+        
+        if price_diff < min_price_diff:
+            log_debug(f"📊 평단가 매칭 포기 ({symbol})", 
+                      f"가격 차이 너무 작음: {price_diff:.8f} < {min_price_diff}")
+            return None
+        
         if current_price == target_avg:
+            log_debug(f"📊 평단가 매칭 불필요 ({symbol})", "현재가와 목표평단가 동일")
             return Decimal(0)  # 추가 진입 불필요
         
         # 수량 역계산 공식
         additional_qty = (current_avg - target_avg) * current_qty / (target_avg - current_price)
         
-        # 음수면 불가능
+        # 🔥 안전장치 3: 음수이거나 비정상적으로 큰 수량이면 포기
         if additional_qty <= 0:
+            log_debug(f"📊 평단가 매칭 포기 ({symbol})", 
+                      f"계산 결과 음수: {additional_qty}")
+            return None
+        
+        # 🔥 안전장치 4: 기존 수량의 2배 초과하면 포기 (비정상적 계산 결과 방지)
+        max_allowed_qty = current_qty * Decimal("2.0")  # 2배로 제한
+        if additional_qty > max_allowed_qty:
+            log_debug(f"📊 평단가 매칭 포기 ({symbol})", 
+                      f"계산 수량 과다: {additional_qty} > 허용상한: {max_allowed_qty}")
             return None
         
         # 최소수량, 계약단위 조정
-        cfg = SYMBOL_CONFIG[symbol]
+        cfg = get_symbol_config(symbol)  # 🔥 안전한 설정 조회
         final_qty = max(additional_qty, cfg["min_qty"])
         
         # 최소 명목가치 확인
@@ -319,8 +365,15 @@ def calculate_qty_to_match_avg_price(symbol, tv_expected_avg):
             min_qty_for_notional = cfg["min_notional"] / (current_price * cfg["contract_size"])
             final_qty = max(final_qty, min_qty_for_notional)
         
-        log_debug(f"📊 평단가 매칭 수량 계산 ({symbol})", 
-                  f"목표평단: {target_avg:.8f}, 계산수량: {final_qty}")
+        # 🔥 안전장치 5: 최종 수량도 2배 제한 재확인
+        if final_qty > max_allowed_qty:
+            log_debug(f"📊 평단가 매칭 포기 ({symbol})", 
+                      f"최종 수량 과다: {final_qty} > 허용상한: {max_allowed_qty}")
+            return None
+        
+        log_debug(f"📊 평단가 매칭 수량 계산 성공 ({symbol})", 
+                  f"목표평단: {target_avg:.8f}, 현재수량: {current_qty}, "
+                  f"계산수량: {additional_qty:.4f}, 최종수량: {final_qty}")
         
         return final_qty
         
@@ -360,7 +413,7 @@ def get_tp_sl(symbol, side, entry_number=None):
                 return data["tp"], data["sl"], data["entry_slippage_pct"], data["entry_time"], data.get("premium_multiplier", Decimal("1.0"))
     
     # 🔥 이전 코드와 동일한 기본값 (진입 단계별)
-    cfg = SYMBOL_CONFIG.get(symbol, {"tp_mult": 1.0, "sl_mult": 1.0})
+    cfg = get_symbol_config(symbol)  # 🔥 안전한 설정 조회
     entry_idx = (entry_number or 1) - 1
     
     tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
@@ -398,7 +451,7 @@ def is_duplicate(data):
 # 10. 수량 계산
 # ========
 def calculate_position_size(symbol, signal_type, entry_score=50, current_signal_count=0):
-    cfg = SYMBOL_CONFIG[symbol]
+    cfg = get_symbol_config(symbol)  # 🔥 안전한 설정 조회
     equity = get_total_collateral()
     price = get_price(symbol)
     if equity <= 0 or price <= 0:
@@ -449,10 +502,8 @@ def update_all_position_states():
             # 🔥 핵심 수정: API에서 온 심볼을 그대로 사용
             symbol = raw_symbol  # "ETH_USDT" 그대로 사용
             
-            # 🔥 추가: SYMBOL_CONFIG에 없으면 스킵
-            if symbol not in SYMBOL_CONFIG:
-                log_debug(f"⚠️ 미지원 심볼", f"API 심볼: {symbol}")
-                continue
+            # 🔥 추가: SYMBOL_CONFIG에 없으면 기본값으로 추가
+            cfg = get_symbol_config(symbol)
                 
             if symbol not in position_state:
                 initialize_states()
@@ -460,7 +511,7 @@ def update_all_position_states():
             current_side_state = position_state[symbol][side]
             current_side_state["price"] = Decimal(str(pos_info.entry_price))
             current_side_state["size"] = Decimal(str(pos_info.size))
-            current_side_state["value"] = Decimal(str(pos_info.size)) * Decimal(str(pos_info.mark_price)) * SYMBOL_CONFIG[symbol]["contract_size"]
+            current_side_state["value"] = Decimal(str(pos_info.size)) * Decimal(str(pos_info.mark_price)) * cfg["contract_size"]
             
             # 수동 포지션 감지
             if current_side_state["entry_count"] == 0 and current_side_state["size"] > 0:
@@ -538,6 +589,7 @@ def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0"
             log_debug(f"❌ 주문 생성 오류 ({symbol}_{side.upper()})", str(e), exc_info=True)
             return False
 
+# 🔥 개선된 청산 함수 (POSITION_DUAL_MODE 오류 해결)
 def close_position(symbol, side, reason="manual"):
     with position_lock:
         try:
@@ -551,59 +603,37 @@ def close_position(symbol, side, reason="manual"):
             log_debug(f"🔄 청산 시도 ({symbol}_{side.upper()})", 
                      f"현재 포지션: {current_size}, 사유: {reason}")
             
-            # 🔥 수정: Gate.io 올바른 청산 방식 (3가지 방법 시도)
+            # 🔥 수정: reduce_only=True 방식으로 통일 (close=True 방식 제거)
             success = False
             
-            # 방법 1: close=True 사용 (가장 확실한 방법)
+            # 방법 1: reduce_only=True 사용 (가장 안정적)
             try:
+                # 반대 방향으로 같은 수량 주문 (reduce_only=True)
+                if side == "long":
+                    order_size = -int(current_size)  # 롱 청산은 음수 (매도)
+                else:
+                    order_size = int(current_size)   # 숏 청산은 양수 (매수)
+                
                 order1 = FuturesOrder(
                     contract=symbol, 
-                    size=0,  # 👈 중요: 0으로 설정
+                    size=order_size,
                     price="0",  # 시장가
                     tif="ioc",
-                    close=True  # 👈 핵심: close=True
+                    reduce_only=True  # 👈 핵심: reduce_only=True만 사용
                 )
                 
                 result1 = _get_api_response(api.create_futures_order, SETTLE, order1)
                 if result1:
                     log_debug(f"✅ 청산 방법1 성공 ({symbol}_{side.upper()})", 
-                             f"close=True 방식, 주문ID: {getattr(result1, 'id', 'Unknown')}")
+                             f"reduce_only=True 방식, 수량: {order_size}, 주문ID: {getattr(result1, 'id', 'Unknown')}")
                     success = True
                 else:
-                    log_debug(f"⚠️ 청산 방법1 실패 ({symbol}_{side.upper()})", "close=True 방식 실패")
+                    log_debug(f"⚠️ 청산 방법1 실패 ({symbol}_{side.upper()})", "reduce_only=True 방식 실패")
                     
             except Exception as e:
                 log_debug(f"⚠️ 청산 방법1 예외 ({symbol}_{side.upper()})", str(e))
             
-            # 방법 2: reduce_only 사용 (방법1 실패시)
-            if not success:
-                try:
-                    # 반대 방향으로 같은 수량 주문 (reduce_only=True)
-                    if side == "long":
-                        order_size = -int(current_size)  # 롱 청산은 음수 (매도)
-                    else:
-                        order_size = int(current_size)   # 숏 청산은 양수 (매수)
-                    
-                    order2 = FuturesOrder(
-                        contract=symbol, 
-                        size=order_size,
-                        price="0",  # 시장가
-                        tif="ioc",
-                        reduce_only=True  # 👈 핵심: reduce_only=True
-                    )
-                    
-                    result2 = _get_api_response(api.create_futures_order, SETTLE, order2)
-                    if result2:
-                        log_debug(f"✅ 청산 방법2 성공 ({symbol}_{side.upper()})", 
-                                 f"reduce_only=True 방식, 수량: {order_size}, 주문ID: {getattr(result2, 'id', 'Unknown')}")
-                        success = True
-                    else:
-                        log_debug(f"⚠️ 청산 방법2 실패 ({symbol}_{side.upper()})", "reduce_only=True 방식 실패")
-                        
-                except Exception as e:
-                    log_debug(f"⚠️ 청산 방법2 예외 ({symbol}_{side.upper()})", str(e))
-            
-            # 방법 3: 직접 반대 포지션 (방법1,2 모두 실패시)
+            # 방법 2: 직접 반대 포지션 (방법1 실패시만)
             if not success:
                 try:
                     if side == "long":
@@ -611,26 +641,26 @@ def close_position(symbol, side, reason="manual"):
                     else:
                         order_size = int(current_size)
                     
-                    order3 = FuturesOrder(
+                    order2 = FuturesOrder(
                         contract=symbol, 
                         size=order_size,
                         price="0",  # 시장가
                         tif="ioc"  # reduce_only나 close 없이
                     )
                     
-                    result3 = _get_api_response(api.create_futures_order, SETTLE, order3)
-                    if result3:
-                        log_debug(f"✅ 청산 방법3 성공 ({symbol}_{side.upper()})", 
-                                 f"반대 포지션 방식, 수량: {order_size}, 주문ID: {getattr(result3, 'id', 'Unknown')}")
+                    result2 = _get_api_response(api.create_futures_order, SETTLE, order2)
+                    if result2:
+                        log_debug(f"✅ 청산 방법2 성공 ({symbol}_{side.upper()})", 
+                                 f"반대 포지션 방식, 수량: {order_size}, 주문ID: {getattr(result2, 'id', 'Unknown')}")
                         success = True
                     else:
-                        log_debug(f"⚠️ 청산 방법3 실패 ({symbol}_{side.upper()})", "반대 포지션 방식 실패")
+                        log_debug(f"⚠️ 청산 방법2 실패 ({symbol}_{side.upper()})", "반대 포지션 방식 실패")
                         
                 except Exception as e:
-                    log_debug(f"⚠️ 청산 방법3 예외 ({symbol}_{side.upper()})", str(e))
+                    log_debug(f"⚠️ 청산 방법2 예외 ({symbol}_{side.upper()})", str(e))
             
             if not success:
-                log_debug(f"❌ 모든 청산 방법 실패 ({symbol}_{side.upper()})", "3가지 방법 모두 실패")
+                log_debug(f"❌ 모든 청산 방법 실패 ({symbol}_{side.upper()})", "2가지 방법 모두 실패")
                 return False
             
             # 청산 성공시 내부 상태 초기화
@@ -720,16 +750,17 @@ def status():
                     }
         
         return jsonify({
-            "status": "running", "version": "v6.26_premium_tp_multipliers",
+            "status": "running", "version": "v6.26_enhanced_safety_systems",
             "current_time_kst": datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
             "balance_usdt": float(equity), "active_positions": active_positions,
-            "tp_system": "Premium TP Multipliers + Manual Close Protection",
+            "tp_system": "Premium TP + Manual Close Protection + Enhanced Safety",
             "premium_multipliers": {
                 "first_entry": float(PREMIUM_TP_MULTIPLIERS["first_entry"]),
                 "after_normal": float(PREMIUM_TP_MULTIPLIERS["after_normal"]),
                 "after_premium": float(PREMIUM_TP_MULTIPLIERS["after_premium"])
             },
             "manual_close_protection": protection_status,
+            "supported_symbols": list(SYMBOL_CONFIG.keys()),
             "queue_info": {"size": task_q.qsize(), "max_size": task_q.maxsize}
         })
     except Exception as e:
@@ -822,7 +853,12 @@ def simple_tp_monitor(ticker):
         symbol = normalize_symbol(ticker.get("contract"))
         price = Decimal(str(ticker.get("last", "0")))
         
-        if not symbol or symbol not in SYMBOL_CONFIG or price <= 0:
+        if not symbol or price <= 0:
+            return
+            
+        # 🔥 안전한 심볼 설정 확인
+        cfg = get_symbol_config(symbol)
+        if not cfg:
             return
             
         with position_lock:
@@ -845,7 +881,6 @@ def simple_tp_monitor(ticker):
                 
                 if entry_price and entry_price > 0 and entry_count > 0:
                     # 🔥 파인스크립트와 동일한 TP 계산 + 프리미엄 배수
-                    cfg = SYMBOL_CONFIG[symbol]
                     symbol_weight_tp = Decimal(str(cfg["tp_mult"]))
                     
                     # TP 맵핑 (프리미엄 배수 적용)
@@ -890,7 +925,6 @@ def simple_tp_monitor(ticker):
                 
                 if entry_price and entry_price > 0 and entry_count > 0:
                     # 🔥 파인스크립트와 동일한 TP 계산 + 프리미엄 배수
-                    cfg = SYMBOL_CONFIG[symbol]
                     symbol_weight_tp = Decimal(str(cfg["tp_mult"]))
                     
                     # TP 맵핑 (프리미엄 배수 적용)
@@ -922,7 +956,7 @@ def simple_tp_monitor(ticker):
         log_debug(f"❌ TP 모니터링 오류 ({ticker.get('contract', 'Unknown')})", str(e))
 
 # ========
-# 15. 🔥 수정: 진입 처리 로직 (프리미엄 TP 배수 적용)
+# 15. 🔥 수정: 진입 처리 로직 (프리미엄 TP 배수 + 안전장치 적용)
 # ========
 def worker(idx):
     while True:
@@ -959,9 +993,9 @@ def handle_entry(data):
         log_debug("❌ 진입 처리 불가", f"필수 정보 누락")
         return
     
-    cfg = SYMBOL_CONFIG.get(symbol)
+    cfg = get_symbol_config(symbol)  # 🔥 안전한 설정 조회
     if not cfg:
-        return log_debug(f"⚠️ 진입 취소 ({symbol})", "미지원 심볼")
+        return log_debug(f"⚠️ 진입 취소 ({symbol})", "심볼 설정 조회 실패")
         
     current_price = get_price(symbol)
     price_multiplier = cfg.get("price_multiplier", Decimal("1.0"))
@@ -1022,9 +1056,9 @@ def handle_entry(data):
 
     current_signal_count = pos_side_state.get("premium_entry_count", 0) if "premium" in signal_type else pos_side_state.get("normal_entry_count", 0)
     
-    # 🔥 평단가 매칭 수량 계산 시도
+    # 🔥 강화된 평단가 매칭 수량 계산 시도
     if use_avg_matching and expected_new_avg:
-        matched_qty = calculate_qty_to_match_avg_price(symbol, expected_new_avg)
+        matched_qty = calculate_qty_to_match_avg_price(symbol, expected_new_avg)  # 🔥 안전장치 적용된 함수
         if matched_qty and matched_qty > 0:
             # 평단가 매칭으로 수량 결정
             qty = matched_qty
@@ -1060,7 +1094,6 @@ def handle_entry(data):
             sl_map = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
             
             if current_entry_count <= len(tp_map):
-                cfg = SYMBOL_CONFIG[symbol]
                 base_tp = tp_map[current_entry_count-1] * Decimal(str(cfg["tp_mult"]))
                 sl = sl_map[current_entry_count-1] * Decimal(str(cfg["sl_mult"]))
                 
@@ -1128,11 +1161,11 @@ def position_monitor():
 # 17. 메인 실행
 # ========
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.26 (프리미엄 TP 배수 + 수동 청산 보호 기능)")
+    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.26 (프리미엄 TP 배수 + 강화된 안전장치)")
     log_debug("🎯 TP 시스템", "프리미엄 TP 배수 시스템 + WebSocket 백업 TP + 수동 청산 충돌 방지")
     log_debug("🛡️ 보호 시스템", "수동 청산 감지 시 10초간 자동 TP 차단")
     log_debug("🚀 프리미엄 배수", f"첫진입: {PREMIUM_TP_MULTIPLIERS['first_entry']}x, 노멀→프리미엄: {PREMIUM_TP_MULTIPLIERS['after_normal']}x, 프리미엄→프리미엄: {PREMIUM_TP_MULTIPLIERS['after_premium']}x")
-    log_debug("🔧 주요 개선", "SOL 심볼 인식, 총 진입 제한 13회, 평단가 매칭, 슬리피지 0.03%/5틱")
+    log_debug("🔧 주요 개선", "평단가 매칭 안전장치, ONDO 심볼 추가, POSITION_DUAL_MODE 오류 해결")
     
     initialize_states()
     
@@ -1161,7 +1194,7 @@ if __name__ == "__main__":
     
     # 백그라운드 스레드 시작
     threading.Thread(target=position_monitor, daemon=True, name="PositionMonitor").start()
-    threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True, name="PremiumTPMonitor").start()
+    threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True, name="EnhancedTPMonitor").start()
     
     # 워커 스레드 시작
     for i in range(WORKER_COUNT):
@@ -1169,7 +1202,7 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹 서버 시작", f"Flask 서버 0.0.0.0:{port}")
-    log_debug("✅ 준비 완료", "프리미엄 TP 배수 시스템 + 수동 청산 보호 + TP 감쇠 + 평단가 매칭")
+    log_debug("✅ 준비 완료", "프리미엄 TP 배수 + 평단가 매칭 안전장치 + 수동 청산 보호 + 듀얼모드 오류 해결")
     
     try:
         app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
