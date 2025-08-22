@@ -505,10 +505,6 @@ def update_all_position_states():
             # 🔥 수정: 정규화 함수 적용
             symbol = normalize_symbol(raw_symbol)
             
-            # 🔥 추가: 디버그 로그
-            log_debug(f"🔍 포지션 매칭 시도", 
-                      f"API: {raw_symbol} → 정규화: {symbol}, {side}, 크기: {pos_info.size}")
-            
             # 🔥 추가: SYMBOL_CONFIG에 없으면 기본값으로 추가
             cfg = get_symbol_config(symbol)
             if symbol not in position_state:
