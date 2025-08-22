@@ -486,10 +486,13 @@ def update_all_position_states():
         if all_positions_from_api is None:
             log_debug("❌ 포지션 업데이트 실패", "API 호출 실패")
             return
+        
+        # 🔥 추가: 디버그 로그
+        log_debug("🔍 포지션 API 응답", f"총 {len(all_positions_from_api)}개 포지션 수신")
             
         active_positions_set = set()
         for pos_info in all_positions_from_api:
-            raw_symbol = pos_info.contract  # "ETH_USDT"
+            raw_symbol = pos_info.contract
             api_side = pos_info.mode
             
             if api_side == 'dual_long':
@@ -499,12 +502,15 @@ def update_all_position_states():
             else:
                 continue
             
-            # 🔥 핵심 수정: API에서 온 심볼을 그대로 사용
-            symbol = raw_symbol  # "ETH_USDT" 그대로 사용
+            # 🔥 수정: 정규화 함수 적용
+            symbol = normalize_symbol(raw_symbol)
+            
+            # 🔥 추가: 디버그 로그
+            log_debug(f"🔍 포지션 매칭 시도", 
+                      f"API: {raw_symbol} → 정규화: {symbol}, {side}, 크기: {pos_info.size}")
             
             # 🔥 추가: SYMBOL_CONFIG에 없으면 기본값으로 추가
             cfg = get_symbol_config(symbol)
-                
             if symbol not in position_state:
                 initialize_states()
             
