@@ -897,7 +897,7 @@ def simple_tp_monitor(ticker):
                     time_elapsed = time.time() - entry_time
                     periods_15s = max(0, int(time_elapsed / 15))
                     tp_decay_amt_ps = Decimal("0.002") / 100  # 0.002%씩 감소
-                    tp_min_pct_ps = Decimal("0.12") / 100     # 최소 0.12%
+                    tp_min_pct_ps = Decimal("0.15") / 100     # 최소 0.12%
                     
                     tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp)
                     current_tp_pct = max(tp_min_pct_ps * symbol_weight_tp, base_tp_pct - tp_reduction)
@@ -941,7 +941,7 @@ def simple_tp_monitor(ticker):
                     time_elapsed = time.time() - entry_time
                     periods_15s = max(0, int(time_elapsed / 15))
                     tp_decay_amt_ps = Decimal("0.002") / 100  # 0.002%씩 감소
-                    tp_min_pct_ps = Decimal("0.12") / 100     # 최소 0.12%
+                    tp_min_pct_ps = Decimal("0.15") / 100     # 최소 0.12%
                     
                     tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp)
                     current_tp_pct = max(tp_min_pct_ps * symbol_weight_tp, base_tp_pct - tp_reduction)
