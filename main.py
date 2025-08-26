@@ -487,8 +487,12 @@ def update_all_position_states():
             log_debug("❌ 포지션 업데이트 실패", "API 호출 실패")
             return
         
-        # 🔥 추가: 디버그 로그
-        log_debug("🔍 포지션 API 응답", f"총 {len(all_positions_from_api)}개 포지션 수신")
+        # --- 👇 [수정됨] API 응답이 비어있는 경우 명시적 로그 추가 ---
+        if not all_positions_from_api:
+            log_debug("🔍 포지션 API 응답", "API로부터 수신된 활성 포지션이 없습니다.")
+        else:
+            log_debug("🔍 포지션 API 응답", f"총 {len(all_positions_from_api)}개 포지션 수신")
+        # -----------------------------------------------------------
             
         active_positions_set = set()
         for pos_info in all_positions_from_api:
@@ -502,10 +506,8 @@ def update_all_position_states():
             else:
                 continue
             
-            # 🔥 수정: 정규화 함수 적용
             symbol = normalize_symbol(raw_symbol)
             
-            # 🔥 추가: SYMBOL_CONFIG에 없으면 기본값으로 추가
             cfg = get_symbol_config(symbol)
             if symbol not in position_state:
                 initialize_states()
@@ -515,7 +517,6 @@ def update_all_position_states():
             current_side_state["size"] = Decimal(str(pos_info.size))
             current_side_state["value"] = Decimal(str(pos_info.size)) * Decimal(str(pos_info.mark_price)) * cfg["contract_size"]
             
-            # 수동 포지션 감지
             if current_side_state["entry_count"] == 0 and current_side_state["size"] > 0:
                 log_debug("🔄 수동 포지션 감지", f"{symbol} {side.upper()} 포지션")
                 current_side_state["entry_count"] = 1
@@ -523,27 +524,26 @@ def update_all_position_states():
                 
             active_positions_set.add((symbol, side))
             
-        # 🔥 핵심: 수동 청산 감지 (유령 포지션에서)
         for symbol, sides in position_state.items():
             for side in ["long", "short"]:
                 if (symbol, side) not in active_positions_set and sides[side]["size"] > 0:
                     log_debug(f"🔄 수동 청산 감지 ({symbol}_{side.upper()})", 
                              f"서버 포지션: {sides[side]['size']}, API 포지션: 없음")
                     
-                    # 🔥 수동 청산 보호 즉시 활성화
-                    set_manual_close_protection(symbol, side, 10)  # 10초 보호
+                    set_manual_close_protection(symbol, side, 10)
                     
-                    # 서버 상태 초기화
                     position_state[symbol][side] = get_default_pos_side_state()
                     if symbol in tpsl_storage and side in tpsl_storage[symbol]:
                         tpsl_storage[symbol][side].clear()
 
 # ========
-# 12. 양방향 주문 실행
+# 12. 양방향 주문 실행 (수정됨 - 최대 5초 확인)
 # ========
 def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0"), tv_sync_data=None):
     with position_lock:
         try:
+            original_size = position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0"))
+            
             if side == "long":
                 order_size = int(qty)
             else:
@@ -582,119 +582,31 @@ def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0"
                 
             pos_side_state["entry_time"] = time.time()
             
-            time.sleep(2)
-            update_all_position_states()
+            # --- 👇 [수정됨] 최대 5초 확인 루프 ---
+            is_updated = False
+            for attempt in range(5):  # 1초 간격으로 최대 5번 (5초) 확인
+                time.sleep(1)
+                update_all_position_states()
+                
+                latest_size = position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0"))
+                if latest_size > original_size:
+                    log_debug(f"🔄 포지션 업데이트 확인 성공 ({symbol}_{side.upper()})", 
+                              f"시도 {attempt+1}/5, 수량 변경: {original_size} -> {latest_size} ({attempt+1}초 소요)")
+                    is_updated = True
+                    break
+                else:
+                    log_debug(f"🔄 포지션 업데이트 확인 중... ({symbol}_{side.upper()})", 
+                              f"시도 {attempt+1}/5, 수량 변경 없음. 현재: {latest_size}")
+
+            if not is_updated:
+                log_debug(f"❌ 포지션 업데이트 최종 실패 ({symbol}_{side.upper()})", 
+                          "5초 후에도 수량 변경이 감지되지 않음. 진입 포기.")
             
-            return True
+            return is_updated
+            # ------------------------------------
             
         except Exception as e:
             log_debug(f"❌ 주문 생성 오류 ({symbol}_{side.upper()})", str(e), exc_info=True)
-            return False
-
-# 🔥 개선된 청산 함수 (POSITION_DUAL_MODE 오류 해결)
-def close_position(symbol, side, reason="manual"):
-    with position_lock:
-        try:
-            pos_side_state = position_state.get(symbol, {}).get(side, {})
-            current_size = pos_side_state.get("size", Decimal("0"))
-            
-            if current_size <= 0:
-                log_debug(f"⚠️ 청산 주문 생략 ({symbol}_{side.upper()})", "포지션 없음")
-                return True
-            
-            log_debug(f"🔄 청산 시도 ({symbol}_{side.upper()})", 
-                     f"현재 포지션: {current_size}, 사유: {reason}")
-            
-            # 🔥 수정: reduce_only=True 방식으로 통일 (close=True 방식 제거)
-            success = False
-            
-            # 방법 1: reduce_only=True 사용 (가장 안정적)
-            try:
-                # 반대 방향으로 같은 수량 주문 (reduce_only=True)
-                if side == "long":
-                    order_size = -int(current_size)  # 롱 청산은 음수 (매도)
-                else:
-                    order_size = int(current_size)   # 숏 청산은 양수 (매수)
-                
-                order1 = FuturesOrder(
-                    contract=symbol, 
-                    size=order_size,
-                    price="0",  # 시장가
-                    tif="ioc",
-                    reduce_only=True  # 👈 핵심: reduce_only=True만 사용
-                )
-                
-                result1 = _get_api_response(api.create_futures_order, SETTLE, order1)
-                if result1:
-                    log_debug(f"✅ 청산 방법1 성공 ({symbol}_{side.upper()})", 
-                             f"reduce_only=True 방식, 수량: {order_size}, 주문ID: {getattr(result1, 'id', 'Unknown')}")
-                    success = True
-                else:
-                    log_debug(f"⚠️ 청산 방법1 실패 ({symbol}_{side.upper()})", "reduce_only=True 방식 실패")
-                    
-            except Exception as e:
-                log_debug(f"⚠️ 청산 방법1 예외 ({symbol}_{side.upper()})", str(e))
-            
-            # 방법 2: 직접 반대 포지션 (방법1 실패시만)
-            if not success:
-                try:
-                    if side == "long":
-                        order_size = -int(current_size)
-                    else:
-                        order_size = int(current_size)
-                    
-                    order2 = FuturesOrder(
-                        contract=symbol, 
-                        size=order_size,
-                        price="0",  # 시장가
-                        tif="ioc"  # reduce_only나 close 없이
-                    )
-                    
-                    result2 = _get_api_response(api.create_futures_order, SETTLE, order2)
-                    if result2:
-                        log_debug(f"✅ 청산 방법2 성공 ({symbol}_{side.upper()})", 
-                                 f"반대 포지션 방식, 수량: {order_size}, 주문ID: {getattr(result2, 'id', 'Unknown')}")
-                        success = True
-                    else:
-                        log_debug(f"⚠️ 청산 방법2 실패 ({symbol}_{side.upper()})", "반대 포지션 방식 실패")
-                        
-                except Exception as e:
-                    log_debug(f"⚠️ 청산 방법2 예외 ({symbol}_{side.upper()})", str(e))
-            
-            if not success:
-                log_debug(f"❌ 모든 청산 방법 실패 ({symbol}_{side.upper()})", "2가지 방법 모두 실패")
-                return False
-            
-            # 청산 성공시 내부 상태 초기화
-            pos_side_state = position_state.setdefault(symbol, {
-                "long": get_default_pos_side_state(), 
-                "short": get_default_pos_side_state()
-            })
-            pos_side_state[side] = get_default_pos_side_state()
-            
-            if symbol in tpsl_storage and side in tpsl_storage[symbol]:
-                tpsl_storage[symbol][side].clear()
-                
-            with signal_lock:
-                recent_signals.pop(f"{symbol}_{side}", None)
-            
-            # 2초 후 실제 포지션 확인
-            time.sleep(2)
-            update_all_position_states()
-            
-            # 실제로 청산되었는지 확인
-            final_size = position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0"))
-            if final_size > 0:
-                log_debug(f"⚠️ 청산 확인 실패 ({symbol}_{side.upper()})", 
-                         f"주문은 성공했지만 포지션이 남음: {final_size}")
-                return False
-            else:
-                log_debug(f"🎉 청산 확인 성공 ({symbol}_{side.upper()})", 
-                         f"포지션 완전 청산 확인, 사유: {reason}")
-                return True
-            
-        except Exception as e:
-            log_debug(f"❌ 청산 주문 생성 오류 ({symbol}_{side.upper()})", str(e), exc_info=True)
             return False
 
 # ========
@@ -1087,7 +999,7 @@ def handle_entry(data):
     if qty > 0:
         entry_action = "추가진입" if pos_side_state.get("size", 0) > 0 else "첫진입"
         if place_order(symbol, side, qty, signal_type, final_position_ratio):
-            update_all_position_states()
+            # update_all_position_states()
             latest_pos_side_state = position_state.get(symbol, {}).get(side, {})
             current_entry_count = latest_pos_side_state.get("entry_count", 0)
             
