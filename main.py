@@ -537,13 +537,18 @@ def update_all_position_states():
                         tpsl_storage[symbol][side].clear()
 
 # ========
-# 12. 양방향 주문 실행 (수정됨 - 최대 5초 확인)
+# 12. 🔥 수정: 양방향 주문 실행 (절댓값 비교 + 디버깅 강화)
 # ========
 def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0"), tv_sync_data=None):
     with position_lock:
         try:
-            original_size = position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0"))
+            # 🔥 수정: 주문 전 상태를 더 정확히 파악
+            update_all_position_states()  # 먼저 최신 상태로 업데이트
+            original_size = abs(position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0")))
             
+            log_debug(f"🔍 주문 전 상태 ({symbol}_{side.upper()})", 
+                      f"기존 포지션 크기: {original_size}")
+
             if side == "long":
                 order_size = int(qty)
             else:
@@ -582,13 +587,18 @@ def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0"
                 
             pos_side_state["entry_time"] = time.time()
             
-            # --- 👇 [수정됨] 최대 5초 확인 루프 ---
+            # --- 👇 [수정됨] 절댓값 비교 + 디버깅 강화 ---
             is_updated = False
             for attempt in range(5):  # 1초 간격으로 최대 5번 (5초) 확인
                 time.sleep(1)
                 update_all_position_states()
                 
-                latest_size = position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0"))
+                latest_size = abs(position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0")))
+                
+                log_debug(f"🔍 포지션 크기 확인 ({symbol}_{side.upper()})", 
+                          f"시도 {attempt+1}/5 - 기존: {original_size}, 현재: {latest_size}")
+                
+                # 🔥 핵심 수정: 절댓값으로 비교
                 if latest_size > original_size:
                     log_debug(f"🔄 포지션 업데이트 확인 성공 ({symbol}_{side.upper()})", 
                               f"시도 {attempt+1}/5, 수량 변경: {original_size} -> {latest_size} ({attempt+1}초 소요)")
@@ -596,18 +606,218 @@ def place_order(symbol, side, qty, signal_type, final_position_ratio=Decimal("0"
                     break
                 else:
                     log_debug(f"🔄 포지션 업데이트 확인 중... ({symbol}_{side.upper()})", 
-                              f"시도 {attempt+1}/5, 수량 변경 없음. 현재: {latest_size}")
+                              f"시도 {attempt+1}/5, 수량 변경 없음. 기존: {original_size}, 현재: {latest_size}")
 
             if not is_updated:
                 log_debug(f"❌ 포지션 업데이트 최종 실패 ({symbol}_{side.upper()})", 
                           "5초 후에도 수량 변경이 감지되지 않음. 진입 포기.")
             
             return is_updated
-            # ------------------------------------
             
         except Exception as e:
             log_debug(f"❌ 주문 생성 오류 ({symbol}_{side.upper()})", str(e), exc_info=True)
             return False
+
+# ========
+# 15. 🔥 수정: 진입 처리 로직 (디버깅 정보 강화)
+# ========
+def handle_entry(data):
+    symbol = normalize_symbol(data.get("symbol"))
+    side = data.get("side", "").lower()
+    base_type = data.get("type", "normal")
+    signal_type = f"{base_type}_{side}"
+    
+    # 🔥 추가: TradingView에서 전송된 진입 정보 추출
+    tv_entry_info = data.get("entry_info", "")
+    tv_total_entries = data.get("total_entries", 1)
+    
+    entry_score = data.get("entry_score", 50)
+    signal_price_raw = data.get('price')
+    tv_tp_pct = Decimal(str(data.get("tp_pct", "0.5"))) / 100
+    sl_pct = Decimal(str(data.get("sl_pct", "4.0"))) / 100
+    
+    # 🔥 프리미엄 배수 정보 및 평단가 매칭 관련 데이터
+    premium_multiplier_received = Decimal(str(data.get("premium_multiplier", 1.0)))
+    expected_new_avg = data.get("expected_new_avg")
+    use_avg_matching = data.get("use_avg_matching", False)
+    
+    if not all([symbol, side, signal_price_raw]):
+        log_debug("❌ 진입 처리 불가", f"필수 정보 누락")
+        return
+    
+    cfg = get_symbol_config(symbol)
+    if not cfg:
+        return log_debug(f"⚠️ 진입 취소 ({symbol})", "심볼 설정 조회 실패")
+        
+    current_price = get_price(symbol)
+    price_multiplier = cfg.get("price_multiplier", Decimal("1.0"))
+    signal_price = Decimal(str(signal_price_raw)) / price_multiplier
+    
+    if current_price <= 0 or signal_price <= 0:
+        return log_debug(f"❌ 진입 취소 ({symbol})", f"유효하지 않은 가격")
+    
+    # 🔥 핵심: 포지션 상태 먼저 확인
+    update_all_position_states()
+    pos_side_state = position_state.get(symbol, {}).get(side, {})
+    current_entry_count = pos_side_state.get("entry_count", 0)
+    
+    # 🔥 추가: 상태 불일치 디버깅 정보
+    log_debug(f"🔍 포지션 상태 비교 ({symbol}_{side.upper()})", 
+              f"TV 정보: {tv_entry_info} (총 {tv_total_entries}번째), "
+              f"서버 인식: {current_entry_count}번째 진입")
+    
+    # 🔥 프리미엄 배수 계산
+    normal_count = pos_side_state.get("normal_entry_count", 0)
+    premium_count = pos_side_state.get("premium_entry_count", 0)
+    calculated_multiplier = get_premium_tp_multiplier(signal_type, normal_count, premium_count)
+    
+    # TV에서 받은 배수와 비교
+    if abs(calculated_multiplier - premium_multiplier_received) > Decimal("0.1"):
+        log_debug(f"⚠️ 프리미엄 배수 불일치 ({symbol}_{side.upper()})", 
+                  f"서버계산: {calculated_multiplier}, TV수신: {premium_multiplier_received}")
+    
+    # 🔥 핵심 수정: 첫 진입에만 가격 필터 적용
+    if current_entry_count == 0:
+        price_diff = abs(current_price - signal_price)
+        allowed_slippage = max(signal_price * PRICE_DEVIATION_LIMIT_PCT, Decimal(str(MAX_SLIPPAGE_TICKS)) * cfg['tick_size'])
+        if price_diff > allowed_slippage:
+            return log_debug(f"⚠️ 첫 진입 취소: 슬리피지 ({symbol}_{side.upper()})", 
+                            f"가격 차이: {price_diff:.8f} > 허용: {allowed_slippage:.8f}")
+        else:
+            log_debug(f"✅ 첫 진입 가격 필터 통과 ({symbol}_{side.upper()})", 
+                      f"가격 차이: {price_diff:.8f} <= 허용: {allowed_slippage:.8f}")
+    else:
+        price_diff = abs(current_price - signal_price)
+        log_debug(f"📊 추가 진입 허용 ({symbol}_{side.upper()})", 
+                  f"진입 #{current_entry_count+1}/13 - 가격 필터 생략 (차이: {price_diff:.8f}, 평단가 매칭 우선)")
+    
+    # 🔥 진입 제한 체크
+    entry_limits = {"premium": 5, "normal": 5, "rescue": 3}
+    total_entry_limit = 13
+    
+    entry_type_key = next((k for k in entry_limits if k in signal_type), None)
+
+    if pos_side_state.get("entry_count", 0) >= total_entry_limit:
+        log_debug(f"⚠️ 추가 진입 제한 ({symbol}_{side.upper()})", f"총 진입 횟수 최대치 도달: {total_entry_limit}")
+        return
+
+    if entry_type_key and pos_side_state.get(f"{entry_type_key}_entry_count", 0) >= entry_limits[entry_type_key]:
+        log_debug(f"⚠️ 추가 진입 제한 ({symbol}_{side.upper()})", f"'{entry_type_key}' 유형 최대치 도달: {entry_limits[entry_type_key]}")
+        return
+
+    # 🔥 추가 진입 시 평단가 불리 체크 (레스큐 제외)
+    if pos_side_state.get("size", Decimal(0)) != 0 and "rescue" not in signal_type:
+        avg_price = pos_side_state.get("price")
+        if avg_price and ((side == "long" and current_price <= avg_price) or (side == "short" and current_price >= avg_price)):
+            return log_debug(f"⚠️ 추가 진입 보류 ({symbol}_{side.upper()})", 
+                           f"평단가 불리 - 현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
+
+    # 🔥 수량 계산
+    current_signal_count = pos_side_state.get("premium_entry_count", 0) if "premium" in signal_type else pos_side_state.get("normal_entry_count", 0)
+    
+    # 🔥 강화된 평단가 매칭 수량 계산 시도
+    if use_avg_matching and expected_new_avg:
+        matched_qty = calculate_qty_to_match_avg_price(symbol, expected_new_avg)
+        if matched_qty and matched_qty > 0:
+            qty = matched_qty
+            log_debug(f"📊 평단가 매칭 수량 적용 ({symbol}_{side.upper()})", 
+                      f"목표평단: {expected_new_avg}, 매칭수량: {qty}")
+        else:
+            qty = calculate_position_size(symbol, signal_type, entry_score, current_signal_count)
+    else:
+        qty = calculate_position_size(symbol, signal_type, entry_score, current_signal_count)
+    
+    # 🔥 레스큐 로직
+    final_position_ratio = Decimal("0")
+    if "rescue" in signal_type:
+        last_ratio = pos_side_state.get('last_entry_ratio', Decimal("5.0"))
+        if last_ratio > 0:
+            equity, contract_val = get_total_collateral(), get_price(symbol) * cfg["contract_size"]
+            if contract_val > 0:
+                rescue_ratio = last_ratio * Decimal("1.5")
+                qty = max((equity * rescue_ratio / 100 / contract_val).quantize(Decimal('1'), rounding=ROUND_DOWN), cfg["min_qty"])
+                final_position_ratio = rescue_ratio
+    
+    # 🔥 주문 실행
+    if qty > 0:
+        entry_action = "추가진입" if abs(pos_side_state.get("size", 0)) > 0 else "첫진입"
+        if place_order(symbol, side, qty, signal_type, final_position_ratio):
+            latest_pos_side_state = position_state.get(symbol, {}).get(side, {})
+            current_entry_count = latest_pos_side_state.get("entry_count", 0)
+            
+            # 🔥 TP/SL 맵핑 기반 저장 + 프리미엄 배수 적용
+            tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
+            sl_map = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
+            
+            if current_entry_count <= len(tp_map):
+                base_tp = tp_map[current_entry_count-1] * Decimal(str(cfg["tp_mult"]))
+                sl = sl_map[current_entry_count-1] * Decimal(str(cfg["sl_mult"]))
+                
+                # 🔥 프리미엄 배수 적용된 최종 TP
+                final_tp = base_tp * calculated_multiplier
+                
+                # 슬리피지 계산
+                slippage_pct = abs(current_price - signal_price) / signal_price if signal_price > 0 else Decimal("0")
+                
+                # 🔥 프리미엄 배수 포함하여 저장
+                store_tp_sl(symbol, side, final_tp, sl, slippage_pct, current_entry_count, calculated_multiplier)
+                
+                log_debug(f"💾 TP/SL 저장 ({symbol}_{side.upper()})", 
+                         f"진입 #{current_entry_count}/13, 기본TP: {base_tp*100:.3f}%, "
+                         f"프리미엄배수: {calculated_multiplier:.2f}x, 최종TP: {final_tp*100:.3f}%, "
+                         f"SL: {sl*100:.3f}%, 슬리피지: {slippage_pct*100:.4f}%")
+            
+            log_debug(f"✅ {entry_action} 성공 ({symbol}_{side.upper()})", 
+                      f"유형: {signal_type}, 수량: {float(qty)} 계약 (총 진입: {current_entry_count}/13), "
+                      f"프리미엄 배수: {calculated_multiplier:.2f}x")
+        else:
+            log_debug(f"❌ {entry_action} 실패 ({symbol}_{side.upper()})", "주문 실행 중 오류")
+    else:
+        log_debug(f"❌ 진입 취소 ({symbol}_{side.upper()})", "계산된 수량이 0 이하")
+
+# ========
+# 16. 🔥 수정: 포지션 모니터링 (디버깅 정보 강화)
+# ========
+def position_monitor():
+    while True:
+        time.sleep(30)
+        try:
+            update_all_position_states()
+            total_value = Decimal("0")
+            active_positions_log = []
+            
+            # 🔥 추가: 전체 포지션 상태 디버깅
+            log_debug("🔍 포지션 상태 디버깅", f"전체 position_state: {dict(position_state)}")
+            
+            with position_lock:
+                for symbol, sides in position_state.items():
+                    for side, pos_data in sides.items():
+                        # 🔥 수정: 0이 아닌 모든 포지션 표시 (음수 포지션 포함)
+                        current_size = pos_data.get("size", Decimal("0"))
+                        if current_size != 0:
+                            total_value += abs(pos_data.get("value", Decimal("0")))
+                            pyramid_info = f"총:{pos_data['entry_count']}/13,일:{pos_data['normal_entry_count']}/5,프:{pos_data['premium_entry_count']}/5,레:{pos_data['rescue_entry_count']}/3"
+                            
+                            protection_status = ""
+                            if is_manual_close_protected(symbol, side):
+                                protection_status = " [🛡️보호중]"
+                            
+                            premium_mult = pos_data.get('premium_tp_multiplier', Decimal("1.0"))
+                            premium_info = f" [🚀{premium_mult:.1f}x]" if premium_mult > Decimal("1.0") else ""
+                                
+                            active_positions_log.append(f"{symbol}_{side.upper()}: {current_size} @ {pos_data.get('price', 0):.8f} ({pyramid_info}, 가치: {abs(pos_data.get('value', 0)):.2f} USDT){premium_info}{protection_status}")
+            
+            if active_positions_log:
+                equity = get_total_collateral()
+                exposure_pct = (total_value / equity * 100) if equity > 0 else 0
+                log_debug("🚀 포지션 현황", f"활성: {len(active_positions_log)}개, 총가치: {total_value:.2f} USDT, 노출도: {exposure_pct:.1f}%")
+                for pos_info in active_positions_log:
+                    log_debug("  └", pos_info)
+            else:
+                log_debug("📊 포지션 현황", "활성 포지션 없음")
+                
+        except Exception as e:
+            log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
 # ========
 # 13. 🔥 수정: Flask 라우트 (보호 상태 추가)
@@ -637,16 +847,20 @@ def status():
         with position_lock:
             for symbol, sides in position_state.items():
                 for side, pos_data in sides.items():
-                    if pos_data and pos_data.get("size", Decimal("0")) > 0:
+                    current_size = pos_data.get("size", Decimal("0"))
+                    if pos_data and current_size != 0:  # 🔥 수정: 0이 아닌 모든 포지션
                         pos_key = f"{symbol}_{side.upper()}"
                         active_positions[pos_key] = {
-                            "side": side, "size": float(pos_data["size"]), "price": float(pos_data["price"]),
-                            "value": float(pos_data["value"]), "entry_count": pos_data.get("entry_count", 0),
+                            "side": side, 
+                            "size": float(current_size),  # 🔥 수정: current_size 사용
+                            "price": float(pos_data["price"]),
+                            "value": float(abs(pos_data["value"])),  # 🔥 추가: 절댓값 사용
+                            "entry_count": pos_data.get("entry_count", 0),
                             "normal_entry_count": pos_data.get("normal_entry_count", 0),
                             "premium_entry_count": pos_data.get("premium_entry_count", 0),
                             "rescue_entry_count": pos_data.get("rescue_entry_count", 0),
                             "last_entry_ratio": float(pos_data.get('last_entry_ratio', Decimal("0"))),
-                            # 🔥 추가: 프리미엄 TP 정보
+                            # 프리미엄 TP 정보
                             "premium_tp_multiplier": float(pos_data.get('premium_tp_multiplier', Decimal("1.0"))),
                             "base_tp_pct": float(pos_data.get('base_tp_pct', Decimal("0"))) if pos_data.get('base_tp_pct') else 0,
                             "current_tp_pct": float(pos_data.get('current_tp_pct', Decimal("0"))) if pos_data.get('current_tp_pct') else 0
@@ -762,7 +976,7 @@ async def price_monitor():
         await asyncio.sleep(3)
 
 def simple_tp_monitor(ticker):
-    """🔥 수정: 프리미엄 배수 + 수동 청산 보호 기능이 추가된 TP 모니터링"""
+    """🔥 수정: 프리미엄 배수 + 수동 청산 보호 + 실제 청산 실행"""
     try:
         symbol = normalize_symbol(ticker.get("contract"))
         price = Decimal(str(ticker.get("last", "0")))
@@ -770,7 +984,6 @@ def simple_tp_monitor(ticker):
         if not symbol or price <= 0:
             return
             
-        # 🔥 안전한 심볼 설정 확인
         cfg = get_symbol_config(symbol)
         if not cfg:
             return
@@ -781,90 +994,102 @@ def simple_tp_monitor(ticker):
             # 롱 포지션 TP 체크
             long_size = pos_side_state.get("long", {}).get("size", Decimal(0))
             if long_size > 0:
-                # 🔥 수동 청산 보호 체크 (핵심!)
                 if is_manual_close_protected(symbol, "long"):
-                    return  # 보호 중이면 TP 실행 안함
+                    return
                 
                 long_pos = pos_side_state["long"]
                 entry_price = long_pos.get("price")
                 entry_time = long_pos.get("entry_time", time.time())
                 entry_count = long_pos.get("entry_count", 0)
-                
-                # 🔥 프리미엄 배수 적용된 TP 계산
                 premium_multiplier = long_pos.get("premium_tp_multiplier", Decimal("1.0"))
                 
                 if entry_price and entry_price > 0 and entry_count > 0:
-                    # 🔥 파인스크립트와 동일한 TP 계산 + 프리미엄 배수
                     symbol_weight_tp = Decimal(str(cfg["tp_mult"]))
-                    
-                    # TP 맵핑 (프리미엄 배수 적용)
                     tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
                     base_tp_pct = tp_map[min(entry_count-1, len(tp_map)-1)] * symbol_weight_tp * premium_multiplier
                     
-                    # 🔥 핵심: 시간 감쇠 적용 (15초마다)
                     time_elapsed = time.time() - entry_time
                     periods_15s = max(0, int(time_elapsed / 15))
-                    tp_decay_amt_ps = Decimal("0.002") / 100  # 0.002%씩 감소
-                    tp_min_pct_ps = Decimal("0.16") / 100     # 최소 0.12%
+                    tp_decay_amt_ps = Decimal("0.002") / 100
+                    tp_min_pct_ps = Decimal("0.16") / 100
                     
                     tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp)
                     current_tp_pct = max(tp_min_pct_ps * symbol_weight_tp, base_tp_pct - tp_reduction)
                     
-                    # 🔥 포지션 상태 업데이트
                     long_pos["current_tp_pct"] = current_tp_pct
-                    
                     tp_price = entry_price * (1 + current_tp_pct)
                     
                     if price >= tp_price:
                         log_debug(f"🎯 롱 TP 실행 ({symbol})", 
-                                 f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}, "
-                                 f"프리미엄배수: {premium_multiplier:.2f}x, 감쇠TP: {current_tp_pct*100:.3f}% "
-                                 f"(기본: {base_tp_pct*100:.3f}%, 경과: {time_elapsed:.0f}초)")
-                        close_position(symbol, "long", "TP")
+                                 f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}")
+                        
+                        # 🔥 추가: 실제 청산 주문 실행
+                        try:
+                            current_size = abs(long_pos.get("size", Decimal("0")))
+                            if current_size > 0:
+                                order = FuturesOrder(
+                                    contract=symbol,
+                                    size=-int(current_size),  # 롱 포지션 청산은 음수
+                                    price="0",
+                                    tif="ioc"
+                                )
+                                result = _get_api_response(api.create_futures_order, SETTLE, order)
+                                if result:
+                                    log_debug(f"✅ 롱 TP 청산 주문 성공 ({symbol})", f"주문 ID: {getattr(result, 'id', 'Unknown')}")
+                                else:
+                                    log_debug(f"❌ 롱 TP 청산 주문 실패 ({symbol})", "API 호출 실패")
+                        except Exception as e:
+                            log_debug(f"❌ 롱 TP 청산 오류 ({symbol})", str(e), exc_info=True)
             
             # 숏 포지션 TP 체크
             short_size = pos_side_state.get("short", {}).get("size", Decimal(0))
             if short_size > 0:
-                # 🔥 수동 청산 보호 체크 (핵심!)
                 if is_manual_close_protected(symbol, "short"):
-                    return  # 보호 중이면 TP 실행 안함
+                    return
                 
                 short_pos = pos_side_state["short"]
                 entry_price = short_pos.get("price")
                 entry_time = short_pos.get("entry_time", time.time())
                 entry_count = short_pos.get("entry_count", 0)
-                
-                # 🔥 프리미엄 배수 적용된 TP 계산
                 premium_multiplier = short_pos.get("premium_tp_multiplier", Decimal("1.0"))
                 
                 if entry_price and entry_price > 0 and entry_count > 0:
-                    # 🔥 파인스크립트와 동일한 TP 계산 + 프리미엄 배수
                     symbol_weight_tp = Decimal(str(cfg["tp_mult"]))
-                    
-                    # TP 맵핑 (프리미엄 배수 적용)
                     tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
                     base_tp_pct = tp_map[min(entry_count-1, len(tp_map)-1)] * symbol_weight_tp * premium_multiplier
                     
-                    # 🔥 핵심: 시간 감쇠 적용 (15초마다)
                     time_elapsed = time.time() - entry_time
                     periods_15s = max(0, int(time_elapsed / 15))
-                    tp_decay_amt_ps = Decimal("0.002") / 100  # 0.002%씩 감소
-                    tp_min_pct_ps = Decimal("0.16") / 100     # 최소 0.12%
+                    tp_decay_amt_ps = Decimal("0.002") / 100
+                    tp_min_pct_ps = Decimal("0.16") / 100
                     
                     tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp)
                     current_tp_pct = max(tp_min_pct_ps * symbol_weight_tp, base_tp_pct - tp_reduction)
                     
-                    # 🔥 포지션 상태 업데이트
                     short_pos["current_tp_pct"] = current_tp_pct
-                    
-                    tp_price = entry_price * (1 - current_tp_pct)  # 숏은 반대
+                    tp_price = entry_price * (1 - current_tp_pct)
                     
                     if price <= tp_price:
                         log_debug(f"🎯 숏 TP 실행 ({symbol})", 
-                                 f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}, "
-                                 f"프리미엄배수: {premium_multiplier:.2f}x, 감쇠TP: {current_tp_pct*100:.3f}% "
-                                 f"(기본: {base_tp_pct*100:.3f}%, 경과: {time_elapsed:.0f}초)")
-                        close_position(symbol, "short", "TP")
+                                 f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}")
+                        
+                        # 🔥 추가: 실제 청산 주문 실행
+                        try:
+                            current_size = abs(short_pos.get("size", Decimal("0")))
+                            if current_size > 0:
+                                order = FuturesOrder(
+                                    contract=symbol,
+                                    size=int(current_size),  # 숏 포지션 청산은 양수
+                                    price="0",
+                                    tif="ioc"
+                                )
+                                result = _get_api_response(api.create_futures_order, SETTLE, order)
+                                if result:
+                                    log_debug(f"✅ 숏 TP 청산 주문 성공 ({symbol})", f"주문 ID: {getattr(result, 'id', 'Unknown')}")
+                                else:
+                                    log_debug(f"❌ 숏 TP 청산 주문 실패 ({symbol})", "API 호출 실패")
+                        except Exception as e:
+                            log_debug(f"❌ 숏 TP 청산 오류 ({symbol})", str(e), exc_info=True)
                 
     except Exception as e:
         log_debug(f"❌ TP 모니터링 오류 ({ticker.get('contract', 'Unknown')})", str(e))
@@ -887,150 +1112,6 @@ def worker(idx):
         except Exception as e:
             log_debug(f"❌ 워커-{idx} 심각 오류", f"워커 스레드 오류: {str(e)}", exc_info=True)
 
-def handle_entry(data):
-    symbol = normalize_symbol(data.get("symbol"))
-    side = data.get("side", "").lower()
-    base_type = data.get("type", "normal")
-    signal_type = f"{base_type}_{side}"
-    
-    entry_score = data.get("entry_score", 50)
-    signal_price_raw = data.get('price')
-    tv_tp_pct = Decimal(str(data.get("tp_pct", "0.5"))) / 100  # 🔥 기본값 0.52%로 변경
-    sl_pct = Decimal(str(data.get("sl_pct", "4.0"))) / 100
-    
-    # 🔥 추가: 프리미엄 배수 정보 및 평단가 매칭 관련 데이터
-    premium_multiplier_received = Decimal(str(data.get("premium_multiplier", 1.0)))
-    expected_new_avg = data.get("expected_new_avg")
-    use_avg_matching = data.get("use_avg_matching", False)
-    
-    if not all([symbol, side, signal_price_raw]):
-        log_debug("❌ 진입 처리 불가", f"필수 정보 누락")
-        return
-    
-    cfg = get_symbol_config(symbol)  # 🔥 안전한 설정 조회
-    if not cfg:
-        return log_debug(f"⚠️ 진입 취소 ({symbol})", "심볼 설정 조회 실패")
-        
-    current_price = get_price(symbol)
-    price_multiplier = cfg.get("price_multiplier", Decimal("1.0"))
-    signal_price = Decimal(str(signal_price_raw)) / price_multiplier
-    
-    if current_price <= 0 or signal_price <= 0:
-        return log_debug(f"❌ 진입 취소 ({symbol})", f"유효하지 않은 가격")
-    
-    # 🔥 핵심 수정: 포지션 상태 먼저 확인
-    update_all_position_states()
-    pos_side_state = position_state.get(symbol, {}).get(side, {})
-    current_entry_count = pos_side_state.get("entry_count", 0)
-    
-    # 🔥 프리미엄 배수 계산 (서버에서 자체 계산 + TV에서 받은 값 검증)
-    normal_count = pos_side_state.get("normal_entry_count", 0)
-    premium_count = pos_side_state.get("premium_entry_count", 0)
-    calculated_multiplier = get_premium_tp_multiplier(signal_type, normal_count, premium_count)
-    
-    # TV에서 받은 배수와 비교
-    if abs(calculated_multiplier - premium_multiplier_received) > Decimal("0.1"):
-        log_debug(f"⚠️ 프리미엄 배수 불일치 ({symbol}_{side.upper()})", 
-                  f"서버계산: {calculated_multiplier}, TV수신: {premium_multiplier_received}")
-    
-    # 🔥 수정: 첫 진입에만 가격 필터 적용
-    if current_entry_count == 0:
-        # 첫 진입인 경우에만 가격 필터 적용
-        price_diff = abs(current_price - signal_price)
-        allowed_slippage = max(signal_price * PRICE_DEVIATION_LIMIT_PCT, Decimal(str(MAX_SLIPPAGE_TICKS)) * cfg['tick_size'])
-        if price_diff > allowed_slippage:
-            return log_debug(f"⚠️ 첫 진입 취소: 슬리피지 ({symbol}_{side.upper()})", 
-                            f"가격 차이: {price_diff:.8f} > 허용: {allowed_slippage:.8f}")
-    else:
-        # 추가 진입인 경우 가격 필터 생략 (평단가 매칭 우선)
-        price_diff = abs(current_price - signal_price)
-        log_debug(f"📊 추가 진입 허용 ({symbol}_{side.upper()})", 
-                  f"진입 #{current_entry_count+1}/13 - 가격 필터 생략 (차이: {price_diff:.8f}, 평단가 매칭 우선)")
-    
-    # 🔥 수정: 총 진입 제한을 13으로 변경
-    entry_limits = {"premium": 5, "normal": 5, "rescue": 3}
-    total_entry_limit = 13
-    
-    entry_type_key = next((k for k in entry_limits if k in signal_type), None)
-
-    if pos_side_state.get("entry_count", 0) >= total_entry_limit:
-        log_debug(f"⚠️ 추가 진입 제한 ({symbol}_{side.upper()})", f"총 진입 횟수 최대치 도달: {total_entry_limit}")
-        return
-
-    if entry_type_key and pos_side_state.get(f"{entry_type_key}_entry_count", 0) >= entry_limits[entry_type_key]:
-        log_debug(f"⚠️ 추가 진입 제한 ({symbol}_{side.upper()})", f"'{entry_type_key}' 유형 최대치 도달: {entry_limits[entry_type_key]}")
-        return
-
-    # 🔥 추가 진입 시 평단가 불리 체크 (레스큐 제외)
-    if pos_side_state.get("size", Decimal(0)) > 0 and "rescue" not in signal_type:
-        avg_price = pos_side_state.get("price")
-        if avg_price and ((side == "long" and current_price <= avg_price) or (side == "short" and current_price >= avg_price)):
-            return log_debug(f"⚠️ 추가 진입 보류 ({symbol}_{side.upper()})", 
-                           f"평단가 불리 - 현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
-
-    current_signal_count = pos_side_state.get("premium_entry_count", 0) if "premium" in signal_type else pos_side_state.get("normal_entry_count", 0)
-    
-    # 🔥 강화된 평단가 매칭 수량 계산 시도
-    if use_avg_matching and expected_new_avg:
-        matched_qty = calculate_qty_to_match_avg_price(symbol, expected_new_avg)  # 🔥 안전장치 적용된 함수
-        if matched_qty and matched_qty > 0:
-            # 평단가 매칭으로 수량 결정
-            qty = matched_qty
-            log_debug(f"📊 평단가 매칭 수량 적용 ({symbol}_{side.upper()})", 
-                      f"목표평단: {expected_new_avg}, 매칭수량: {qty}")
-        else:
-            # 평단가 매칭 실패시 기본 계산
-            qty = calculate_position_size(symbol, signal_type, entry_score, current_signal_count)
-    else:
-        # 기본 수량 계산
-        qty = calculate_position_size(symbol, signal_type, entry_score, current_signal_count)
-    
-    final_position_ratio = Decimal("0")
-    
-    if "rescue" in signal_type:
-        last_ratio = pos_side_state.get('last_entry_ratio', Decimal("5.0"))
-        if last_ratio > 0:
-            equity, contract_val = get_total_collateral(), get_price(symbol) * cfg["contract_size"]
-            if contract_val > 0:
-                rescue_ratio = last_ratio * Decimal("1.5")
-                qty = max((equity * rescue_ratio / 100 / contract_val).quantize(Decimal('1'), rounding=ROUND_DOWN), cfg["min_qty"])
-                final_position_ratio = rescue_ratio
-    
-    if qty > 0:
-        entry_action = "추가진입" if pos_side_state.get("size", 0) > 0 else "첫진입"
-        if place_order(symbol, side, qty, signal_type, final_position_ratio):
-            # update_all_position_states()
-            latest_pos_side_state = position_state.get(symbol, {}).get(side, {})
-            current_entry_count = latest_pos_side_state.get("entry_count", 0)
-            
-            # 🔥 TP/SL 맵핑 기반 저장 + 프리미엄 배수 적용
-            tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
-            sl_map = [Decimal("0.04"), Decimal("0.038"), Decimal("0.035"), Decimal("0.033"), Decimal("0.03")]
-            
-            if current_entry_count <= len(tp_map):
-                base_tp = tp_map[current_entry_count-1] * Decimal(str(cfg["tp_mult"]))
-                sl = sl_map[current_entry_count-1] * Decimal(str(cfg["sl_mult"]))
-                
-                # 🔥 프리미엄 배수 적용된 최종 TP
-                final_tp = base_tp * calculated_multiplier
-                
-                # 슬리피지 계산
-                slippage_pct = abs(current_price - signal_price) / signal_price if signal_price > 0 else Decimal("0")
-                
-                # 🔥 프리미엄 배수 포함하여 저장
-                store_tp_sl(symbol, side, final_tp, sl, slippage_pct, current_entry_count, calculated_multiplier)
-                
-                log_debug(f"💾 TP/SL 저장 ({symbol}_{side.upper()})", 
-                         f"진입 #{current_entry_count}/13, 기본TP: {base_tp*100:.3f}%, "
-                         f"프리미엄배수: {calculated_multiplier:.2f}x, 최종TP: {final_tp*100:.3f}%, "
-                         f"SL: {sl*100:.3f}%, 슬리피지: {slippage_pct*100:.4f}%")
-            
-            log_debug(f"✅ {entry_action} 성공 ({symbol}_{side.upper()})", 
-                      f"유형: {signal_type}, 수량: {float(qty)} 계약 (총 진입: {current_entry_count}/13), "
-                      f"프리미엄 배수: {calculated_multiplier:.2f}x")
-        else:
-            log_debug(f"❌ {entry_action} 실패 ({symbol}_{side.upper()})", "주문 실행 중 오류")
-
 # ========
 # 16. 포지션 모니터링
 # ========
@@ -1042,14 +1123,18 @@ def position_monitor():
             total_value = Decimal("0")
             active_positions_log = []
             
+            # 🔥 추가: 전체 포지션 상태 디버깅
+            log_debug("🔍 포지션 상태 디버깅", f"전체 position_state: {dict(position_state)}")
+            
             with position_lock:
                 for symbol, sides in position_state.items():
                     for side, pos_data in sides.items():
-                        if pos_data and pos_data.get("size", Decimal("0")) > 0:
-                            total_value += pos_data.get("value", Decimal("0"))
+                        # 🔥 수정: 0이 아닌 모든 포지션 표시 (음수 포지션 포함)
+                        current_size = pos_data.get("size", Decimal("0"))
+                        if current_size != 0:  # 👈 올바름: 0이 아닌 모든 포지션
+                            total_value += abs(pos_data.get("value", Decimal("0")))
                             pyramid_info = f"총:{pos_data['entry_count']}/13,일:{pos_data['normal_entry_count']}/5,프:{pos_data['premium_entry_count']}/5,레:{pos_data['rescue_entry_count']}/3"
                             
-                            # 🔥 수동 보호 상태 + 프리미엄 TP 배수 체크
                             protection_status = ""
                             if is_manual_close_protected(symbol, side):
                                 protection_status = " [🛡️보호중]"
@@ -1057,7 +1142,7 @@ def position_monitor():
                             premium_mult = pos_data.get('premium_tp_multiplier', Decimal("1.0"))
                             premium_info = f" [🚀{premium_mult:.1f}x]" if premium_mult > Decimal("1.0") else ""
                                 
-                            active_positions_log.append(f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data['price']:.8f} ({pyramid_info}, 가치: {pos_data['value']:.2f} USDT){premium_info}{protection_status}")
+                            active_positions_log.append(f"{symbol}_{side.upper()}: {current_size} @ {pos_data.get('price', 0):.8f} ({pyramid_info}, 가치: {abs(pos_data.get('value', 0)):.2f} USDT){premium_info}{protection_status}")
             
             if active_positions_log:
                 equity = get_total_collateral()
@@ -1095,11 +1180,13 @@ if __name__ == "__main__":
     with position_lock:
         for symbol, sides in position_state.items():
             for side, pos_data in sides.items():
-                if pos_data and pos_data.get("size", Decimal("0")) > 0:
+                # 🔥 수정: 0이 아닌 모든 포지션 감지 (음수 포지션 포함)
+                current_size = pos_data.get("size", Decimal("0"))
+                if pos_data and current_size != 0:
                     premium_mult = pos_data.get('premium_tp_multiplier', Decimal("1.0"))
                     premium_info = f" [🚀{premium_mult:.1f}x]" if premium_mult > Decimal("1.0") else ""
                     initial_active_positions.append(
-                        f"{symbol}_{side.upper()}: {pos_data['size']:.4f} @ {pos_data.get('price', 0):.8f}{premium_info}"
+                        f"{symbol}_{side.upper()}: {current_size:.4f} @ {pos_data.get('price', 0):.8f}{premium_info}"
                     )
     
     log_debug("📊 초기 활성 포지션", f"{len(initial_active_positions)}개 감지" if initial_active_positions else "감지 안됨")
