@@ -169,8 +169,8 @@ def initialize_states():
                 tpsl_storage[sym] = {"long": {}, "short": {}}
 
 # 🔥 수동 청산 보호 함수
-def set_manual_close_protection(symbol, side, duration=10):
-    """수동 청산 보호 설정 (기본 10초)"""
+def set_manual_close_protection(symbol, side, duration=30):
+    """수동 청산 보호 설정 (기본 30초)"""
     with manual_protection_lock:
         key = f"{symbol}_{side}"
         manual_close_protection[key] = {
@@ -933,7 +933,7 @@ async def price_monitor():
         await asyncio.sleep(3)
 
 def simple_tp_monitor(ticker):
-    """🔥 수정: 프리미엄 배수 + 수동 청산 보호 + 실제 청산 실행"""
+    """🔥 수정: 프리미엄 배수 + 수동 청산 보호 + 실제 청산 실행 + 방향 정확 처리"""
     try:
         symbol = normalize_symbol(ticker.get("contract"))
         price = Decimal(str(ticker.get("last", "0")))
@@ -948,9 +948,12 @@ def simple_tp_monitor(ticker):
         with position_lock:
             pos_side_state = position_state.get(symbol, {})
             
-            # 롱 포지션 TP 체크
-            long_size = pos_side_state.get("long", {}).get("size", Decimal(0))
-            if long_size > 0:
+            # 🔥 수정: 실제 포지션 크기와 방향 정확히 확인
+            long_actual_size = pos_side_state.get("long", {}).get("size", Decimal(0))
+            short_actual_size = pos_side_state.get("short", {}).get("size", Decimal(0))
+            
+            # 롱 포지션 TP 체크 (양수 크기만)
+            if long_actual_size > 0:
                 if is_manual_close_protected(symbol, "long"):
                     return
                 
@@ -980,27 +983,24 @@ def simple_tp_monitor(ticker):
                         log_debug(f"🎯 롱 TP 실행 ({symbol})", 
                                  f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}")
                         
-                        # 🔥 추가: 실제 청산 주문 실행
+                        # 🔥 수정: 실제 청산 주문 실행 (방향 정확 처리)
                         try:
-                            current_size = abs(long_pos.get("size", Decimal("0")))
-                            if current_size > 0:
-                                order = FuturesOrder(
-                                    contract=symbol,
-                                    size=-int(current_size),  # 롱 포지션 청산은 음수
-                                    price="0",
-                                    tif="ioc"
-                                )
-                                result = _get_api_response(api.create_futures_order, SETTLE, order)
-                                if result:
-                                    log_debug(f"✅ 롱 TP 청산 주문 성공 ({symbol})", f"주문 ID: {getattr(result, 'id', 'Unknown')}")
-                                else:
-                                    log_debug(f"❌ 롱 TP 청산 주문 실패 ({symbol})", "API 호출 실패")
+                            order = FuturesOrder(
+                                contract=symbol,
+                                size=-int(long_actual_size),  # 🔥 수정: 실제 크기 사용, 롱 청산은 음수
+                                price="0",
+                                tif="ioc"
+                            )
+                            result = _get_api_response(api.create_futures_order, SETTLE, order)
+                            if result:
+                                log_debug(f"✅ 롱 TP 청산 주문 성공 ({symbol})", f"주문 ID: {getattr(result, 'id', 'Unknown')}")
+                            else:
+                                log_debug(f"❌ 롱 TP 청산 주문 실패 ({symbol})", "API 호출 실패")
                         except Exception as e:
                             log_debug(f"❌ 롱 TP 청산 오류 ({symbol})", str(e), exc_info=True)
             
-            # 숏 포지션 TP 체크
-            short_size = pos_side_state.get("short", {}).get("size", Decimal(0))
-            if short_size > 0:
+            # 숏 포지션 TP 체크 (양수 크기만)
+            if short_actual_size > 0:
                 if is_manual_close_protected(symbol, "short"):
                     return
                 
@@ -1030,21 +1030,19 @@ def simple_tp_monitor(ticker):
                         log_debug(f"🎯 숏 TP 실행 ({symbol})", 
                                  f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}")
                         
-                        # 🔥 추가: 실제 청산 주문 실행
+                        # 🔥 수정: 실제 청산 주문 실행 (방향 정확 처리)
                         try:
-                            current_size = abs(short_pos.get("size", Decimal("0")))
-                            if current_size > 0:
-                                order = FuturesOrder(
-                                    contract=symbol,
-                                    size=int(current_size),  # 숏 포지션 청산은 양수
-                                    price="0",
-                                    tif="ioc"
-                                )
-                                result = _get_api_response(api.create_futures_order, SETTLE, order)
-                                if result:
-                                    log_debug(f"✅ 숏 TP 청산 주문 성공 ({symbol})", f"주문 ID: {getattr(result, 'id', 'Unknown')}")
-                                else:
-                                    log_debug(f"❌ 숏 TP 청산 주문 실패 ({symbol})", "API 호출 실패")
+                            order = FuturesOrder(
+                                contract=symbol,
+                                size=int(short_actual_size),  # 🔥 수정: 실제 크기 사용, 숏 청산은 양수
+                                price="0",
+                                tif="ioc"
+                            )
+                            result = _get_api_response(api.create_futures_order, SETTLE, order)
+                            if result:
+                                log_debug(f"✅ 숏 TP 청산 주문 성공 ({symbol})", f"주문 ID: {getattr(result, 'id', 'Unknown')}")
+                            else:
+                                log_debug(f"❌ 숏 TP 청산 주문 실패 ({symbol})", "API 호출 실패")
                         except Exception as e:
                             log_debug(f"❌ 숏 TP 청산 오류 ({symbol})", str(e), exc_info=True)
                 
