@@ -705,12 +705,13 @@ def handle_entry(data):
         log_debug(f"⚠️ 추가 진입 제한 ({symbol}_{side.upper()})", f"'{entry_type_key}' 유형 최대치 도달: {entry_limits[entry_type_key]}")
         return
 
-    # 🔥 추가 진입 시 평단가 불리 체크 (레스큐 제외)
-    if pos_side_state.get("size", Decimal(0)) != 0 and "rescue" not in signal_type:
-        avg_price = pos_side_state.get("price")
-        if avg_price and ((side == "long" and current_price <= avg_price) or (side == "short" and current_price >= avg_price)):
-            return log_debug(f"⚠️ 추가 진입 보류 ({symbol}_{side.upper()})", 
-                           f"평단가 불리 - 현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
+    # 🔥 수정: 평단가 불리 체크 완전 제거 (추가 진입시 가격 불리 무시)
+    # 기존 코드 (제거됨):
+    # if pos_side_state.get("size", Decimal(0)) != 0 and "rescue" not in signal_type:
+    #     avg_price = pos_side_state.get("price")
+    #     if avg_price and ((side == "long" and current_price <= avg_price) or (side == "short" and current_price >= avg_price)):
+    #         return log_debug(f"⚠️ 추가 진입 보류 ({symbol}_{side.upper()})", 
+    #                        f"평단가 불리 - 현재가: {current_price:.8f}, 평단가: {avg_price:.8f}")
 
     # 🔥 수량 계산
     current_signal_count = pos_side_state.get("premium_entry_count", 0) if "premium" in signal_type else pos_side_state.get("normal_entry_count", 0)
@@ -776,51 +777,7 @@ def handle_entry(data):
         log_debug(f"❌ 진입 취소 ({symbol}_{side.upper()})", "계산된 수량이 0 이하")
 
 # ========
-# 16. 🔥 수정: 포지션 모니터링 (디버깅 정보 강화)
-# ========
-def position_monitor():
-    while True:
-        time.sleep(30)
-        try:
-            update_all_position_states()
-            total_value = Decimal("0")
-            active_positions_log = []
-            
-            # 🔥 추가: 전체 포지션 상태 디버깅
-            log_debug("🔍 포지션 상태 디버깅", f"전체 position_state: {dict(position_state)}")
-            
-            with position_lock:
-                for symbol, sides in position_state.items():
-                    for side, pos_data in sides.items():
-                        # 🔥 수정: 0이 아닌 모든 포지션 표시 (음수 포지션 포함)
-                        current_size = pos_data.get("size", Decimal("0"))
-                        if current_size != 0:
-                            total_value += abs(pos_data.get("value", Decimal("0")))
-                            pyramid_info = f"총:{pos_data['entry_count']}/13,일:{pos_data['normal_entry_count']}/5,프:{pos_data['premium_entry_count']}/5,레:{pos_data['rescue_entry_count']}/3"
-                            
-                            protection_status = ""
-                            if is_manual_close_protected(symbol, side):
-                                protection_status = " [🛡️보호중]"
-                            
-                            premium_mult = pos_data.get('premium_tp_multiplier', Decimal("1.0"))
-                            premium_info = f" [🚀{premium_mult:.1f}x]" if premium_mult > Decimal("1.0") else ""
-                                
-                            active_positions_log.append(f"{symbol}_{side.upper()}: {current_size} @ {pos_data.get('price', 0):.8f} ({pyramid_info}, 가치: {abs(pos_data.get('value', 0)):.2f} USDT){premium_info}{protection_status}")
-            
-            if active_positions_log:
-                equity = get_total_collateral()
-                exposure_pct = (total_value / equity * 100) if equity > 0 else 0
-                log_debug("🚀 포지션 현황", f"활성: {len(active_positions_log)}개, 총가치: {total_value:.2f} USDT, 노출도: {exposure_pct:.1f}%")
-                for pos_info in active_positions_log:
-                    log_debug("  └", pos_info)
-            else:
-                log_debug("📊 포지션 현황", "활성 포지션 없음")
-                
-        except Exception as e:
-            log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
-
-# ========
-# 13. 🔥 수정: Flask 라우트 (보호 상태 추가)
+# 12. 🔥 수정: Flask 라우트 (보호 상태 추가)
 # ========
 @app.route("/ping", methods=["GET", "HEAD"])
 def ping():
@@ -942,7 +899,7 @@ def webhook():
         return jsonify({"error": str(e)}), 500
 
 # ========
-# 14. 🔥 수정: WebSocket TP 모니터링 (프리미엄 배수 + 수동 청산 보호 적용)
+# 13. 🔥 수정: WebSocket TP 모니터링 (프리미엄 배수 + 수동 청산 보호 적용)
 # ========
 async def price_monitor():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
@@ -1095,7 +1052,7 @@ def simple_tp_monitor(ticker):
         log_debug(f"❌ TP 모니터링 오류 ({ticker.get('contract', 'Unknown')})", str(e))
 
 # ========
-# 15. 🔥 수정: 진입 처리 로직 (프리미엄 TP 배수 + 안전장치 적용)
+# 14. 🔥 수정: 진입 처리 로직 (프리미엄 TP 배수 + 안전장치 적용)
 # ========
 def worker(idx):
     while True:
@@ -1113,7 +1070,7 @@ def worker(idx):
             log_debug(f"❌ 워커-{idx} 심각 오류", f"워커 스레드 오류: {str(e)}", exc_info=True)
 
 # ========
-# 16. 포지션 모니터링
+# 15. 포지션 모니터링
 # ========
 def position_monitor():
     while True:
@@ -1123,15 +1080,13 @@ def position_monitor():
             total_value = Decimal("0")
             active_positions_log = []
             
-            # 🔥 추가: 전체 포지션 상태 디버깅
-            log_debug("🔍 포지션 상태 디버깅", f"전체 position_state: {dict(position_state)}")
+            # 🔥 전체 디버깅 로그 제거
             
             with position_lock:
                 for symbol, sides in position_state.items():
                     for side, pos_data in sides.items():
-                        # 🔥 수정: 0이 아닌 모든 포지션 표시 (음수 포지션 포함)
                         current_size = pos_data.get("size", Decimal("0"))
-                        if current_size != 0:  # 👈 올바름: 0이 아닌 모든 포지션
+                        if current_size != 0:
                             total_value += abs(pos_data.get("value", Decimal("0")))
                             pyramid_info = f"총:{pos_data['entry_count']}/13,일:{pos_data['normal_entry_count']}/5,프:{pos_data['premium_entry_count']}/5,레:{pos_data['rescue_entry_count']}/3"
                             
@@ -1157,7 +1112,7 @@ def position_monitor():
             log_debug("❌ 포지션 모니터링 오류", str(e), exc_info=True)
 
 # ========
-# 17. 메인 실행
+# 16. 메인 실행
 # ========
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.26 (프리미엄 TP 배수 + 강화된 안전장치)")
