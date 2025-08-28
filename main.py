@@ -252,11 +252,13 @@ def calculate_position_size(symbol, signal_type, entry_score, current_signal_cou
     contract_value = price * cfg["contract_size"]
     if contract_value <= 0: return Decimal("0"), final_ratio
     
-    base_qty = (equity * final_ratio / 100 / contract_value).quantize(Decimal('1'), ROUND_DOWN)
-    qty = max(base_qty, cfg["min_qty"])
+    base_qty = (equity * final_position_ratio / 100 / contract_value).quantize(Decimal('1'), rounding=ROUND_DOWN)
+    qty_with_min = max(base_qty, cfg["min_qty"])
     
-    if qty * contract_value < cfg["min_notional"]:
-        qty = (cfg["min_notional"] / contract_value).quantize(Decimal('1'), ROUND_DOWN) + Decimal("1")
+    if qty_with_min * contract_value < cfg["min_notional"]:
+        final_qty = (cfg["min_notional"] / contract_value).quantize(Decimal('1'), rounding=ROUND_DOWN) + Decimal("1")
+    else:
+        final_qty = qty_with_min
         
     return qty, final_ratio
 
@@ -403,23 +405,121 @@ async def price_monitor():
         await asyncio.sleep(5)
 
 def simple_tp_monitor(ticker):
-    symbol, price = normalize_symbol(ticker.get("contract")), Decimal(str(ticker.get("last", "0")))
-    if not symbol or price <= 0: return
-    with position_lock, tpsl_lock:
-        for side in ["long", "short"]:
-            state = position_state.get(symbol, {}).get(side, {})
-            if state["size"] > 0 and not is_manual_close_protected(symbol, side):
-                entry_price, side_storage = state["price"], tpsl_storage.get(symbol, {}).get(side, {})
-                if entry_price > 0 and side_storage:
-                    latest_entry = side_storage.get(max(side_storage.keys()))
-                    if latest_entry:
-                        tp_pct = latest_entry.get("tp")
-                        tp_price = entry_price * (1 + tp_pct) if side == "long" else entry_price * (1 - tp_pct)
-                        if (side == "long" and price >= tp_price) or (side == "short" and price <= tp_price):
-                            log_debug(f"🎯 {side.upper()} TP 실행 ({symbol})", f"현재가: {price:.8f}, TP가: {tp_price:.8f}")
-                            if place_order(symbol, side, state["size"]):
-                                tpsl_storage[symbol][side].clear()
-                                position_state[symbol][side] = get_default_pos_side_state()
+    """🔥 수정: 프리미엄 배수 + 수동 청산 보호 + 실제 청산 실행 + 방향 정확 처리"""
+    try:
+        symbol = normalize_symbol(ticker.get("contract"))
+        price = Decimal(str(ticker.get("last", "0")))
+        
+        if not symbol or price <= 0:
+            return
+            
+        cfg = get_symbol_config(symbol)
+        if not cfg:
+            return
+            
+        with position_lock:
+            pos_side_state = position_state.get(symbol, {})
+            
+            # 롱 포지션 TP 체크 (양수 크기만)
+            long_actual_size = pos_side_state.get("long", {}).get("size", Decimal(0))
+            if long_actual_size > 0:
+                if is_manual_close_protected(symbol, "long"):
+                    return
+                
+                long_pos = pos_side_state["long"]
+                entry_price = long_pos.get("price")
+                entry_time = long_pos.get("entry_time", time.time())
+                entry_count = long_pos.get("entry_count", 0)
+                premium_multiplier = long_pos.get("premium_tp_multiplier", Decimal("1.0"))
+                
+                if entry_price and entry_price > 0 and entry_count > 0:
+                    symbol_weight_tp = Decimal(str(cfg["tp_mult"]))
+                    tp_map = [Decimal("0.0045"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
+                    base_tp_pct = tp_map[min(entry_count-1, len(tp_map)-1)] * symbol_weight_tp * premium_multiplier
+                    
+                    time_elapsed = time.time() - entry_time
+                    periods_15s = max(0, int(time_elapsed / 15))
+                    tp_decay_amt_ps = Decimal("0.002") / 100
+                    tp_min_pct_ps = Decimal("0.16") / 100
+                    
+                    # 🔥 수정: 감쇄량과 최소 TP에도 프리미엄 배수 적용
+                    tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp * premium_multiplier)
+                    min_tp_with_mult = tp_min_pct_ps * symbol_weight_tp * premium_multiplier
+                    current_tp_pct = max(min_tp_with_mult, base_tp_pct - tp_reduction)
+                    
+                    long_pos["current_tp_pct"] = current_tp_pct
+                    tp_price = entry_price * (1 + current_tp_pct)
+                    
+                    if price >= tp_price:
+                        log_debug(f"🎯 롱 TP 실행 ({symbol})", 
+                                 f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}")
+                        
+                        try:
+                            order = FuturesOrder(
+                                contract=symbol,
+                                size=-int(long_actual_size),
+                                price="0",
+                                tif="ioc"
+                            )
+                            result = _get_api_response(api.create_futures_order, SETTLE, order)
+                            if result:
+                                log_debug(f"✅ 롱 TP 청산 주문 성공 ({symbol})", f"주문 ID: {getattr(result, 'id', 'Unknown')}")
+                            else:
+                                log_debug(f"❌ 롱 TP 청산 주문 실패 ({symbol})", "API 호출 실패")
+                        except Exception as e:
+                            log_debug(f"❌ 롱 TP 청산 오류 ({symbol})", str(e), exc_info=True)
+            
+            # 숏 포지션 TP 체크 (양수 크기만)
+            short_actual_size = pos_side_state.get("short", {}).get("size", Decimal(0))
+            if short_actual_size > 0:
+                if is_manual_close_protected(symbol, "short"):
+                    return
+                
+                short_pos = pos_side_state["short"]
+                entry_price = short_pos.get("price")
+                entry_time = short_pos.get("entry_time", time.time())
+                entry_count = short_pos.get("entry_count", 0)
+                premium_multiplier = short_pos.get("premium_tp_multiplier", Decimal("1.0"))
+                
+                if entry_price and entry_price > 0 and entry_count > 0:
+                    symbol_weight_tp = Decimal(str(cfg["tp_mult"]))
+                    tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
+                    base_tp_pct = tp_map[min(entry_count-1, len(tp_map)-1)] * symbol_weight_tp * premium_multiplier
+                    
+                    time_elapsed = time.time() - entry_time
+                    periods_15s = max(0, int(time_elapsed / 15))
+                    tp_decay_amt_ps = Decimal("0.002") / 100
+                    tp_min_pct_ps = Decimal("0.16") / 100
+                    
+                    # 🔥 수정: 감쇄량과 최소 TP에도 프리미엄 배수 적용
+                    tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp * premium_multiplier)
+                    min_tp_with_mult = tp_min_pct_ps * symbol_weight_tp * premium_multiplier
+                    current_tp_pct = max(min_tp_with_mult, base_tp_pct - tp_reduction)
+                    
+                    short_pos["current_tp_pct"] = current_tp_pct
+                    tp_price = entry_price * (1 - current_tp_pct)
+                    
+                    if price <= tp_price:
+                        log_debug(f"🎯 숏 TP 실행 ({symbol})", 
+                                 f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}")
+                        
+                        try:
+                            order = FuturesOrder(
+                                contract=symbol,
+                                size=int(short_actual_size),
+                                price="0",
+                                tif="ioc"
+                            )
+                            result = _get_api_response(api.create_futures_order, SETTLE, order)
+                            if result:
+                                log_debug(f"✅ 숏 TP 청산 주문 성공 ({symbol})", f"주문 ID: {getattr(result, 'id', 'Unknown')}")
+                            else:
+                                log_debug(f"❌ 숏 TP 청산 주문 실패 ({symbol})", "API 호출 실패")
+                        except Exception as e:
+                            log_debug(f"❌ 숏 TP 청산 오류 ({symbol})", str(e), exc_info=True)
+                
+    except Exception as e:
+        log_debug(f"❌ TP 모니터링 오류 ({ticker.get('contract', 'Unknown')})", str(e))
 
 def worker(idx):
     while True:
