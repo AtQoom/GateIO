@@ -412,7 +412,11 @@ def status():
                             "size": float(pos_data["size"]), "price": float(pos_data["price"]), "value": float(abs(pos_data["value"])),
                             "entry_count": pos_data["entry_count"], "normal_count": pos_data["normal_entry_count"],
                             "premium_count": pos_data["premium_entry_count"], "rescue_count": pos_data["rescue_entry_count"],
-                            "last_ratio": float(pos_data['last_entry_ratio'])
+                            "last_ratio": float(pos_data['last_entry_ratio']),
+                            # ▼▼▼ [개선] 모니터링을 위한 정보 추가 ▼▼▼
+                            "premium_tp_mult": float(pos_data.get("premium_tp_multiplier", 1.0)),
+                            "current_tp_pct": f"{float(pos_data.get('current_tp_pct', 0.0)) * 100:.4f}%"
+                            # ▲▲▲ [수정 완료] ▲▲▲
                         }
         return jsonify({"status": "running", "version": "v6.33-server", "balance_usdt": float(equity), "active_positions": active_positions})
     except Exception as e:
@@ -474,7 +478,6 @@ def simple_tp_monitor(ticker):
                     tp_decay_amt_ps = Decimal("0.002") / 100
                     tp_min_pct_ps = Decimal("0.16") / 100
                     
-                    # 🔥 수정: 감쇄량과 최소 TP에도 프리미엄 배수 적용
                     tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp * premium_multiplier)
                     min_tp_with_mult = tp_min_pct_ps * symbol_weight_tp * premium_multiplier
                     current_tp_pct = max(min_tp_with_mult, base_tp_pct - tp_reduction)
@@ -483,19 +486,18 @@ def simple_tp_monitor(ticker):
                     tp_price = entry_price * (1 + current_tp_pct)
                     
                     if price >= tp_price:
-                        log_debug(f"🎯 롱 TP 실행 ({symbol})", 
-                                 f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}")
+                        log_debug(f"🎯 롱 TP 실행 ({symbol})", f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}")
                         
                         try:
-                            order = FuturesOrder(
-                                contract=symbol,
-                                size=-int(long_actual_size),
-                                price="0",
-                                tif="ioc"
-                            )
+                            order = FuturesOrder(contract=symbol, size=-int(long_actual_size), price="0", tif="ioc")
                             result = _get_api_response(api.create_futures_order, SETTLE, order)
                             if result:
                                 log_debug(f"✅ 롱 TP 청산 주문 성공 ({symbol})", f"주문 ID: {getattr(result, 'id', 'Unknown')}")
+                                # ▼▼▼ [매우 중요] TP 성공 후 상태 즉시 초기화 ▼▼▼
+                                position_state[symbol]['long'] = get_default_pos_side_state()
+                                if symbol in tpsl_storage: tpsl_storage[symbol]['long'].clear()
+                                log_debug(f"🔄 TP 실행 후 상태 초기화 ({symbol}_long)", "중복 실행 방지")
+                                # ▲▲▲ [수정 완료] ▲▲▲
                             else:
                                 log_debug(f"❌ 롱 TP 청산 주문 실패 ({symbol})", "API 호출 실패")
                         except Exception as e:
@@ -523,7 +525,6 @@ def simple_tp_monitor(ticker):
                     tp_decay_amt_ps = Decimal("0.002") / 100
                     tp_min_pct_ps = Decimal("0.16") / 100
                     
-                    # 🔥 수정: 감쇄량과 최소 TP에도 프리미엄 배수 적용
                     tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp * premium_multiplier)
                     min_tp_with_mult = tp_min_pct_ps * symbol_weight_tp * premium_multiplier
                     current_tp_pct = max(min_tp_with_mult, base_tp_pct - tp_reduction)
@@ -532,19 +533,18 @@ def simple_tp_monitor(ticker):
                     tp_price = entry_price * (1 - current_tp_pct)
                     
                     if price <= tp_price:
-                        log_debug(f"🎯 숏 TP 실행 ({symbol})", 
-                                 f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}")
+                        log_debug(f"🎯 숏 TP 실행 ({symbol})", f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}")
                         
                         try:
-                            order = FuturesOrder(
-                                contract=symbol,
-                                size=int(short_actual_size),
-                                price="0",
-                                tif="ioc"
-                            )
+                            order = FuturesOrder(contract=symbol, size=int(short_actual_size), price="0", tif="ioc")
                             result = _get_api_response(api.create_futures_order, SETTLE, order)
                             if result:
                                 log_debug(f"✅ 숏 TP 청산 주문 성공 ({symbol})", f"주문 ID: {getattr(result, 'id', 'Unknown')}")
+                                # ▼▼▼ [매우 중요] TP 성공 후 상태 즉시 초기화 ▼▼▼
+                                position_state[symbol]['short'] = get_default_pos_side_state()
+                                if symbol in tpsl_storage: tpsl_storage[symbol]['short'].clear()
+                                log_debug(f"🔄 TP 실행 후 상태 초기화 ({symbol}_short)", "중복 실행 방지")
+                                # ▲▲▲ [수정 완료] ▲▲▲
                             else:
                                 log_debug(f"❌ 숏 TP 청산 주문 실패 ({symbol})", "API 호출 실패")
                         except Exception as e:
