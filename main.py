@@ -132,15 +132,33 @@ task_q = queue.Queue(maxsize=100)
 WORKER_COUNT = min(6, max(2, os.cpu_count() * 2))
 manual_close_protection = {}
 manual_protection_lock = threading.RLock()
+dynamic_symbols = set()
 
 def get_default_pos_side_state():
     return {"price": None, "size": Decimal("0"), "value": Decimal("0"), "entry_count": 0, "normal_entry_count": 0, "premium_entry_count": 0, "rescue_entry_count": 0, "entry_time": None, 'last_entry_ratio': Decimal("0")}
 
 def initialize_states():
+    """🔥 수정: API에서 받는 모든 심볼에 대해 동적으로 상태를 초기화"""
     with position_lock, tpsl_lock:
+        # 기존 방식: SYMBOL_CONFIG에 있는 것들만 초기화
         for sym in SYMBOL_CONFIG:
             position_state[sym] = {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()}
             tpsl_storage[sym] = {"long": {}, "short": {}}
+        
+        # 🔥 새로운 추가: API에서 실제 포지션이 있는 심볼들도 초기화
+        try:
+            api_positions = _get_api_response(api.list_positions, settle=SETTLE)
+            if api_positions:
+                for pos in api_positions:
+                    symbol = normalize_symbol(pos.contract)
+                    if symbol and symbol not in position_state:
+                        log_debug(f"🆕 새 심볼 초기화", f"{symbol} - API에서 발견")
+                        position_state[symbol] = {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()}
+                        tpsl_storage[symbol] = {"long": {}, "short": {}}
+                        # 🔥 추가: 동적 심볼로 등록
+                        dynamic_symbols.add(symbol)
+        except Exception as e:
+            log_debug("⚠️ 동적 초기화 실패", str(e))
 
 # ========
 # 5. 핵심 유틸리티 함수
@@ -175,7 +193,6 @@ def normalize_symbol(raw_symbol):
     if not raw_symbol: return None
     symbol = str(raw_symbol).upper().strip()
     if symbol in SYMBOL_MAPPING: return SYMBOL_MAPPING[symbol]
-    if "SOL" in symbol: return "SOL_USDT"
     clean_symbol = symbol.replace('.P', '').replace('PERP', '').replace('USDT', '')
     for key, value in SYMBOL_MAPPING.items():
         if clean_symbol in key: return value
@@ -306,67 +323,86 @@ def place_order(symbol, side, qty):
             return False
 
 def update_all_position_states():
-    """🔥 최종 완성: 'size=0' 유령 포지션을 완벽히 필터링하고,
-    가장 안전한 '先기록, 後정리' 방식으로 포지션 상태를 동기화하는 최종 버전입니다."""
+    """🔥 최종 완성 + 안전장치 추가"""
     with position_lock:
         api_positions = _get_api_response(api.list_positions, settle=SETTLE)
         
         if api_positions is None:
             log_debug("❌ 포지션 동기화 실패", "API 응답 없음. 이전 포지션 상태를 유지합니다.")
             return
-
         log_debug("📊 포지션 동기화 시작", f"데이터 소스: FuturesApi, 찾은 포지션 수: {len(api_positions)}")
 
-        # 1. 현재 스크립트가 '보유 중'이라고 알고 있는 포지션들의 집합을 미리 만들어 둡니다.
-        # 이 집합은 잠재적인 '청산 대상' 목록이 됩니다.
+        # 🔥 추가: 실제 포지션이 있는 심볼들을 로그로 출력
+        active_symbols = []
+        for pos in api_positions:
+            if Decimal(str(pos.size)) != 0:
+                active_symbols.append(f"{pos.contract}({pos.size})")
+        
+        if active_symbols:
+            log_debug("📍 실제 보유 포지션", f"{len(active_symbols)}개: {', '.join(active_symbols[:5])}")
+
+        # 기존 로직...
         positions_to_clear = set()
         for symbol, sides in position_state.items():
             for side in ["long", "short"]:
                 if sides[side]["size"] > 0:
                     positions_to_clear.add((symbol, side))
-        
-        # 2. API 응답을 하나씩 확인하면서, '실제로 존재하는(size > 0)' 포지션만 골라 상태를 업데이트합니다.
+
+        # API 포지션 처리
         for pos in api_positions:
             pos_size = Decimal(str(pos.size))
             if pos_size == 0:
-                continue  # size가 0인 '유령 포지션'은 완전히 무시하고 건너뜁니다.
-
+                continue
             symbol = normalize_symbol(pos.contract)
-            if not symbol: continue
+            if not symbol: 
+                continue
+                
+            # 🔥 핵심 추가: 심볼이 position_state에 없으면 즉시 초기화
+            if symbol not in position_state:
+                log_debug(f"🆕 즉시 초기화", f"{symbol} - update 중 발견")
+                position_state[symbol] = {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()}
+                tpsl_storage[symbol] = {"long": {}, "short": {}}
+                # 🔥 추가: 동적 심볼로 등록
+                dynamic_symbols.add(symbol)
 
             cfg = get_symbol_config(symbol)
             
-            # API 응답의 'mode'와 'size'를 조합하여 포지션 방향(side)을 명확하게 결정합니다.
+            # 포지션 방향 결정
             side = None
             if hasattr(pos, 'mode') and pos.mode == 'dual_long':
                 side = 'long'
             elif hasattr(pos, 'mode') and pos.mode == 'dual_short':
                 side = 'short'
-            elif pos_size > 0: # 단방향 모드 롱
+            elif pos_size > 0:
                 side = 'long'
-            elif pos_size < 0: # 단방향 모드 숏
+            elif pos_size < 0:
                 side = 'short'
 
-            if not side: continue
-            
-            # 이 포지션은 실제로 존재하므로, '청산 대상' 목록에서 제거합니다.
+            if not side: 
+                continue
+                
             positions_to_clear.discard((symbol, side))
 
-            # 스크립트의 내부 상태를 Gate.io의 최신 정보로 정확하게 업데이트합니다.
+            # 상태 업데이트
             state = position_state[symbol][side]
+            old_size = state.get("size", Decimal("0"))
             state.update({
                 "price": Decimal(str(pos.entry_price)),
                 "size": abs(pos_size),
                 "value": abs(pos_size) * Decimal(str(pos.mark_price)) * cfg["contract_size"]
             })
+            
+            # 🔥 추가: 상태 변경 로그
+            if old_size != abs(pos_size):
+                log_debug(f"🔄 포지션 상태 업데이트", f"{symbol}_{side.upper()}: {old_size} → {abs(pos_size)}")
 
-        # 3. 모든 확인이 끝난 후, '청산 대상' 목록에 여전히 남아있는 포지션들을 최종적으로 정리합니다.
-        # 이들은 API에서 더 이상 보고되지 않으므로, 사용자가 직접 청산한 것으로 간주합니다.
+        # 청산된 포지션 정리
         for symbol, side in positions_to_clear:
-            log_debug(f"🔄 수동/자동 청산 감지 ({symbol}_{side.upper()})", f"API 응답에 해당 포지션이 없어 상태를 초기화합니다.")
+            log_debug(f"🔄 수동/자동 청산 감지", f"{symbol}_{side.upper()} - API 응답에 없음")
             set_manual_close_protection(symbol, side)
             position_state[symbol][side] = get_default_pos_side_state()
-            if symbol in tpsl_storage: tpsl_storage[symbol][side].clear()
+            if symbol in tpsl_storage: 
+                tpsl_storage[symbol][side].clear()
 
 # ========
 # 8. 핵심 진입 처리 로직
@@ -453,41 +489,96 @@ def status():
     try:
         equity = get_total_collateral(force=True)
         update_all_position_states()
+        
+        # 🔥 추가: 전체 position_state 내용을 로그로 출력
+        with position_lock:
+            total_positions = 0
+            for symbol, sides in position_state.items():
+                for side, pos_data in sides.items():
+                    if pos_data["size"] > 0:
+                        total_positions += 1
+                        log_debug(f"📍 상태 확인", f"{symbol}_{side.upper()}: size={pos_data['size']}, price={pos_data['price']}")
+        
+        log_debug("📊 status 호출", f"전체 활성 포지션: {total_positions}개")
+        
         active_positions = {}
         with position_lock:
             for symbol, sides in position_state.items():
                 for side, pos_data in sides.items():
                     if pos_data["size"] != 0:
                         active_positions[f"{symbol}_{side.upper()}"] = {
-                            "size": float(pos_data["size"]), "price": float(pos_data["price"]), "value": float(abs(pos_data["value"])),
-                            "entry_count": pos_data["entry_count"], "normal_count": pos_data["normal_entry_count"],
-                            "premium_count": pos_data["premium_entry_count"], "rescue_count": pos_data["rescue_entry_count"],
+                            "size": float(pos_data["size"]), 
+                            "price": float(pos_data["price"]), 
+                            "value": float(abs(pos_data["value"])),
+                            "entry_count": pos_data["entry_count"], 
+                            "normal_count": pos_data["normal_entry_count"],
+                            "premium_count": pos_data["premium_entry_count"], 
+                            "rescue_count": pos_data["rescue_entry_count"],
                             "last_ratio": float(pos_data['last_entry_ratio']),
-                            # ▼▼▼ [개선] 모니터링을 위한 정보 추가 ▼▼▼
                             "premium_tp_mult": float(pos_data.get("premium_tp_multiplier", 1.0)),
                             "current_tp_pct": f"{float(pos_data.get('current_tp_pct', 0.0)) * 100:.4f}%"
-                            # ▲▲▲ [수정 완료] ▲▲▲
                         }
-        return jsonify({"status": "running", "version": "v6.33-server", "balance_usdt": float(equity), "active_positions": active_positions})
+        
+        return jsonify({
+            "status": "running", 
+            "version": "v6.33-server", 
+            "balance_usdt": float(equity), 
+            "active_positions": active_positions,
+            # 🔥 추가: 디버깅 정보
+            "debug_info": {
+                "total_symbols_tracked": len(position_state),
+                "active_position_count": len(active_positions)
+            }
+        })
     except Exception as e:
+        log_debug("❌ status 오류", str(e), exc_info=True)
         return jsonify({"error": str(e)}), 500
     
 async def price_monitor():
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-    symbols = list(SYMBOL_CONFIG.keys())
+    last_resubscribe = time.time()
+    
     while True:
         try:
             async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
-                await ws.send(json.dumps({"time": int(time.time()), "channel": "futures.tickers", "event": "subscribe", "payload": symbols}))
-                log_debug("🔌 웹소켓 구독", f"{len(symbols)}개 심볼")
+                # 🔥 수정: 동적 심볼 포함한 구독 목록 생성
+                base_symbols = set(SYMBOL_CONFIG.keys())
+                all_symbols = list(base_symbols | dynamic_symbols)
+                
+                await ws.send(json.dumps({
+                    "time": int(time.time()), 
+                    "channel": "futures.tickers", 
+                    "event": "subscribe", 
+                    "payload": all_symbols
+                }))
+                log_debug("🔌 웹소켓 구독", f"{len(all_symbols)}개 심볼 (기본:{len(base_symbols)}, 동적:{len(dynamic_symbols)})")
+                
                 while True:
                     msg = await asyncio.wait_for(ws.recv(), timeout=30)
                     result = json.loads(msg).get("result")
-                    if isinstance(result, list): [simple_tp_monitor(i) for i in result]
-                    elif isinstance(result, dict): simple_tp_monitor(result)
+                    if isinstance(result, list): 
+                        [simple_tp_monitor(i) for i in result]
+                    elif isinstance(result, dict): 
+                        simple_tp_monitor(result)
+                    
+                    # 🔥 추가: 60초마다 재구독 (동적 심볼 추가 반영)
+                    if time.time() - last_resubscribe > 60:
+                        current_symbols = list(set(SYMBOL_CONFIG.keys()) | dynamic_symbols)
+                        if current_symbols != all_symbols:
+                            await ws.send(json.dumps({
+                                "time": int(time.time()), 
+                                "channel": "futures.tickers", 
+                                "event": "subscribe", 
+                                "payload": current_symbols
+                            }))
+                            log_debug("🔌 동적 재구독", f"새 심볼 {len(current_symbols) - len(all_symbols)}개 추가")
+                            all_symbols = current_symbols
+                        last_resubscribe = time.time()
+                        
         except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed) as e:
             log_debug("🔌 웹소켓 재연결", f"사유: {type(e).__name__}")
-        except Exception as e: log_debug("🔌 웹소켓 오류", str(e), exc_info=True)
+        except Exception as e: 
+            log_debug("🔌 웹소켓 오류", str(e), exc_info=True)
         await asyncio.sleep(5)
 
 def simple_tp_monitor(ticker):
