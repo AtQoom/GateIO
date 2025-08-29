@@ -306,15 +306,20 @@ def place_order(symbol, side, qty):
             return False
 
 def update_all_position_states():
-    """🔥 최종 수정: 포지션 조회 API를 'FuturesApi'로 단일화하여 'AttributeError' 충돌 문제를 근본적으로 해결"""
+    """🔥 최종 완성: 포지션 조회 API를 'FuturesApi.list_positions'로 단일화하여 서버 충돌을 해결하고,
+    API 일시 오류에도 포지션 상태를 안전하게 유지하도록 설계된 가장 안정적인 최종 버전입니다."""
     with position_lock:
         # ▼▼▼ [핵심 수정] 선물 포지션 조회는 계정 유형과 상관없이 'api.list_positions' 하나로 통일합니다. ▼▼▼
         api_positions = _get_api_response(api.list_positions, settle=SETTLE)
         
-        # ▼▼▼ [안정성 유지] API 호출 실패 시(None 반환 시), 함수를 즉시 종료하여 기존 포지션 상태를 보존합니다. ▼▼▼
+        # ▼▼▼ [안정성 강화] API 호출에 일시적으로 실패하여 None을 반환받으면,
+        # 기존 포지션 정보를 삭제하지 않고 함수를 즉시 종료하여 상태를 안전하게 보존합니다. ▼▼▼
         if api_positions is None:
             log_debug("❌ 포지션 동기화 실패", "API 응답 없음. 이전 포지션 상태를 유지합니다.")
             return
+
+        # ▼▼▼ [디버깅용 로그] 이제 정상적으로 동작하므로, 불필요한 원본 데이터 로그는 주석 처리하거나 삭제하셔도 됩니다. ▼▼▼
+        # log_debug("🔍 API 원본 포지션 데이터", f"{api_positions}")
 
         log_debug("📊 포지션 동기화 시작", f"데이터 소스: FuturesApi, 찾은 포지션 수: {len(api_positions)}")
         
@@ -328,7 +333,7 @@ def update_all_position_states():
             cfg = get_symbol_config(symbol)
             pos_size = Decimal(str(pos.size))
             
-            # 헤지 모드(dual_long/dual_short)와 단방향 모드를 모두 처리
+            # 헤지 모드(dual_long/dual_short)와 단방향 모드를 모두 올바르게 처리합니다.
             if hasattr(pos, 'mode') and pos.mode in ['dual_long', 'dual_short']:
                 side = 'long' if pos.mode == 'dual_long' else 'short'
                 state = position_state[symbol][side]
@@ -337,7 +342,7 @@ def update_all_position_states():
                     "value": pos_size * Decimal(str(pos.mark_price)) * cfg["contract_size"]
                 })
                 active_positions_set.add((symbol, side))
-            else: # 단방향 모드 또는 mode 정보 없는 경우
+            else: 
                 if pos_size > 0:
                     side = 'long'
                     state = position_state[symbol]['long']
@@ -359,7 +364,7 @@ def update_all_position_states():
                     if position_state[symbol]['long']['size'] > 0:
                         position_state[symbol]['long'] = get_default_pos_side_state()
 
-        # API에서 확인된 포지션 외에는 모두 청산된 것으로 간주하고 정리
+        # API에서 확인된 포지션 외에는 모두 청산된 것으로 간주하고 내부 상태를 정리합니다.
         for symbol, sides in position_state.items():
             for side in ["long", "short"]:
                 if (symbol, side) not in active_positions_set and sides[side]["size"] > 0:
