@@ -306,34 +306,28 @@ def place_order(symbol, side, qty):
             return False
 
 def update_all_position_states():
-    """🔥 최종 완성: 포지션 조회 API를 'FuturesApi.list_positions'로 단일화하여 서버 충돌을 해결하고,
-    API 일시 오류에도 포지션 상태를 안전하게 유지하도록 설계된 가장 안정적인 최종 버전입니다."""
+    """🔥 최종 완성: 헤지 모드와 단방향 모드가 섞여있을 때 발생하는 상태 초기화 충돌 버그를 완벽히 해결한 최종 버전"""
     with position_lock:
-        # ▼▼▼ [핵심 수정] 선물 포지션 조회는 계정 유형과 상관없이 'api.list_positions' 하나로 통일합니다. ▼▼▼
         api_positions = _get_api_response(api.list_positions, settle=SETTLE)
         
-        # ▼▼▼ [안정성 강화] API 호출에 일시적으로 실패하여 None을 반환받으면,
-        # 기존 포지션 정보를 삭제하지 않고 함수를 즉시 종료하여 상태를 안전하게 보존합니다. ▼▼▼
         if api_positions is None:
             log_debug("❌ 포지션 동기화 실패", "API 응답 없음. 이전 포지션 상태를 유지합니다.")
             return
-
-        # ▼▼▼ [디버깅용 로그] 이제 정상적으로 동작하므로, 불필요한 원본 데이터 로그는 주석 처리하거나 삭제하셔도 됩니다. ▼▼▼
-        # log_debug("🔍 API 원본 포지션 데이터", f"{api_positions}")
 
         log_debug("📊 포지션 동기화 시작", f"데이터 소스: FuturesApi, 찾은 포지션 수: {len(api_positions)}")
         
         active_positions_set = set()
         
+        # 1단계: API에서 받은 모든 포지션 정보를 내부 상태에 먼저 기록
         for pos in api_positions:
             symbol = normalize_symbol(pos.contract)
             if not symbol: continue
             if symbol not in position_state: initialize_states()
-            
+
             cfg = get_symbol_config(symbol)
             pos_size = Decimal(str(pos.size))
             
-            # 헤지 모드(dual_long/dual_short)와 단방향 모드를 모두 올바르게 처리합니다.
+            # 헤지 모드(dual_long/dual_short) 처리
             if hasattr(pos, 'mode') and pos.mode in ['dual_long', 'dual_short']:
                 side = 'long' if pos.mode == 'dual_long' else 'short'
                 state = position_state[symbol][side]
@@ -342,30 +336,28 @@ def update_all_position_states():
                     "value": pos_size * Decimal(str(pos.mark_price)) * cfg["contract_size"]
                 })
                 active_positions_set.add((symbol, side))
-            else: 
-                if pos_size > 0:
+
+            # 단방향 모드(size 부호로 판별) 처리
+            else:
+                if pos_size > 0: # 롱 포지션
                     side = 'long'
-                    state = position_state[symbol]['long']
+                    state = position_state[symbol][side]
                     state.update({
                         "price": Decimal(str(pos.entry_price)), "size": pos_size,
                         "value": pos_size * Decimal(str(pos.mark_price)) * cfg["contract_size"]
                     })
                     active_positions_set.add((symbol, side))
-                    if position_state[symbol]['short']['size'] > 0:
-                        position_state[symbol]['short'] = get_default_pos_side_state()
-                elif pos_size < 0:
+                elif pos_size < 0: # 숏 포지션
                     side = 'short'
-                    state = position_state[symbol]['short']
+                    state = position_state[symbol][side]
                     state.update({
                         "price": Decimal(str(pos.entry_price)), "size": abs(pos_size),
                         "value": abs(pos_size) * Decimal(str(pos.mark_price)) * cfg["contract_size"]
                     })
                     active_positions_set.add((symbol, side))
-                    if position_state[symbol]['long']['size'] > 0:
-                        position_state[symbol]['long'] = get_default_pos_side_state()
-
-        # API에서 확인된 포지션 외에는 모두 청산된 것으로 간주하고 내부 상태를 정리합니다.
-        for symbol, sides in position_state.items():
+        
+        # 2단계: 기록이 끝난 후, API에 존재하지 않는 포지션만 골라서 정리
+        for symbol, sides in list(position_state.items()):
             for side in ["long", "short"]:
                 if (symbol, side) not in active_positions_set and sides[side]["size"] > 0:
                     log_debug(f"🔄 수동/자동 청산 감지 ({symbol}_{side.upper()})", f"서버: {sides[side]['size']}, API: 없음")
