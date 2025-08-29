@@ -296,73 +296,79 @@ def place_order(symbol, side, qty):
 
 def update_all_position_states():
     with position_lock:
-        all_positions = _get_api_response(api.list_positions, SETTLE)
-        if all_positions is None:
-            return
+        all_positions = []
+        api_source = "None"
 
+        # 1. 통합 계정(Unified Account) 먼저 확인
+        try:
+            unified_positions = _get_api_response(unified_api.list_unified_positions, SETTLE)
+            if unified_positions:
+                all_positions = unified_positions
+                api_source = "UnifiedApi"
+        except Exception:
+            # 통합 계정이 아니거나 오류 발생 시, 다음으로 넘어감
+            pass
+
+        # 2. 통합 계정에 포지션이 없으면, 클래식 선물 계정(Classic Account) 확인
+        if not all_positions:
+            try:
+                futures_positions = _get_api_response(api.list_positions, SETTLE)
+                if futures_positions:
+                    all_positions = futures_positions
+                    api_source = "FuturesApi"
+            except Exception as e:
+                log_debug("❌ API 호출 완전 실패", f"두 API 모두에서 포지션 조회 실패: {e}", exc_info=True)
+                return
+        
+        log_debug("📊 포지션 동기화 시작", f"데이터 소스: {api_source}, 찾은 포지션 수: {len(all_positions)}")
+        
         active_positions_set = set()
         
-        # API에서 받은 실시간 포지션으로 서버 상태 업데이트
         for pos in all_positions:
             symbol = normalize_symbol(pos.contract)
             if not symbol: continue
             if symbol not in position_state: initialize_states()
-
+            
             cfg = get_symbol_config(symbol)
             pos_size = Decimal(str(pos.size))
             
-            # ▼▼▼ [수정된 핵심 로직] 포지션 모드에 따라 side 구분 ▼▼▼
-            # 헤지 모드 (Dual Position) 처리
+            # 헤지 모드 처리 (dual_long / dual_short)
             if hasattr(pos, 'mode') and pos.mode in ['dual_long', 'dual_short']:
                 side = 'long' if pos.mode == 'dual_long' else 'short'
                 state = position_state[symbol][side]
-                # 헤지 모드에서 size는 항상 양수
                 state.update({
-                    "price": Decimal(str(pos.entry_price)),
-                    "size": pos_size, 
+                    "price": Decimal(str(pos.entry_price)), "size": pos_size,
                     "value": pos_size * Decimal(str(pos.mark_price)) * cfg["contract_size"]
                 })
-                if state["entry_count"] == 0 and state["size"] > 0:
-                    log_debug(f"🔄 수동 포지션 감지 (헤지 모드)", f"{symbol} {side.upper()}")
-                    state.update({"entry_count": 1, "entry_time": time.time()})
                 active_positions_set.add((symbol, side))
             
-            # 단방향 모드 (One-way Position) 처리
+            # 단방향 모드 또는 mode 정보가 없는 경우 처리 (size 부호로 판별)
             else:
-                # 단방향 모드에서는 size의 부호로 롱/숏 구분
                 if pos_size > 0:
                     side = 'long'
-                    state = position_state[symbol][side]
+                    state = position_state[symbol]['long']
                     state.update({
-                        "price": Decimal(str(pos.entry_price)), 
-                        "size": pos_size, 
+                        "price": Decimal(str(pos.entry_price)), "size": pos_size,
                         "value": pos_size * Decimal(str(pos.mark_price)) * cfg["contract_size"]
                     })
                     active_positions_set.add((symbol, side))
-                    # 반대편 포지션 상태는 깨끗하게 초기화
-                    if position_state[symbol]['short']['size'] > 0:
-                        position_state[symbol]['short'] = get_default_pos_side_state()
+                    if position_state[symbol]['short']['size'] > 0: position_state[symbol]['short'] = get_default_pos_side_state()
                 
                 elif pos_size < 0:
                     side = 'short'
-                    state = position_state[symbol][side]
+                    state = position_state[symbol]['short']
                     state.update({
-                        "price": Decimal(str(pos.entry_price)),
-                        "size": abs(pos_size), # 서버 상태의 size는 항상 양수로 저장
+                        "price": Decimal(str(pos.entry_price)), "size": abs(pos_size),
                         "value": abs(pos_size) * Decimal(str(pos.mark_price)) * cfg["contract_size"]
                     })
                     active_positions_set.add((symbol, side))
-                    # 반대편 포지션 상태는 깨끗하게 초기화
-                    if position_state[symbol]['long']['size'] > 0:
-                        position_state[symbol]['long'] = get_default_pos_side_state()
-            # ▲▲▲ [수정 완료] ▲▲▲
-
+                    if position_state[symbol]['long']['size'] > 0: position_state[symbol]['long'] = get_default_pos_side_state()
+        
         # 서버에는 있지만 API에 없는 포지션(청산된 포지션) 정리
         for symbol, sides in position_state.items():
             for side in ["long", "short"]:
                 if (symbol, side) not in active_positions_set and sides[side]["size"] > 0:
                     log_debug(f"🔄 수동/자동 청산 감지 ({symbol}_{side.upper()})", f"서버: {sides[side]['size']}, API: 없음")
-                    # TP가 방금 실행된 경우를 대비해 수동 청산 보호를 걸어둠
                     set_manual_close_protection(symbol, side)
                     position_state[symbol][side] = get_default_pos_side_state()
                     if symbol in tpsl_storage: tpsl_storage[symbol][side].clear()
