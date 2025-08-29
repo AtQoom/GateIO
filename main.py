@@ -306,35 +306,21 @@ def place_order(symbol, side, qty):
             return False
 
 def update_all_position_states():
-    """🔥 최종 안정성 강화: API 조회 실패 시, 기존 포지션 상태를 유지하여 '사라지는 포지션' 버그를 완벽히 해결"""
+    """🔥 최종 수정: 포지션 조회 API를 'FuturesApi'로 단일화하여 'AttributeError' 충돌 문제를 근본적으로 해결"""
     with position_lock:
-        api_positions = None
-        api_source = "None"
+        # ▼▼▼ [핵심 수정] 선물 포지션 조회는 계정 유형과 상관없이 'api.list_positions' 하나로 통일합니다. ▼▼▼
+        api_positions = _get_api_response(api.list_positions, settle=SETTLE)
         
-        # 1. 통합 계정(Unified Account) 먼저 확인
-        unified_positions = _get_api_response(unified_api.list_unified_positions, SETTLE)
-        
-        # ▼▼▼ [핵심] API 호출이 성공했을 때만(결과가 None이 아닐 때) api_positions에 값을 할당 ▼▼▼
-        if unified_positions is not None:
-            api_positions = unified_positions
-            api_source = "UnifiedApi"
-        else:
-            # 통합 계정 API 호출 실패 시, 클래식 선물 계정으로 재시도
-            futures_positions = _get_api_response(api.list_positions, SETTLE)
-            if futures_positions is not None:
-                api_positions = futures_positions
-                api_source = "FuturesApi"
-        
-        # ▼▼▼ [매우 중요] 두 API 모두에서 정보를 가져오는데 실패했다면, 함수를 즉시 종료하여 기존 상태를 보존! ▼▼▼
+        # ▼▼▼ [안정성 유지] API 호출 실패 시(None 반환 시), 함수를 즉시 종료하여 기존 포지션 상태를 보존합니다. ▼▼▼
         if api_positions is None:
-            log_debug("❌ 포지션 동기화 실패", "API 엔드포인트 응답 없음. 이전 포지션 상태를 유지합니다.")
+            log_debug("❌ 포지션 동기화 실패", "API 응답 없음. 이전 포지션 상태를 유지합니다.")
             return
 
-        log_debug("📊 포지션 동기화 시작", f"데이터 소스: {api_source}, 찾은 포지션 수: {len(api_positions)}")
+        log_debug("📊 포지션 동기화 시작", f"데이터 소스: FuturesApi, 찾은 포지션 수: {len(api_positions)}")
         
         active_positions_set = set()
         
-        for pos in api_positions: # 성공적으로 가져온 API 결과로만 처리
+        for pos in api_positions:
             symbol = normalize_symbol(pos.contract)
             if not symbol: continue
             if symbol not in position_state: initialize_states()
@@ -342,6 +328,7 @@ def update_all_position_states():
             cfg = get_symbol_config(symbol)
             pos_size = Decimal(str(pos.size))
             
+            # 헤지 모드(dual_long/dual_short)와 단방향 모드를 모두 처리
             if hasattr(pos, 'mode') and pos.mode in ['dual_long', 'dual_short']:
                 side = 'long' if pos.mode == 'dual_long' else 'short'
                 state = position_state[symbol][side]
@@ -350,7 +337,7 @@ def update_all_position_states():
                     "value": pos_size * Decimal(str(pos.mark_price)) * cfg["contract_size"]
                 })
                 active_positions_set.add((symbol, side))
-            else:
+            else: # 단방향 모드 또는 mode 정보 없는 경우
                 if pos_size > 0:
                     side = 'long'
                     state = position_state[symbol]['long']
@@ -359,7 +346,8 @@ def update_all_position_states():
                         "value": pos_size * Decimal(str(pos.mark_price)) * cfg["contract_size"]
                     })
                     active_positions_set.add((symbol, side))
-                    if position_state[symbol]['short']['size'] > 0: position_state[symbol]['short'] = get_default_pos_side_state()
+                    if position_state[symbol]['short']['size'] > 0:
+                        position_state[symbol]['short'] = get_default_pos_side_state()
                 elif pos_size < 0:
                     side = 'short'
                     state = position_state[symbol]['short']
@@ -368,8 +356,9 @@ def update_all_position_states():
                         "value": abs(pos_size) * Decimal(str(pos.mark_price)) * cfg["contract_size"]
                     })
                     active_positions_set.add((symbol, side))
-                    if position_state[symbol]['long']['size'] > 0: position_state[symbol]['long'] = get_default_pos_side_state()
-        
+                    if position_state[symbol]['long']['size'] > 0:
+                        position_state[symbol]['long'] = get_default_pos_side_state()
+
         # API에서 확인된 포지션 외에는 모두 청산된 것으로 간주하고 정리
         for symbol, sides in position_state.items():
             for side in ["long", "short"]:
