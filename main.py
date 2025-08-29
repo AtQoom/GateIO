@@ -306,7 +306,8 @@ def place_order(symbol, side, qty):
             return False
 
 def update_all_position_states():
-    """🔥 최종 완성: 헤지 모드와 단방향 모드가 섞여있을 때 발생하는 상태 초기화 충돌 버그를 완벽히 해결한 최종 버전"""
+    """🔥 최종 완성: 'size=0' 유령 포지션을 완벽히 필터링하고,
+    가장 안전한 '先기록, 後정리' 방식으로 포지션 상태를 동기화하는 최종 버전입니다."""
     with position_lock:
         api_positions = _get_api_response(api.list_positions, settle=SETTLE)
         
@@ -315,55 +316,57 @@ def update_all_position_states():
             return
 
         log_debug("📊 포지션 동기화 시작", f"데이터 소스: FuturesApi, 찾은 포지션 수: {len(api_positions)}")
+
+        # 1. 현재 스크립트가 '보유 중'이라고 알고 있는 포지션들의 집합을 미리 만들어 둡니다.
+        # 이 집합은 잠재적인 '청산 대상' 목록이 됩니다.
+        positions_to_clear = set()
+        for symbol, sides in position_state.items():
+            for side in ["long", "short"]:
+                if sides[side]["size"] > 0:
+                    positions_to_clear.add((symbol, side))
         
-        active_positions_set = set()
-        
-        # 1단계: API에서 받은 모든 포지션 정보를 내부 상태에 먼저 기록
+        # 2. API 응답을 하나씩 확인하면서, '실제로 존재하는(size > 0)' 포지션만 골라 상태를 업데이트합니다.
         for pos in api_positions:
+            pos_size = Decimal(str(pos.size))
+            if pos_size == 0:
+                continue  # size가 0인 '유령 포지션'은 완전히 무시하고 건너뜁니다.
+
             symbol = normalize_symbol(pos.contract)
             if not symbol: continue
-            if symbol not in position_state: initialize_states()
 
             cfg = get_symbol_config(symbol)
-            pos_size = Decimal(str(pos.size))
             
-            # 헤지 모드(dual_long/dual_short) 처리
-            if hasattr(pos, 'mode') and pos.mode in ['dual_long', 'dual_short']:
-                side = 'long' if pos.mode == 'dual_long' else 'short'
-                state = position_state[symbol][side]
-                state.update({
-                    "price": Decimal(str(pos.entry_price)), "size": pos_size,
-                    "value": pos_size * Decimal(str(pos.mark_price)) * cfg["contract_size"]
-                })
-                active_positions_set.add((symbol, side))
+            # API 응답의 'mode'와 'size'를 조합하여 포지션 방향(side)을 명확하게 결정합니다.
+            side = None
+            if hasattr(pos, 'mode') and pos.mode == 'dual_long':
+                side = 'long'
+            elif hasattr(pos, 'mode') and pos.mode == 'dual_short':
+                side = 'short'
+            elif pos_size > 0: # 단방향 모드 롱
+                side = 'long'
+            elif pos_size < 0: # 단방향 모드 숏
+                side = 'short'
 
-            # 단방향 모드(size 부호로 판별) 처리
-            else:
-                if pos_size > 0: # 롱 포지션
-                    side = 'long'
-                    state = position_state[symbol][side]
-                    state.update({
-                        "price": Decimal(str(pos.entry_price)), "size": pos_size,
-                        "value": pos_size * Decimal(str(pos.mark_price)) * cfg["contract_size"]
-                    })
-                    active_positions_set.add((symbol, side))
-                elif pos_size < 0: # 숏 포지션
-                    side = 'short'
-                    state = position_state[symbol][side]
-                    state.update({
-                        "price": Decimal(str(pos.entry_price)), "size": abs(pos_size),
-                        "value": abs(pos_size) * Decimal(str(pos.mark_price)) * cfg["contract_size"]
-                    })
-                    active_positions_set.add((symbol, side))
-        
-        # 2단계: 기록이 끝난 후, API에 존재하지 않는 포지션만 골라서 정리
-        for symbol, sides in list(position_state.items()):
-            for side in ["long", "short"]:
-                if (symbol, side) not in active_positions_set and sides[side]["size"] > 0:
-                    log_debug(f"🔄 수동/자동 청산 감지 ({symbol}_{side.upper()})", f"서버: {sides[side]['size']}, API: 없음")
-                    set_manual_close_protection(symbol, side)
-                    position_state[symbol][side] = get_default_pos_side_state()
-                    if symbol in tpsl_storage: tpsl_storage[symbol][side].clear()
+            if not side: continue
+            
+            # 이 포지션은 실제로 존재하므로, '청산 대상' 목록에서 제거합니다.
+            positions_to_clear.discard((symbol, side))
+
+            # 스크립트의 내부 상태를 Gate.io의 최신 정보로 정확하게 업데이트합니다.
+            state = position_state[symbol][side]
+            state.update({
+                "price": Decimal(str(pos.entry_price)),
+                "size": abs(pos_size),
+                "value": abs(pos_size) * Decimal(str(pos.mark_price)) * cfg["contract_size"]
+            })
+
+        # 3. 모든 확인이 끝난 후, '청산 대상' 목록에 여전히 남아있는 포지션들을 최종적으로 정리합니다.
+        # 이들은 API에서 더 이상 보고되지 않으므로, 사용자가 직접 청산한 것으로 간주합니다.
+        for symbol, side in positions_to_clear:
+            log_debug(f"🔄 수동/자동 청산 감지 ({symbol}_{side.upper()})", f"API 응답에 해당 포지션이 없어 상태를 초기화합니다.")
+            set_manual_close_protection(symbol, side)
+            position_state[symbol][side] = get_default_pos_side_state()
+            if symbol in tpsl_storage: tpsl_storage[symbol][side].clear()
 
 # ========
 # 8. 핵심 진입 처리 로직
