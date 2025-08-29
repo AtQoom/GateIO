@@ -347,11 +347,35 @@ def handle_entry(data):
     qty, final_ratio = calculate_position_size(symbol, signal_type, entry_score, current_signal_count)
         
     if qty > 0 and place_order(symbol, side, qty):
+        # 진입 성공 후 상태 업데이트
         state["entry_count"] += 1
         state[f"{base_type}_entry_count"] += 1
         state["entry_time"] = time.time()
         if "rescue" not in signal_type: state['last_entry_ratio'] = final_ratio
         
+        # ▼▼▼ [제안 드린 추가 로직] 프리미엄 TP 배수 저장 ▼▼▼
+        current_multiplier = state.get("premium_tp_multiplier", Decimal("1.0"))
+        
+        if "premium" in signal_type:
+            # 첫 프리미엄 진입 (기존 포지션 없음)
+            if state["premium_entry_count"] == 1 and state["normal_entry_count"] == 0:
+                new_multiplier = PREMIUM_TP_MULTIPLIERS["first_entry"]
+            # 일반 진입 후 첫 프리미엄 진입
+            elif state["premium_entry_count"] == 1 and state["normal_entry_count"] > 0:
+                new_multiplier = PREMIUM_TP_MULTIPLIERS["after_normal"]
+            # 프리미엄 진입 후 추가 프리미엄 진입
+            else:
+                new_multiplier = PREMIUM_TP_MULTIPLIERS["after_premium"]
+            
+            # 기존 배수와 새 배수 중 더 유리한(작은) 값을 선택하여 점진적으로 TP 목표를 낮춤
+            state["premium_tp_multiplier"] = min(current_multiplier, new_multiplier) if current_multiplier != Decimal("1.0") else new_multiplier
+            log_debug(f"✨ 프리미엄 TP 배수 적용", f"{symbol} {side.upper()} → {state['premium_tp_multiplier']:.2f}x")
+
+        # 일반/레스큐 신호로 첫 진입 시, 배수 1.0으로 초기화
+        elif state["entry_count"] == 1:
+            state["premium_tp_multiplier"] = Decimal("1.0")
+        # ▲▲▲ [로직 추가 완료] ▲▲▲
+
         store_tp_sl(symbol, side, tv_tp_pct, tv_sl_pct, state["entry_count"])
         log_debug(f"💾 TP/SL 저장", f"TP: {tv_tp_pct*100:.3f}%, SL: {tv_sl_pct*100:.3f}%")
         log_debug(f"✅ 진입 성공", f"유형: {signal_type}, 수량: {float(qty)}")
