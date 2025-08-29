@@ -276,19 +276,30 @@ def calculate_position_size(symbol, signal_type, entry_score, current_signal_cou
 def place_order(symbol, side, qty):
     with position_lock:
         try:
+            # 주문 전 상태 확인을 위해 먼저 호출
             update_all_position_states()
-            original_size = abs(position_state[symbol][side]["size"])
+            original_size = position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0"))
+            
             order = FuturesOrder(contract=symbol, size=int(qty) if side == "long" else -int(qty), price="0", tif="ioc")
             result = _get_api_response(api.create_futures_order, SETTLE, order)
-            if not result: return False
+            
+            if not result: 
+                log_debug(f"❌ 주문 API 호출 실패 ({symbol}_{side.upper()})", "결과 없음")
+                return False
+
             log_debug(f"✅ 주문 전송 ({symbol}_{side.upper()})", f"ID: {getattr(result, 'id', 'N/A')}")
-            for attempt in range(5):
+            
+            # ▼▼▼ [핵심 수정] API 지연에 대응하기 위해 대기 시간을 5초 -> 15초로 늘림 ▼▼▼
+            for attempt in range(15):
                 time.sleep(1)
                 update_all_position_states()
-                if abs(position_state[symbol][side]["size"]) > original_size:
+                current_size = position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0"))
+                if current_size > original_size:
                     log_debug(f"🔄 포지션 업데이트 확인 ({symbol}_{side.upper()})", f"{attempt+1}초 소요")
                     return True
-            log_debug(f"❌ 포지션 업데이트 실패 ({symbol}_{side.upper()})", "5초 후에도 변경 없음")
+            # ▲▲▲ [수정 완료] ▲▲▲
+            
+            log_debug(f"❌ 포지션 업데이트 실패 ({symbol}_{side.upper()})", "15초 후에도 변경 없음. API 지연 가능성 높음.")
             return False
         except Exception as e:
             log_debug(f"❌ 주문 오류 ({symbol}_{side.upper()})", str(e), exc_info=True)
@@ -496,112 +507,95 @@ async def price_monitor():
         await asyncio.sleep(5)
 
 def simple_tp_monitor(ticker):
-    """🔥 수정: 프리미엄 배수 + 수동 청산 보호 + 실제 청산 실행 + 방향 정확 처리"""
+    """🔥 진짜 최종 수정: 'reduce_only=True' 옵션을 추가하여 헤지 모드에서 TP가 반대 포지션을 여는 치명적인 버그를 해결"""
     try:
         symbol = normalize_symbol(ticker.get("contract"))
         price = Decimal(str(ticker.get("last", "0")))
         
-        if not symbol or price <= 0:
-            return
-            
+        if not symbol or price <= 0: return
         cfg = get_symbol_config(symbol)
-        if not cfg:
-            return
+        if not cfg: return
             
         with position_lock:
             pos_side_state = position_state.get(symbol, {})
             
-            # 롱 포지션 TP 체크 (양수 크기만)
+            # --- 롱 포지션 TP 체크 ---
             long_actual_size = pos_side_state.get("long", {}).get("size", Decimal(0))
-            if long_actual_size > 0:
-                if is_manual_close_protected(symbol, "long"):
-                    return
-                
+            if long_actual_size > 0 and not is_manual_close_protected(symbol, "long"):
                 long_pos = pos_side_state["long"]
                 entry_price = long_pos.get("price")
-                entry_time = long_pos.get("entry_time", time.time())
                 entry_count = long_pos.get("entry_count", 0)
-                premium_multiplier = long_pos.get("premium_tp_multiplier", Decimal("1.0"))
-                
+
                 if entry_price and entry_price > 0 and entry_count > 0:
+                    premium_multiplier = long_pos.get("premium_tp_multiplier", Decimal("1.0"))
                     symbol_weight_tp = Decimal(str(cfg["tp_mult"]))
                     tp_map = [Decimal("0.0045"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
                     base_tp_pct = tp_map[min(entry_count-1, len(tp_map)-1)] * symbol_weight_tp * premium_multiplier
-                    
-                    time_elapsed = time.time() - entry_time
+                    time_elapsed = time.time() - long_pos.get("entry_time", time.time())
                     periods_15s = max(0, int(time_elapsed / 15))
                     tp_decay_amt_ps = Decimal("0.002") / 100
                     tp_min_pct_ps = Decimal("0.16") / 100
-                    
                     tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp * premium_multiplier)
                     min_tp_with_mult = tp_min_pct_ps * symbol_weight_tp * premium_multiplier
                     current_tp_pct = max(min_tp_with_mult, base_tp_pct - tp_reduction)
-                    
                     long_pos["current_tp_pct"] = current_tp_pct
                     tp_price = entry_price * (1 + current_tp_pct)
                     
                     if price >= tp_price:
+                        set_manual_close_protection(symbol, 'long', duration=20)
                         log_debug(f"🎯 롱 TP 실행 ({symbol})", f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}")
                         
                         try:
-                            order = FuturesOrder(contract=symbol, size=-int(long_actual_size), price="0", tif="ioc")
+                            # ▼▼▼ [핵심 수정] reduce_only=True 플래그를 추가하여 '청산 전용' 주문으로 전송 ▼▼▼
+                            order = FuturesOrder(contract=symbol, size=-int(long_actual_size), price="0", tif="ioc", reduce_only=True)
                             result = _get_api_response(api.create_futures_order, SETTLE, order)
                             if result:
-                                log_debug(f"✅ 롱 TP 청산 주문 성공 ({symbol})", f"주문 ID: {getattr(result, 'id', 'Unknown')}")
-                                # ▼▼▼ [매우 중요] TP 성공 후 상태 즉시 초기화 ▼▼▼
+                                log_debug(f"✅ 롱 TP 청산 주문 성공 ({symbol})", f"ID: {getattr(result, 'id', 'Unknown')}")
                                 position_state[symbol]['long'] = get_default_pos_side_state()
                                 if symbol in tpsl_storage: tpsl_storage[symbol]['long'].clear()
-                                log_debug(f"🔄 TP 실행 후 상태 초기화 ({symbol}_long)", "중복 실행 방지")
-                                # ▲▲▲ [수정 완료] ▲▲▲
+                                log_debug(f"🔄 TP 실행 후 상태 초기화 완료 ({symbol}_long)")
                             else:
-                                log_debug(f"❌ 롱 TP 청산 주문 실패 ({symbol})", "API 호출 실패")
+                                log_debug(f"❌ 롱 TP 청산 주문 실패 ({symbol})", "API 호출 실패. 20초 후 재시도 가능.")
                         except Exception as e:
                             log_debug(f"❌ 롱 TP 청산 오류 ({symbol})", str(e), exc_info=True)
-            
-            # 숏 포지션 TP 체크 (양수 크기만)
+
+            # --- 숏 포지션 TP 체크 ---
             short_actual_size = pos_side_state.get("short", {}).get("size", Decimal(0))
-            if short_actual_size > 0:
-                if is_manual_close_protected(symbol, "short"):
-                    return
-                
+            if short_actual_size > 0 and not is_manual_close_protected(symbol, "short"):
                 short_pos = pos_side_state["short"]
                 entry_price = short_pos.get("price")
-                entry_time = short_pos.get("entry_time", time.time())
                 entry_count = short_pos.get("entry_count", 0)
-                premium_multiplier = short_pos.get("premium_tp_multiplier", Decimal("1.0"))
-                
+
                 if entry_price and entry_price > 0 and entry_count > 0:
+                    premium_multiplier = short_pos.get("premium_tp_multiplier", Decimal("1.0"))
                     symbol_weight_tp = Decimal(str(cfg["tp_mult"]))
                     tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
                     base_tp_pct = tp_map[min(entry_count-1, len(tp_map)-1)] * symbol_weight_tp * premium_multiplier
-                    
-                    time_elapsed = time.time() - entry_time
+                    time_elapsed = time.time() - short_pos.get("entry_time", time.time())
                     periods_15s = max(0, int(time_elapsed / 15))
                     tp_decay_amt_ps = Decimal("0.002") / 100
                     tp_min_pct_ps = Decimal("0.16") / 100
-                    
                     tp_reduction = Decimal(str(periods_15s)) * (tp_decay_amt_ps * symbol_weight_tp * premium_multiplier)
                     min_tp_with_mult = tp_min_pct_ps * symbol_weight_tp * premium_multiplier
                     current_tp_pct = max(min_tp_with_mult, base_tp_pct - tp_reduction)
-                    
                     short_pos["current_tp_pct"] = current_tp_pct
                     tp_price = entry_price * (1 - current_tp_pct)
                     
                     if price <= tp_price:
+                        set_manual_close_protection(symbol, 'short', duration=20)
                         log_debug(f"🎯 숏 TP 실행 ({symbol})", f"진입가: {entry_price:.8f}, 현재가: {price:.8f}, TP가: {tp_price:.8f}")
                         
                         try:
-                            order = FuturesOrder(contract=symbol, size=int(short_actual_size), price="0", tif="ioc")
+                            # ▼▼▼ [핵심 수정] reduce_only=True 플래그를 추가하여 '청산 전용' 주문으로 전송 ▼▼▼
+                            order = FuturesOrder(contract=symbol, size=int(short_actual_size), price="0", tif="ioc", reduce_only=True)
                             result = _get_api_response(api.create_futures_order, SETTLE, order)
                             if result:
                                 log_debug(f"✅ 숏 TP 청산 주문 성공 ({symbol})", f"주문 ID: {getattr(result, 'id', 'Unknown')}")
-                                # ▼▼▼ [매우 중요] TP 성공 후 상태 즉시 초기화 ▼▼▼
                                 position_state[symbol]['short'] = get_default_pos_side_state()
                                 if symbol in tpsl_storage: tpsl_storage[symbol]['short'].clear()
-                                log_debug(f"🔄 TP 실행 후 상태 초기화 ({symbol}_short)", "중복 실행 방지")
-                                # ▲▲▲ [수정 완료] ▲▲▲
+                                log_debug(f"🔄 TP 실행 후 상태 초기화 완료 ({symbol}_short)")
                             else:
-                                log_debug(f"❌ 숏 TP 청산 주문 실패 ({symbol})", "API 호출 실패")
+                                log_debug(f"❌ 숏 TP 청산 주문 실패 ({symbol})", "API 호출 실패. 20초 후 재시도 가능.")
                         except Exception as e:
                             log_debug(f"❌ 숏 TP 청산 오류 ({symbol})", str(e), exc_info=True)
                 
