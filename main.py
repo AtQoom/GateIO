@@ -236,7 +236,8 @@ def is_duplicate(data):
 
 def calculate_position_size(symbol, signal_type, entry_score, current_signal_count):
     cfg, equity, price = get_symbol_config(symbol), get_total_collateral(), get_price(symbol)
-    if equity <= 0 or price <= 0: return Decimal("0"), Decimal("0")
+    if equity <= 0 or price <= 0:
+        return Decimal("0"), Decimal("0")
     
     base_ratio = get_ratio_by_index(current_signal_count)
     signal_multiplier = get_signal_type_multiplier(signal_type)
@@ -246,13 +247,19 @@ def calculate_position_size(symbol, signal_type, entry_score, current_signal_cou
     # 레스큐는 이전 비율 기준
     if "rescue" in signal_type:
         with position_lock:
+            # 🔥 추가: 'side' 변수가 없어서 오류가 발생할 수 있으므로 추가합니다.
+            side = "long" if "long" in signal_type else "short"
             last_ratio = position_state.get(symbol, {}).get(side, {}).get('last_entry_ratio', Decimal("5.0"))
             final_ratio = last_ratio * signal_multiplier
-
+            
     contract_value = price * cfg["contract_size"]
-    if contract_value <= 0: return Decimal("0"), final_ratio
+    if contract_value <= 0:
+        return Decimal("0"), final_ratio
     
-    base_qty = (equity * final_position_ratio / 100 / contract_value).quantize(Decimal('1'), rounding=ROUND_DOWN)
+    # 🔥 수정: 변수명을 'final_position_ratio'에서 'final_ratio'로 변경
+    position_value = equity * final_ratio / 100
+    base_qty = (position_value / contract_value).quantize(Decimal('1'), rounding=ROUND_DOWN)
+    
     qty_with_min = max(base_qty, cfg["min_qty"])
     
     if qty_with_min * contract_value < cfg["min_notional"]:
@@ -260,7 +267,8 @@ def calculate_position_size(symbol, signal_type, entry_score, current_signal_cou
     else:
         final_qty = qty_with_min
         
-    return qty, final_ratio
+    # 🔥 수정: 반환값에 qty가 누락되어 있었습니다.
+    return final_qty, final_ratio
 
 # ========
 # 7. 주문 및 상태 관리
