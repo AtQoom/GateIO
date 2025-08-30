@@ -135,7 +135,8 @@ def get_default_pos_side_state():
         "price": None, "size": Decimal("0"), "value": Decimal("0"),
         "entry_count": 0, "normal_entry_count": 0, "premium_entry_count": 0,
         "rescue_entry_count": 0, "entry_time": None, "last_entry_ratio": Decimal("0"),
-        "current_tp_pct": Decimal("0")
+        "current_tp_pct": Decimal("0"),
+        "premium_tp_multiplier": Decimal("1.0")  # 이 필드가 누락됨
     }
 
 def initialize_states():
@@ -214,8 +215,21 @@ def get_total_collateral(force=False):
     return equity
 
 def get_price(symbol):
-    ticker = _get_api_response(api.list_futures_tickers, SETTLE, contract=symbol)
-    return Decimal(str(ticker.last)) if ticker and len(ticker) > 0 else Decimal("0")
+    """list_futures_tickers는 list[FuturesTicker]를 반환할 수 있으므로 첫 요소를 안전하게 처리"""
+    try:
+        res = _get_api_response(api.list_futures_tickers, SETTLE, contract=symbol)
+        if not res:
+            return Decimal("0")
+        # Gate.io SDK는 리스트를 반환
+        if isinstance(res, list) and len(res) > 0:
+            last_str = str(getattr(res[0], 'last', '0'))
+            return Decimal(last_str)
+        # 혹시 단일 객체가 오는 경우 보강
+        last_str = str(getattr(res, 'last', '0'))
+        return Decimal(last_str)
+    except Exception as e:
+        log_debug("❌ Get Price 오류", f"{symbol}: {e}", exc_info=True)
+        return Decimal("0")
 
 # ======== 6. 파인스크립트 연동 및 수량계산 ========
 def get_signal_type_multiplier(signal_type):
@@ -434,14 +448,23 @@ def handle_entry(data):
     qty, final_ratio = calculate_position_size(symbol, signal_type, entry_score, current_signal_count)
     
     if qty > 0 and place_order(symbol, side, qty):
+        # 1) 카운트 먼저 증가 (파인스크립트와 동기화)
         state["entry_count"] += 1
-        state[f"{base_type}_entry_count"] += 1
+        if base_type == "premium":
+            state["premium_entry_count"] += 1
+        elif base_type == "normal":
+            state["normal_entry_count"] += 1
+        elif base_type == "rescue":
+            state["rescue_entry_count"] += 1
         state["entry_time"] = time.time()
+        
+        # 2) last_entry_ratio 갱신
         if "rescue" not in signal_type: 
             state['last_entry_ratio'] = final_ratio
         
-        current_multiplier = state.get("premium_tp_multiplier", Decimal("1.0"))
-        if "premium" in signal_type:
+        # 3) 프리미엄 배수 재계산 (증가된 카운트 기준)
+        if base_type == "premium":
+            # 진입 후 증가된 카운트로 배수 판단
             if state["premium_entry_count"] == 1 and state["normal_entry_count"] == 0:
                 new_multiplier = PREMIUM_TP_MULTIPLIERS["first_entry"]
             elif state["premium_entry_count"] == 1 and state["normal_entry_count"] > 0:
@@ -449,14 +472,27 @@ def handle_entry(data):
             else:
                 new_multiplier = PREMIUM_TP_MULTIPLIERS["after_premium"]
             
-            state["premium_tp_multiplier"] = min(current_multiplier, new_multiplier) if current_multiplier != Decimal("1.0") else new_multiplier
-            log_debug("✨ 프리미엄 TP 배수 적용", f"{symbol} {side.upper()} → {state['premium_tp_multiplier']:.2f}x")
+            current_multiplier = state.get("premium_tp_multiplier", Decimal("1.0"))
+            state["premium_tp_multiplier"] = min(current_multiplier, new_multiplier) if current_multiplier > Decimal("1.0") else new_multiplier
+            log_debug("✨ 프리미엄 TP 배수 적용", f"{symbol} {side.upper()} → {state['premium_tp_multiplier']:.2f}x (P:{state['premium_entry_count']}/N:{state['normal_entry_count']})")
         elif state["entry_count"] == 1:
+            # 포지션이 새로 시작되면 배수 초기화
             state["premium_tp_multiplier"] = Decimal("1.0")
         
+        # 4) TP/SL 저장 및 로그
         store_tp_sl(symbol, side, tv_tp_pct, tv_sl_pct, state["entry_count"])
         log_debug("💾 TP/SL 저장", f"TP:{tv_tp_pct*100:.3f}% SL:{tv_sl_pct*100:.3f}%")
-        log_debug("✅ 진입 성공", f"{signal_type} qty={float(qty)}")
+        log_debug("✅ 진입 성공", f"{signal_type} qty={float(qty)} 총진입:{state['entry_count']} N:{state['normal_entry_count']} P:{state['premium_entry_count']} R:{state['rescue_entry_count']}")
+        
+        # 5) 디버깅용 - 알림 카운트와 서버 카운트 비교
+        tv_next_total = data.get("next_total_cnt", 0)
+        tv_next_norm = data.get("next_norm_cnt", 0)
+        tv_next_prem = data.get("next_prem_cnt", 0)
+        tv_next_rescue = data.get("next_rescue_cnt", 0)
+        
+        if tv_next_total != state["entry_count"]:
+            log_debug("⚠️ 카운트 불일치", f"TV예상:{tv_next_total} vs 서버:{state['entry_count']}")
+        log_debug("📊 카운트 동기화", f"TV→서버 N:{tv_next_norm}→{state['normal_entry_count']} P:{tv_next_prem}→{state['premium_entry_count']} R:{tv_next_rescue}→{state['rescue_entry_count']}")
 
 # ======== 9. 라우트 & 백그라운드 ========
 @app.route("/", methods=["POST"])
@@ -536,51 +572,66 @@ def status():
 async def price_monitor():
     global ws_last_payload, ws_last_subscribed_at
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-    last_resubscribe = time.time()
     
     while True:
         try:
             async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
-                base_symbols = set(SYMBOL_CONFIG.keys())
-                all_symbols = list(base_symbols | dynamic_symbols)
-                
-                # 구독 및 메트릭 기록
-                payload = all_symbols
-                ws_last_payload = payload[:]  # 복사 저장
-                ws_last_subscribed_at = int(time.time())
-                
-                await ws.send(json.dumps({
-                    "time": int(time.time()),
-                    "channel": "futures.tickers",
-                    "event": "subscribe",
-                    "payload": payload
-                }))
-                
-                log_debug("🔌 웹소켓 구독", f"{len(payload)}개 심볼 (기본:{len(base_symbols)}, 동적:{len(dynamic_symbols)})")
-                
+                log_debug("🔌 웹소켓 연결 성공", uri)
+                last_resubscribe_time = 0
+                last_app_ping_time = 0
+                subscribed_symbols = set()
+
                 while True:
-                    msg = await asyncio.wait_for(ws.recv(), timeout=30)
-                    result = json.loads(msg).get("result")
-                    if isinstance(result, list):
-                        [simple_tp_monitor(i) for i in result]
-                    elif isinstance(result, dict):
-                        simple_tp_monitor(result)
-                    
-                    # 60초마다 심볼 세트 변경 여부 확인 → 변경 시 재구독
-                    if time.time() - last_resubscribe > 60:
-                        current_symbols = list(set(SYMBOL_CONFIG.keys()) | dynamic_symbols)
-                        if current_symbols != all_symbols:
-                            await ws.send(json.dumps({
-                                "time": int(time.time()),
-                                "channel": "futures.tickers",
-                                "event": "subscribe",
-                                "payload": current_symbols
-                            }))
-                            ws_last_payload = current_symbols[:]
+                    # 60초마다 심볼 리스트 갱신 및 재구독
+                    if time.time() - last_resubscribe_time > 60:
+                        base_symbols = set(SYMBOL_CONFIG.keys())
+                        with position_lock:
+                            current_symbols_set = base_symbols | dynamic_symbols
+                        
+                        if subscribed_symbols != current_symbols_set:
+                            # 기존 구독 해지 (중요: unsubscribe 먼저)
+                            if subscribed_symbols:
+                                await ws.send(json.dumps({
+                                    "time": int(time.time()), 
+                                    "channel": "futures.tickers",
+                                    "event": "unsubscribe", 
+                                    "payload": list(subscribed_symbols)
+                                }))
+                                log_debug("🔌 웹소켓 구독 해지", f"{len(subscribed_symbols)}개 심볼")
+
+                            # 신규 구독
+                            subscribed_symbols = current_symbols_set
+                            payload = list(subscribed_symbols)
+                            ws_last_payload = payload[:]
                             ws_last_subscribed_at = int(time.time())
-                            log_debug("🔌 동적 재구독", f"변경:{len(current_symbols)-len(all_symbols)}개 (총 {len(current_symbols)})")
-                            all_symbols = current_symbols
-                        last_resubscribe = time.time()
+                            await ws.send(json.dumps({
+                                "time": ws_last_subscribed_at, 
+                                "channel": "futures.tickers",
+                                "event": "subscribe", 
+                                "payload": payload
+                            }))
+                            log_debug("🔌 웹소켓 구독/재구독", f"{len(payload)}개 심볼")
+                        
+                        last_resubscribe_time = time.time()
+
+                    # 10초마다 앱 레벨 핑
+                    if time.time() - last_app_ping_time > 10:
+                        await ws.send(json.dumps({
+                            "time": int(time.time()), 
+                            "channel": "futures.ping"
+                        }))
+                        last_app_ping_time = time.time()
+                    
+                    msg = await asyncio.wait_for(ws.recv(), timeout=30)
+                    data = json.loads(msg)
+                    
+                    if data.get("channel") == "futures.tickers":
+                        result = data.get("result")
+                        if isinstance(result, list):
+                            for item in result:
+                                simple_tp_monitor(item)
+                        elif isinstance(result, dict):
+                            simple_tp_monitor(result)
         
         except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed) as e:
             log_debug("🔌 웹소켓 재연결", f"사유: {type(e).__name__}")
