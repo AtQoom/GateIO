@@ -25,6 +25,7 @@ import urllib.parse
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
+
 def log_debug(tag, msg, exc_info=False):
     logger.info(f"[{tag}] {msg}")
     if exc_info:
@@ -143,6 +144,7 @@ def initialize_states():
         for sym in SYMBOL_CONFIG:
             position_state[sym] = {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()}
             tpsl_storage[sym] = {"long": {}, "short": {}}
+        
         try:
             api_positions = _get_api_response(api.list_positions, settle=SETTLE)
             if api_positions:
@@ -189,12 +191,15 @@ def _get_api_response(api_call, *args, **kwargs):
     return None
 
 def normalize_symbol(raw_symbol):
-    if not raw_symbol: return None
+    if not raw_symbol: 
+        return None
     symbol = str(raw_symbol).upper().strip()
-    if symbol in SYMBOL_MAPPING: return SYMBOL_MAPPING[symbol]
+    if symbol in SYMBOL_MAPPING: 
+        return SYMBOL_MAPPING[symbol]
     clean = symbol.replace('.P', '').replace('PERP', '').replace('USDT', '')
     for key, value in SYMBOL_MAPPING.items():
-        if clean in key: return value
+        if clean in key: 
+            return value
     log_debug("⚠️ 심볼 정규화 실패", f"'{raw_symbol}' → 매핑되지 않음")
     return symbol
 
@@ -202,6 +207,7 @@ def get_total_collateral(force=False):
     now = time.time()
     if not force and account_cache.get("data") and account_cache.get("time", 0) > now - 30:
         return account_cache["data"]
+    
     acc = _get_api_response(api.list_futures_accounts, SETTLE)
     equity = Decimal(str(getattr(acc, 'total', '0'))) if acc else Decimal("0")
     account_cache.update({"time": now, "data": equity})
@@ -213,8 +219,10 @@ def get_price(symbol):
 
 # ======== 6. 파인스크립트 연동 및 수량계산 ========
 def get_signal_type_multiplier(signal_type):
-    if "premium" in signal_type: return Decimal("2.0")
-    if "rescue" in signal_type:  return Decimal("3.0")
+    if "premium" in signal_type: 
+        return Decimal("2.0")
+    if "rescue" in signal_type:  
+        return Decimal("3.0")
     return Decimal("1.0")
 
 def get_entry_weight_from_score(score):
@@ -254,25 +262,31 @@ def calculate_position_size(symbol, signal_type, entry_score, current_signal_cou
     cfg, equity, price = get_symbol_config(symbol), get_total_collateral(), get_price(symbol)
     if equity <= 0 or price <= 0:
         return Decimal("0"), Decimal("0")
+    
     base_ratio = get_ratio_by_index(current_signal_count)
     signal_multiplier = get_signal_type_multiplier(signal_type)
     score_weight = get_entry_weight_from_score(entry_score)
     final_ratio = base_ratio * signal_multiplier * score_weight
+    
     if "rescue" in signal_type:
         with position_lock:
             side = "long" if "long" in signal_type else "short"
             last_ratio = position_state.get(symbol, {}).get(side, {}).get('last_entry_ratio', Decimal("5.0"))
             final_ratio = last_ratio * signal_multiplier
+    
     contract_value = price * cfg["contract_size"]
     if contract_value <= 0:
         return Decimal("0"), final_ratio
+    
     position_value = equity * final_ratio / 100
     base_qty = (position_value / contract_value).quantize(Decimal('1'), rounding=ROUND_DOWN)
     qty_with_min = max(base_qty, cfg["min_qty"])
+    
     if qty_with_min * contract_value < cfg["min_notional"]:
         final_qty = (cfg["min_notional"] / contract_value).quantize(Decimal('1'), rounding=ROUND_DOWN) + Decimal("1")
     else:
         final_qty = qty_with_min
+    
     return final_qty, final_ratio
 
 # ======== 7. 주문 및 상태 관리 ========
@@ -281,12 +295,21 @@ def place_order(symbol, side, qty):
         try:
             update_all_position_states()
             original_size = position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0"))
-            order = FuturesOrder(contract=symbol, size=int(qty) if side == "long" else -int(qty), price="0", tif="ioc")
+            
+            order = FuturesOrder(
+                contract=symbol, 
+                size=int(qty) if side == "long" else -int(qty), 
+                price="0", 
+                tif="ioc"
+            )
             result = _get_api_response(api.create_futures_order, SETTLE, order)
+            
             if not result:
                 log_debug("❌ 주문 API 호출 실패", f"{symbol}_{side}")
                 return False
+            
             log_debug("✅ 주문 전송", f"{symbol}_{side} id={getattr(result, 'id', 'N/A')}")
+            
             for attempt in range(15):
                 time.sleep(1)
                 update_all_position_states()
@@ -294,6 +317,7 @@ def place_order(symbol, side, qty):
                 if current_size > original_size:
                     log_debug("🔄 포지션 업데이트 확인", f"{symbol}_{side} {attempt+1}s")
                     return True
+            
             log_debug("❌ 포지션 업데이트 실패", f"{symbol}_{side} 15s 타임아웃")
             return False
         except Exception as e:
@@ -307,47 +331,58 @@ def update_all_position_states():
         if api_positions is None:
             log_debug("❌ 포지션 동기화 실패", "API 응답 없음")
             return
+        
         log_debug("📊 포지션 동기화 시작", f"FuturesApi count={len(api_positions)}")
+        
         positions_to_clear = set()
         for symbol, sides in position_state.items():
             for side in ["long", "short"]:
                 if sides[side]["size"] > 0:
                     positions_to_clear.add((symbol, side))
-
+        
         # API 반영
         for pos in api_positions:
             pos_size = Decimal(str(pos.size))
             if pos_size == 0:
                 continue
+            
             symbol = normalize_symbol(pos.contract)
             if not symbol:
                 continue
+            
             if symbol not in position_state:
                 log_debug("🆕 즉시 초기화", f"{symbol} - update 중 발견")
                 position_state[symbol] = {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()}
                 tpsl_storage[symbol] = {"long": {}, "short": {}}
                 dynamic_symbols.add(symbol)
-
+            
             cfg = get_symbol_config(symbol)
             side = None
-            if hasattr(pos, 'mode') and pos.mode == 'dual_long': side = 'long'
-            elif hasattr(pos, 'mode') and pos.mode == 'dual_short': side = 'short'
-            elif pos_size > 0: side = 'long'
-            elif pos_size < 0: side = 'short'
+            if hasattr(pos, 'mode') and pos.mode == 'dual_long': 
+                side = 'long'
+            elif hasattr(pos, 'mode') and pos.mode == 'dual_short': 
+                side = 'short'
+            elif pos_size > 0: 
+                side = 'long'
+            elif pos_size < 0: 
+                side = 'short'
+            
             if not side:
                 continue
-
+            
             positions_to_clear.discard((symbol, side))
             state = position_state[symbol][side]
             old_size = state.get("size", Decimal("0"))
+            
             state.update({
                 "price": Decimal(str(pos.entry_price)),
                 "size": abs(pos_size),
                 "value": abs(pos_size) * Decimal(str(pos.mark_price)) * cfg["contract_size"]
             })
+            
             if old_size != abs(pos_size):
                 log_debug("🔄 포지션 상태 업데이트", f"{symbol}_{side.upper()}: {old_size} → {abs(pos_size)}")
-
+        
         # 청산/미보유 정리 + 동적 심볼 자동 제거
         cleared_symbols = set()
         for symbol, side in positions_to_clear:
@@ -356,11 +391,12 @@ def update_all_position_states():
             position_state[symbol][side] = get_default_pos_side_state()
             if symbol in tpsl_storage:
                 tpsl_storage[symbol][side].clear()
+            
             # 두 사이드 모두 size 0이면 동적 심볼 세트에서 제거 후보
             other_side = "short" if side == "long" else "long"
             if position_state[symbol][other_side]["size"] == 0 and position_state[symbol][side]["size"] == 0:
                 cleared_symbols.add(symbol)
-
+        
         # 동적 심볼 자동 정리
         if cleared_symbols:
             before = len(dynamic_symbols)
@@ -374,25 +410,36 @@ def handle_entry(data):
     symbol, side, base_type = normalize_symbol(data.get("symbol")), data.get("side", "").lower(), data.get("type", "normal")
     signal_type, entry_score = f"{base_type}_{side}", data.get("entry_score", 50)
     tv_tp_pct, tv_sl_pct = Decimal(str(data.get("tp_pct", "0")))/100, Decimal(str(data.get("sl_pct", "0")))/100
+    
     if not all([symbol, side, data.get('price'), tv_tp_pct > 0, tv_sl_pct > 0]):
         return log_debug("❌ 진입 불가", f"필수 정보 누락: {data}")
+    
     cfg, current_price = get_symbol_config(symbol), get_price(symbol)
     signal_price = Decimal(str(data['price'])) / cfg.get("price_multiplier", Decimal("1.0"))
-    if current_price <= 0: return
+    
+    if current_price <= 0: 
+        return
+    
     update_all_position_states()
     state = position_state[symbol][side]
+    
     if state["entry_count"] == 0 and abs(current_price - signal_price) > max(signal_price * PRICE_DEVIATION_LIMIT_PCT, Decimal(str(MAX_SLIPPAGE_TICKS)) * cfg['tick_size']):
         return log_debug("⚠️ 첫 진입 취소: 슬리피지", "가격차 큼")
+    
     entry_limits = {"premium": 5, "normal": 5, "rescue": 3}
     if state["entry_count"] >= sum(entry_limits.values()) or state[f"{base_type}_entry_count"] >= entry_limits.get(base_type, 99):
         return log_debug("⚠️ 추가 진입 제한", "최대 횟수 도달")
+    
     current_signal_count = state[f"{base_type}_entry_count"] if "rescue" not in signal_type else 0
     qty, final_ratio = calculate_position_size(symbol, signal_type, entry_score, current_signal_count)
+    
     if qty > 0 and place_order(symbol, side, qty):
         state["entry_count"] += 1
         state[f"{base_type}_entry_count"] += 1
         state["entry_time"] = time.time()
-        if "rescue" not in signal_type: state['last_entry_ratio'] = final_ratio
+        if "rescue" not in signal_type: 
+            state['last_entry_ratio'] = final_ratio
+        
         current_multiplier = state.get("premium_tp_multiplier", Decimal("1.0"))
         if "premium" in signal_type:
             if state["premium_entry_count"] == 1 and state["normal_entry_count"] == 0:
@@ -401,10 +448,12 @@ def handle_entry(data):
                 new_multiplier = PREMIUM_TP_MULTIPLIERS["after_normal"]
             else:
                 new_multiplier = PREMIUM_TP_MULTIPLIERS["after_premium"]
+            
             state["premium_tp_multiplier"] = min(current_multiplier, new_multiplier) if current_multiplier != Decimal("1.0") else new_multiplier
             log_debug("✨ 프리미엄 TP 배수 적용", f"{symbol} {side.upper()} → {state['premium_tp_multiplier']:.2f}x")
         elif state["entry_count"] == 1:
             state["premium_tp_multiplier"] = Decimal("1.0")
+        
         store_tp_sl(symbol, side, tv_tp_pct, tv_sl_pct, state["entry_count"])
         log_debug("💾 TP/SL 저장", f"TP:{tv_tp_pct*100:.3f}% SL:{tv_sl_pct*100:.3f}%")
         log_debug("✅ 진입 성공", f"{signal_type} qty={float(qty)}")
@@ -431,7 +480,7 @@ def status():
     try:
         equity = get_total_collateral(force=True)
         update_all_position_states()
-
+        
         # 상태 로그
         with position_lock:
             total_positions = 0
@@ -440,8 +489,9 @@ def status():
                     if pos_data["size"] > 0:
                         total_positions += 1
                         log_debug("📍 상태 확인", f"{symbol}_{side.upper()}: size={pos_data['size']}, price={pos_data['price']}")
+        
         log_debug("📊 status 호출", f"전체 활성 포지션: {total_positions}개")
-
+        
         # 응답 데이터
         active_positions = {}
         with position_lock:
@@ -460,7 +510,7 @@ def status():
                             "premium_tp_mult": float(pos_data.get("premium_tp_multiplier", 1.0)),
                             "current_tp_pct": f"{float(pos_data.get('current_tp_pct', 0.0)) * 100:.4f}%"
                         }
-
+        
         # 동적/구독 관련 디버그 메타
         meta = {
             "tracked_symbols_total": len(position_state),
@@ -470,7 +520,7 @@ def status():
             "ws_last_payload_sample": ws_last_payload[:10],
             "ws_last_subscribed_at": ws_last_subscribed_at
         }
-
+        
         return jsonify({
             "status": "running",
             "version": "v6.33-server",
@@ -478,6 +528,7 @@ def status():
             "active_positions": active_positions,
             "debug_info": meta
         })
+    
     except Exception as e:
         log_debug("❌ status 오류", str(e), exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -486,26 +537,27 @@ async def price_monitor():
     global ws_last_payload, ws_last_subscribed_at
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     last_resubscribe = time.time()
-
+    
     while True:
         try:
             async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
                 base_symbols = set(SYMBOL_CONFIG.keys())
                 all_symbols = list(base_symbols | dynamic_symbols)
-
+                
                 # 구독 및 메트릭 기록
                 payload = all_symbols
                 ws_last_payload = payload[:]  # 복사 저장
                 ws_last_subscribed_at = int(time.time())
-
+                
                 await ws.send(json.dumps({
                     "time": int(time.time()),
                     "channel": "futures.tickers",
                     "event": "subscribe",
                     "payload": payload
                 }))
+                
                 log_debug("🔌 웹소켓 구독", f"{len(payload)}개 심볼 (기본:{len(base_symbols)}, 동적:{len(dynamic_symbols)})")
-
+                
                 while True:
                     msg = await asyncio.wait_for(ws.recv(), timeout=30)
                     result = json.loads(msg).get("result")
@@ -513,7 +565,7 @@ async def price_monitor():
                         [simple_tp_monitor(i) for i in result]
                     elif isinstance(result, dict):
                         simple_tp_monitor(result)
-
+                    
                     # 60초마다 심볼 세트 변경 여부 확인 → 변경 시 재구독
                     if time.time() - last_resubscribe > 60:
                         current_symbols = list(set(SYMBOL_CONFIG.keys()) | dynamic_symbols)
@@ -529,11 +581,12 @@ async def price_monitor():
                             log_debug("🔌 동적 재구독", f"변경:{len(current_symbols)-len(all_symbols)}개 (총 {len(current_symbols)})")
                             all_symbols = current_symbols
                         last_resubscribe = time.time()
-
+        
         except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed) as e:
             log_debug("🔌 웹소켓 재연결", f"사유: {type(e).__name__}")
         except Exception as e:
             log_debug("🔌 웹소켓 오류", str(e), exc_info=True)
+        
         await asyncio.sleep(5)
 
 def simple_tp_monitor(ticker):
@@ -541,24 +594,29 @@ def simple_tp_monitor(ticker):
     try:
         symbol = normalize_symbol(ticker.get("contract"))
         price = Decimal(str(ticker.get("last", "0")))
-        if not symbol or price <= 0: return
+        if not symbol or price <= 0: 
+            return
+        
         cfg = get_symbol_config(symbol)
-        if not cfg: return
-
+        if not cfg: 
+            return
+        
         with position_lock:
             pos = position_state.get(symbol, {})
-
+            
             # Long
             long_size = pos.get("long", {}).get("size", Decimal(0))
             if long_size > 0 and not is_manual_close_protected(symbol, "long"):
                 long_state = pos["long"]
                 entry_price = long_state.get("price")
                 entry_count = long_state.get("entry_count", 0)
+                
                 if entry_price and entry_price > 0 and entry_count > 0:
                     premium_mult = long_state.get("premium_tp_multiplier", Decimal("1.0"))
                     sym_tp_mult = Decimal(str(cfg["tp_mult"]))
                     tp_map = [Decimal("0.0045"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
                     base_tp = tp_map[min(entry_count-1, len(tp_map)-1)] * sym_tp_mult * premium_mult
+                    
                     elapsed = time.time() - long_state.get("entry_time", time.time())
                     periods = max(0, int(elapsed / 15))
                     decay = Decimal("0.002") / 100
@@ -566,34 +624,39 @@ def simple_tp_monitor(ticker):
                     reduction = Decimal(str(periods)) * (decay * sym_tp_mult * premium_mult)
                     current_tp = max(min_tp * sym_tp_mult * premium_mult, base_tp - reduction)
                     long_state["current_tp_pct"] = current_tp
+                    
                     tp_price = entry_price * (1 + current_tp)
                     if price >= tp_price:
                         set_manual_close_protection(symbol, 'long', duration=20)
                         log_debug("🎯 롱 TP 실행", f"{symbol} entry:{entry_price:.8f} now:{price:.8f} tp:{tp_price:.8f}")
+                        
                         try:
                             order = FuturesOrder(contract=symbol, size=-int(long_size), price="0", tif="ioc", reduce_only=True)
                             result = _get_api_response(api.create_futures_order, SETTLE, order)
                             if result:
                                 log_debug("✅ 롱 TP 청산 주문 성공", f"{symbol}")
                                 position_state[symbol]['long'] = get_default_pos_side_state()
-                                if symbol in tpsl_storage: tpsl_storage[symbol]['long'].clear()
+                                if symbol in tpsl_storage: 
+                                    tpsl_storage[symbol]['long'].clear()
                                 log_debug("🔄 TP 실행 후 상태 초기화 완료", f"{symbol}_long")
                             else:
                                 log_debug("❌ 롱 TP 청산 주문 실패", f"{symbol}")
                         except Exception as e:
                             log_debug("❌ 롱 TP 청산 오류", str(e), exc_info=True)
-
+            
             # Short
             short_size = pos.get("short", {}).get("size", Decimal(0))
             if short_size > 0 and not is_manual_close_protected(symbol, "short"):
                 short_state = pos["short"]
                 entry_price = short_state.get("price")
                 entry_count = short_state.get("entry_count", 0)
+                
                 if entry_price and entry_price > 0 and entry_count > 0:
                     premium_mult = short_state.get("premium_tp_multiplier", Decimal("1.0"))
                     sym_tp_mult = Decimal(str(cfg["tp_mult"]))
                     tp_map = [Decimal("0.005"), Decimal("0.004"), Decimal("0.0035"), Decimal("0.003"), Decimal("0.002")]
                     base_tp = tp_map[min(entry_count-1, len(tp_map)-1)] * sym_tp_mult * premium_mult
+                    
                     elapsed = time.time() - short_state.get("entry_time", time.time())
                     periods = max(0, int(elapsed / 15))
                     decay = Decimal("0.002") / 100
@@ -601,23 +664,26 @@ def simple_tp_monitor(ticker):
                     reduction = Decimal(str(periods)) * (decay * sym_tp_mult * premium_mult)
                     current_tp = max(min_tp * sym_tp_mult * premium_mult, base_tp - reduction)
                     short_state["current_tp_pct"] = current_tp
+                    
                     tp_price = entry_price * (1 - current_tp)
                     if price <= tp_price:
                         set_manual_close_protection(symbol, 'short', duration=20)
                         log_debug("🎯 숏 TP 실행", f"{symbol} entry:{entry_price:.8f} now:{price:.8f} tp:{tp_price:.8f}")
+                        
                         try:
                             order = FuturesOrder(contract=symbol, size=int(short_size), price="0", tif="ioc", reduce_only=True)
                             result = _get_api_response(api.create_futures_order, SETTLE, order)
                             if result:
                                 log_debug("✅ 숏 TP 청산 주문 성공", f"{symbol}")
                                 position_state[symbol]['short'] = get_default_pos_side_state()
-                                if symbol in tpsl_storage: tpsl_storage[symbol]['short'].clear()
+                                if symbol in tpsl_storage: 
+                                    tpsl_storage[symbol]['short'].clear()
                                 log_debug("🔄 TP 실행 후 상태 초기화 완료", f"{symbol}_short")
                             else:
                                 log_debug("❌ 숏 TP 청산 주문 실패", f"{symbol}")
                         except Exception as e:
                             log_debug("❌ 숏 TP 청산 오류", str(e), exc_info=True)
-
+    
     except Exception as e:
         log_debug("❌ TP 모니터링 오류", str(e))
 
@@ -643,13 +709,17 @@ def position_monitor():
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.33-server")
     log_debug("🛡️ 안전장치", f"웹훅 중복 방지 쿨다운: {COOLDOWN_SECONDS}초")
+    
     initialize_states()
     log_debug("💰 초기 자산", f"{get_total_collateral(force=True):.2f} USDT")
     update_all_position_states()
+    
     threading.Thread(target=position_monitor, daemon=True).start()
     threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
+    
     for i in range(WORKER_COUNT):
         threading.Thread(target=worker, args=(i,), daemon=True).start()
+    
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹 서버 시작", f"0.0.0.0:{port} 대기 중...")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
