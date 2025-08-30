@@ -242,17 +242,17 @@ def get_signal_type_multiplier(signal_type):
 def get_entry_weight_from_score(score):
     try:
         score = Decimal(str(score))
-        if score <= 10: return Decimal("0.25")
-        if score <= 30: return Decimal("0.35")
-        if score <= 50: return Decimal("0.50")
-        if score <= 70: return Decimal("0.65")
+        if score <= 10: return Decimal("0.2")
+        if score <= 30: return Decimal("0.3")
+        if score <= 50: return Decimal("0.45")
+        if score <= 70: return Decimal("0.6")
         if score <= 90: return Decimal("0.80")
         return Decimal("1.00")
     except:
-        return Decimal("0.25")
+        return Decimal("0.2")
 
 def get_ratio_by_index(idx):
-    ratios = [Decimal("3.0"), Decimal("7.0"), Decimal("20.0"), Decimal("50.0"), Decimal("120.0")]
+    ratios = [Decimal("2.0"), Decimal("4.0"), Decimal("12.0"), Decimal("36.0"), Decimal("110.0")]
     return ratios[min(idx, len(ratios) - 1)]
 
 def store_tp_sl(symbol, side, tp, sl, entry_number):
