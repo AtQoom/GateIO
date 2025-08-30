@@ -419,20 +419,27 @@ def update_all_position_states():
             if before != after:
                 log_debug("🧹 동적 심볼 정리", f"제거:{before-after}개 → 현재 {after}개")
 
-# ======== 8. 진입 처리 ========
+# ======== 8. 진입 처리 (수정된 부분) ========
 def handle_entry(data):
-    symbol, side, base_type = normalize_symbol(data.get("symbol")), data.get("side", "").lower(), data.get("type", "normal")
+    # 오류 수정: base_type에서 '_long' 또는 '_short' 제거
+    raw_type = data.get("type", "normal")
+    base_type = raw_type.replace("_long", "").replace("_short", "")
+    
+    symbol, side = normalize_symbol(data.get("symbol")), data.get("side", "").lower()
     signal_type, entry_score = f"{base_type}_{side}", data.get("entry_score", 50)
     tv_tp_pct, tv_sl_pct = Decimal(str(data.get("tp_pct", "0")))/100, Decimal(str(data.get("sl_pct", "0")))/100
     
     if not all([symbol, side, data.get('price'), tv_tp_pct > 0, tv_sl_pct > 0]):
         return log_debug("❌ 진입 불가", f"필수 정보 누락: {data}")
     
-    cfg, current_price = get_symbol_config(symbol), get_price(symbol)
-    signal_price = Decimal(str(data['price'])) / cfg.get("price_multiplier", Decimal("1.0"))
+    cfg = get_symbol_config(symbol)
+    current_price = get_price(symbol)
     
-    if current_price <= 0: 
+    if current_price <= 0:
+        log_debug("⚠️ 진입 취소", f"{symbol} 가격 정보를 가져올 수 없습니다.")
         return
+        
+    signal_price = Decimal(str(data['price'])) / cfg.get("price_multiplier", Decimal("1.0"))
     
     update_all_position_states()
     state = position_state[symbol][side]
@@ -441,21 +448,16 @@ def handle_entry(data):
         return log_debug("⚠️ 첫 진입 취소: 슬리피지", "가격차 큼")
     
     entry_limits = {"premium": 5, "normal": 5, "rescue": 3}
-    if state["entry_count"] >= sum(entry_limits.values()) or state[f"{base_type}_entry_count"] >= entry_limits.get(base_type, 99):
-        return log_debug("⚠️ 추가 진입 제한", "최대 횟수 도달")
+    if state["entry_count"] >= sum(entry_limits.values()) or state.get(f"{base_type}_entry_count", 0) >= entry_limits.get(base_type, 99):
+        return log_debug("⚠️ 추가 진입 제한", f"{symbol} {side} - 최대 횟수 도달 ({base_type}:{state.get(f'{base_type}_entry_count', 0)})")
     
-    current_signal_count = state[f"{base_type}_entry_count"] if "rescue" not in signal_type else 0
+    current_signal_count = state.get(f"{base_type}_entry_count", 0) if "rescue" not in signal_type else 0
     qty, final_ratio = calculate_position_size(symbol, signal_type, entry_score, current_signal_count)
     
     if qty > 0 and place_order(symbol, side, qty):
         # 1) 카운트 먼저 증가 (파인스크립트와 동기화)
         state["entry_count"] += 1
-        if base_type == "premium":
-            state["premium_entry_count"] += 1
-        elif base_type == "normal":
-            state["normal_entry_count"] += 1
-        elif base_type == "rescue":
-            state["rescue_entry_count"] += 1
+        state[f"{base_type}_entry_count"] = state.get(f"{base_type}_entry_count", 0) + 1
         state["entry_time"] = time.time()
         
         # 2) last_entry_ratio 갱신
@@ -464,7 +466,6 @@ def handle_entry(data):
         
         # 3) 프리미엄 배수 재계산 (증가된 카운트 기준)
         if base_type == "premium":
-            # 진입 후 증가된 카운트로 배수 판단
             if state["premium_entry_count"] == 1 and state["normal_entry_count"] == 0:
                 new_multiplier = PREMIUM_TP_MULTIPLIERS["first_entry"]
             elif state["premium_entry_count"] == 1 and state["normal_entry_count"] > 0:
@@ -476,7 +477,6 @@ def handle_entry(data):
             state["premium_tp_multiplier"] = min(current_multiplier, new_multiplier) if current_multiplier > Decimal("1.0") else new_multiplier
             log_debug("✨ 프리미엄 TP 배수 적용", f"{symbol} {side.upper()} → {state['premium_tp_multiplier']:.2f}x (P:{state['premium_entry_count']}/N:{state['normal_entry_count']})")
         elif state["entry_count"] == 1:
-            # 포지션이 새로 시작되면 배수 초기화
             state["premium_tp_multiplier"] = Decimal("1.0")
         
         # 4) TP/SL 저장 및 로그
@@ -485,14 +485,10 @@ def handle_entry(data):
         log_debug("✅ 진입 성공", f"{signal_type} qty={float(qty)} 총진입:{state['entry_count']} N:{state['normal_entry_count']} P:{state['premium_entry_count']} R:{state['rescue_entry_count']}")
         
         # 5) 디버깅용 - 알림 카운트와 서버 카운트 비교
-        tv_next_total = data.get("next_total_cnt", 0)
-        tv_next_norm = data.get("next_norm_cnt", 0)
-        tv_next_prem = data.get("next_prem_cnt", 0)
-        tv_next_rescue = data.get("next_rescue_cnt", 0)
-        
-        if tv_next_total != state["entry_count"]:
-            log_debug("⚠️ 카운트 불일치", f"TV예상:{tv_next_total} vs 서버:{state['entry_count']}")
-        log_debug("📊 카운트 동기화", f"TV→서버 N:{tv_next_norm}→{state['normal_entry_count']} P:{tv_next_prem}→{state['premium_entry_count']} R:{tv_next_rescue}→{state['rescue_entry_count']}")
+        if "next_total_cnt" in data:
+            tv_next_total = data.get("next_total_cnt", 0)
+            if tv_next_total != state["entry_count"]:
+                log_debug("⚠️ 카운트 불일치", f"TV예상:{tv_next_total} vs 서버:{state['entry_count']}")
 
 # ======== 9. 라우트 & 백그라운드 ========
 @app.route("/", methods=["POST"])
