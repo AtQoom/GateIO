@@ -257,7 +257,7 @@ def get_entry_weight_from_score(score):
         return Decimal("0.2")
 
 def get_ratio_by_index(idx):
-    ratios = [Decimal("2.0"), Decimal("4.0"), Decimal("12.0"), Decimal("36.0"), Decimal("110.0")]
+    ratios = [Decimal("4.0"), Decimal("8.0"), Decimal("24.0"), Decimal("72.0"), Decimal("220.0")]
     return ratios[min(idx, len(ratios) - 1)]
 
 def store_tp_sl(symbol, side, tp, sl, entry_number):
