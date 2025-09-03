@@ -21,6 +21,8 @@ import queue
 import pytz
 import urllib.parse 
 
+warned_unmapped_symbols = set()
+
 # ======== 1. 로깅 설정 ========
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
@@ -201,8 +203,11 @@ def normalize_symbol(raw_symbol):
     for key, value in SYMBOL_MAPPING.items():
         if clean in key: 
             return value
-    log_debug("⚠️ 심볼 정규화 실패", f"'{raw_symbol}' → 매핑되지 않음")
-    return symbol
+    # 여기부터 1회 경고!
+    if symbol not in warned_unmapped_symbols:
+        log_debug("⚠️ 심볼 정규화 실패", f"'{raw_symbol}' → 매핑되지 않음")
+        warned_unmapped_symbols.add(symbol)
+    return None
 
 def get_total_collateral(force=False):
     now = time.time()
