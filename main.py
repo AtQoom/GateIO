@@ -18,6 +18,18 @@ logger = logging.getLogger(__name__)
 
 COOLDOWN_SECONDS = 5
 SETTLE = "usdt"
+WORKER_COUNT = 3
+
+PRICE_DEVIATION_LIMIT_PCT = 0.01
+MAX_SLIPPAGE_TICKS = 10
+PREMIUM_TP_MULTIPLIERS = {
+    "first_entry": Decimal("1.8"),
+    "after_normal": Decimal("1.2"),
+    "after_premium": Decimal("1.0")
+}
+ws_last_payload = []
+ws_last_subscribed_at = 0
+tpsl_storage = {}
 
 # API 키 & 초기화
 API_KEY = os.environ.get("API_KEY", "")
