@@ -315,6 +315,23 @@ def update_all_position_states():
             log_debug("🔄 포지션 초기화 감지", f"{symbol} {side.upper()}")
             position_state[symbol][side] = get_default_pos_side_state()
 
+def get_total_collateral(force=False):
+    """
+    Gate.io API에서 USDT 잔고(총 자산)를 조회합니다.
+    force: 캐시 무시 및 API 강제 호출용 (필요시)
+    """
+    try:
+        # 현물 월렛 잔고 예시 (선물 잔고 필요시 다른 메서드 참고)
+        balance = unified_api.list_wallet_balance(currency='USDT')
+        for item in balance:
+            if item.currency == 'USDT':
+                # 현물, 선물 등 목적에 맞는 필드를 사용하세요
+                return float(item.available)
+        return 0.0
+    except Exception as ex:
+        log_debug("❌ USDT 잔고 조회 오류", str(ex))
+        return 0.0
+
 app = Flask(__name__)
 
 @app.route("/", methods=["POST"])
