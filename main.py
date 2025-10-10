@@ -500,13 +500,13 @@ def is_manual_close_protected(symbol, side):
     return False
 
 def eth_hedge_fill_monitor():
-    """⭐ 체결 감지 + 즉시 헤징 + 재진입"""
+    """⭐ 체결 감지 + 역방향 최소 수량 헤징"""
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
     last_action_time = 0
     
     while True:
-        time.sleep(1)
+        time.sleep(2)
         update_all_position_states()
         
         with position_lock:
@@ -517,96 +517,89 @@ def eth_hedge_fill_monitor():
             short_price = pos.get("short", {}).get("price", Decimal("0"))
             
             now = time.time()
-            obv_macd_val = get_obv_macd_value("ETH_USDT")
+            current_price = get_price("ETH_USDT")
             
-            # OBV 기반 수량 계산
-            if obv_macd_val >= 0:
-                long_qty_base = calculate_grid_qty(get_price("ETH_USDT"), Decimal("1.0"))
-                short_qty_base = calculate_grid_qty(get_price("ETH_USDT"), obv_macd_val)
-            else:
-                short_qty_base = calculate_grid_qty(get_price("ETH_USDT"), Decimal("1.0"))
-                long_qty_base = calculate_grid_qty(get_price("ETH_USDT"), abs(obv_macd_val))
+            # ⭐ 헤징용 최소 수량 (레버리지 1.0)
+            hedge_qty = calculate_grid_qty(current_price, Decimal("1.0"))
             
             # ⭐ 롱 체결 감지 (아래쪽)
-            if long_size > prev_long_size and (now - last_action_time) > 3:
-                log_debug("✅ 롱 체결", f"ETH 평단:{long_price} 수량:{long_size}")
+            if long_size > prev_long_size and (now - last_action_time) > 10:
+                added_long = long_size - prev_long_size
+                log_debug("✅ 롱 체결", f"ETH 평단:{long_price} 추가:{added_long} 총:{long_size}")
                 
-                # ⭐ 즉시 prev 업데이트 (중복 방지!)
+                # ⭐ 즉시 prev 업데이트
                 prev_long_size = long_size
                 prev_short_size = short_size
+                last_action_time = now
                 
-                # 즉시 숏 헤징 (시장가)
-                if short_qty_base >= 1:
+                # ⭐ 숏 최소 수량 헤징 (같은 가격 지정가)
+                if hedge_qty >= 1:
                     try:
                         order = FuturesOrder(
                             contract="ETH_USDT",
-                            size=-int(short_qty_base),
-                            price="0",
+                            size=-int(hedge_qty),  # ⭐ 레버리지 1.0 수량
+                            price=str(long_price),  # ⭐ 같은 가격
                             tif="ioc"
                         )
                         result = api.create_futures_order(SETTLE, order)
                         if result:
-                            log_debug("🔄 숏 헤징", f"qty={short_qty_base} 시장가")
+                            log_debug("🔄 숏 헤징", f"{hedge_qty}계약 @ {long_price}")
                     except Exception as e:
                         log_debug("❌ 헤징 오류", str(e))
                 
                 # 새로운 그리드 발주
-                time.sleep(1)
+                time.sleep(2)
                 cancel_open_orders("ETH_USDT")
-                time.sleep(0.5)
+                time.sleep(1)
                 initialize_hedge_orders()
-                last_action_time = now
             
             # ⭐ 숏 체결 감지 (위쪽)
-            elif short_size > prev_short_size and (now - last_action_time) > 3:
-                log_debug("✅ 숏 체결", f"ETH 평단:{short_price} 수량:{short_size}")
+            elif short_size > prev_short_size and (now - last_action_time) > 10:
+                added_short = short_size - prev_short_size
+                log_debug("✅ 숏 체결", f"ETH 평단:{short_price} 추가:{added_short} 총:{short_size}")
                 
-                # ⭐ 즉시 prev 업데이트 (중복 방지!)
+                # ⭐ 즉시 prev 업데이트
                 prev_long_size = long_size
                 prev_short_size = short_size
+                last_action_time = now
                 
-                # 즉시 롱 헤징 (시장가)
-                if long_qty_base >= 1:
+                # ⭐ 롱 최소 수량 헤징 (같은 가격 지정가)
+                if hedge_qty >= 1:
                     try:
                         order = FuturesOrder(
                             contract="ETH_USDT",
-                            size=int(long_qty_base),
-                            price="0",
+                            size=int(hedge_qty),  # ⭐ 레버리지 1.0 수량
+                            price=str(short_price),  # ⭐ 같은 가격
                             tif="ioc"
                         )
                         result = api.create_futures_order(SETTLE, order)
                         if result:
-                            log_debug("🔄 롱 헤징", f"qty={long_qty_base} 시장가")
+                            log_debug("🔄 롱 헤징", f"{hedge_qty}계약 @ {short_price}")
                     except Exception as e:
                         log_debug("❌ 헤징 오류", str(e))
                 
                 # 새로운 그리드 발주
-                time.sleep(1)
+                time.sleep(2)
                 cancel_open_orders("ETH_USDT")
-                time.sleep(0.5)
+                time.sleep(1)
                 initialize_hedge_orders()
-                last_action_time = now
             
             # 청산 감지
-            elif prev_long_size > 0 and long_size == 0 and (now - last_action_time) > 3:
+            elif prev_long_size > 0 and long_size == 0 and (now - last_action_time) > 10:
                 log_debug("🎯 롱 청산 감지", "재초기화")
                 prev_long_size = Decimal("0")
-                prev_short_size = short_size
                 cancel_open_orders("ETH_USDT")
-                time.sleep(0.5)
+                time.sleep(1)
                 initialize_hedge_orders()
                 last_action_time = now
             
-            elif prev_short_size > 0 and short_size == 0 and (now - last_action_time) > 3:
+            elif prev_short_size > 0 and short_size == 0 and (now - last_action_time) > 10:
                 log_debug("🎯 숏 청산 감지", "재초기화")
-                prev_long_size = long_size
                 prev_short_size = Decimal("0")
                 cancel_open_orders("ETH_USDT")
-                time.sleep(0.5)
+                time.sleep(1)
                 initialize_hedge_orders()
                 last_action_time = now
-            
-            # ⭐ 마지막에 업데이트 제거 (위에서 이미 함)
 
 def eth_hedge_tp_monitor():
     """⭐ ETH TP 실시간 모니터링 (평단 ±0.15% 시장가 청산)"""
