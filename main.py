@@ -531,6 +531,10 @@ def eth_hedge_fill_monitor():
             if long_size > prev_long_size and (now - last_action_time) > 3:
                 log_debug("✅ 롱 체결", f"ETH 평단:{long_price} 수량:{long_size}")
                 
+                # ⭐ 즉시 prev 업데이트 (중복 방지!)
+                prev_long_size = long_size
+                prev_short_size = short_size
+                
                 # 즉시 숏 헤징 (시장가)
                 if short_qty_base >= 1:
                     try:
@@ -557,6 +561,10 @@ def eth_hedge_fill_monitor():
             elif short_size > prev_short_size and (now - last_action_time) > 3:
                 log_debug("✅ 숏 체결", f"ETH 평단:{short_price} 수량:{short_size}")
                 
+                # ⭐ 즉시 prev 업데이트 (중복 방지!)
+                prev_long_size = long_size
+                prev_short_size = short_size
+                
                 # 즉시 롱 헤징 (시장가)
                 if long_qty_base >= 1:
                     try:
@@ -580,22 +588,25 @@ def eth_hedge_fill_monitor():
                 last_action_time = now
             
             # 청산 감지
-            if prev_long_size > 0 and long_size == 0 and (now - last_action_time) > 3:
+            elif prev_long_size > 0 and long_size == 0 and (now - last_action_time) > 3:
                 log_debug("🎯 롱 청산 감지", "재초기화")
+                prev_long_size = Decimal("0")
+                prev_short_size = short_size
                 cancel_open_orders("ETH_USDT")
                 time.sleep(0.5)
                 initialize_hedge_orders()
                 last_action_time = now
             
-            if prev_short_size > 0 and short_size == 0 and (now - last_action_time) > 3:
+            elif prev_short_size > 0 and short_size == 0 and (now - last_action_time) > 3:
                 log_debug("🎯 숏 청산 감지", "재초기화")
+                prev_long_size = long_size
+                prev_short_size = Decimal("0")
                 cancel_open_orders("ETH_USDT")
                 time.sleep(0.5)
                 initialize_hedge_orders()
                 last_action_time = now
             
-            prev_long_size = long_size
-            prev_short_size = short_size
+            # ⭐ 마지막에 업데이트 제거 (위에서 이미 함)
 
 def eth_hedge_tp_monitor():
     """⭐ ETH TP 실시간 모니터링 (평단 ±0.15% 시장가 청산)"""
