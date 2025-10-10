@@ -578,6 +578,37 @@ def position_monitor():
         except Exception as e:
             log_debug("❌ 모니터링 오류", str(e), exc_info=True)
 
+def initialize_states():
+    """포지션/TP·SL 저장 관련 전역 상태 초기화"""
+    global position_state, tpsl_storage
+    # 이미 선언된 포지션 상태 초기화
+    for symbol in SYMBOL_CONFIG.keys():
+        position_state[symbol] = {
+            "long": get_default_pos_side_state(),
+            "short": get_default_pos_side_state(),
+        }
+    # TP·SL 스토리지 초기화 (없으면 새로 추가)
+    tpsl_storage = {}
+    for symbol in SYMBOL_CONFIG.keys():
+        tpsl_storage[symbol] = {
+            "long": [],
+            "short": [],
+        }
+
+def get_default_pos_side_state():
+    return {
+        "price": Decimal("0"),
+        "size": Decimal("0"),
+        "value": Decimal("0"),
+        "entry_count": 0,
+        "normal_entry_count": 0,
+        "premium_entry_count": 0,
+        "rescue_entry_count": 0,
+        "last_entry_ratio": Decimal("1.0"),
+        "premium_tp_multiplier": Decimal("1.0"),
+        "current_tp_pct": Decimal("0.0")
+    }
+
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.33-server")
     log_debug("🛡️ 안전장치", f"웹훅 중복 방지 쿨다운: {COOLDOWN_SECONDS}초")
