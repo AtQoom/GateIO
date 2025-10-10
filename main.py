@@ -378,26 +378,19 @@ def initialize_grid_orders():
     handle_grid_entry({"symbol": symbol, "side": "short", "price": str(up_price)})
     handle_grid_entry({"symbol": symbol, "side": "long", "price": str(down_price)})
 
-def on_grid_fill_event(symbol, side, fill_price):
+def on_grid_fill_event(symbol, fill_price):
+    gap_pct = Decimal("0.15") / Decimal("100")
     obv_macd_val = get_obv_macd_value()
     base_qty = get_base_qty()
-    dynamic_qty = calculate_dynamic_qty(base_qty, obv_macd_val, side)
 
-    gap_pct = Decimal("0.15") / Decimal("100")
-    fill_price_dec = Decimal(str(fill_price))
-    if side == "long":
-        new_order_price = fill_price_dec * (1 + gap_pct)
-        opposite_side = "short"
-    else:
-        new_order_price = fill_price_dec * (1 - gap_pct)
-        opposite_side = "long"
+    dynamic_qty_long = calculate_dynamic_qty(base_qty, obv_macd_val, "long")
+    dynamic_qty_short = calculate_dynamic_qty(base_qty, obv_macd_val, "short")
 
-    handle_grid_entry({
-        "symbol": symbol,
-        "side": opposite_side,
-        "price": str(new_order_price),
-        "qty": dynamic_qty
-    })
+    up_price = Decimal(str(fill_price)) * (1 + gap_pct)
+    down_price = Decimal(str(fill_price)) * (1 - gap_pct)
+
+    handle_grid_entry({"symbol": symbol, "side": "short", "price": str(up_price), "qty": dynamic_qty_short})
+    handle_grid_entry({"symbol": symbol, "side": "long", "price": str(down_price), "qty": dynamic_qty_long})
 
 def handle_grid_entry(data):
     symbol = normalize_symbol(data.get("symbol"))
@@ -454,6 +447,27 @@ def set_manual_close_protection(symbol, side, duration):
 
 def is_manual_close_protected(symbol, side):
     return False
+
+def position_monitor():
+    prev_long_size = Decimal("0")
+    prev_short_size = Decimal("0")
+    while True:
+        time.sleep(2)
+        update_all_position_states()
+        with position_lock:
+            pos = position_state.get("ETH_USDT", {})
+            long_size = pos.get("long", {}).get("size", Decimal("0"))
+            short_size = pos.get("short", {}).get("size", Decimal("0"))
+            long_price = pos.get("long", {}).get("price", Decimal("0"))
+            short_price = pos.get("short", {}).get("price", Decimal("0"))
+            # 신규 long 진입(체결)
+            if long_size > prev_long_size:
+                on_grid_fill_event("ETH_USDT", long_price)
+            # 신규 short 진입(체결)
+            if short_size > prev_short_size:
+                on_grid_fill_event("ETH_USDT", short_price)
+            prev_long_size = long_size
+            prev_short_size = short_size
 
 app = Flask(__name__)
 
