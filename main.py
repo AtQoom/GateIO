@@ -100,8 +100,8 @@ def log_debug(tag, msg, exc_info=False):
     if exc_info:
         logger.exception("")
 
-def get_candles(symbol, interval='5m', limit=100):
-    """Gate.io 캔들 데이터 조회"""
+def get_candles(symbol, interval='15s', limit=100):
+    """Gate.io 캔들 데이터 조회 (15초봉)"""
     try:
         candles = api.list_futures_candlesticks(
             settle=SETTLE,
@@ -141,49 +141,60 @@ def get_candles(symbol, interval='5m', limit=100):
         log_debug("❌ 캔들 조회 오류", f"{symbol}: {e}", exc_info=True)
         return None
 
+def dema(series, period):
+    """Double EMA"""
+    ema1 = series.ewm(span=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, adjust=False).mean()
+    return 2 * ema1 - ema2
+
 def calculate_obv_macd(symbol):
     """
-    OBV MACD 계산 (TradingView 호환 스케일)
+    TradingView OBV MACD 완벽 재현
     """
     try:
-        df = get_candles(symbol, interval='5m', limit=100)
+        df = get_candles(symbol, interval='15s', limit=100)
         if df is None or len(df) < 50:
             return 0.0
         
-        # OBV 계산
-        obv = [0]
+        # Pine Script 로직 재현
+        window_len = 28
+        v_len = 14
+        
+        # 1. 기본 OBV 계산
+        v = [0]
         for i in range(1, len(df)):
-            if df['close'].iloc[i] > df['close'].iloc[i-1]:
-                obv.append(obv[-1] + df['volume'].iloc[i])
-            elif df['close'].iloc[i] < df['close'].iloc[i-1]:
-                obv.append(obv[-1] - df['volume'].iloc[i])
-            else:
-                obv.append(obv[-1])
+            sign_val = np.sign(df['close'].iloc[i] - df['close'].iloc[i-1])
+            v.append(v[-1] + sign_val * df['volume'].iloc[i])
         
-        df['obv'] = obv
+        df['v'] = v
         
-        # OBV의 MACD 계산
-        exp1 = df['obv'].ewm(span=12, adjust=False).mean()
-        exp2 = df['obv'].ewm(span=26, adjust=False).mean()
-        macd = exp1 - exp2
-        signal = macd.ewm(span=9, adjust=False).mean()
-        macd_histogram = macd - signal
+        # 2. Shadow 계산
+        df['smooth'] = df['v'].rolling(window=v_len).mean()
+        df['price_spread'] = (df['high'] - df['low']).rolling(window=window_len).std()
+        df['v_spread'] = (df['v'] - df['smooth']).rolling(window=window_len).std()
         
-        latest_macd = float(macd_histogram.iloc[-1])
+        df['shadow'] = (df['v'] - df['smooth']) / df['v_spread'] * df['price_spread']
+        df['out'] = df.apply(lambda row: row['high'] + row['shadow'] if row['shadow'] > 0 else row['low'] + row['shadow'], axis=1)
         
-        # ⭐ 정규화 개선: TradingView 스케일 맞춤
-        # ETH 거래량 기준으로 적절히 스케일 조정
-        if abs(latest_macd) > 100000:
-            normalized = latest_macd / 1000000  # 백만 단위
-        elif abs(latest_macd) > 10000:
-            normalized = latest_macd / 10000    # 만 단위
-        else:
-            normalized = latest_macd / 1000     # 천 단위
+        # 3. OBV EMA (len=1이므로 그대로 사용)
+        df['obvema'] = df['out'].ewm(span=1, adjust=False).mean()
         
-        return normalized
+        # 4. DEMA(obvema, 9)
+        df['ma'] = dema(df['obvema'], 9)
+        
+        # 5. Slow MA = EMA(close, 26)
+        df['slow_ma'] = df['close'].ewm(span=26, adjust=False).mean()
+        
+        # 6. MACD = ma - slow_ma
+        df['macd'] = df['ma'] - df['slow_ma']
+        
+        # 최신 값 반환
+        latest_macd = float(df['macd'].iloc[-1])
+        
+        return latest_macd
         
     except Exception as e:
-        log_debug("❌ OBV MACD 계산 오류", f"{symbol}: {e}")
+        log_debug("❌ OBV MACD 계산 오류", f"{symbol}: {e}", exc_info=True)
         return 0.0
 
 def get_obv_macd_value(symbol="ETH_USDT"):
@@ -193,7 +204,7 @@ def get_obv_macd_value(symbol="ETH_USDT"):
     
     if cache_key in candle_cache:
         cached_time, cached_value = candle_cache[cache_key]
-        if now - cached_time < 300:
+        if now - cached_time < 60:  # 1분 캐시
             return cached_value
     
     value = calculate_obv_macd(symbol)
@@ -204,16 +215,36 @@ def get_obv_macd_value(symbol="ETH_USDT"):
 
 def get_base_qty():
     return Decimal("2.0")
-
+    
 def calculate_grid_qty(base_qty: Decimal, obv_macd_val: float) -> Decimal:
-    ratio = Decimal("1.0")
+    """
+    그리드 수량 계산 (기존 전략)
+    - 기본 2.0 계약
+    - OBV MACD 값에 따라 2.1배~3.0배
+    """
+    ratio = Decimal("2.1")  # ⭐ 기본값 2.1배
     abs_val = abs(obv_macd_val)
     
-    if abs_val < 20:
-        ratio = Decimal("1.0")
-    elif abs_val >= 20 and abs_val < 50:
-        ratio = Decimal("2.0")
-    elif abs_val >= 50:
+    # OBV MACD 절대값 기준 (10단계 세분화)
+    if abs_val >= 20 and abs_val < 30:
+        ratio = Decimal("2.1")
+    elif abs_val >= 30 and abs_val < 40:
+        ratio = Decimal("2.2")
+    elif abs_val >= 40 and abs_val < 50:
+        ratio = Decimal("2.3")
+    elif abs_val >= 50 and abs_val < 60:
+        ratio = Decimal("2.4")
+    elif abs_val >= 60 and abs_val < 70:
+        ratio = Decimal("2.5")
+    elif abs_val >= 70 and abs_val < 80:
+        ratio = Decimal("2.6")
+    elif abs_val >= 80 and abs_val < 90:
+        ratio = Decimal("2.7")
+    elif abs_val >= 90 and abs_val < 100:
+        ratio = Decimal("2.8")
+    elif abs_val >= 100 and abs_val < 110:
+        ratio = Decimal("2.9")
+    elif abs_val >= 110:
         ratio = Decimal("3.0")
     
     return base_qty * ratio
@@ -280,7 +311,7 @@ def place_order(symbol, side, qty: Decimal, price: Decimal, wait_for_fill=True):
 
 def place_grid_tp_order(symbol, side, avg_price, total_qty):
     """
-    그리드 TP 주문 (평단 기준) - close_long/close_short 명시
+    그리드 TP 주문 (평단 기준)
     """
     try:
         gap_pct = Decimal("0.15") / Decimal("100")
@@ -288,23 +319,19 @@ def place_grid_tp_order(symbol, side, avg_price, total_qty):
         if side == "long":
             tp_price = avg_price * (1 + gap_pct)
             close_size = -int(total_qty)
-            close_long = True
         else:
             tp_price = avg_price * (1 - gap_pct)
             close_size = int(total_qty)
-            close_long = False
         
         log_debug("📝 TP 주문 준비", f"{symbol}_{side} size={close_size} price={tp_price}")
         
-        # ⭐ close_long/close_short 파라미터 명시
+        # ⭐ reduce_only만 사용 (close_long/close_short 제거)
         tp_order = FuturesOrder(
             contract=symbol,
-            size=abs(close_size),  # 절대값으로 수량
+            size=close_size,
             price=str(tp_price),
             tif="gtc",
-            reduce_only=True,
-            close_long=close_long if side == "long" else None,  # 롱 청산
-            close_short=not close_long if side == "short" else None  # 숏 청산
+            reduce_only=True
         )
         
         result = api.create_futures_order(SETTLE, tp_order)
@@ -642,7 +669,7 @@ def status():
         
         return jsonify({
             "status": "running",
-            "version": "v8.0-final",
+            "version": "v9.0-tradingview",
             "balance_usdt": float(equity),
             "active_positions": active_positions,
             "eth_obv_macd": round(obv_macd, 2),
@@ -853,7 +880,7 @@ def get_default_pos_side_state():
     }
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v8.0-final")
+    log_debug("🚀 서버 시작", "v9.0-tradingview")
     initialize_states()
     log_debug("💰 초기 자산", f"{get_total_collateral(force=True):.2f} USDT")
     update_all_position_states()
