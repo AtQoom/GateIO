@@ -315,6 +315,8 @@ def update_all_position_states():
             log_debug("🔄 포지션 초기화 감지", f"{symbol} {side.upper()}")
             position_state[symbol][side] = get_default_pos_side_state()
 
+app = Flask(__name__)
+
 @app.route("/", methods=["POST"])
 def webhook():
     try:
