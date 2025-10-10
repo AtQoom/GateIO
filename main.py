@@ -233,25 +233,25 @@ def calculate_grid_qty(current_price: Decimal, obv_macd_val: float) -> Decimal:
         abs_val = abs(obv_macd_val)
         
         if abs_val < 20:
-            leverage = Decimal("2.0")
+            leverage = Decimal("1.0")
         elif abs_val >= 20 and abs_val < 30:
-            leverage = Decimal("2.1")
+            leverage = Decimal("1.2")
         elif abs_val >= 30 and abs_val < 40:
-            leverage = Decimal("2.2")
+            leverage = Decimal("1.4")
         elif abs_val >= 40 and abs_val < 50:
-            leverage = Decimal("2.3")
+            leverage = Decimal("1.6")
         elif abs_val >= 50 and abs_val < 60:
-            leverage = Decimal("2.4")
+            leverage = Decimal("1.8")
         elif abs_val >= 60 and abs_val < 70:
-            leverage = Decimal("2.5")
+            leverage = Decimal("2.0")
         elif abs_val >= 70 and abs_val < 80:
-            leverage = Decimal("2.6")
+            leverage = Decimal("2.2")
         elif abs_val >= 80 and abs_val < 90:
-            leverage = Decimal("2.7")
+            leverage = Decimal("2.4")
         elif abs_val >= 90 and abs_val < 100:
-            leverage = Decimal("2.8")
+            leverage = Decimal("2.6")
         elif abs_val >= 100 and abs_val < 110:
-            leverage = Decimal("2.9")
+            leverage = Decimal("2.8")
         else:
             leverage = Decimal("3.0")
         
