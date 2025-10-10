@@ -327,6 +327,100 @@ def update_all_position_states():
             log_debug("🔄 포지션 초기화 감지", f"{symbol} {side.upper()}")
             position_state[symbol][side] = get_default_pos_side_state()
 
+def grid_auto_order_loop():
+    symbol = "ETH_USDT"
+    gap_pct = Decimal("0.15") / Decimal("100")
+    sleep_sec = 15  # 15초마다 한 번씩
+
+    while True:
+        # 1. 최신 체결가(또는 ws현재가) 기준
+        with position_lock:
+            # 최근 체결가를 포지션에서 구함 (없으면 get_price)
+            last_long_price = position_state.get(symbol, {}).get("long", {}).get("price")
+            last_short_price = position_state.get(symbol, {}).get("short", {}).get("price")
+        
+        # 최근 체결가(없으면 단순 get_price 사용)
+        ref_price = None
+        if last_long_price and last_short_price:
+            # 롱·숏 각각 체결된게 있으면, 더 최근 체결가가 기준
+            ref_price = max(last_long_price, last_short_price)
+        elif last_long_price:
+            ref_price = last_long_price
+        elif last_short_price:
+            ref_price = last_short_price
+        else:
+            ref_price = Decimal(str(get_price(symbol)))
+
+        price = Decimal(str(ref_price))
+
+        # 2. 0.15% 위/아래 지정가 산정, 역방향 지정
+        up_entry_price = price * (1 + gap_pct)
+        down_entry_price = price * (1 - gap_pct)
+
+        # 3. 역방향(위:숏, 아래:롱) 진입
+        data_short = {"symbol": symbol, "side": "short", "price": str(up_entry_price)}
+        data_long = {"symbol": symbol, "side": "long", "price": str(down_entry_price)}
+
+        # 4. 각각 진입(자동으로 obv macd 계수·동적수량/TP/SL 등 반영)
+        handle_grid_entry(data_short)
+        handle_grid_entry(data_long)
+
+        time.sleep(sleep_sec)
+
+def initialize_grid_orders():
+    symbol = "ETH_USDT"
+    gap_pct = Decimal("0.15") / Decimal("100")
+    current_price = Decimal(str(get_price(symbol)))
+
+    up_price = current_price * (1 + gap_pct)
+    down_price = current_price * (1 - gap_pct)
+
+    handle_grid_entry({"symbol": symbol, "side": "short", "price": str(up_price)})
+    handle_grid_entry({"symbol": symbol, "side": "long", "price": str(down_price)})
+
+def on_grid_fill_event(symbol, side, fill_price):
+    obv_macd_val = get_obv_macd_value()
+    base_qty = get_base_qty()
+    dynamic_qty = calculate_dynamic_qty(base_qty, obv_macd_val, side)
+
+    gap_pct = Decimal("0.15") / Decimal("100")
+    fill_price_dec = Decimal(str(fill_price))
+    if side == "long":
+        new_order_price = fill_price_dec * (1 + gap_pct)
+        opposite_side = "short"
+    else:
+        new_order_price = fill_price_dec * (1 - gap_pct)
+        opposite_side = "long"
+
+    handle_grid_entry({
+        "symbol": symbol,
+        "side": opposite_side,
+        "price": str(new_order_price),
+        "qty": dynamic_qty
+    })
+
+def handle_grid_entry(data):
+    symbol = normalize_symbol(data.get("symbol"))
+    if symbol != "ETH_USDT":
+        return
+    side = data.get("side", "").lower()
+    price = Decimal(str(data.get("price", "0")))
+    qty = data.get("qty")
+    if qty is None:
+        obv_macd_val = get_obv_macd_value()
+        base_qty = get_base_qty()
+        qty = calculate_dynamic_qty(base_qty, obv_macd_val, side)
+    else:
+        qty = Decimal(str(qty))
+
+    if qty < Decimal('1'):
+        return
+
+    success = place_order(symbol, side, qty)
+    if success:
+        update_position_state(symbol, side, price, qty)
+        log_debug("📈 그리드 진입", f"{symbol} {side} qty={qty} price={price}")
+
 def get_total_collateral(force=False):
     try:
         # Gate.io 선물 USDT 계좌의 총 자산 조회
@@ -656,19 +750,19 @@ def get_default_pos_side_state():
     }
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.33-server")
-    log_debug("🛡️ 안전장치", f"웹훅 중복 방지 쿨다운: {COOLDOWN_SECONDS}초")
-    
+    log_debug("🚀 서버 시작", "...")
     initialize_states()
+    initialize_grid_orders()  # 최초 지정가 2개 주문 세팅 함수 추가 호출
     log_debug("💰 초기 자산", f"{get_total_collateral(force=True):.2f} USDT")
     update_all_position_states()
-    
+
     threading.Thread(target=position_monitor, daemon=True).start()
     threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
-    
+    # 기존 grid_auto_order_loop는 제거 또는 비활성화 필요
+
     for i in range(WORKER_COUNT):
         threading.Thread(target=worker, args=(i,), daemon=True).start()
-    
+
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹 서버 시작", f"0.0.0.0:{port} 대기 중...")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
