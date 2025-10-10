@@ -543,7 +543,7 @@ def is_manual_close_protected(symbol, side):
     return False
 
 def eth_hedge_fill_monitor():
-    """⭐ ETH 체결 감지 및 재배치"""
+    """⭐ ETH 체결 감지 및 재배치 (수정)"""
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
     last_rebalance_time = 0
@@ -558,6 +558,13 @@ def eth_hedge_fill_monitor():
             short_size = pos.get("short", {}).get("size", Decimal("0"))
             long_price = pos.get("long", {}).get("price", Decimal("0"))
             short_price = pos.get("short", {}).get("price", Decimal("0"))
+            
+            # 미체결 주문 수 확인
+            try:
+                open_orders = api.list_futures_orders(settle=SETTLE, contract="ETH_USDT", status='open')
+                pending_count = len(list(open_orders))
+            except:
+                pending_count = 0
             
             # 청산 감지
             if prev_long_size > 0 and long_size == 0:
@@ -576,22 +583,13 @@ def eth_hedge_fill_monitor():
             
             # 체결 감지
             now = time.time()
-            any_filled = False
-            fill_price = None
+            position_changed = (long_size != prev_long_size or short_size != prev_short_size)
             
-            if long_size > prev_long_size and long_size > 0:
-                log_debug("✅ 롱 체결", f"ETH 평단:{long_price} 수량:{long_size}")
-                any_filled = True
-                fill_price = long_price
-            
-            if short_size > prev_short_size and short_size > 0:
-                log_debug("✅ 숏 체결", f"ETH 평단:{short_price} 수량:{short_size}")
-                any_filled = True
-                fill_price = short_price
-            
-            # 체결 시 재진입 (1초 쿨다운)
-            if any_filled and fill_price and (now - last_rebalance_time) > 1:
-                on_hedge_fill_event("ETH_USDT", fill_price)
+            # ⭐ 핵심: 포지션 변화 + 미체결 0 + 1초 쿨다운
+            if position_changed and pending_count == 0 and (now - last_rebalance_time) > 1:
+                current_price = get_price("ETH_USDT")
+                log_debug("✅ 전체 체결", f"롱:{long_size} 숏:{short_size} 미체결:{pending_count}")
+                on_hedge_fill_event("ETH_USDT", current_price)
                 last_rebalance_time = now
             
             prev_long_size = long_size
