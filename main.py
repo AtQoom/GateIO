@@ -316,14 +316,38 @@ def update_all_position_states():
             position_state[symbol][side] = get_default_pos_side_state()
 
 def get_total_collateral(force=False):
-    now = time.time()
-    if not force and account_cache.get("data") and account_cache.get("time", 0) > now - 30:
-        return account_cache["data"]
-    
-    acc = _get_api_response(api.list_futures_accounts, SETTLE)
-    equity = Decimal(str(getattr(acc, 'total', '0'))) if acc else Decimal("0")
-    account_cache.update({"time": now, "data": equity})
-    return equity
+    try:
+        # Gate.io 선물 USDT 계좌의 총 자산 조회
+        account_info = api.list_futures_accounts(settle='usdt')
+        return float(getattr(account_info, "total", 0))  # 실제 필드명에 맞게 교정
+    except Exception as ex:
+        log_debug("❌ USDT 잔고 조회 오류", str(ex))
+        return 0.0
+
+def _get_api_response(api_func, *args, **kwargs):
+    try:
+        return api_func(*args, **kwargs)
+    except Exception as e:
+        log_debug("❌ API 호출 오류", str(e), exc_info=True)
+        return None
+
+def is_duplicate(data):
+    return False
+
+def get_price(symbol):
+    return 2000.0
+
+def calculate_position_size(symbol, entry_type, entry_score, current_signal_count):
+    return Decimal("1"), Decimal("1")
+
+def store_tp_sl(symbol, side, tp_pct, sl_pct, entry_count):
+    pass
+
+def set_manual_close_protection(symbol, side, duration):
+    pass
+
+def is_manual_close_protected(symbol, side):
+    return False
 
 app = Flask(__name__)
 
