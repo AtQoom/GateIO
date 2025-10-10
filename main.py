@@ -212,42 +212,74 @@ def get_obv_macd_value(symbol="ETH_USDT"):
     log_debug("📊 OBV MACD", f"{symbol}: {value:.2f}")
     
     return value
+    
+def get_available_balance():
+    """사용 가능한 USDT 잔고"""
+    try:
+        account_info = api.list_futures_accounts(settle='usdt')
+        available = float(getattr(account_info, "available", 0))
+        return available
+    except Exception as e:
+        log_debug("❌ 잔고 조회 오류", str(e))
+        return 0.0
 
-def get_base_qty():
-    return Decimal("2.0")
-    
-def calculate_grid_qty(base_qty: Decimal, obv_macd_val: float) -> Decimal:
+def calculate_grid_qty(current_price: Decimal, obv_macd_val: float) -> Decimal:
     """
-    그리드 수량 계산 (기존 전략)
-    - 기본 2.0 계약
-    - OBV MACD 값에 따라 2.1배~3.0배
+    그리드 수량 계산 (자본금 기반)
+    - 기본: 자본금 × 2배
+    - 최대: 자본금 × 3배
     """
-    ratio = Decimal("2.1")  # ⭐ 기본값 2.1배
-    abs_val = abs(obv_macd_val)
-    
-    # OBV MACD 절대값 기준 (10단계 세분화)
-    if abs_val >= 20 and abs_val < 30:
-        ratio = Decimal("2.1")
-    elif abs_val >= 30 and abs_val < 40:
-        ratio = Decimal("2.2")
-    elif abs_val >= 40 and abs_val < 50:
-        ratio = Decimal("2.3")
-    elif abs_val >= 50 and abs_val < 60:
-        ratio = Decimal("2.4")
-    elif abs_val >= 60 and abs_val < 70:
-        ratio = Decimal("2.5")
-    elif abs_val >= 70 and abs_val < 80:
-        ratio = Decimal("2.6")
-    elif abs_val >= 80 and abs_val < 90:
-        ratio = Decimal("2.7")
-    elif abs_val >= 90 and abs_val < 100:
-        ratio = Decimal("2.8")
-    elif abs_val >= 100 and abs_val < 110:
-        ratio = Decimal("2.9")
-    elif abs_val >= 110:
-        ratio = Decimal("3.0")
-    
-    return base_qty * ratio
+    try:
+        # 사용 가능한 잔고 조회
+        balance = Decimal(str(get_available_balance()))
+        
+        if balance <= 0:
+            log_debug("⚠️ 잔고 부족", f"balance={balance}")
+            return Decimal("0")
+        
+        # 레버리지 배율 계산 (2.0 ~ 3.0)
+        abs_val = abs(obv_macd_val)
+        
+        if abs_val < 20:
+            leverage = Decimal("2.0")
+        elif abs_val >= 20 and abs_val < 30:
+            leverage = Decimal("2.1")
+        elif abs_val >= 30 and abs_val < 40:
+            leverage = Decimal("2.2")
+        elif abs_val >= 40 and abs_val < 50:
+            leverage = Decimal("2.3")
+        elif abs_val >= 50 and abs_val < 60:
+            leverage = Decimal("2.4")
+        elif abs_val >= 60 and abs_val < 70:
+            leverage = Decimal("2.5")
+        elif abs_val >= 70 and abs_val < 80:
+            leverage = Decimal("2.6")
+        elif abs_val >= 80 and abs_val < 90:
+            leverage = Decimal("2.7")
+        elif abs_val >= 90 and abs_val < 100:
+            leverage = Decimal("2.8")
+        elif abs_val >= 100 and abs_val < 110:
+            leverage = Decimal("2.9")
+        else:
+            leverage = Decimal("3.0")
+        
+        # 포지션 가치 계산
+        position_value = balance * leverage
+        
+        # ETH 계약 수량 계산 (1계약 = 0.01 ETH)
+        contract_size = Decimal("0.01")
+        qty = position_value / (current_price * contract_size)
+        
+        # 정수로 내림
+        qty = qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
+        
+        log_debug("💰 수량 계산", f"잔고:{balance} 레버:{leverage} 가격:{current_price} → {qty}계약")
+        
+        return qty
+        
+    except Exception as e:
+        log_debug("❌ 수량 계산 오류", str(e), exc_info=True)
+        return Decimal("2.0")  # 폴백
 
 def cancel_open_orders(symbol):
     try:
@@ -312,8 +344,13 @@ def place_order(symbol, side, qty: Decimal, price: Decimal, wait_for_fill=True):
 def place_grid_tp_order(symbol, side, avg_price, total_qty):
     """
     그리드 TP 주문 (평단 기준)
+    reduce_only=True로 청산 전용 주문
     """
     try:
+        if total_qty <= 0:
+            log_debug("⚠️ TP 주문 불가", f"{symbol}_{side} qty=0")
+            return False
+        
         gap_pct = Decimal("0.15") / Decimal("100")
         
         if side == "long":
@@ -323,9 +360,9 @@ def place_grid_tp_order(symbol, side, avg_price, total_qty):
             tp_price = avg_price * (1 - gap_pct)
             close_size = int(total_qty)
         
-        log_debug("📝 TP 주문 준비", f"{symbol}_{side} size={close_size} price={tp_price}")
+        log_debug("📝 TP 주문 준비", f"{symbol}_{side} 평단:{avg_price} TP:{tp_price} size={close_size}")
         
-        # ⭐ reduce_only만 사용 (close_long/close_short 제거)
+        # reduce_only=True: 포지션 청산 전용
         tp_order = FuturesOrder(
             contract=symbol,
             size=close_size,
@@ -337,10 +374,10 @@ def place_grid_tp_order(symbol, side, avg_price, total_qty):
         result = api.create_futures_order(SETTLE, tp_order)
         
         if result:
-            log_debug("✅ TP 주문 성공", f"{symbol}_{side.upper()} TP:{tp_price}")
+            log_debug("✅ TP 주문 성공", f"{symbol}_{side.upper()} TP:{tp_price} (reduce_only)")
             return True
         else:
-            log_debug("❌ TP 주문 실패", f"{symbol}_{side}")
+            log_debug("❌ TP 주문 실패", f"{symbol}_{side} - API 응답 없음")
             return False
         
     except Exception as e:
@@ -389,6 +426,7 @@ def update_position_state(symbol, side, price, qty):
             pos["size"] = new_size
 
 def handle_grid_entry(data):
+    """ETH 그리드 진입"""
     symbol = normalize_symbol(data.get("symbol"))
     if symbol != "ETH_USDT":
         return
@@ -397,10 +435,10 @@ def handle_grid_entry(data):
     price = Decimal(str(data.get("price", "0")))
     
     obv_macd_val = get_obv_macd_value(symbol)
-    base_qty = get_base_qty()
-    qty = calculate_grid_qty(base_qty, obv_macd_val)
+    qty = calculate_grid_qty(price, obv_macd_val)  # ⭐ 가격 전달
     
     if qty < Decimal('1'):
+        log_debug("⚠️ 수량 부족", f"{symbol} qty={qty}")
         return
 
     success = place_order(symbol, side, qty, price, wait_for_fill=False)
@@ -579,6 +617,9 @@ def is_manual_close_protected(symbol, side):
     return False
 
 def eth_grid_fill_monitor():
+    """
+    ETH 체결 감지 및 평단 TP 관리
+    """
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
     
@@ -593,35 +634,50 @@ def eth_grid_fill_monitor():
             long_price = pos.get("long", {}).get("price", Decimal("0"))
             short_price = pos.get("short", {}).get("price", Decimal("0"))
             
+            # 포지션 청산 감지
             if prev_long_size > 0 and long_size == 0:
-                log_debug("🎯 롱 청산", "ETH 그리드 재시작")
+                log_debug("🎯 롱 청산 감지", "ETH 그리드 재시작")
                 cancel_open_orders("ETH_USDT")
                 time.sleep(0.5)
                 initialize_grid_orders()
             
             if prev_short_size > 0 and short_size == 0:
-                log_debug("🎯 숏 청산", "ETH 그리드 재시작")
+                log_debug("🎯 숏 청산 감지", "ETH 그리드 재시작")
                 cancel_open_orders("ETH_USDT")
                 time.sleep(0.5)
                 initialize_grid_orders()
             
+            # 롱 체결
             if long_size > prev_long_size and long_size > 0:
                 log_debug("✅ 롱 체결", f"ETH 평단:{long_price} 수량:{long_size}")
+                
+                # 기존 TP 취소
                 cancel_tp_orders("ETH_USDT")
-                time.sleep(0.3)
+                time.sleep(0.5)
+                
+                # 새 TP 발주 (전체 수량)
                 place_grid_tp_order("ETH_USDT", "long", long_price, long_size)
+                
+                # 그리드 재배치
                 on_grid_fill_event("ETH_USDT", long_price)
             
+            # 숏 체결
             if short_size > prev_short_size and short_size > 0:
                 log_debug("✅ 숏 체결", f"ETH 평단:{short_price} 수량:{short_size}")
+                
+                # 기존 TP 취소
                 cancel_tp_orders("ETH_USDT")
-                time.sleep(0.3)
+                time.sleep(0.5)
+                
+                # 새 TP 발주 (전체 수량)
                 place_grid_tp_order("ETH_USDT", "short", short_price, short_size)
+                
+                # 그리드 재배치
                 on_grid_fill_event("ETH_USDT", short_price)
             
             prev_long_size = long_size
             prev_short_size = short_size
-
+            
 def position_monitor():
     while True:
         time.sleep(30)
