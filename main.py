@@ -1,80 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Gate.io 자동매매 서버 v6.33-server - 파인스크립트 v6.33 연동 최종본 (+동적 심볼 정리, status 확장)
-(기존 v6.26 기반 수정)
-"""
 import os
 import json
 import time
 import asyncio
 import threading
-import websockets
+import queue
 import logging
-import sys
 from decimal import Decimal, ROUND_DOWN
-from datetime import datetime
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
 from gate_api import exceptions as gate_api_exceptions
-import queue
-import pytz
-import urllib.parse 
+import websockets
 
-warned_unmapped_symbols = set()
-
-# ======== 1. 로깅 설정 ========
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
-logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
-def log_debug(tag, msg, exc_info=False):
-    logger.info(f"[{tag}] {msg}")
-    if exc_info:
-        logger.exception("")
-
-# ======== 2. Flask 앱 및 API 설정 ========
-try:
-    app = Flask(__name__)
-    logger.info("Flask 앱 초기화 성공")
-except Exception as e:
-    logger.error(f"Flask 앱 초기화 실패: {e}")
-    try:
-        app = Flask("gate_trading_server")
-        logger.info("대안 Flask 앱 초기화 성공")
-    except Exception as e2:
-        logger.critical(f"Flask 앱 초기화 완전 실패: {e2}")
-        sys.exit(1)
-
-API_KEY = os.environ.get("API_KEY", "")
-API_SECRET = os.environ.get("API_SECRET", "")
+COOLDOWN_SECONDS = 5
 SETTLE = "usdt"
 
+# API 키 & 초기화
+API_KEY = os.environ.get("API_KEY", "")
+API_SECRET = os.environ.get("API_SECRET", "")
 if not API_KEY or not API_SECRET:
-    logger.critical("API_KEY 또는 API_SECRET이 설정되지 않았습니다.")
-    sys.exit(1)
+    logger.critical("API 키 미설정")
+    exit(1)
 
-try:
-    config = Configuration(key=API_KEY, secret=API_SECRET)
-    client = ApiClient(config)
-    api = FuturesApi(client)
-    unified_api = UnifiedApi(client)
-    logger.info("Gate.io API 초기화 성공")
-except Exception as e:
-    logger.critical(f"Gate.io API 초기화 실패: {e}")
-    sys.exit(1)
+config = Configuration(key=API_KEY, secret=API_SECRET)
+client = ApiClient(config)
+api = FuturesApi(client)
+unified_api = UnifiedApi(client)
 
-# ======== 3. 상수 및 설정 ========
-COOLDOWN_SECONDS = 5
-PRICE_DEVIATION_LIMIT_PCT = Decimal("0.0003")
-MAX_SLIPPAGE_TICKS = 5
-KST = pytz.timezone('Asia/Seoul')
-
-PREMIUM_TP_MULTIPLIERS = {
-    "first_entry":   Decimal("1.5"),
-    "after_normal":  Decimal("1.3"),
-    "after_premium": Decimal("1.2")
-}
+# 글로벌 상태, 큐
+task_q = queue.Queue(maxsize=200)
+position_lock = threading.RLock()
+position_state = {}
+dynamic_symbols = set()
 
 SYMBOL_MAPPING = {
     "BTCUSDT":"BTC_USDT","BTCUSDT.P":"BTC_USDT","BTCUSDTPERP":"BTC_USDT","BTC_USDT":"BTC_USDT","BTC":"BTC_USDT",
@@ -104,398 +65,256 @@ SYMBOL_CONFIG = {
     "PEPE_USDT":{"min_qty":Decimal("1"),"qty_step":Decimal("1"),"contract_size":Decimal("10000000"),"min_notional":Decimal("5"),"tp_mult":1.2,"sl_mult":1.2,"tick_size":Decimal("0.00000001"),"price_multiplier":Decimal("100000000.0")},
     "XRP_USDT":{"min_qty":Decimal("1"),"qty_step":Decimal("1"),"contract_size":Decimal("10"),"min_notional":Decimal("5"),"tp_mult":1.0,"sl_mult":1.0,"tick_size":Decimal("0.0001")},
     "DOGE_USDT":{"min_qty":Decimal("1"),"qty_step":Decimal("1"),"contract_size":Decimal("10"),"min_notional":Decimal("5"),"tp_mult":1.2,"sl_mult":1.2,"tick_size":Decimal("0.00001")},
-    "ONDO_USDT":{"min_qty":Decimal("1"),"qty_step":Decimal("1"),"contract_size":Decimal("1"),"min_notional":Decimal("5"),"tp_mult":1.0,"sl_mult":1.0,"tick_size":Decimal("0.0001")}
+    "ONDO_USDT":{"min_qty":Decimal("1"),"qty_step":Decimal("1"),"contract_size":Decimal("1"),"min_notional":Decimal("5"),"tp_mult":1.0,"sl_mult":1.0,"tick_size":Decimal("0.0001")},
 }
-
+  
 def get_symbol_config(symbol):
-    if symbol in SYMBOL_CONFIG: 
+    if symbol in SYMBOL_CONFIG:
         return SYMBOL_CONFIG[symbol]
     log_debug(f"⚠️ 누락된 심볼 설정 ({symbol})", "기본값으로 진행")
     SYMBOL_CONFIG[symbol] = DEFAULT_SYMBOL_CONFIG.copy()
     return SYMBOL_CONFIG[symbol]
 
-# ======== 4. 상태 관리 ========
-position_state = {}
-position_lock = threading.RLock()
-account_cache = {"time": 0, "data": None}
-recent_signals = {}
-signal_lock = threading.RLock()
-tpsl_storage = {}
-tpsl_lock = threading.RLock()
-task_q = queue.Queue(maxsize=100)
-WORKER_COUNT = min(6, max(2, os.cpu_count() * 2))
-manual_close_protection = {}
-manual_protection_lock = threading.RLock()
-
-# 동적 심볼 관리 + 메트릭
-dynamic_symbols = set()
-ws_last_payload = []        # 마지막 구독 payload
-ws_last_subscribed_at = 0   # 최근 구독시각(epoch)
-
-def get_default_pos_side_state():
-    return {
-        "price": None, "size": Decimal("0"), "value": Decimal("0"),
-        "entry_count": 0, "normal_entry_count": 0, "premium_entry_count": 0,
-        "rescue_entry_count": 0, "entry_time": None, "last_entry_ratio": Decimal("0"),
-        "current_tp_pct": Decimal("0"),
-        "premium_tp_multiplier": Decimal("1.0")  # 이 필드가 누락됨
-    }
-
-def initialize_states():
-    """API에서 받는 모든 심볼에 대해 동적으로 상태를 초기화"""
-    with position_lock, tpsl_lock:
-        for sym in SYMBOL_CONFIG:
-            position_state[sym] = {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()}
-            tpsl_storage[sym] = {"long": {}, "short": {}}
-        
-        try:
-            api_positions = _get_api_response(api.list_positions, settle=SETTLE)
-            if api_positions:
-                for pos in api_positions:
-                    symbol = normalize_symbol(pos.contract)
-                    if symbol and symbol not in position_state:
-                        log_debug("🆕 새 심볼 초기화", f"{symbol} - API에서 발견")
-                        position_state[symbol] = {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()}
-                        tpsl_storage[symbol] = {"long": {}, "short": {}}
-                        dynamic_symbols.add(symbol)
-        except Exception as e:
-            log_debug("⚠️ 동적 초기화 실패", str(e))
-
-# ======== 5. 유틸 ========
-def set_manual_close_protection(symbol, side, duration=30):
-    with manual_protection_lock:
-        key = f"{symbol}_{side}"
-        manual_close_protection[key] = {"protected_until": time.time() + duration, "reason": "manual_close_detected"}
-        log_debug("🛡️ 수동 청산 보호 활성화", f"{key} {duration}초")
-
-def is_manual_close_protected(symbol, side):
-    with manual_protection_lock:
-        key = f"{symbol}_{side}"
-        if key in manual_close_protection and time.time() < manual_close_protection[key]["protected_until"]:
-            return True
-        elif key in manual_close_protection:
-            del manual_close_protection[key]
-            log_debug("🛡️ 수동 청산 보호 해제", key)
-    return False
-
-def _get_api_response(api_call, *args, **kwargs):
-    for attempt in range(3):
-        try:
-            return api_call(*args, **kwargs)
-        except Exception as e:
-            error_msg = str(e)
-            if isinstance(e, gate_api_exceptions.ApiException):
-                error_msg = f"API Error {e.status}: {e.body or e.reason}"
-            if attempt < 2:
-                log_debug("⚠️ API 호출 재시도", f"{attempt+1}/3: {error_msg}")
-            else:
-                log_debug("❌ API 호출 최종 실패", error_msg, exc_info=True)
-            time.sleep(1)
-    return None
-
-def normalize_symbol(raw_symbol):
-    if not raw_symbol: 
+def normalize_symbol(raw):
+    if not raw:
         return None
-    symbol = str(raw_symbol).upper().strip()
-    if symbol in SYMBOL_MAPPING: 
-        return SYMBOL_MAPPING[symbol]
-    clean = symbol.replace('.P', '').replace('PERP', '').replace('USDT', '')
-    for key, value in SYMBOL_MAPPING.items():
-        if clean in key: 
-            return value
-    # 여기부터 1회 경고!
-    if symbol not in warned_unmapped_symbols:
-        log_debug("⚠️ 심볼 정규화 실패", f"'{raw_symbol}' → 매핑되지 않음")
-        warned_unmapped_symbols.add(symbol)
-    return None
+    raw = raw.upper().strip()
+    return SYMBOL_MAPPING.get(raw, None)
 
-def get_total_collateral(force=False):
-    now = time.time()
-    if not force and account_cache.get("data") and account_cache.get("time", 0) > now - 30:
-        return account_cache["data"]
-    
-    acc = _get_api_response(api.list_futures_accounts, SETTLE)
-    equity = Decimal(str(getattr(acc, 'total', '0'))) if acc else Decimal("0")
-    account_cache.update({"time": now, "data": equity})
-    return equity
+def log_debug(tag, msg, exc_info=False):
+    logger.info(f"[{tag}] {msg}")
+    if exc_info:
+        logger.exception("")
 
-def get_price(symbol):
-    """list_futures_tickers는 list[FuturesTicker]를 반환할 수 있으므로 첫 요소를 안전하게 처리"""
-    try:
-        res = _get_api_response(api.list_futures_tickers, SETTLE, contract=symbol)
-        if not res:
-            return Decimal("0")
-        # Gate.io SDK는 리스트를 반환
-        if isinstance(res, list) and len(res) > 0:
-            last_str = str(getattr(res[0], 'last', '0'))
-            return Decimal(last_str)
-        # 혹시 단일 객체가 오는 경우 보강
-        last_str = str(getattr(res, 'last', '0'))
-        return Decimal(last_str)
-    except Exception as e:
-        log_debug("❌ Get Price 오류", f"{symbol}: {e}", exc_info=True)
-        return Decimal("0")
+def get_obv_macd_value():
+    # TODO: 외부 데이터 연동
+    return 30.0  # 임시 값
 
-# ======== 6. 파인스크립트 연동 및 수량계산 ========
-def get_signal_type_multiplier(signal_type):
-    if "premium" in signal_type: 
-        return Decimal("2.0")
-    if "rescue" in signal_type:  
-        return Decimal("3.0")
-    return Decimal("1.0")
+def get_base_qty():
+    # TODO: 잔고 기반 실제 동적 계산을 위해 API 잔고 조회 호출 필요
+    return Decimal("2.0")
 
-def get_entry_weight_from_score(score):
-    try:
-        score = Decimal(str(score))
-        if score <= 10: return Decimal("0.2")
-        if score <= 30: return Decimal("0.3")
-        if score <= 50: return Decimal("0.45")
-        if score <= 70: return Decimal("0.6")
-        if score <= 90: return Decimal("0.80")
-        return Decimal("1.00")
-    except:
-        return Decimal("0.2")
+def calculate_dynamic_qty(base_qty: Decimal, obv_macd_val: float, side: str) -> Decimal:
+    ratio = 1.0
+    if side == "long":  # 역방향 숏 진입시 적용
+        if obv_macd_val <= -20 and obv_macd_val > -30:
+            ratio = 2.1
+        elif obv_macd_val <= -30 and obv_macd_val > -40:
+            ratio = 2.2
+        elif obv_macd_val <= -40 and obv_macd_val > -50:
+            ratio = 2.3
+        elif obv_macd_val <= -50 and obv_macd_val > -60:
+            ratio = 2.4
+        elif obv_macd_val <= -60 and obv_macd_val > -70:
+            ratio = 2.5
+        elif obv_macd_val <= -70 and obv_macd_val > -80:
+            ratio = 2.6
+        elif obv_macd_val <= -80 and obv_macd_val > -90:
+            ratio = 2.7
+        elif obv_macd_val <= -90 and obv_macd_val > -100:
+            ratio = 2.8
+        elif obv_macd_val <= -100 and obv_macd_val > -110:
+            ratio = 2.9
+        elif obv_macd_val <= -110:
+            ratio = 3.0
+    elif side == "short":  # 역방향 롱 진입시 적용
+        if obv_macd_val >= 20 and obv_macd_val < 30:
+            ratio = 2.1
+        elif obv_macd_val >= 30 and obv_macd_val < 40:
+            ratio = 2.2
+        elif obv_macd_val >= 40 and obv_macd_val < 50:
+            ratio = 2.3
+        elif obv_macd_val >= 50 and obv_macd_val < 60:
+            ratio = 2.4
+        elif obv_macd_val >= 60 and obv_macd_val < 70:
+            ratio = 2.5
+        elif obv_macd_val >= 70 and obv_macd_val < 80:
+            ratio = 2.6
+        elif obv_macd_val >= 80 and obv_macd_val < 90:
+            ratio = 2.7
+        elif obv_macd_val >= 90 and obv_macd_val < 100:
+            ratio = 2.8
+        elif obv_macd_val >= 100 and obv_macd_val < 110:
+            ratio = 2.9
+        elif obv_macd_val >= 110:
+            ratio = 3.0
+    return base_qty * Decimal(str(ratio))
 
-def get_ratio_by_index(idx):
-    ratios = [Decimal("4.0"), Decimal("8.0"), Decimal("24.0"), Decimal("72.0"), Decimal("220.0")]
-    return ratios[min(idx, len(ratios) - 1)]
-
-def store_tp_sl(symbol, side, tp, sl, entry_number):
-    with tpsl_lock:
-        tpsl_storage.setdefault(symbol, {"long": {}, "short": {}})[side][entry_number] = {
-            "tp": tp, "sl": sl, "entry_time": time.time()
-        }
-
-def is_duplicate(data):
-    with signal_lock:
-        now = time.time()
-        symbol_id = f"{data.get('symbol')}_{data.get('side')}_{data.get('type')}"
-        if now - recent_signals.get(symbol_id, 0) < COOLDOWN_SECONDS:
-            log_debug("🔄 중복 신호 무시", f"{symbol_id}")
-            return True
-        recent_signals[symbol_id] = now
-        recent_signals.update({k: v for k, v in recent_signals.items() if now - v < 300})
-        return False
-
-def calculate_position_size(symbol, signal_type, entry_score, current_signal_count):
-    cfg, equity, price = get_symbol_config(symbol), get_total_collateral(), get_price(symbol)
-    if equity <= 0 or price <= 0:
-        return Decimal("0"), Decimal("0")
-    
-    base_ratio = get_ratio_by_index(current_signal_count)
-    signal_multiplier = get_signal_type_multiplier(signal_type)
-    score_weight = get_entry_weight_from_score(entry_score)
-    final_ratio = base_ratio * signal_multiplier * score_weight
-    
-    if "rescue" in signal_type:
-        with position_lock:
-            side = "long" if "long" in signal_type else "short"
-            last_ratio = position_state.get(symbol, {}).get(side, {}).get('last_entry_ratio', Decimal("5.0"))
-            final_ratio = last_ratio * signal_multiplier
-    
-    contract_value = price * cfg["contract_size"]
-    if contract_value <= 0:
-        return Decimal("0"), final_ratio
-    
-    position_value = equity * final_ratio / 100
-    base_qty = (position_value / contract_value).quantize(Decimal('1'), rounding=ROUND_DOWN)
-    qty_with_min = max(base_qty, cfg["min_qty"])
-    
-    if qty_with_min * contract_value < cfg["min_notional"]:
-        final_qty = (cfg["min_notional"] / contract_value).quantize(Decimal('1'), rounding=ROUND_DOWN) + Decimal("1")
-    else:
-        final_qty = qty_with_min
-    
-    return final_qty, final_ratio
-
-# ======== 7. 주문 및 상태 관리 ========
-def place_order(symbol, side, qty):
+def place_order(symbol, side, qty: Decimal):
     with position_lock:
         try:
             update_all_position_states()
             original_size = position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0"))
-            
-            order = FuturesOrder(
-                contract=symbol, 
-                size=int(qty) if side == "long" else -int(qty), 
-                price="0", 
-                tif="ioc"
-            )
-            result = _get_api_response(api.create_futures_order, SETTLE, order)
-            
+            order_size = qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
+            if side == "short":
+                order_size = -order_size
+            order = FuturesOrder(contract=symbol, size=int(order_size), price="0", tif="ioc")
+            result = api.create_futures_order(SETTLE, order)
             if not result:
-                log_debug("❌ 주문 API 호출 실패", f"{symbol}_{side}")
+                log_debug("❌ 주문 실패", f"{symbol}_{side}")
                 return False
-            
-            log_debug("✅ 주문 전송", f"{symbol}_{side} id={getattr(result, 'id', 'N/A')}")
-            
-            for attempt in range(15):
+            for _ in range(15):
                 time.sleep(1)
                 update_all_position_states()
-                current_size = position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0"))
-                if current_size > original_size:
-                    log_debug("🔄 포지션 업데이트 확인", f"{symbol}_{side} {attempt+1}s")
+                new_size = position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0"))
+                if new_size > original_size:
                     return True
-            
-            log_debug("❌ 포지션 업데이트 실패", f"{symbol}_{side} 15s 타임아웃")
+            log_debug("❌ 포지션 갱신 실패", f"{symbol}_{side}")
             return False
-        except Exception as e:
-            log_debug("❌ 주문 오류", f"{symbol}_{side} {e}", exc_info=True)
+        except Exception as ex:
+            log_debug("❌ 주문에러", str(ex), exc_info=True)
             return False
 
+def update_position_state(symbol, side, price, qty):
+    with position_lock:
+        if symbol not in position_state:
+            position_state[symbol] = {"long": {"price": None, "size": Decimal("0")}, "short": {"price": None, "size": Decimal("0")}}
+        pos = position_state[symbol][side]
+        current_size = pos["size"]
+        current_price = pos["price"] or Decimal("0")
+        new_size = current_size + qty
+        if new_size == 0:
+            pos["price"] = None
+            pos["size"] = Decimal("0")
+        else:
+            avg_price = ((current_price * current_size) + (price * qty)) / new_size
+            pos["price"] = avg_price
+            pos["size"] = new_size
+
+def handle_grid_entry(data):
+    symbol = normalize_symbol(data.get("symbol"))
+    if symbol != "ETH_USDT":
+        return
+    side = data.get("side", "").lower()
+    price = Decimal(str(data.get("price", "0")))
+    obv_macd_val = get_obv_macd_value()
+    base_qty = get_base_qty()
+    dynamic_qty = calculate_dynamic_qty(base_qty, obv_macd_val, side)
+    if dynamic_qty < Decimal('1'):
+        return
+    success = place_order(symbol, side, dynamic_qty)
+    if success:
+        update_position_state(symbol, side, price, dynamic_qty)
+        log_debug("📈 그리드 진입", f"{symbol} {side} qty={dynamic_qty} price={price}")
+
+def handle_entry(data):
+    """
+    기존 전략 진입 처리 - ETH_USDT 심볼은 제외
+    """
+    symbol = normalize_symbol(data.get("symbol"))
+    if symbol == "ETH_USDT":
+        # ETH는 기존 전략 제외, 별도 handle_grid_entry 에서 처리
+        return
+    
+    side = data.get("side", "").lower()
+    signal_type = data.get("type", "normal")
+    entry_score = data.get("entry_score", 50)
+    tv_tp_pct = Decimal(str(data.get("tp_pct", "0"))) / 100
+    tv_sl_pct = Decimal(str(data.get("sl_pct", "0"))) / 100
+    
+    if not all([symbol, side, data.get('price'), tv_tp_pct > 0, tv_sl_pct > 0]):
+        log_debug("❌ 진입 불가", f"필수 정보 누락: {data}")
+        return
+    
+    cfg = get_symbol_config(symbol)
+    current_price = get_price(symbol)
+    if current_price <= 0:
+        log_debug("⚠️ 진입 취소", f"{symbol} 가격 정보 없음")
+        return
+
+    signal_price = Decimal(str(data['price'])) / cfg.get("price_multiplier", Decimal("1.0"))
+    
+    update_all_position_states()
+    state = position_state[symbol][side]
+
+    # 슬리피지 체크 (첫 진입 시)
+    if state["entry_count"] == 0 and abs(current_price - signal_price) > max(signal_price * PRICE_DEVIATION_LIMIT_PCT, Decimal(str(MAX_SLIPPAGE_TICKS)) * cfg['tick_size']):
+        log_debug("⚠️ 첫 진입 취소", "슬리피지 큼")
+        return
+    
+    entry_limits = {"premium": 5, "normal": 5, "rescue": 3}
+    base_type = signal_type.replace("_long", "").replace("_short", "")
+    if state["entry_count"] >= sum(entry_limits.values()) or state.get(f"{base_type}_entry_count", 0) >= entry_limits.get(base_type, 99):
+        log_debug("⚠️ 추가 진입 제한", f"{symbol} {side} 최고 횟수 도달")
+        return
+
+    current_signal_count = state.get(f"{base_type}_entry_count", 0) if "rescue" not in signal_type else 0
+    qty, final_ratio = calculate_position_size(symbol, f"{base_type}_{side}", entry_score, current_signal_count)
+    
+    if qty > 0 and place_order(symbol, side, qty):
+        state["entry_count"] += 1
+        state[f"{base_type}_entry_count"] = current_signal_count + 1
+        state["entry_time"] = time.time()
+        
+        if "rescue" not in signal_type:
+            state["last_entry_ratio"] = final_ratio
+        
+        # 프리미엄 TP 배수 재계산
+        if base_type == "premium":
+            if state["premium_entry_count"] == 1 and state["normal_entry_count"] == 0:
+                new_mul = PREMIUM_TP_MULTIPLIERS["first_entry"]
+            elif state["premium_entry_count"] == 1 and state["normal_entry_count"] > 0:
+                new_mul = PREMIUM_TP_MULTIPLIERS["after_normal"]
+            else:
+                new_mul = PREMIUM_TP_MULTIPLIERS["after_premium"]
+            cur_mul = state.get("premium_tp_multiplier", Decimal("1.0"))
+            state["premium_tp_multiplier"] = min(cur_mul, new_mul) if cur_mul > Decimal("1.0") else new_mul
+            log_debug("✨ 프리미엄 TP 배수 적용", f"{symbol} {side.upper()}={state['premium_tp_multiplier']}")
+        elif state["entry_count"] == 1:
+            state["premium_tp_multiplier"] = Decimal("1.0")
+        
+        store_tp_sl(symbol, side, tv_tp_pct, tv_sl_pct, state["entry_count"])
+        log_debug("✅ 진입 성공", f"{symbol} {side} qty={float(qty)} 진입 횟수={state['entry_count']}")
+
 def update_all_position_states():
-    """주기 동기화 + 동적 심볼 추가/정리"""
+    """
+    Gate.io API로 포지션 최신화 후 로컬 상태 반영
+    """
     with position_lock:
         api_positions = _get_api_response(api.list_positions, settle=SETTLE)
         if api_positions is None:
             log_debug("❌ 포지션 동기화 실패", "API 응답 없음")
             return
         
-        log_debug("📊 포지션 동기화 시작", f"FuturesApi count={len(api_positions)}")
+        log_debug("📊 포지션 동기화", f"포지션 수={len(api_positions)}")
         
-        positions_to_clear = set()
+        cleared = set()
         for symbol, sides in position_state.items():
             for side in ["long", "short"]:
                 if sides[side]["size"] > 0:
-                    positions_to_clear.add((symbol, side))
+                    cleared.add((symbol, side))
         
-        # API 반영
         for pos in api_positions:
             pos_size = Decimal(str(pos.size))
             if pos_size == 0:
                 continue
-            
             symbol = normalize_symbol(pos.contract)
             if not symbol:
                 continue
             
             if symbol not in position_state:
-                log_debug("🆕 즉시 초기화", f"{symbol} - update 중 발견")
+                log_debug("🆕 심볼 초기화", f"{symbol}")
                 position_state[symbol] = {"long": get_default_pos_side_state(), "short": get_default_pos_side_state()}
-                tpsl_storage[symbol] = {"long": {}, "short": {}}
-                dynamic_symbols.add(symbol)
             
             cfg = get_symbol_config(symbol)
-            side = None
-            if hasattr(pos, 'mode') and pos.mode == 'dual_long': 
-                side = 'long'
-            elif hasattr(pos, 'mode') and pos.mode == 'dual_short': 
-                side = 'short'
-            elif pos_size > 0: 
-                side = 'long'
-            elif pos_size < 0: 
-                side = 'short'
+            side = "long" if pos_size > 0 else "short"
+            cleared.discard((symbol, side))
             
-            if not side:
-                continue
-            
-            positions_to_clear.discard((symbol, side))
             state = position_state[symbol][side]
-            old_size = state.get("size", Decimal("0"))
-            
+            old_size = state["size"]
             state.update({
                 "price": Decimal(str(pos.entry_price)),
                 "size": abs(pos_size),
                 "value": abs(pos_size) * Decimal(str(pos.mark_price)) * cfg["contract_size"]
             })
-            
             if old_size != abs(pos_size):
-                log_debug("🔄 포지션 상태 업데이트", f"{symbol}_{side.upper()}: {old_size} → {abs(pos_size)}")
-        
-        # 청산/미보유 정리 + 동적 심볼 자동 제거
-        cleared_symbols = set()
-        for symbol, side in positions_to_clear:
-            log_debug("🔄 수동/자동 청산 감지", f"{symbol}_{side.upper()} - API 응답에 없음")
-            set_manual_close_protection(symbol, side)
+                log_debug("🔄 포지션 상태 갱신", f"{symbol} {side.upper()}: {old_size} -> {abs(pos_size)}")
+
+        # API 미응답된 비보유 사이드 초기화
+        for symbol, side in cleared:
+            log_debug("🔄 포지션 초기화 감지", f"{symbol} {side.upper()}")
             position_state[symbol][side] = get_default_pos_side_state()
-            if symbol in tpsl_storage:
-                tpsl_storage[symbol][side].clear()
-            
-            # 두 사이드 모두 size 0이면 동적 심볼 세트에서 제거 후보
-            other_side = "short" if side == "long" else "long"
-            if position_state[symbol][other_side]["size"] == 0 and position_state[symbol][side]["size"] == 0:
-                cleared_symbols.add(symbol)
-        
-        # 동적 심볼 자동 정리
-        if cleared_symbols:
-            before = len(dynamic_symbols)
-            dynamic_symbols.difference_update(cleared_symbols)
-            after = len(dynamic_symbols)
-            if before != after:
-                log_debug("🧹 동적 심볼 정리", f"제거:{before-after}개 → 현재 {after}개")
 
-# ======== 8. 진입 처리 (수정된 부분) ========
-def handle_entry(data):
-    # 오류 수정: base_type에서 '_long' 또는 '_short' 제거
-    raw_type = data.get("type", "normal")
-    base_type = raw_type.replace("_long", "").replace("_short", "")
-    
-    symbol, side = normalize_symbol(data.get("symbol")), data.get("side", "").lower()
-    signal_type, entry_score = f"{base_type}_{side}", data.get("entry_score", 50)
-    tv_tp_pct, tv_sl_pct = Decimal(str(data.get("tp_pct", "0")))/100, Decimal(str(data.get("sl_pct", "0")))/100
-    
-    if not all([symbol, side, data.get('price'), tv_tp_pct > 0, tv_sl_pct > 0]):
-        return log_debug("❌ 진입 불가", f"필수 정보 누락: {data}")
-    
-    cfg = get_symbol_config(symbol)
-    current_price = get_price(symbol)
-    
-    if current_price <= 0:
-        log_debug("⚠️ 진입 취소", f"{symbol} 가격 정보를 가져올 수 없습니다.")
-        return
-        
-    signal_price = Decimal(str(data['price'])) / cfg.get("price_multiplier", Decimal("1.0"))
-    
-    update_all_position_states()
-    state = position_state[symbol][side]
-    
-    if state["entry_count"] == 0 and abs(current_price - signal_price) > max(signal_price * PRICE_DEVIATION_LIMIT_PCT, Decimal(str(MAX_SLIPPAGE_TICKS)) * cfg['tick_size']):
-        return log_debug("⚠️ 첫 진입 취소: 슬리피지", "가격차 큼")
-    
-    entry_limits = {"premium": 5, "normal": 5, "rescue": 3}
-    if state["entry_count"] >= sum(entry_limits.values()) or state.get(f"{base_type}_entry_count", 0) >= entry_limits.get(base_type, 99):
-        return log_debug("⚠️ 추가 진입 제한", f"{symbol} {side} - 최대 횟수 도달 ({base_type}:{state.get(f'{base_type}_entry_count', 0)})")
-    
-    current_signal_count = state.get(f"{base_type}_entry_count", 0) if "rescue" not in signal_type else 0
-    qty, final_ratio = calculate_position_size(symbol, signal_type, entry_score, current_signal_count)
-    
-    if qty > 0 and place_order(symbol, side, qty):
-        # 1) 카운트 먼저 증가 (파인스크립트와 동기화)
-        state["entry_count"] += 1
-        state[f"{base_type}_entry_count"] = state.get(f"{base_type}_entry_count", 0) + 1
-        state["entry_time"] = time.time()
-        
-        # 2) last_entry_ratio 갱신
-        if "rescue" not in signal_type: 
-            state['last_entry_ratio'] = final_ratio
-        
-        # 3) 프리미엄 배수 재계산 (증가된 카운트 기준)
-        if base_type == "premium":
-            if state["premium_entry_count"] == 1 and state["normal_entry_count"] == 0:
-                new_multiplier = PREMIUM_TP_MULTIPLIERS["first_entry"]
-            elif state["premium_entry_count"] == 1 and state["normal_entry_count"] > 0:
-                new_multiplier = PREMIUM_TP_MULTIPLIERS["after_normal"]
-            else:
-                new_multiplier = PREMIUM_TP_MULTIPLIERS["after_premium"]
-            
-            current_multiplier = state.get("premium_tp_multiplier", Decimal("1.0"))
-            state["premium_tp_multiplier"] = min(current_multiplier, new_multiplier) if current_multiplier > Decimal("1.0") else new_multiplier
-            log_debug("✨ 프리미엄 TP 배수 적용", f"{symbol} {side.upper()} → {state['premium_tp_multiplier']:.2f}x (P:{state['premium_entry_count']}/N:{state['normal_entry_count']})")
-        elif state["entry_count"] == 1:
-            state["premium_tp_multiplier"] = Decimal("1.0")
-        
-        # 4) TP/SL 저장 및 로그
-        store_tp_sl(symbol, side, tv_tp_pct, tv_sl_pct, state["entry_count"])
-        log_debug("💾 TP/SL 저장", f"TP:{tv_tp_pct*100:.3f}% SL:{tv_sl_pct*100:.3f}%")
-        log_debug("✅ 진입 성공", f"{signal_type} qty={float(qty)} 총진입:{state['entry_count']} N:{state['normal_entry_count']} P:{state['premium_entry_count']} R:{state['rescue_entry_count']}")
-        
-        # 5) 디버깅용 - 알림 카운트와 서버 카운트 비교
-        if "next_total_cnt" in data:
-            tv_next_total = data.get("next_total_cnt", 0)
-            if tv_next_total != state["entry_count"]:
-                log_debug("⚠️ 카운트 불일치", f"TV예상:{tv_next_total} vs 서버:{state['entry_count']}")
-
-# ======== 9. 라우트 & 백그라운드 ========
 @app.route("/", methods=["POST"])
 def webhook():
     try:
@@ -757,7 +576,6 @@ def position_monitor():
         except Exception as e:
             log_debug("❌ 모니터링 오류", str(e), exc_info=True)
 
-# ======== Main ========
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "Gate.io 자동매매 서버 v6.33-server")
     log_debug("🛡️ 안전장치", f"웹훅 중복 방지 쿨다운: {COOLDOWN_SECONDS}초")
