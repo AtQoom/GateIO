@@ -51,7 +51,7 @@ position_lock = threading.RLock()
 position_state = {}
 dynamic_symbols = set()
 latest_prices = {}
-candle_cache = {}  # 캔들 데이터 캐시
+candle_cache = {}
 
 SYMBOL_MAPPING = {
     "BTCUSDT":"BTC_USDT","BTCUSDT.P":"BTC_USDT","BTCUSDTPERP":"BTC_USDT","BTC_USDT":"BTC_USDT","BTC":"BTC_USDT",
@@ -115,7 +115,6 @@ def get_candles(symbol, interval='5m', limit=100):
             log_debug("⚠️ 캔들 데이터 없음", f"{symbol}")
             return None
         
-        # Gate.io API 응답 객체를 DataFrame으로 변환
         data = []
         for c in candles:
             try:
@@ -128,7 +127,6 @@ def get_candles(symbol, interval='5m', limit=100):
                     'open': float(c.o)
                 })
             except AttributeError:
-                # 속성 접근 실패 시 인덱스로 시도
                 data.append({
                     'timestamp': int(c[0]),
                     'volume': float(c[1]),
@@ -139,7 +137,7 @@ def get_candles(symbol, interval='5m', limit=100):
                 })
         
         df = pd.DataFrame(data)
-        log_debug("✅ 캔들 조회 성공", f"{symbol}: {len(df)}개")
+        log_debug("✅ 캔들 조회", f"{symbol}: {len(df)}개")
         return df.sort_values('timestamp').reset_index(drop=True)
         
     except Exception as e:
@@ -147,17 +145,12 @@ def get_candles(symbol, interval='5m', limit=100):
         return None
 
 def calculate_obv_macd(symbol):
-    """
-    실제 OBV MACD 계산
-    OBV = On Balance Volume
-    MACD = OBV의 MACD(12, 26, 9)
-    """
+    """OBV MACD 계산"""
     try:
         df = get_candles(symbol, interval='5m', limit=100)
         if df is None or len(df) < 50:
             return 0.0
         
-        # OBV 계산
         obv = [0]
         for i in range(1, len(df)):
             if df['close'].iloc[i] > df['close'].iloc[i-1]:
@@ -169,17 +162,13 @@ def calculate_obv_macd(symbol):
         
         df['obv'] = obv
         
-        # OBV의 MACD 계산
         exp1 = df['obv'].ewm(span=12, adjust=False).mean()
         exp2 = df['obv'].ewm(span=26, adjust=False).mean()
         macd = exp1 - exp2
         signal = macd.ewm(span=9, adjust=False).mean()
         macd_histogram = macd - signal
         
-        # 최신 값 반환
         latest_macd = float(macd_histogram.iloc[-1])
-        
-        # 정규화 (너무 큰 값 방지)
         normalized = latest_macd / 1000000 if abs(latest_macd) > 1000000 else latest_macd
         
         return normalized
@@ -189,17 +178,15 @@ def calculate_obv_macd(symbol):
         return 0.0
 
 def get_obv_macd_value(symbol="ETH_USDT"):
-    """OBV MACD 값 조회 (캐싱 포함)"""
+    """OBV MACD 값 조회 (캐싱)"""
     cache_key = f"{symbol}_obv_macd"
     now = time.time()
     
-    # 5분 캐시
     if cache_key in candle_cache:
         cached_time, cached_value = candle_cache[cache_key]
-        if now - cached_time < 300:  # 5분
+        if now - cached_time < 300:
             return cached_value
     
-    # 새로 계산
     value = calculate_obv_macd(symbol)
     candle_cache[cache_key] = (now, value)
     log_debug("📊 OBV MACD", f"{symbol}: {value:.2f}")
@@ -207,33 +194,30 @@ def get_obv_macd_value(symbol="ETH_USDT"):
     return value
 
 def get_base_qty():
-    """그리드 전략 기본 수량 (고정 2.0)"""
+    """그리드 기본 수량 (2.0 계약)"""
     return Decimal("2.0")
 
 def calculate_grid_qty(base_qty: Decimal, obv_macd_val: float) -> Decimal:
     """
-    그리드 전용 수량 계산 (기본 2.0)
-    - 기본: 2.0 (1.0배)
-    - 강한 신호: 4.0 (2.0배)
-    - 매우 강한 신호: 6.0 (3.0배)
+    그리드 수량 계산
+    - 기본: 2.0
+    - 강함: 4.0
+    - 매우 강함: 6.0
     """
-    ratio = Decimal("1.0")  # 기본
+    ratio = Decimal("1.0")
     abs_val = abs(obv_macd_val)
     
-    # OBV MACD 절대값 기준
     if abs_val < 20:
-        ratio = Decimal("1.0")  # 기본 2.0
+        ratio = Decimal("1.0")
     elif abs_val >= 20 and abs_val < 50:
-        ratio = Decimal("2.0")  # 강함 4.0
+        ratio = Decimal("2.0")
     elif abs_val >= 50:
-        ratio = Decimal("3.0")  # 매우 강함 6.0
+        ratio = Decimal("3.0")
     
     return base_qty * ratio
 
 def cancel_open_orders(symbol):
-    """
-    해당 심볼의 모든 미체결 주문 취소
-    """
+    """모든 미체결 주문 취소"""
     try:
         orders = api.list_futures_orders(
             settle=SETTLE,
@@ -246,8 +230,8 @@ def cancel_open_orders(symbol):
             try:
                 api.cancel_futures_order(settle=SETTLE, order_id=str(order.id))
                 cancel_count += 1
-            except Exception as e:
-                log_debug("⚠️ 주문 취소 실패", f"Order ID: {order.id}")
+            except:
+                pass
         
         if cancel_count > 0:
             log_debug("🗑️ 주문 취소", f"{symbol}: {cancel_count}건")
@@ -264,6 +248,8 @@ def place_order(symbol, side, qty: Decimal, price: Decimal, wait_for_fill=True):
             order_size = qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
             if side == "short":
                 order_size = -order_size
+            
+            log_debug("🔢 주문 수량", f"{symbol} {side} qty={qty} → size={int(order_size)}")
             
             order = FuturesOrder(contract=symbol, size=int(order_size), price=str(price), tif="gtc")
             result = api.create_futures_order(SETTLE, order)
@@ -296,8 +282,7 @@ def place_order(symbol, side, qty: Decimal, price: Decimal, wait_for_fill=True):
 
 def place_grid_tp_order(symbol, side, avg_price, total_qty):
     """
-    그리드 전용 TP 주문 (평단 기준)
-    - 기존 TP 취소 후 새로 발주
+    그리드 TP 주문 (평단 기준)
     """
     try:
         gap_pct = Decimal("0.15") / Decimal("100")
@@ -309,7 +294,8 @@ def place_grid_tp_order(symbol, side, avg_price, total_qty):
             tp_price = avg_price * (1 - gap_pct)
             close_size = int(total_qty)
         
-        # TP 주문 발주
+        log_debug("📝 TP 주문 준비", f"{symbol}_{side} size={close_size} price={tp_price} reduce_only=True")
+        
         tp_order = FuturesOrder(
             contract=symbol,
             size=close_size,
@@ -317,20 +303,22 @@ def place_grid_tp_order(symbol, side, avg_price, total_qty):
             tif="gtc",
             reduce_only=True
         )
+        
         result = api.create_futures_order(SETTLE, tp_order)
         
         if result:
-            log_debug("✅ TP 주문 (평단)", f"{symbol}_{side.upper()} 평단:{avg_price} TP:{tp_price} qty:{total_qty}")
-        return True
+            log_debug("✅ TP 주문 성공", f"{symbol}_{side.upper()} 평단:{avg_price} TP:{tp_price} qty:{total_qty}")
+            return True
+        else:
+            log_debug("❌ TP 주문 실패", f"{symbol}_{side} - API 응답 없음")
+            return False
         
     except Exception as e:
-        log_debug("❌ TP 주문 오류", f"{symbol}_{side}: {e}")
+        log_debug("❌ TP 주문 오류", f"{symbol}_{side}: {e}", exc_info=True)
         return False
 
 def cancel_tp_orders(symbol):
-    """
-    해당 심볼의 TP 주문만 취소 (reduce_only=True 주문)
-    """
+    """TP 주문만 취소 (reduce_only=True)"""
     try:
         orders = api.list_futures_orders(
             settle=SETTLE,
@@ -340,7 +328,6 @@ def cancel_tp_orders(symbol):
         
         cancel_count = 0
         for order in orders:
-            # reduce_only 주문만 취소 (TP 주문)
             if getattr(order, 'reduce_only', False):
                 try:
                     api.cancel_futures_order(settle=SETTLE, order_id=str(order.id))
@@ -373,7 +360,7 @@ def update_position_state(symbol, side, price, qty):
             pos["size"] = new_size
 
 def handle_grid_entry(data):
-    """ETH 그리드 전용 진입"""
+    """ETH 그리드 진입"""
     symbol = normalize_symbol(data.get("symbol"))
     if symbol != "ETH_USDT":
         return
@@ -381,7 +368,6 @@ def handle_grid_entry(data):
     side = data.get("side", "").lower()
     price = Decimal(str(data.get("price", "0")))
     
-    # OBV MACD 기반 동적 수량
     obv_macd_val = get_obv_macd_value(symbol)
     base_qty = get_base_qty()
     qty = calculate_grid_qty(base_qty, obv_macd_val)
@@ -450,7 +436,7 @@ def handle_entry(data):
                 new_mul = PREMIUM_TP_MULTIPLIERS["after_premium"]
             cur_mul = state.get("premium_tp_multiplier", Decimal("1.0"))
             state["premium_tp_multiplier"] = min(cur_mul, new_mul) if cur_mul > Decimal("1.0") else new_mul
-            log_debug("✨ 프리미엄 TP 배수 적용", f"{symbol} {side.upper()}={state['premium_tp_multiplier']}")
+            log_debug("✨ 프리미엄 TP 배수", f"{symbol} {side.upper()}={state['premium_tp_multiplier']}")
         elif state["entry_count"] == 1:
             state["premium_tp_multiplier"] = Decimal("1.0")
         
@@ -500,7 +486,6 @@ def initialize_grid_orders():
     """ETH 그리드 최초 주문"""
     symbol = "ETH_USDT"
     
-    # 기존 주문 모두 취소
     cancel_open_orders(symbol)
     time.sleep(1)
     
@@ -515,28 +500,21 @@ def initialize_grid_orders():
     log_debug("🎯 그리드 초기화", f"ETH 양방향 주문 완료")
 
 def on_grid_fill_event(symbol, fill_price):
-    """
-    체결 발생 시 그리드 재배치
-    - 기존 주문 모두 취소
-    - 새로운 양방향 주문 1건씩만 생성
-    """
-    # 1. 기존 모든 주문 취소
+    """그리드 재배치"""
     cancel_open_orders(symbol)
     time.sleep(0.5)
     
-    # 2. 새로운 그리드 가격 계산
     gap_pct = Decimal("0.15") / Decimal("100")
     up_price = Decimal(str(fill_price)) * (1 + gap_pct)
     down_price = Decimal(str(fill_price)) * (1 - gap_pct)
 
     log_debug("🔄 그리드 재배치", f"{symbol} 체결가:{fill_price}")
     
-    # 3. 새로운 주문만 발주
     handle_grid_entry({"symbol": symbol, "side": "short", "price": str(up_price)})
     handle_grid_entry({"symbol": symbol, "side": "long", "price": str(down_price)})
 
 def get_price(symbol):
-    """실시간 가격 반환"""
+    """실시간 가격"""
     price = latest_prices.get(symbol, Decimal("0"))
     if price > 0:
         return price
@@ -581,6 +559,9 @@ def is_manual_close_protected(symbol, side):
     return False
 
 def eth_grid_fill_monitor():
+    """
+    ETH 체결 감지 및 평단 TP 관리
+    """
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
     
@@ -595,14 +576,13 @@ def eth_grid_fill_monitor():
             long_price = pos.get("long", {}).get("price", Decimal("0"))
             short_price = pos.get("short", {}).get("price", Decimal("0"))
             
-            # ⭐ 롱 포지션 청산 감지
+            # 포지션 청산 감지 → 그리드 재시작
             if prev_long_size > 0 and long_size == 0:
                 log_debug("🎯 롱 청산 감지", "ETH 그리드 재시작")
                 cancel_open_orders("ETH_USDT")
                 time.sleep(0.5)
                 initialize_grid_orders()
             
-            # ⭐ 숏 포지션 청산 감지
             if prev_short_size > 0 and short_size == 0:
                 log_debug("🎯 숏 청산 감지", "ETH 그리드 재시작")
                 cancel_open_orders("ETH_USDT")
@@ -612,16 +592,20 @@ def eth_grid_fill_monitor():
             # 롱 체결
             if long_size > prev_long_size and long_size > 0:
                 log_debug("✅ 롱 체결", f"ETH 평단:{long_price} 총수량:{long_size}")
+                
                 cancel_tp_orders("ETH_USDT")
                 time.sleep(0.3)
+                
                 place_grid_tp_order("ETH_USDT", "long", long_price, long_size)
                 on_grid_fill_event("ETH_USDT", long_price)
             
             # 숏 체결
             if short_size > prev_short_size and short_size > 0:
                 log_debug("✅ 숏 체결", f"ETH 평단:{short_price} 총수량:{short_size}")
+                
                 cancel_tp_orders("ETH_USDT")
                 time.sleep(0.3)
+                
                 place_grid_tp_order("ETH_USDT", "short", short_price, short_size)
                 on_grid_fill_event("ETH_USDT", short_price)
             
@@ -676,7 +660,7 @@ def status():
         
         return jsonify({
             "status": "running",
-            "version": "v7.0-final",
+            "version": "v7.5-final",
             "balance_usdt": float(equity),
             "active_positions": active_positions,
             "eth_obv_macd": round(obv_macd, 2),
@@ -759,7 +743,7 @@ async def price_monitor():
         await asyncio.sleep(5)
 
 def simple_tp_monitor(ticker):
-    """기존 전략 TP 모니터링 (ETH 제외)"""
+    """기존 전략 TP (ETH 제외)"""
     try:
         symbol = normalize_symbol(ticker.get("contract"))
         if symbol == "ETH_USDT":
@@ -776,7 +760,6 @@ def simple_tp_monitor(ticker):
         with position_lock:
             pos = position_state.get(symbol, {})
             
-            # Long TP
             long_size = pos.get("long", {}).get("size", Decimal(0))
             if long_size > 0 and not is_manual_close_protected(symbol, "long"):
                 long_state = pos["long"]
@@ -813,7 +796,6 @@ def simple_tp_monitor(ticker):
                         except Exception as e:
                             log_debug("❌ 롱 TP 오류", str(e), exc_info=True)
             
-            # Short TP
             short_size = pos.get("short", {}).get("size", Decimal(0))
             if short_size > 0 and not is_manual_close_protected(symbol, "short"):
                 short_state = pos["short"]
@@ -892,15 +874,13 @@ def get_default_pos_side_state():
     }
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v7.0-final")
+    log_debug("🚀 서버 시작", "v7.5-final")
     initialize_states()
     log_debug("💰 초기 자산", f"{get_total_collateral(force=True):.2f} USDT")
     update_all_position_states()
     
-    # 최초 그리드 주문
     initialize_grid_orders()
 
-    # 쓰레드 시작
     threading.Thread(target=eth_grid_fill_monitor, daemon=True).start()
     threading.Thread(target=position_monitor, daemon=True).start()
     threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
