@@ -107,51 +107,35 @@ def get_base_qty():
     """그리드 전략 기본 수량"""
     return Decimal("2.0")
 
-def calculate_dynamic_qty(base_qty: Decimal, obv_macd_val: float, side: str) -> Decimal:
-    """기존 전략 전용 동적 수량 계산"""
+def calculate_grid_qty(base_qty: Decimal, obv_macd_val: float) -> Decimal:
+    """
+    그리드 전용 수량 계산 (양방향 동일)
+    OBV MACD 절대값 기준으로 가중치 적용
+    """
     ratio = 1.0
-    if side == "long":
-        if obv_macd_val <= -20 and obv_macd_val > -30:
-            ratio = 2.1
-        elif obv_macd_val <= -30 and obv_macd_val > -40:
-            ratio = 2.2
-        elif obv_macd_val <= -40 and obv_macd_val > -50:
-            ratio = 2.3
-        elif obv_macd_val <= -50 and obv_macd_val > -60:
-            ratio = 2.4
-        elif obv_macd_val <= -60 and obv_macd_val > -70:
-            ratio = 2.5
-        elif obv_macd_val <= -70 and obv_macd_val > -80:
-            ratio = 2.6
-        elif obv_macd_val <= -80 and obv_macd_val > -90:
-            ratio = 2.7
-        elif obv_macd_val <= -90 and obv_macd_val > -100:
-            ratio = 2.8
-        elif obv_macd_val <= -100 and obv_macd_val > -110:
-            ratio = 2.9
-        elif obv_macd_val <= -110:
-            ratio = 3.0
-    elif side == "short":
-        if obv_macd_val >= 20 and obv_macd_val < 30:
-            ratio = 2.1
-        elif obv_macd_val >= 30 and obv_macd_val < 40:
-            ratio = 2.2
-        elif obv_macd_val >= 40 and obv_macd_val < 50:
-            ratio = 2.3
-        elif obv_macd_val >= 50 and obv_macd_val < 60:
-            ratio = 2.4
-        elif obv_macd_val >= 60 and obv_macd_val < 70:
-            ratio = 2.5
-        elif obv_macd_val >= 70 and obv_macd_val < 80:
-            ratio = 2.6
-        elif obv_macd_val >= 80 and obv_macd_val < 90:
-            ratio = 2.7
-        elif obv_macd_val >= 90 and obv_macd_val < 100:
-            ratio = 2.8
-        elif obv_macd_val >= 100 and obv_macd_val < 110:
-            ratio = 2.9
-        elif obv_macd_val >= 110:
-            ratio = 3.0
+    abs_val = abs(obv_macd_val)
+    
+    if abs_val >= 20 and abs_val < 30:
+        ratio = 2.1
+    elif abs_val >= 30 and abs_val < 40:
+        ratio = 2.2
+    elif abs_val >= 40 and abs_val < 50:
+        ratio = 2.3
+    elif abs_val >= 50 and abs_val < 60:
+        ratio = 2.4
+    elif abs_val >= 60 and abs_val < 70:
+        ratio = 2.5
+    elif abs_val >= 70 and abs_val < 80:
+        ratio = 2.6
+    elif abs_val >= 80 and abs_val < 90:
+        ratio = 2.7
+    elif abs_val >= 90 and abs_val < 100:
+        ratio = 2.8
+    elif abs_val >= 100 and abs_val < 110:
+        ratio = 2.9
+    elif abs_val >= 110:
+        ratio = 3.0
+    
     return base_qty * Decimal(str(ratio))
 
 def place_order(symbol, side, qty: Decimal, price: Decimal, wait_for_fill=True):
@@ -257,11 +241,6 @@ def update_position_state(symbol, side, price, qty):
             pos["size"] = new_size
 
 def handle_grid_entry(data):
-    """
-    ETH_USDT 그리드 전용 진입
-    - 고정 수량 사용 (OBV MACD 무시)
-    - TP/SL 없음
-    """
     symbol = normalize_symbol(data.get("symbol"))
     if symbol != "ETH_USDT":
         return
@@ -269,15 +248,17 @@ def handle_grid_entry(data):
     side = data.get("side", "").lower()
     price = Decimal(str(data.get("price", "0")))
     
-    # ⭐ 그리드는 항상 고정 수량
-    qty = get_base_qty()
+    # ⭐ OBV MACD 기반 동적 수량
+    obv_macd_val = get_obv_macd_value()
+    base_qty = get_base_qty()
+    qty = calculate_grid_qty(base_qty, obv_macd_val)
     
     if qty < Decimal('1'):
         return
 
     success = place_order(symbol, side, qty, price, wait_for_fill=False)
     if success:
-        log_debug("📈 그리드 주문", f"{symbol} {side} qty={qty} price={price}")
+        log_debug("📈 그리드 주문", f"{symbol} {side} qty={qty} price={price} (OBV:{obv_macd_val})")
 
 def handle_entry(data):
     """기존 전략 진입 처리 - ETH_USDT 제외"""
