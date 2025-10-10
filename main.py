@@ -48,7 +48,7 @@ task_q = queue.Queue(maxsize=200)
 position_lock = threading.RLock()
 position_state = {}
 dynamic_symbols = set()
-latest_prices = {}  # ⭐ 실시간 가격 저장
+latest_prices = {}
 
 SYMBOL_MAPPING = {
     "BTCUSDT":"BTC_USDT","BTCUSDT.P":"BTC_USDT","BTCUSDTPERP":"BTC_USDT","BTC_USDT":"BTC_USDT","BTC":"BTC_USDT",
@@ -101,7 +101,7 @@ def log_debug(tag, msg, exc_info=False):
 
 def get_obv_macd_value():
     # TODO: 외부 데이터 연동
-    return 30.0  # 임시 값
+    return 30.0
 
 def get_base_qty():
     # TODO: 잔고 기반 실제 동적 계산
@@ -155,7 +155,7 @@ def calculate_dynamic_qty(base_qty: Decimal, obv_macd_val: float, side: str) -> 
 
 def place_order(symbol, side, qty: Decimal, price: Decimal, wait_for_fill=True):
     """
-    주문 발주 함수
+    주문 발주
     wait_for_fill=True: 체결 확인 (기존 전략)
     wait_for_fill=False: 주문 발주만 확인 (그리드 전략)
     """
@@ -174,11 +174,9 @@ def place_order(symbol, side, qty: Decimal, price: Decimal, wait_for_fill=True):
             
             log_debug("✅ 주문 발주", f"{symbol}_{side} price={price} qty={qty}")
             
-            # 그리드 전략은 주문 발주만 확인
             if not wait_for_fill:
                 return True
             
-            # 기존 전략은 체결 확인
             update_all_position_states()
             original_size = position_state.get(symbol, {}).get(side, {}).get("size", Decimal("0"))
             
@@ -189,7 +187,7 @@ def place_order(symbol, side, qty: Decimal, price: Decimal, wait_for_fill=True):
                 if new_size > original_size:
                     return True
             
-            log_debug("⚠️ 체결 대기 타임아웃", f"{symbol}_{side} (주문은 시장에 남음)")
+            log_debug("⚠️ 체결 대기 타임아웃", f"{symbol}_{side}")
             return True
             
         except Exception as ex:
@@ -198,7 +196,7 @@ def place_order(symbol, side, qty: Decimal, price: Decimal, wait_for_fill=True):
 
 def place_tp_sl_order(symbol, side, entry_price, qty, tp_pct, sl_pct):
     """
-    익절/손절 지정가 주문 발주 (예외 처리 포함)
+    익절/손절 지정가 주문 발주 (기존 전략 전용)
     """
     try:
         if side == "long":
@@ -210,7 +208,6 @@ def place_tp_sl_order(symbol, side, entry_price, qty, tp_pct, sl_pct):
             sl_price = entry_price * (1 + sl_pct)
             close_size = abs(int(qty))
         
-        # 익절 지정가
         try:
             tp_order = FuturesOrder(
                 contract=symbol, 
@@ -223,9 +220,8 @@ def place_tp_sl_order(symbol, side, entry_price, qty, tp_pct, sl_pct):
             if tp_result:
                 log_debug("✅ TP 주문", f"{symbol}_{side.upper()} TP:{tp_price}")
         except Exception as e:
-            log_debug("❌ TP 주문 오류", f"{symbol}_{side.upper()}: {str(e)}", exc_info=True)
+            log_debug("❌ TP 주문 오류", f"{symbol}_{side.upper()}: {str(e)}")
         
-        # 손절 지정가
         try:
             sl_order = FuturesOrder(
                 contract=symbol, 
@@ -238,10 +234,10 @@ def place_tp_sl_order(symbol, side, entry_price, qty, tp_pct, sl_pct):
             if sl_result:
                 log_debug("✅ SL 주문", f"{symbol}_{side.upper()} SL:{sl_price}")
         except Exception as e:
-            log_debug("❌ SL 주문 오류", f"{symbol}_{side.upper()}: {str(e)}", exc_info=True)
+            log_debug("❌ SL 주문 오류", f"{symbol}_{side.upper()}: {str(e)}")
             
     except Exception as e:
-        log_debug("❌ TP/SL 계산 오류", f"{symbol}_{side}: {str(e)}", exc_info=True)
+        log_debug("❌ TP/SL 계산 오류", f"{symbol}_{side}: {str(e)}")
 
 def update_position_state(symbol, side, price, qty):
     with position_lock:
@@ -277,7 +273,6 @@ def handle_grid_entry(data):
     if qty < Decimal('1'):
         return
 
-    # 그리드는 체결 대기 안함
     success = place_order(symbol, side, qty, price, wait_for_fill=False)
     if success:
         log_debug("📈 그리드 주문", f"{symbol} {side} qty={qty} price={price}")
@@ -351,7 +346,6 @@ def update_all_position_states():
     with position_lock:
         api_positions = _get_api_response(api.list_positions, settle=SETTLE)
         if api_positions is None:
-            log_debug("❌ 포지션 동기화 실패", "API 응답 없음")
             return
         
         cleared = set()
@@ -382,11 +376,8 @@ def update_all_position_states():
                 "size": abs(pos_size),
                 "value": abs(pos_size) * Decimal(str(pos.mark_price)) * cfg["contract_size"]
             })
-            if old_size != abs(pos_size):
-                log_debug("🔄 포지션 갱신", f"{symbol} {side.upper()}: {old_size} -> {abs(pos_size)}")
 
         for symbol, side in cleared:
-            log_debug("🔄 포지션 초기화", f"{symbol} {side.upper()}")
             position_state[symbol][side] = get_default_pos_side_state()
 
 def initialize_grid_orders():
@@ -400,6 +391,7 @@ def initialize_grid_orders():
 
     handle_grid_entry({"symbol": symbol, "side": "short", "price": str(up_price)})
     handle_grid_entry({"symbol": symbol, "side": "long", "price": str(down_price)})
+    log_debug("🎯 그리드 초기화", f"ETH 상/하 지정가 주문 완료")
 
 def on_grid_fill_event(symbol, fill_price):
     """체결 발생 시 양방향 그리드 재배치"""
@@ -413,6 +405,7 @@ def on_grid_fill_event(symbol, fill_price):
     up_price = Decimal(str(fill_price)) * (1 + gap_pct)
     down_price = Decimal(str(fill_price)) * (1 - gap_pct)
 
+    log_debug("🔄 그리드 재배치", f"{symbol} 체결가:{fill_price}")
     handle_grid_entry({"symbol": symbol, "side": "short", "price": str(up_price), "qty": dynamic_qty_short})
     handle_grid_entry({"symbol": symbol, "side": "long", "price": str(down_price), "qty": dynamic_qty_long})
 
@@ -422,7 +415,6 @@ def get_price(symbol):
     if price > 0:
         return price
     
-    # WebSocket 가격이 없으면 API 조회
     try:
         ticker = api.list_futures_tickers(settle=SETTLE, contract=symbol)
         if ticker and len(ticker) > 0:
@@ -463,12 +455,16 @@ def is_manual_close_protected(symbol, side):
     return False
 
 def eth_grid_fill_monitor():
-    """ETH 체결 감지 및 TP/SL 발주"""
+    """
+    ETH 체결 감지 (TP/SL 없음 - 순수 그리드)
+    """
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
+    
     while True:
         time.sleep(2)
         update_all_position_states()
+        
         with position_lock:
             pos = position_state.get("ETH_USDT", {})
             long_size = pos.get("long", {}).get("size", Decimal("0"))
@@ -476,16 +472,14 @@ def eth_grid_fill_monitor():
             long_price = pos.get("long", {}).get("price", Decimal("0"))
             short_price = pos.get("short", {}).get("price", Decimal("0"))
             
-            # 롱 체결
+            # 롱 체결 감지 - 그리드 재배치만
             if long_size > prev_long_size:
-                qty_filled = long_size - prev_long_size
-                place_tp_sl_order("ETH_USDT", "long", long_price, qty_filled, Decimal("0.01"), Decimal("0.005"))
+                log_debug("✅ 롱 체결 감지", f"ETH {long_price} (+{long_size - prev_long_size})")
                 on_grid_fill_event("ETH_USDT", long_price)
             
-            # 숏 체결
+            # 숏 체결 감지 - 그리드 재배치만
             if short_size > prev_short_size:
-                qty_filled = short_size - prev_short_size
-                place_tp_sl_order("ETH_USDT", "short", short_price, qty_filled, Decimal("0.01"), Decimal("0.005"))
+                log_debug("✅ 숏 체결 감지", f"ETH {short_price} (+{short_size - prev_short_size})")
                 on_grid_fill_event("ETH_USDT", short_price)
             
             prev_long_size = long_size
@@ -533,29 +527,14 @@ def status():
                             "size": float(pos_data["size"]),
                             "price": float(pos_data["price"]),
                             "value": float(abs(pos_data["value"])),
-                            "entry_count": pos_data["entry_count"],
-                            "normal_count": pos_data["normal_entry_count"],
-                            "premium_count": pos_data["premium_entry_count"],
-                            "rescue_count": pos_data["rescue_entry_count"],
-                            "last_ratio": float(pos_data['last_entry_ratio']),
-                            "premium_tp_mult": float(pos_data.get("premium_tp_multiplier", 1.0)),
-                            "current_tp_pct": f"{float(pos_data.get('current_tp_pct', 0.0)) * 100:.4f}%"
+                            "entry_count": pos_data["entry_count"]
                         }
-        
-        meta = {
-            "tracked_symbols_total": len(position_state),
-            "active_position_count": len(active_positions),
-            "dynamic_symbols": sorted(list(dynamic_symbols)),
-            "ws_last_payload_count": len(ws_last_payload),
-            "ws_last_subscribed_at": ws_last_subscribed_at
-        }
         
         return jsonify({
             "status": "running",
-            "version": "v6.40-integrated",
+            "version": "v6.50-grid-pure",
             "balance_usdt": float(equity),
-            "active_positions": active_positions,
-            "debug_info": meta
+            "active_positions": active_positions
         })
     
     except Exception as e:
@@ -599,7 +578,6 @@ async def price_monitor():
                                 "event": "subscribe", 
                                 "payload": payload
                             }))
-                            log_debug("🔌 구독", f"{len(payload)}개 심볼")
                         
                         last_resubscribe_time = time.time()
 
@@ -635,9 +613,12 @@ async def price_monitor():
         await asyncio.sleep(5)
 
 def simple_tp_monitor(ticker):
-    """TP 모니터링 및 청산"""
+    """기존 전략 TP 모니터링 (ETH 제외)"""
     try:
         symbol = normalize_symbol(ticker.get("contract"))
+        if symbol == "ETH_USDT":  # ETH는 그리드 전용이므로 TP 모니터링 제외
+            return
+            
         price = Decimal(str(ticker.get("last", "0")))
         if not symbol or price <= 0: 
             return
@@ -649,7 +630,7 @@ def simple_tp_monitor(ticker):
         with position_lock:
             pos = position_state.get(symbol, {})
             
-            # Long
+            # Long TP
             long_size = pos.get("long", {}).get("size", Decimal(0))
             if long_size > 0 and not is_manual_close_protected(symbol, "long"):
                 long_state = pos["long"]
@@ -673,7 +654,7 @@ def simple_tp_monitor(ticker):
                     tp_price = entry_price * (1 + current_tp)
                     if price >= tp_price:
                         set_manual_close_protection(symbol, 'long', duration=20)
-                        log_debug("🎯 롱 TP", f"{symbol} entry:{entry_price:.8f} now:{price:.8f} tp:{tp_price:.8f}")
+                        log_debug("🎯 롱 TP", f"{symbol} entry:{entry_price:.8f} tp:{tp_price:.8f}")
                         
                         try:
                             order = FuturesOrder(contract=symbol, size=-int(long_size), price="0", tif="ioc", reduce_only=True)
@@ -686,7 +667,7 @@ def simple_tp_monitor(ticker):
                         except Exception as e:
                             log_debug("❌ 롱 TP 오류", str(e), exc_info=True)
             
-            # Short
+            # Short TP
             short_size = pos.get("short", {}).get("size", Decimal(0))
             if short_size > 0 and not is_manual_close_protected(symbol, "short"):
                 short_state = pos["short"]
@@ -710,7 +691,7 @@ def simple_tp_monitor(ticker):
                     tp_price = entry_price * (1 - current_tp)
                     if price <= tp_price:
                         set_manual_close_protection(symbol, 'short', duration=20)
-                        log_debug("🎯 숏 TP", f"{symbol} entry:{entry_price:.8f} now:{price:.8f} tp:{tp_price:.8f}")
+                        log_debug("🎯 숏 TP", f"{symbol} entry:{entry_price:.8f} tp:{tp_price:.8f}")
                         
                         try:
                             order = FuturesOrder(contract=symbol, size=int(short_size), price="0", tif="ioc", reduce_only=True)
@@ -765,7 +746,7 @@ def get_default_pos_side_state():
     }
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v6.40-integrated")
+    log_debug("🚀 서버 시작", "v6.50-grid-pure")
     initialize_states()
     log_debug("💰 초기 자산", f"{get_total_collateral(force=True):.2f} USDT")
     update_all_position_states()
