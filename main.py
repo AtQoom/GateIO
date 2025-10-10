@@ -568,7 +568,7 @@ def eth_grid_fill_monitor():
             prev_short_size = short_size
 
 def eth_grid_tp_monitor():
-    """⭐ ETH TP 실시간 모니터링 (시장가 청산)"""
+    """ETH TP 실시간 모니터링"""
     while True:
         time.sleep(1)
         
@@ -580,7 +580,7 @@ def eth_grid_tp_monitor():
             with position_lock:
                 pos = position_state.get("ETH_USDT", {})
                 
-                # 롱 포지션 TP 체크
+                # ========== 롱 포지션 TP 체크 ==========
                 long_size = pos.get("long", {}).get("size", Decimal("0"))
                 long_price = pos.get("long", {}).get("price", Decimal("0"))
                 
@@ -591,22 +591,33 @@ def eth_grid_tp_monitor():
                     if current_price >= tp_price:
                         log_debug("🎯 롱 TP 도달", f"평단:{long_price} TP:{tp_price} 현재:{current_price}")
                         
+                        # 즉시 포지션 초기화 (중복 방지)
+                        position_state["ETH_USDT"]["long"] = get_default_pos_side_state()
+                        
                         try:
                             order = FuturesOrder(
                                 contract="ETH_USDT",
                                 size=-int(long_size),
-                                price="0",  # ⭐ 시장가
+                                price="0",
                                 tif="ioc",
                                 reduce_only=True
                             )
                             result = api.create_futures_order(SETTLE, order)
                             
                             if result:
-                                log_debug("✅ 롱 청산 완료", f"ETH {long_size}계약 시장가 @ {current_price}")
+                                log_debug("✅ 롱 청산 완료", f"{long_size}계약 @ {current_price}")
+                                
+                                # ⭐⭐⭐ 청산 후 그리드 재시작 ⭐⭐⭐
+                                time.sleep(1)
+                                cancel_open_orders("ETH_USDT")
+                                time.sleep(0.5)
+                                initialize_grid_orders()
+                            else:
+                                log_debug("❌ 롱 청산 실패", "API 응답 없음")
                         except Exception as e:
                             log_debug("❌ 롱 청산 오류", str(e), exc_info=True)
                 
-                # 숏 포지션 TP 체크
+                # ========== 숏 포지션 TP 체크 ==========
                 short_size = pos.get("short", {}).get("size", Decimal("0"))
                 short_price = pos.get("short", {}).get("price", Decimal("0"))
                 
@@ -617,18 +628,29 @@ def eth_grid_tp_monitor():
                     if current_price <= tp_price:
                         log_debug("🎯 숏 TP 도달", f"평단:{short_price} TP:{tp_price} 현재:{current_price}")
                         
+                        # 즉시 포지션 초기화
+                        position_state["ETH_USDT"]["short"] = get_default_pos_side_state()
+                        
                         try:
                             order = FuturesOrder(
                                 contract="ETH_USDT",
                                 size=int(short_size),
-                                price="0",  # ⭐ 시장가
+                                price="0",
                                 tif="ioc",
                                 reduce_only=True
                             )
                             result = api.create_futures_order(SETTLE, order)
                             
                             if result:
-                                log_debug("✅ 숏 청산 완료", f"ETH {short_size}계약 시장가 @ {current_price}")
+                                log_debug("✅ 숏 청산 완료", f"{short_size}계약 @ {current_price}")
+                                
+                                # ⭐⭐⭐ 청산 후 그리드 재시작 ⭐⭐⭐
+                                time.sleep(1)
+                                cancel_open_orders("ETH_USDT")
+                                time.sleep(0.5)
+                                initialize_grid_orders()
+                            else:
+                                log_debug("❌ 숏 청산 실패", "API 응답 없음")
                         except Exception as e:
                             log_debug("❌ 숏 청산 오류", str(e), exc_info=True)
         
