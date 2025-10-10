@@ -625,7 +625,8 @@ def eth_hedge_tp_monitor():
                     if current_price >= tp_price:
                         log_debug("🎯 롱 TP 도달", f"평단:{long_price} TP:{tp_price} 현재:{current_price}")
                         
-                        position_state["ETH_USDT"]["long"] = get_default_pos_side_state()
+                        # ⭐ position_state 수정 제거!
+                        # position_state["ETH_USDT"]["long"] = get_default_pos_side_state()
                         
                         try:
                             order = FuturesOrder(
@@ -639,6 +640,7 @@ def eth_hedge_tp_monitor():
                             
                             if result:
                                 log_debug("✅ 롱 청산 완료", f"{long_size}계약 @ {current_price}")
+                                # ⭐ eth_hedge_fill_monitor가 자동으로 감지함
                             else:
                                 log_debug("❌ 롱 청산 실패", "API 응답 없음")
                         except Exception as e:
@@ -655,7 +657,8 @@ def eth_hedge_tp_monitor():
                     if current_price <= tp_price:
                         log_debug("🎯 숏 TP 도달", f"평단:{short_price} TP:{tp_price} 현재:{current_price}")
                         
-                        position_state["ETH_USDT"]["short"] = get_default_pos_side_state()
+                        # ⭐ position_state 수정 제거!
+                        # position_state["ETH_USDT"]["short"] = get_default_pos_side_state()
                         
                         try:
                             order = FuturesOrder(
@@ -669,6 +672,7 @@ def eth_hedge_tp_monitor():
                             
                             if result:
                                 log_debug("✅ 숏 청산 완료", f"{short_size}계약 @ {current_price}")
+                                # ⭐ eth_hedge_fill_monitor가 자동으로 감지함
                             else:
                                 log_debug("❌ 숏 청산 실패", "API 응답 없음")
                         except Exception as e:
