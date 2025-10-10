@@ -104,10 +104,11 @@ def get_obv_macd_value():
     return 30.0
 
 def get_base_qty():
-    # TODO: 잔고 기반 실제 동적 계산
+    """그리드 전략 기본 수량"""
     return Decimal("2.0")
 
 def calculate_dynamic_qty(base_qty: Decimal, obv_macd_val: float, side: str) -> Decimal:
+    """기존 전략 전용 동적 수량 계산"""
     ratio = 1.0
     if side == "long":
         if obv_macd_val <= -20 and obv_macd_val > -30:
@@ -256,20 +257,21 @@ def update_position_state(symbol, side, price, qty):
             pos["size"] = new_size
 
 def handle_grid_entry(data):
-    """ETH_USDT 그리드 전용 진입"""
+    """
+    ETH_USDT 그리드 전용 진입
+    - 고정 수량 사용 (OBV MACD 무시)
+    - TP/SL 없음
+    """
     symbol = normalize_symbol(data.get("symbol"))
     if symbol != "ETH_USDT":
         return
+    
     side = data.get("side", "").lower()
     price = Decimal(str(data.get("price", "0")))
-    qty = data.get("qty")
-    if qty is None:
-        obv_macd_val = get_obv_macd_value()
-        base_qty = get_base_qty()
-        qty = calculate_dynamic_qty(base_qty, obv_macd_val, side)
-    else:
-        qty = Decimal(str(qty))
-
+    
+    # ⭐ 그리드는 항상 고정 수량
+    qty = get_base_qty()
+    
     if qty < Decimal('1'):
         return
 
@@ -391,23 +393,24 @@ def initialize_grid_orders():
 
     handle_grid_entry({"symbol": symbol, "side": "short", "price": str(up_price)})
     handle_grid_entry({"symbol": symbol, "side": "long", "price": str(down_price)})
-    log_debug("🎯 그리드 초기화", f"ETH 상/하 지정가 주문 완료")
+    log_debug("🎯 그리드 초기화", f"ETH 양방향 주문 완료 (고정수량: {get_base_qty()})")
 
 def on_grid_fill_event(symbol, fill_price):
-    """체결 발생 시 양방향 그리드 재배치"""
+    """
+    체결 발생 시 양방향 그리드 재배치
+    - 고정 수량 사용
+    """
     gap_pct = Decimal("0.15") / Decimal("100")
-    obv_macd_val = get_obv_macd_value()
-    base_qty = get_base_qty()
-
-    dynamic_qty_long = calculate_dynamic_qty(base_qty, obv_macd_val, "long")
-    dynamic_qty_short = calculate_dynamic_qty(base_qty, obv_macd_val, "short")
+    
+    # ⭐ 그리드는 항상 고정 수량
+    qty = get_base_qty()
 
     up_price = Decimal(str(fill_price)) * (1 + gap_pct)
     down_price = Decimal(str(fill_price)) * (1 - gap_pct)
 
-    log_debug("🔄 그리드 재배치", f"{symbol} 체결가:{fill_price}")
-    handle_grid_entry({"symbol": symbol, "side": "short", "price": str(up_price), "qty": dynamic_qty_short})
-    handle_grid_entry({"symbol": symbol, "side": "long", "price": str(down_price), "qty": dynamic_qty_long})
+    log_debug("🔄 그리드 재배치", f"{symbol} 체결가:{fill_price} 수량:{qty}")
+    handle_grid_entry({"symbol": symbol, "side": "short", "price": str(up_price)})
+    handle_grid_entry({"symbol": symbol, "side": "long", "price": str(down_price)})
 
 def get_price(symbol):
     """실시간 WebSocket 가격 반환"""
@@ -472,14 +475,14 @@ def eth_grid_fill_monitor():
             long_price = pos.get("long", {}).get("price", Decimal("0"))
             short_price = pos.get("short", {}).get("price", Decimal("0"))
             
-            # 롱 체결 감지 - 그리드 재배치만
+            # 롱 체결 감지
             if long_size > prev_long_size:
-                log_debug("✅ 롱 체결 감지", f"ETH {long_price} (+{long_size - prev_long_size})")
+                log_debug("✅ 롱 체결", f"ETH {long_price} (+{long_size - prev_long_size})")
                 on_grid_fill_event("ETH_USDT", long_price)
             
-            # 숏 체결 감지 - 그리드 재배치만
+            # 숏 체결 감지
             if short_size > prev_short_size:
-                log_debug("✅ 숏 체결 감지", f"ETH {short_price} (+{short_size - prev_short_size})")
+                log_debug("✅ 숏 체결", f"ETH {short_price} (+{short_size - prev_short_size})")
                 on_grid_fill_event("ETH_USDT", short_price)
             
             prev_long_size = long_size
@@ -532,9 +535,10 @@ def status():
         
         return jsonify({
             "status": "running",
-            "version": "v6.50-grid-pure",
+            "version": "v6.60-grid-fixed-qty",
             "balance_usdt": float(equity),
-            "active_positions": active_positions
+            "active_positions": active_positions,
+            "grid_base_qty": float(get_base_qty())
         })
     
     except Exception as e:
@@ -616,7 +620,7 @@ def simple_tp_monitor(ticker):
     """기존 전략 TP 모니터링 (ETH 제외)"""
     try:
         symbol = normalize_symbol(ticker.get("contract"))
-        if symbol == "ETH_USDT":  # ETH는 그리드 전용이므로 TP 모니터링 제외
+        if symbol == "ETH_USDT":
             return
             
         price = Decimal(str(ticker.get("last", "0")))
@@ -746,9 +750,10 @@ def get_default_pos_side_state():
     }
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v6.50-grid-pure")
+    log_debug("🚀 서버 시작", "v6.60-grid-fixed-qty")
     initialize_states()
     log_debug("💰 초기 자산", f"{get_total_collateral(force=True):.2f} USDT")
+    log_debug("📊 그리드 기본 수량", f"{get_base_qty()} (고정)")
     update_all_position_states()
     
     # 최초 그리드 주문
