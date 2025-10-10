@@ -103,9 +103,7 @@ def log_debug(tag, msg, exc_info=False):
         logger.exception("")
 
 def get_candles(symbol, interval='5m', limit=100):
-    """
-    Gate.io에서 캔들 데이터 조회
-    """
+    """Gate.io 캔들 데이터 조회"""
     try:
         candles = api.list_futures_candlesticks(
             settle=SETTLE,
@@ -114,20 +112,38 @@ def get_candles(symbol, interval='5m', limit=100):
             limit=limit
         )
         if not candles:
+            log_debug("⚠️ 캔들 데이터 없음", f"{symbol}")
             return None
         
-        df = pd.DataFrame([{
-            'timestamp': int(c[0]),
-            'volume': float(c[1]),
-            'close': float(c[2]),
-            'high': float(c[3]),
-            'low': float(c[4]),
-            'open': float(c[5])
-        } for c in candles])
+        # Gate.io API 응답 객체를 DataFrame으로 변환
+        data = []
+        for c in candles:
+            try:
+                data.append({
+                    'timestamp': int(c.t),
+                    'volume': float(c.v),
+                    'close': float(c.c),
+                    'high': float(c.h),
+                    'low': float(c.l),
+                    'open': float(c.o)
+                })
+            except AttributeError:
+                # 속성 접근 실패 시 인덱스로 시도
+                data.append({
+                    'timestamp': int(c[0]),
+                    'volume': float(c[1]),
+                    'close': float(c[2]),
+                    'high': float(c[3]),
+                    'low': float(c[4]),
+                    'open': float(c[5])
+                })
         
+        df = pd.DataFrame(data)
+        log_debug("✅ 캔들 조회 성공", f"{symbol}: {len(df)}개")
         return df.sort_values('timestamp').reset_index(drop=True)
+        
     except Exception as e:
-        log_debug("❌ 캔들 조회 오류", f"{symbol}: {e}")
+        log_debug("❌ 캔들 조회 오류", f"{symbol}: {e}", exc_info=True)
         return None
 
 def calculate_obv_macd(symbol):
@@ -278,34 +294,67 @@ def place_order(symbol, side, qty: Decimal, price: Decimal, wait_for_fill=True):
             log_debug("❌ 주문에러", str(ex), exc_info=True)
             return False
 
-def place_tp_sl_order(symbol, side, entry_price, qty, tp_pct, sl_pct):
-    """익절/손절 주문 (기존 전략 전용)"""
+def place_grid_tp_order(symbol, side, avg_price, total_qty):
+    """
+    그리드 전용 TP 주문 (평단 기준)
+    - 기존 TP 취소 후 새로 발주
+    """
     try:
+        gap_pct = Decimal("0.15") / Decimal("100")
+        
         if side == "long":
-            tp_price = entry_price * (1 + tp_pct)
-            sl_price = entry_price * (1 - sl_pct)
-            close_size = -abs(int(qty))
+            tp_price = avg_price * (1 + gap_pct)
+            close_size = -int(total_qty)
         else:
-            tp_price = entry_price * (1 - tp_pct)
-            sl_price = entry_price * (1 + sl_pct)
-            close_size = abs(int(qty))
+            tp_price = avg_price * (1 - gap_pct)
+            close_size = int(total_qty)
         
-        try:
-            tp_order = FuturesOrder(contract=symbol, size=close_size, price=str(tp_price), tif="gtc", reduce_only=True)
-            api.create_futures_order(SETTLE, tp_order)
-            log_debug("✅ TP 주문", f"{symbol}_{side.upper()} TP:{tp_price}")
-        except Exception as e:
-            log_debug("❌ TP 주문 오류", f"{symbol}_{side.upper()}: {str(e)}")
+        # TP 주문 발주
+        tp_order = FuturesOrder(
+            contract=symbol,
+            size=close_size,
+            price=str(tp_price),
+            tif="gtc",
+            reduce_only=True
+        )
+        result = api.create_futures_order(SETTLE, tp_order)
         
-        try:
-            sl_order = FuturesOrder(contract=symbol, size=close_size, price=str(sl_price), tif="gtc", reduce_only=True)
-            api.create_futures_order(SETTLE, sl_order)
-            log_debug("✅ SL 주문", f"{symbol}_{side.upper()} SL:{sl_price}")
-        except Exception as e:
-            log_debug("❌ SL 주문 오류", f"{symbol}_{side.upper()}: {str(e)}")
-            
+        if result:
+            log_debug("✅ TP 주문 (평단)", f"{symbol}_{side.upper()} 평단:{avg_price} TP:{tp_price} qty:{total_qty}")
+        return True
+        
     except Exception as e:
-        log_debug("❌ TP/SL 계산 오류", f"{symbol}_{side}: {str(e)}")
+        log_debug("❌ TP 주문 오류", f"{symbol}_{side}: {e}")
+        return False
+
+def cancel_tp_orders(symbol):
+    """
+    해당 심볼의 TP 주문만 취소 (reduce_only=True 주문)
+    """
+    try:
+        orders = api.list_futures_orders(
+            settle=SETTLE,
+            contract=symbol,
+            status='open'
+        )
+        
+        cancel_count = 0
+        for order in orders:
+            # reduce_only 주문만 취소 (TP 주문)
+            if getattr(order, 'reduce_only', False):
+                try:
+                    api.cancel_futures_order(settle=SETTLE, order_id=str(order.id))
+                    cancel_count += 1
+                except:
+                    pass
+        
+        if cancel_count > 0:
+            log_debug("🗑️ TP 주문 취소", f"{symbol}: {cancel_count}건")
+        
+        return cancel_count
+    except Exception as e:
+        log_debug("❌ TP 취소 오류", f"{symbol}: {e}")
+        return 0
 
 def update_position_state(symbol, side, price, qty):
     with position_lock:
@@ -532,7 +581,6 @@ def is_manual_close_protected(symbol, side):
     return False
 
 def eth_grid_fill_monitor():
-    """ETH 체결 감지"""
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
     
@@ -547,12 +595,34 @@ def eth_grid_fill_monitor():
             long_price = pos.get("long", {}).get("price", Decimal("0"))
             short_price = pos.get("short", {}).get("price", Decimal("0"))
             
-            if long_size > prev_long_size:
-                log_debug("✅ 롱 체결", f"ETH {long_price} (+{long_size - prev_long_size})")
+            # ⭐ 롱 포지션 청산 감지
+            if prev_long_size > 0 and long_size == 0:
+                log_debug("🎯 롱 청산 감지", "ETH 그리드 재시작")
+                cancel_open_orders("ETH_USDT")
+                time.sleep(0.5)
+                initialize_grid_orders()
+            
+            # ⭐ 숏 포지션 청산 감지
+            if prev_short_size > 0 and short_size == 0:
+                log_debug("🎯 숏 청산 감지", "ETH 그리드 재시작")
+                cancel_open_orders("ETH_USDT")
+                time.sleep(0.5)
+                initialize_grid_orders()
+            
+            # 롱 체결
+            if long_size > prev_long_size and long_size > 0:
+                log_debug("✅ 롱 체결", f"ETH 평단:{long_price} 총수량:{long_size}")
+                cancel_tp_orders("ETH_USDT")
+                time.sleep(0.3)
+                place_grid_tp_order("ETH_USDT", "long", long_price, long_size)
                 on_grid_fill_event("ETH_USDT", long_price)
             
-            if short_size > prev_short_size:
-                log_debug("✅ 숏 체결", f"ETH {short_price} (+{short_size - prev_short_size})")
+            # 숏 체결
+            if short_size > prev_short_size and short_size > 0:
+                log_debug("✅ 숏 체결", f"ETH 평단:{short_price} 총수량:{short_size}")
+                cancel_tp_orders("ETH_USDT")
+                time.sleep(0.3)
+                place_grid_tp_order("ETH_USDT", "short", short_price, short_size)
                 on_grid_fill_event("ETH_USDT", short_price)
             
             prev_long_size = long_size
