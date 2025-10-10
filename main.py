@@ -423,7 +423,7 @@ def update_all_position_states():
             position_state[symbol][side] = get_default_pos_side_state()
 
 def initialize_hedge_orders():
-    """⭐ 헤지 전략 초기화"""
+    """⭐ 헤지 전략 초기화 - 위/아래 각각 롱+숏"""
     symbol = "ETH_USDT"
     cancel_open_orders(symbol)
     time.sleep(1)
@@ -431,31 +431,42 @@ def initialize_hedge_orders():
     current_price = Decimal(str(get_price(symbol)))
     obv_macd_val = get_obv_macd_value(symbol)
     
+    gap_pct = Decimal("0.15") / Decimal("100")
+    up_price = current_price * (1 + gap_pct)
+    down_price = current_price * (1 - gap_pct)
+    
     # OBV MACD 역방향 수량 계산
     if obv_macd_val >= 0:  # 위로 힘 강함
-        # 롱 최소, 숏 가중치
         long_qty = calculate_grid_qty(current_price, Decimal("1.0"))  # 최소
         short_qty = calculate_grid_qty(current_price, obv_macd_val)  # 가중치
     else:  # 아래로 힘 강함
-        # 숏 최소, 롱 가중치
         short_qty = calculate_grid_qty(current_price, Decimal("1.0"))  # 최소
         long_qty = calculate_grid_qty(current_price, abs(obv_macd_val))  # 가중치
     
-    # 같은 가격에 양방향 지정가 발주
+    # ⭐ 위쪽에 롱+숏 (4개 주문 중 2개)
     if long_qty >= 1:
-        place_order(symbol, "long", long_qty, current_price, wait_for_fill=False)
-        log_debug("📈 헤지 롱", f"{symbol} qty={long_qty} @ {current_price}")
+        place_order(symbol, "long", long_qty, up_price, wait_for_fill=False)
+        log_debug("📈 위 롱", f"{symbol} qty={long_qty} @ {up_price}")
     
     if short_qty >= 1:
-        place_order(symbol, "short", short_qty, current_price, wait_for_fill=False)
-        log_debug("📉 헤지 숏", f"{symbol} qty={short_qty} @ {current_price}")
+        place_order(symbol, "short", short_qty, up_price, wait_for_fill=False)
+        log_debug("📉 위 숏", f"{symbol} qty={short_qty} @ {up_price}")
     
-    log_debug("🎯 헤지 초기화", f"ETH 롱:{long_qty} 숏:{short_qty} OBV:{obv_macd_val:.2f}")
-
+    # ⭐ 아래쪽에 롱+숏 (4개 주문 중 2개)
+    if long_qty >= 1:
+        place_order(symbol, "long", long_qty, down_price, wait_for_fill=False)
+        log_debug("📈 아래 롱", f"{symbol} qty={long_qty} @ {down_price}")
+    
+    if short_qty >= 1:
+        place_order(symbol, "short", short_qty, down_price, wait_for_fill=False)
+        log_debug("📉 아래 숏", f"{symbol} qty={short_qty} @ {down_price}")
+    
+    log_debug("🎯 헤지 초기화", f"ETH 위:{up_price} 아래:{down_price} 롱:{long_qty} 숏:{short_qty} OBV:{obv_macd_val:.2f}")
+    
 def on_hedge_fill_event(symbol, fill_price):
-    """⭐ 체결 후 재진입 (체결가 기준 위/아래 0.15%)"""
+    """⭐ 체결 후 재진입 - 체결가 기준 위/아래 각각 롱+숏"""
     cancel_open_orders(symbol)
-    time.sleep(1)  # 1초 쿨다운
+    time.sleep(1)
     
     gap_pct = Decimal("0.15") / Decimal("100")
     up_price = Decimal(str(fill_price)) * (1 + gap_pct)
@@ -465,21 +476,28 @@ def on_hedge_fill_event(symbol, fill_price):
     
     # 역방향 수량 계산
     if obv_macd_val >= 0:
-        long_qty = calculate_grid_qty(up_price, Decimal("1.0"))
-        short_qty = calculate_grid_qty(up_price, obv_macd_val)
+        long_qty = calculate_grid_qty(Decimal(str(fill_price)), Decimal("1.0"))
+        short_qty = calculate_grid_qty(Decimal(str(fill_price)), obv_macd_val)
     else:
-        short_qty = calculate_grid_qty(down_price, Decimal("1.0"))
-        long_qty = calculate_grid_qty(down_price, abs(obv_macd_val))
+        short_qty = calculate_grid_qty(Decimal(str(fill_price)), Decimal("1.0"))
+        long_qty = calculate_grid_qty(Decimal(str(fill_price)), abs(obv_macd_val))
     
-    # 위/아래 양방향 재진입
+    # ⭐ 위쪽에 롱+숏
+    if long_qty >= 1:
+        place_order(symbol, "long", long_qty, up_price, wait_for_fill=False)
+    
     if short_qty >= 1:
         place_order(symbol, "short", short_qty, up_price, wait_for_fill=False)
     
+    # ⭐ 아래쪽에 롱+숏
     if long_qty >= 1:
         place_order(symbol, "long", long_qty, down_price, wait_for_fill=False)
     
-    log_debug("🔄 헤지 재배치", f"{symbol} 체결:{fill_price} 롱:{long_qty}@{down_price} 숏:{short_qty}@{up_price}")
-
+    if short_qty >= 1:
+        place_order(symbol, "short", short_qty, down_price, wait_for_fill=False)
+    
+    log_debug("🔄 헤지 재배치", f"{symbol} 체결:{fill_price} 위:{up_price} 아래:{down_price} 롱:{long_qty} 숏:{short_qty}")
+    
 def get_price(symbol):
     price = latest_prices.get(symbol, Decimal("0"))
     if price > 0:
