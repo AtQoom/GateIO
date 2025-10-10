@@ -12,6 +12,8 @@ from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
 from gate_api import exceptions as gate_api_exceptions
 import websockets
+import pandas as pd
+import numpy as np
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -49,6 +51,7 @@ position_lock = threading.RLock()
 position_state = {}
 dynamic_symbols = set()
 latest_prices = {}
+candle_cache = {}  # 캔들 데이터 캐시
 
 SYMBOL_MAPPING = {
     "BTCUSDT":"BTC_USDT","BTCUSDT.P":"BTC_USDT","BTCUSDTPERP":"BTC_USDT","BTC_USDT":"BTC_USDT","BTC":"BTC_USDT",
@@ -99,51 +102,147 @@ def log_debug(tag, msg, exc_info=False):
     if exc_info:
         logger.exception("")
 
-def get_obv_macd_value():
-    # TODO: 외부 데이터 연동
-    return 30.0
+def get_candles(symbol, interval='5m', limit=100):
+    """
+    Gate.io에서 캔들 데이터 조회
+    """
+    try:
+        candles = api.list_futures_candlesticks(
+            settle=SETTLE,
+            contract=symbol,
+            interval=interval,
+            limit=limit
+        )
+        if not candles:
+            return None
+        
+        df = pd.DataFrame([{
+            'timestamp': int(c[0]),
+            'volume': float(c[1]),
+            'close': float(c[2]),
+            'high': float(c[3]),
+            'low': float(c[4]),
+            'open': float(c[5])
+        } for c in candles])
+        
+        return df.sort_values('timestamp').reset_index(drop=True)
+    except Exception as e:
+        log_debug("❌ 캔들 조회 오류", f"{symbol}: {e}")
+        return None
+
+def calculate_obv_macd(symbol):
+    """
+    실제 OBV MACD 계산
+    OBV = On Balance Volume
+    MACD = OBV의 MACD(12, 26, 9)
+    """
+    try:
+        df = get_candles(symbol, interval='5m', limit=100)
+        if df is None or len(df) < 50:
+            return 0.0
+        
+        # OBV 계산
+        obv = [0]
+        for i in range(1, len(df)):
+            if df['close'].iloc[i] > df['close'].iloc[i-1]:
+                obv.append(obv[-1] + df['volume'].iloc[i])
+            elif df['close'].iloc[i] < df['close'].iloc[i-1]:
+                obv.append(obv[-1] - df['volume'].iloc[i])
+            else:
+                obv.append(obv[-1])
+        
+        df['obv'] = obv
+        
+        # OBV의 MACD 계산
+        exp1 = df['obv'].ewm(span=12, adjust=False).mean()
+        exp2 = df['obv'].ewm(span=26, adjust=False).mean()
+        macd = exp1 - exp2
+        signal = macd.ewm(span=9, adjust=False).mean()
+        macd_histogram = macd - signal
+        
+        # 최신 값 반환
+        latest_macd = float(macd_histogram.iloc[-1])
+        
+        # 정규화 (너무 큰 값 방지)
+        normalized = latest_macd / 1000000 if abs(latest_macd) > 1000000 else latest_macd
+        
+        return normalized
+        
+    except Exception as e:
+        log_debug("❌ OBV MACD 계산 오류", f"{symbol}: {e}")
+        return 0.0
+
+def get_obv_macd_value(symbol="ETH_USDT"):
+    """OBV MACD 값 조회 (캐싱 포함)"""
+    cache_key = f"{symbol}_obv_macd"
+    now = time.time()
+    
+    # 5분 캐시
+    if cache_key in candle_cache:
+        cached_time, cached_value = candle_cache[cache_key]
+        if now - cached_time < 300:  # 5분
+            return cached_value
+    
+    # 새로 계산
+    value = calculate_obv_macd(symbol)
+    candle_cache[cache_key] = (now, value)
+    log_debug("📊 OBV MACD", f"{symbol}: {value:.2f}")
+    
+    return value
 
 def get_base_qty():
-    """그리드 전략 기본 수량"""
+    """그리드 전략 기본 수량 (고정 2.0)"""
     return Decimal("2.0")
 
 def calculate_grid_qty(base_qty: Decimal, obv_macd_val: float) -> Decimal:
     """
-    그리드 전용 수량 계산 (양방향 동일)
-    OBV MACD 절대값 기준으로 가중치 적용
+    그리드 전용 수량 계산 (기본 2.0)
+    - 기본: 2.0 (1.0배)
+    - 강한 신호: 4.0 (2.0배)
+    - 매우 강한 신호: 6.0 (3.0배)
     """
-    ratio = 1.0
+    ratio = Decimal("1.0")  # 기본
     abs_val = abs(obv_macd_val)
     
-    if abs_val >= 20 and abs_val < 30:
-        ratio = 2.1
-    elif abs_val >= 30 and abs_val < 40:
-        ratio = 2.2
-    elif abs_val >= 40 and abs_val < 50:
-        ratio = 2.3
-    elif abs_val >= 50 and abs_val < 60:
-        ratio = 2.4
-    elif abs_val >= 60 and abs_val < 70:
-        ratio = 2.5
-    elif abs_val >= 70 and abs_val < 80:
-        ratio = 2.6
-    elif abs_val >= 80 and abs_val < 90:
-        ratio = 2.7
-    elif abs_val >= 90 and abs_val < 100:
-        ratio = 2.8
-    elif abs_val >= 100 and abs_val < 110:
-        ratio = 2.9
-    elif abs_val >= 110:
-        ratio = 3.0
+    # OBV MACD 절대값 기준
+    if abs_val < 20:
+        ratio = Decimal("1.0")  # 기본 2.0
+    elif abs_val >= 20 and abs_val < 50:
+        ratio = Decimal("2.0")  # 강함 4.0
+    elif abs_val >= 50:
+        ratio = Decimal("3.0")  # 매우 강함 6.0
     
-    return base_qty * Decimal(str(ratio))
+    return base_qty * ratio
+
+def cancel_open_orders(symbol):
+    """
+    해당 심볼의 모든 미체결 주문 취소
+    """
+    try:
+        orders = api.list_futures_orders(
+            settle=SETTLE,
+            contract=symbol,
+            status='open'
+        )
+        
+        cancel_count = 0
+        for order in orders:
+            try:
+                api.cancel_futures_order(settle=SETTLE, order_id=str(order.id))
+                cancel_count += 1
+            except Exception as e:
+                log_debug("⚠️ 주문 취소 실패", f"Order ID: {order.id}")
+        
+        if cancel_count > 0:
+            log_debug("🗑️ 주문 취소", f"{symbol}: {cancel_count}건")
+        
+        return cancel_count
+    except Exception as e:
+        log_debug("❌ 주문 취소 오류", f"{symbol}: {e}")
+        return 0
 
 def place_order(symbol, side, qty: Decimal, price: Decimal, wait_for_fill=True):
-    """
-    주문 발주
-    wait_for_fill=True: 체결 확인 (기존 전략)
-    wait_for_fill=False: 주문 발주만 확인 (그리드 전략)
-    """
+    """주문 발주"""
     with position_lock:
         try:
             order_size = qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
@@ -180,9 +279,7 @@ def place_order(symbol, side, qty: Decimal, price: Decimal, wait_for_fill=True):
             return False
 
 def place_tp_sl_order(symbol, side, entry_price, qty, tp_pct, sl_pct):
-    """
-    익절/손절 지정가 주문 발주 (기존 전략 전용)
-    """
+    """익절/손절 주문 (기존 전략 전용)"""
     try:
         if side == "long":
             tp_price = entry_price * (1 + tp_pct)
@@ -194,30 +291,16 @@ def place_tp_sl_order(symbol, side, entry_price, qty, tp_pct, sl_pct):
             close_size = abs(int(qty))
         
         try:
-            tp_order = FuturesOrder(
-                contract=symbol, 
-                size=close_size, 
-                price=str(tp_price), 
-                tif="gtc", 
-                reduce_only=True
-            )
-            tp_result = api.create_futures_order(SETTLE, tp_order)
-            if tp_result:
-                log_debug("✅ TP 주문", f"{symbol}_{side.upper()} TP:{tp_price}")
+            tp_order = FuturesOrder(contract=symbol, size=close_size, price=str(tp_price), tif="gtc", reduce_only=True)
+            api.create_futures_order(SETTLE, tp_order)
+            log_debug("✅ TP 주문", f"{symbol}_{side.upper()} TP:{tp_price}")
         except Exception as e:
             log_debug("❌ TP 주문 오류", f"{symbol}_{side.upper()}: {str(e)}")
         
         try:
-            sl_order = FuturesOrder(
-                contract=symbol, 
-                size=close_size, 
-                price=str(sl_price), 
-                tif="gtc", 
-                reduce_only=True
-            )
-            sl_result = api.create_futures_order(SETTLE, sl_order)
-            if sl_result:
-                log_debug("✅ SL 주문", f"{symbol}_{side.upper()} SL:{sl_price}")
+            sl_order = FuturesOrder(contract=symbol, size=close_size, price=str(sl_price), tif="gtc", reduce_only=True)
+            api.create_futures_order(SETTLE, sl_order)
+            log_debug("✅ SL 주문", f"{symbol}_{side.upper()} SL:{sl_price}")
         except Exception as e:
             log_debug("❌ SL 주문 오류", f"{symbol}_{side.upper()}: {str(e)}")
             
@@ -241,6 +324,7 @@ def update_position_state(symbol, side, price, qty):
             pos["size"] = new_size
 
 def handle_grid_entry(data):
+    """ETH 그리드 전용 진입"""
     symbol = normalize_symbol(data.get("symbol"))
     if symbol != "ETH_USDT":
         return
@@ -248,8 +332,8 @@ def handle_grid_entry(data):
     side = data.get("side", "").lower()
     price = Decimal(str(data.get("price", "0")))
     
-    # ⭐ OBV MACD 기반 동적 수량
-    obv_macd_val = get_obv_macd_value()
+    # OBV MACD 기반 동적 수량
+    obv_macd_val = get_obv_macd_value(symbol)
     base_qty = get_base_qty()
     qty = calculate_grid_qty(base_qty, obv_macd_val)
     
@@ -258,10 +342,10 @@ def handle_grid_entry(data):
 
     success = place_order(symbol, side, qty, price, wait_for_fill=False)
     if success:
-        log_debug("📈 그리드 주문", f"{symbol} {side} qty={qty} price={price} (OBV:{obv_macd_val})")
+        log_debug("📈 그리드 주문", f"{symbol} {side} qty={qty} price={price} OBV_MACD:{obv_macd_val:.2f}")
 
 def handle_entry(data):
-    """기존 전략 진입 처리 - ETH_USDT 제외"""
+    """기존 전략 진입 (ETH 제외)"""
     symbol = normalize_symbol(data.get("symbol"))
     if symbol == "ETH_USDT":
         return
@@ -325,7 +409,7 @@ def handle_entry(data):
         log_debug("✅ 진입 성공", f"{symbol} {side} qty={float(qty)} 진입 횟수={state['entry_count']}")
 
 def update_all_position_states():
-    """Gate.io API로 포지션 최신화"""
+    """포지션 최신화"""
     with position_lock:
         api_positions = _get_api_response(api.list_positions, settle=SETTLE)
         if api_positions is None:
@@ -366,6 +450,11 @@ def update_all_position_states():
 def initialize_grid_orders():
     """ETH 그리드 최초 주문"""
     symbol = "ETH_USDT"
+    
+    # 기존 주문 모두 취소
+    cancel_open_orders(symbol)
+    time.sleep(1)
+    
     gap_pct = Decimal("0.15") / Decimal("100")
     current_price = Decimal(str(get_price(symbol)))
 
@@ -374,27 +463,31 @@ def initialize_grid_orders():
 
     handle_grid_entry({"symbol": symbol, "side": "short", "price": str(up_price)})
     handle_grid_entry({"symbol": symbol, "side": "long", "price": str(down_price)})
-    log_debug("🎯 그리드 초기화", f"ETH 양방향 주문 완료 (고정수량: {get_base_qty()})")
+    log_debug("🎯 그리드 초기화", f"ETH 양방향 주문 완료")
 
 def on_grid_fill_event(symbol, fill_price):
     """
-    체결 발생 시 양방향 그리드 재배치
-    - 고정 수량 사용
+    체결 발생 시 그리드 재배치
+    - 기존 주문 모두 취소
+    - 새로운 양방향 주문 1건씩만 생성
     """
-    gap_pct = Decimal("0.15") / Decimal("100")
+    # 1. 기존 모든 주문 취소
+    cancel_open_orders(symbol)
+    time.sleep(0.5)
     
-    # ⭐ 그리드는 항상 고정 수량
-    qty = get_base_qty()
-
+    # 2. 새로운 그리드 가격 계산
+    gap_pct = Decimal("0.15") / Decimal("100")
     up_price = Decimal(str(fill_price)) * (1 + gap_pct)
     down_price = Decimal(str(fill_price)) * (1 - gap_pct)
 
-    log_debug("🔄 그리드 재배치", f"{symbol} 체결가:{fill_price} 수량:{qty}")
+    log_debug("🔄 그리드 재배치", f"{symbol} 체결가:{fill_price}")
+    
+    # 3. 새로운 주문만 발주
     handle_grid_entry({"symbol": symbol, "side": "short", "price": str(up_price)})
     handle_grid_entry({"symbol": symbol, "side": "long", "price": str(down_price)})
 
 def get_price(symbol):
-    """실시간 WebSocket 가격 반환"""
+    """실시간 가격 반환"""
     price = latest_prices.get(symbol, Decimal("0"))
     if price > 0:
         return price
@@ -439,9 +532,7 @@ def is_manual_close_protected(symbol, side):
     return False
 
 def eth_grid_fill_monitor():
-    """
-    ETH 체결 감지 (TP/SL 없음 - 순수 그리드)
-    """
+    """ETH 체결 감지"""
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
     
@@ -456,12 +547,10 @@ def eth_grid_fill_monitor():
             long_price = pos.get("long", {}).get("price", Decimal("0"))
             short_price = pos.get("short", {}).get("price", Decimal("0"))
             
-            # 롱 체결 감지
             if long_size > prev_long_size:
                 log_debug("✅ 롱 체결", f"ETH {long_price} (+{long_size - prev_long_size})")
                 on_grid_fill_event("ETH_USDT", long_price)
             
-            # 숏 체결 감지
             if short_size > prev_short_size:
                 log_debug("✅ 숏 체결", f"ETH {short_price} (+{short_size - prev_short_size})")
                 on_grid_fill_event("ETH_USDT", short_price)
@@ -470,7 +559,7 @@ def eth_grid_fill_monitor():
             prev_short_size = short_size
 
 def position_monitor():
-    """전체 심볼 포지션 주기적 갱신"""
+    """포지션 주기적 갱신"""
     while True:
         time.sleep(30)
         try:
@@ -510,15 +599,17 @@ def status():
                         active_positions[f"{symbol}_{side.upper()}"] = {
                             "size": float(pos_data["size"]),
                             "price": float(pos_data["price"]),
-                            "value": float(abs(pos_data["value"])),
-                            "entry_count": pos_data["entry_count"]
+                            "value": float(abs(pos_data["value"]))
                         }
+        
+        obv_macd = get_obv_macd_value("ETH_USDT")
         
         return jsonify({
             "status": "running",
-            "version": "v6.60-grid-fixed-qty",
+            "version": "v7.0-final",
             "balance_usdt": float(equity),
             "active_positions": active_positions,
+            "eth_obv_macd": round(obv_macd, 2),
             "grid_base_qty": float(get_base_qty())
         })
     
@@ -731,10 +822,9 @@ def get_default_pos_side_state():
     }
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v6.60-grid-fixed-qty")
+    log_debug("🚀 서버 시작", "v7.0-final")
     initialize_states()
     log_debug("💰 초기 자산", f"{get_total_collateral(force=True):.2f} USDT")
-    log_debug("📊 그리드 기본 수량", f"{get_base_qty()} (고정)")
     update_all_position_states()
     
     # 최초 그리드 주문
