@@ -423,7 +423,7 @@ def update_all_position_states():
             position_state[symbol][side] = get_default_pos_side_state()
 
 def initialize_hedge_orders():
-    """⭐ 헤지 전략 초기화 - 위/아래 각각 롱+숏"""
+    """⭐ 그리드 지정가 (위 숏, 아래 롱만)"""
     symbol = "ETH_USDT"
     cancel_open_orders(symbol)
     time.sleep(1)
@@ -435,69 +435,26 @@ def initialize_hedge_orders():
     up_price = current_price * (1 + gap_pct)
     down_price = current_price * (1 - gap_pct)
     
-    # OBV MACD 역방향 수량 계산
-    if obv_macd_val >= 0:  # 위로 힘 강함
-        long_qty = calculate_grid_qty(current_price, Decimal("1.0"))  # 최소
-        short_qty = calculate_grid_qty(current_price, obv_macd_val)  # 가중치
-    else:  # 아래로 힘 강함
-        short_qty = calculate_grid_qty(current_price, Decimal("1.0"))  # 최소
-        long_qty = calculate_grid_qty(current_price, abs(obv_macd_val))  # 가중치
+    # OBV MACD 역방향 수량
+    if obv_macd_val >= 0:
+        long_qty = calculate_grid_qty(current_price, Decimal("1.0"))
+        short_qty = calculate_grid_qty(current_price, obv_macd_val)
+    else:
+        short_qty = calculate_grid_qty(current_price, Decimal("1.0"))
+        long_qty = calculate_grid_qty(current_price, abs(obv_macd_val))
     
-    # ⭐ 위쪽에 롱+숏 (4개 주문 중 2개)
-    if long_qty >= 1:
-        place_order(symbol, "long", long_qty, up_price, wait_for_fill=False)
-        log_debug("📈 위 롱", f"{symbol} qty={long_qty} @ {up_price}")
-    
+    # ⭐ 위쪽: 숏만 (지정가)
     if short_qty >= 1:
         place_order(symbol, "short", short_qty, up_price, wait_for_fill=False)
         log_debug("📉 위 숏", f"{symbol} qty={short_qty} @ {up_price}")
     
-    # ⭐ 아래쪽에 롱+숏 (4개 주문 중 2개)
+    # ⭐ 아래쪽: 롱만 (지정가)
     if long_qty >= 1:
         place_order(symbol, "long", long_qty, down_price, wait_for_fill=False)
         log_debug("📈 아래 롱", f"{symbol} qty={long_qty} @ {down_price}")
     
-    if short_qty >= 1:
-        place_order(symbol, "short", short_qty, down_price, wait_for_fill=False)
-        log_debug("📉 아래 숏", f"{symbol} qty={short_qty} @ {down_price}")
-    
-    log_debug("🎯 헤지 초기화", f"ETH 위:{up_price} 아래:{down_price} 롱:{long_qty} 숏:{short_qty} OBV:{obv_macd_val:.2f}")
-    
-def on_hedge_fill_event(symbol, fill_price):
-    """⭐ 체결 후 재진입 - 체결가 기준 위/아래 각각 롱+숏"""
-    cancel_open_orders(symbol)
-    time.sleep(1)
-    
-    gap_pct = Decimal("0.15") / Decimal("100")
-    up_price = Decimal(str(fill_price)) * (1 + gap_pct)
-    down_price = Decimal(str(fill_price)) * (1 - gap_pct)
-    
-    obv_macd_val = get_obv_macd_value(symbol)
-    
-    # 역방향 수량 계산
-    if obv_macd_val >= 0:
-        long_qty = calculate_grid_qty(Decimal(str(fill_price)), Decimal("1.0"))
-        short_qty = calculate_grid_qty(Decimal(str(fill_price)), obv_macd_val)
-    else:
-        short_qty = calculate_grid_qty(Decimal(str(fill_price)), Decimal("1.0"))
-        long_qty = calculate_grid_qty(Decimal(str(fill_price)), abs(obv_macd_val))
-    
-    # ⭐ 위쪽에 롱+숏
-    if long_qty >= 1:
-        place_order(symbol, "long", long_qty, up_price, wait_for_fill=False)
-    
-    if short_qty >= 1:
-        place_order(symbol, "short", short_qty, up_price, wait_for_fill=False)
-    
-    # ⭐ 아래쪽에 롱+숏
-    if long_qty >= 1:
-        place_order(symbol, "long", long_qty, down_price, wait_for_fill=False)
-    
-    if short_qty >= 1:
-        place_order(symbol, "short", short_qty, down_price, wait_for_fill=False)
-    
-    log_debug("🔄 헤지 재배치", f"{symbol} 체결:{fill_price} 위:{up_price} 아래:{down_price} 롱:{long_qty} 숏:{short_qty}")
-    
+    log_debug("🎯 그리드 초기화", f"ETH 위숏:{short_qty}@{up_price} 아래롱:{long_qty}@{down_price} OBV:{obv_macd_val:.2f}")
+  
 def get_price(symbol):
     price = latest_prices.get(symbol, Decimal("0"))
     if price > 0:
@@ -543,13 +500,13 @@ def is_manual_close_protected(symbol, side):
     return False
 
 def eth_hedge_fill_monitor():
-    """⭐ ETH 체결 감지 및 재배치 (수정)"""
+    """⭐ 체결 감지 + 즉시 헤징 + 재진입"""
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
-    last_rebalance_time = 0
+    last_action_time = 0
     
     while True:
-        time.sleep(2)
+        time.sleep(1)
         update_all_position_states()
         
         with position_lock:
@@ -559,38 +516,83 @@ def eth_hedge_fill_monitor():
             long_price = pos.get("long", {}).get("price", Decimal("0"))
             short_price = pos.get("short", {}).get("price", Decimal("0"))
             
-            # 미체결 주문 수 확인
-            try:
-                open_orders = api.list_futures_orders(settle=SETTLE, contract="ETH_USDT", status='open')
-                pending_count = len(list(open_orders))
-            except:
-                pending_count = 0
+            now = time.time()
+            obv_macd_val = get_obv_macd_value("ETH_USDT")
+            
+            # OBV 기반 수량 계산
+            if obv_macd_val >= 0:
+                long_qty_base = calculate_grid_qty(get_price("ETH_USDT"), Decimal("1.0"))
+                short_qty_base = calculate_grid_qty(get_price("ETH_USDT"), obv_macd_val)
+            else:
+                short_qty_base = calculate_grid_qty(get_price("ETH_USDT"), Decimal("1.0"))
+                long_qty_base = calculate_grid_qty(get_price("ETH_USDT"), abs(obv_macd_val))
+            
+            # ⭐ 롱 체결 감지 (아래쪽)
+            if long_size > prev_long_size and (now - last_action_time) > 3:
+                log_debug("✅ 롱 체결", f"ETH 평단:{long_price} 수량:{long_size}")
+                
+                # 즉시 숏 헤징 (시장가)
+                if short_qty_base >= 1:
+                    try:
+                        order = FuturesOrder(
+                            contract="ETH_USDT",
+                            size=-int(short_qty_base),
+                            price="0",
+                            tif="ioc"
+                        )
+                        result = api.create_futures_order(SETTLE, order)
+                        if result:
+                            log_debug("🔄 숏 헤징", f"qty={short_qty_base} 시장가")
+                    except Exception as e:
+                        log_debug("❌ 헤징 오류", str(e))
+                
+                # 새로운 그리드 발주
+                time.sleep(1)
+                cancel_open_orders("ETH_USDT")
+                time.sleep(0.5)
+                initialize_hedge_orders()
+                last_action_time = now
+            
+            # ⭐ 숏 체결 감지 (위쪽)
+            elif short_size > prev_short_size and (now - last_action_time) > 3:
+                log_debug("✅ 숏 체결", f"ETH 평단:{short_price} 수량:{short_size}")
+                
+                # 즉시 롱 헤징 (시장가)
+                if long_qty_base >= 1:
+                    try:
+                        order = FuturesOrder(
+                            contract="ETH_USDT",
+                            size=int(long_qty_base),
+                            price="0",
+                            tif="ioc"
+                        )
+                        result = api.create_futures_order(SETTLE, order)
+                        if result:
+                            log_debug("🔄 롱 헤징", f"qty={long_qty_base} 시장가")
+                    except Exception as e:
+                        log_debug("❌ 헤징 오류", str(e))
+                
+                # 새로운 그리드 발주
+                time.sleep(1)
+                cancel_open_orders("ETH_USDT")
+                time.sleep(0.5)
+                initialize_hedge_orders()
+                last_action_time = now
             
             # 청산 감지
-            if prev_long_size > 0 and long_size == 0:
-                log_debug("🎯 롱 청산 감지", "ETH 재초기화")
+            if prev_long_size > 0 and long_size == 0 and (now - last_action_time) > 3:
+                log_debug("🎯 롱 청산 감지", "재초기화")
                 cancel_open_orders("ETH_USDT")
                 time.sleep(0.5)
                 initialize_hedge_orders()
-                last_rebalance_time = time.time()
+                last_action_time = now
             
-            if prev_short_size > 0 and short_size == 0:
-                log_debug("🎯 숏 청산 감지", "ETH 재초기화")
+            if prev_short_size > 0 and short_size == 0 and (now - last_action_time) > 3:
+                log_debug("🎯 숏 청산 감지", "재초기화")
                 cancel_open_orders("ETH_USDT")
                 time.sleep(0.5)
                 initialize_hedge_orders()
-                last_rebalance_time = time.time()
-            
-            # 체결 감지
-            now = time.time()
-            position_changed = (long_size != prev_long_size or short_size != prev_short_size)
-            
-            # ⭐ 핵심: 포지션 변화 + 미체결 0 + 1초 쿨다운
-            if position_changed and pending_count == 0 and (now - last_rebalance_time) > 1:
-                current_price = get_price("ETH_USDT")
-                log_debug("✅ 전체 체결", f"롱:{long_size} 숏:{short_size} 미체결:{pending_count}")
-                on_hedge_fill_event("ETH_USDT", current_price)
-                last_rebalance_time = now
+                last_action_time = now
             
             prev_long_size = long_size
             prev_short_size = short_size
