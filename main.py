@@ -595,7 +595,7 @@ def eth_hedge_fill_monitor():
                 last_action_time = now
 
 def eth_hedge_tp_monitor():
-    """⭐ ETH TP 실시간 모니터링 (평단 ±0.15% 시장가 청산)"""
+    """⭐ ETH TP 실시간 모니터링 + 재초기화"""
     while True:
         time.sleep(1)
         
@@ -630,8 +630,13 @@ def eth_hedge_tp_monitor():
                             
                             if result:
                                 log_debug("✅ 롱 청산 완료", f"{long_size}계약 @ {current_price}")
-                            else:
-                                log_debug("❌ 롱 청산 실패", "API 응답 없음")
+                                
+                                # ⭐ 즉시 재초기화
+                                time.sleep(2)
+                                cancel_open_orders("ETH_USDT")
+                                time.sleep(1)
+                                initialize_hedge_orders()
+                                
                         except Exception as e:
                             log_debug("❌ 롱 청산 오류", str(e), exc_info=True)
                 
@@ -658,8 +663,13 @@ def eth_hedge_tp_monitor():
                             
                             if result:
                                 log_debug("✅ 숏 청산 완료", f"{short_size}계약 @ {current_price}")
-                            else:
-                                log_debug("❌ 숏 청산 실패", "API 응답 없음")
+                                
+                                # ⭐ 즉시 재초기화
+                                time.sleep(2)
+                                cancel_open_orders("ETH_USDT")
+                                time.sleep(1)
+                                initialize_hedge_orders()
+                                
                         except Exception as e:
                             log_debug("❌ 숏 청산 오류", str(e), exc_info=True)
         
