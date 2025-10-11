@@ -201,7 +201,6 @@ def get_obv_macd_value(symbol="ETH_USDT"):
 def get_available_balance():
     """USDT 잔고 (Unified Account 우선)"""
     try:
-        # Unified Account API
         try:
             unified_account = unified_api.list_unified_accounts()
             
@@ -212,7 +211,6 @@ def get_available_balance():
                     usdt_data = balances['USDT']
                     
                     try:
-                        # dict와 object 모두 대응
                         if isinstance(usdt_data, dict):
                             available_str = str(usdt_data.get('available', '0'))
                         else:
@@ -221,11 +219,9 @@ def get_available_balance():
                         usdt_balance = float(available_str)
                         
                         if usdt_balance > 0:
-                            # 성공 시에만 로그 출력
-                            log_debug("💰 잔고", f"{usdt_balance:.2f} USDT")
+                            # ⭐ 로그 제거!
                             return usdt_balance
                         
-                        # equity 시도
                         if isinstance(usdt_data, dict):
                             equity_str = str(usdt_data.get('equity', '0'))
                         else:
@@ -234,7 +230,7 @@ def get_available_balance():
                         usdt_balance = float(equity_str)
                         
                         if usdt_balance > 0:
-                            log_debug("💰 잔고", f"{usdt_balance:.2f} USDT")
+                            # ⭐ 로그 제거!
                             return usdt_balance
                     
                     except Exception as e:
@@ -243,13 +239,13 @@ def get_available_balance():
         except Exception as e:
             log_debug("⚠️ Unified API 실패", str(e))
         
-        # Fallback: Futures API
+        # Fallback
         try:
             account = api.list_futures_accounts(settle='usdt')
             total = float(getattr(account, "total", 0))
             
             if total > 0:
-                log_debug("💰 잔고", f"{total:.2f} USDT")
+                # ⭐ 로그 제거!
                 return total
         
         except Exception as e:
