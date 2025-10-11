@@ -201,38 +201,28 @@ def get_obv_macd_value(symbol="ETH_USDT"):
 def get_available_balance():
     """USDT 잔고 (Unified Account 우선)"""
     try:
-        # ⭐ 1. Unified Account API
-        log_debug("🔍 Unified API 호출 시작", "")
-        
+        # Unified Account API
         try:
             unified_account = unified_api.list_unified_accounts()
-            log_debug("🔍 Unified 응답 받음", f"type={type(unified_account)}")
             
-            # balances에서 USDT 찾기
             if hasattr(unified_account, 'balances') and unified_account.balances:
                 balances = unified_account.balances
-                log_debug("🔍 balances 발견", f"type={type(balances)}")
                 
                 if isinstance(balances, dict) and 'USDT' in balances:
                     usdt_data = balances['USDT']
-                    log_debug("🔍 USDT 데이터 발견", f"type={type(usdt_data)}")  # ⭐ 타입 확인
                     
-                    # ⭐ dict와 object 모두 대응
                     try:
-                        # 방법 1: dict인 경우
+                        # dict와 object 모두 대응
                         if isinstance(usdt_data, dict):
                             available_str = str(usdt_data.get('available', '0'))
                         else:
-                            # 방법 2: object인 경우 (속성으로 접근)
                             available_str = str(getattr(usdt_data, 'available', '0'))
                         
-                        log_debug("🔍 available_str", f"'{available_str}'")
-                        
                         usdt_balance = float(available_str)
-                        log_debug("🔍 usdt_balance", f"{usdt_balance}")
                         
                         if usdt_balance > 0:
-                            log_debug("💰 잔고 (Unified Available)", f"{usdt_balance} USDT")
+                            # 성공 시에만 로그 출력
+                            log_debug("💰 잔고", f"{usdt_balance:.2f} USDT")
                             return usdt_balance
                         
                         # equity 시도
@@ -244,41 +234,27 @@ def get_available_balance():
                         usdt_balance = float(equity_str)
                         
                         if usdt_balance > 0:
-                            log_debug("💰 잔고 (Unified Equity)", f"{usdt_balance} USDT")
+                            log_debug("💰 잔고", f"{usdt_balance:.2f} USDT")
                             return usdt_balance
-                        
-                        log_debug("⚠️ USDT 잔고 0", f"available={available_str}, equity={equity_str}")
                     
                     except Exception as e:
-                        log_debug("⚠️ USDT 파싱 실패", f"{type(e).__name__}: {str(e)}")
-                else:
-                    log_debug("⚠️ Unified에 USDT 없음", "")
-            else:
-                log_debug("⚠️ balances 속성 없음", "")
+                        log_debug("⚠️ USDT 파싱 실패", str(e))
         
         except Exception as e:
-            log_debug("⚠️ Unified API 실패", f"{type(e).__name__}: {str(e)}", exc_info=True)
+            log_debug("⚠️ Unified API 실패", str(e))
         
-        # ⭐ 2. Fallback: Futures API
-        log_debug("🔍 Futures API 호출", "")
-        
+        # Fallback: Futures API
         try:
             account = api.list_futures_accounts(settle='usdt')
             total = float(getattr(account, "total", 0))
-            available = float(getattr(account, "available", 0))
             
             if total > 0:
-                log_debug("💰 잔고 (Futures Total)", f"{total} USDT")
+                log_debug("💰 잔고", f"{total:.2f} USDT")
                 return total
-            
-            if available > 0:
-                log_debug("💰 잔고 (Futures Available)", f"{available} USDT")
-                return available
         
         except Exception as e:
             log_debug("⚠️ Futures API 실패", str(e))
         
-        log_debug("⚠️ 잔고 부족", "모든 조회 실패")
         return 0.0
         
     except Exception as e:
