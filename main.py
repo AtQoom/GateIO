@@ -199,38 +199,30 @@ def get_obv_macd_value(symbol="ETH_USDT"):
     return value
 
 def get_available_balance():
-    """사용 가능한 USDT 잔고 (Unified Account 지원)"""
+    """USDT 잔고 (Unified Account 지원)"""
     try:
-        # ⭐ Unified Account 조회 시도
+        # Unified Account에서 total 조회
         try:
-            unified_account = unified_api.list_unified_accounts()
-            if unified_account:
-                # ⭐ USDT 잔고 조회
-                if hasattr(unified_account, 'total') and unified_account.total:
-                    total_usdt = float(unified_account.total.get('USDT', 0))
-                    if total_usdt > 0:
-                        log_debug("💰 잔고 조회 (Unified)", f"Total: {total_usdt} USDT")
-                        return total_usdt
-                
-                # ⭐ 또는 details에서 조회
-                if hasattr(unified_account, 'details'):
-                    for detail in unified_account.details:
-                        if hasattr(detail, 'currency') and detail.currency == 'USDT':
-                            available = float(getattr(detail, 'available', 0))
-                            if available > 0:
-                                log_debug("💰 잔고 조회 (Unified)", f"Available: {available} USDT")
-                                return available
+            account = api.list_futures_accounts(settle='usdt')
+            
+            # total과 available 모두 확인
+            total = float(getattr(account, "total", 0))
+            available = float(getattr(account, "available", 0))
+            
+            # total이 있으면 사용 (Unified Account)
+            if total > 0:
+                log_debug("💰 잔고 (total)", f"{total} USDT")
+                return total
+            
+            # available 사용 (일반 계정)
+            if available > 0:
+                log_debug("💰 잔고 (available)", f"{available} USDT")
+                return available
+        
         except Exception as e:
-            log_debug("⚠️ Unified 조회 실패", str(e))
+            log_debug("⚠️ Futures 조회 실패", str(e))
         
-        # ⭐ 일반 Futures 조회 (fallback)
-        account_info = api.list_futures_accounts(settle='usdt')
-        total = float(getattr(account_info, "total", 0))
-        if total > 0:
-            log_debug("💰 잔고 조회 (Futures)", f"Total: {total} USDT")
-            return total
-        
-        log_debug("⚠️ 잔고 0", "모든 조회 방법 실패")
+        log_debug("⚠️ 잔고 부족", "balance=0.0")
         return 0.0
         
     except Exception as e:
