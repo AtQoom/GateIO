@@ -201,7 +201,7 @@ def get_obv_macd_value(symbol="ETH_USDT"):
 def get_available_balance():
     """USDT 잔고 (Unified Account 우선)"""
     try:
-        # ⭐ 1. Unified Account API (최우선!)
+        # ⭐ 1. Unified Account API
         log_debug("🔍 Unified API 호출 시작", "")
         
         try:
@@ -215,32 +215,44 @@ def get_available_balance():
                 
                 if isinstance(balances, dict) and 'USDT' in balances:
                     usdt_data = balances['USDT']
-                    log_debug("🔍 USDT 데이터 발견", f"{usdt_data}")
+                    log_debug("🔍 USDT 데이터 발견", f"type={type(usdt_data)}")  # ⭐ 타입 확인
                     
-                    if isinstance(usdt_data, dict):
-                        # available 사용
-                        available_str = str(usdt_data.get('available', '0'))  # ⭐ str() 명시
-                        log_debug("🔍 available_str", f"'{available_str}'")  # ⭐ 값 확인
+                    # ⭐ dict와 object 모두 대응
+                    try:
+                        # 방법 1: dict인 경우
+                        if isinstance(usdt_data, dict):
+                            available_str = str(usdt_data.get('available', '0'))
+                        else:
+                            # 방법 2: object인 경우 (속성으로 접근)
+                            available_str = str(getattr(usdt_data, 'available', '0'))
+                        
+                        log_debug("🔍 available_str", f"'{available_str}'")
                         
                         usdt_balance = float(available_str)
-                        log_debug("🔍 usdt_balance", f"{usdt_balance} (type={type(usdt_balance)})")  # ⭐ 값 확인
+                        log_debug("🔍 usdt_balance", f"{usdt_balance}")
                         
                         if usdt_balance > 0:
                             log_debug("💰 잔고 (Unified Available)", f"{usdt_balance} USDT")
                             return usdt_balance
                         
-                        # available이 0이면 equity 시도
-                        equity_str = str(usdt_data.get('equity', '0'))
+                        # equity 시도
+                        if isinstance(usdt_data, dict):
+                            equity_str = str(usdt_data.get('equity', '0'))
+                        else:
+                            equity_str = str(getattr(usdt_data, 'equity', '0'))
+                        
                         usdt_balance = float(equity_str)
-                        log_debug("🔍 equity", f"{usdt_balance}")
                         
                         if usdt_balance > 0:
                             log_debug("💰 잔고 (Unified Equity)", f"{usdt_balance} USDT")
                             return usdt_balance
                         
                         log_debug("⚠️ USDT 잔고 0", f"available={available_str}, equity={equity_str}")
+                    
+                    except Exception as e:
+                        log_debug("⚠️ USDT 파싱 실패", f"{type(e).__name__}: {str(e)}")
                 else:
-                    log_debug("⚠️ Unified에 USDT 없음", f"")
+                    log_debug("⚠️ Unified에 USDT 없음", "")
             else:
                 log_debug("⚠️ balances 속성 없음", "")
         
