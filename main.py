@@ -199,19 +199,11 @@ def get_obv_macd_value(symbol="ETH_USDT"):
     return value
 
 def get_available_balance():
-    """사용 가능한 USDT 잔고"""
+    """사용 가능한 USDT 잔고 (Total 기준)"""
     try:
         account_info = api.list_futures_accounts(settle='usdt')
-        
-        # ⭐ available 대신 total 사용
         total = float(getattr(account_info, "total", 0))
-        available = float(getattr(account_info, "available", 0))
-        
-        # 포지션 중일 때는 total의 50%만 사용
-        if available < total * 0.5:
-            return total * 0.5
-        
-        return available
+        return total
     except Exception as e:
         log_debug("❌ 잔고 조회 오류", str(e))
         return 0.0
