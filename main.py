@@ -199,30 +199,53 @@ def get_obv_macd_value(symbol="ETH_USDT"):
     return value
 
 def get_available_balance():
-    """USDT 잔고 (Unified Account 전용)"""
+    """USDT 잔고 (Unified Account 강화)"""
     try:
-        # ⭐ 1. Unified Account API 사용
+        # ⭐ 1. Unified Account API - 모든 가능한 방식 시도
         try:
             unified_account = unified_api.list_unified_accounts()
             
-            # total에서 USDT 찾기
-            if hasattr(unified_account, 'total') and unified_account.total:
-                if isinstance(unified_account.total, dict):
-                    usdt_balance = float(unified_account.total.get('USDT', 0))
+            # 방법 1: total 속성 (딕셔너리)
+            if hasattr(unified_account, 'total'):
+                total_obj = unified_account.total
+                
+                # total이 딕셔너리인 경우
+                if isinstance(total_obj, dict) and 'USDT' in total_obj:
+                    usdt_balance = float(total_obj['USDT'])
                     if usdt_balance > 0:
-                        log_debug("💰 잔고 (Unified Total)", f"{usdt_balance} USDT")
+                        log_debug("💰 잔고 (Unified Total Dict)", f"{usdt_balance} USDT")
+                        return usdt_balance
+                
+                # total이 객체인 경우 (속성으로 접근)
+                try:
+                    usdt_balance = float(getattr(total_obj, 'USDT', 0))
+                    if usdt_balance > 0:
+                        log_debug("💰 잔고 (Unified Total Attr)", f"{usdt_balance} USDT")
+                        return usdt_balance
+                except:
+                    pass
+            
+            # 방법 2: borrowed (실제 사용 가능 금액)
+            if hasattr(unified_account, 'borrowed'):
+                borrowed_obj = unified_account.borrowed
+                if isinstance(borrowed_obj, dict) and 'USDT' in borrowed_obj:
+                    try:
+                        # borrowed는 빌린 금액이므로, 실제 잔고는 available
+                        pass
+                    except:
+                        pass
+            
+            # 방법 3: available 속성
+            if hasattr(unified_account, 'available'):
+                available_obj = unified_account.available
+                if isinstance(available_obj, dict) and 'USDT' in available_obj:
+                    usdt_balance = float(available_obj['USDT'])
+                    if usdt_balance > 0:
+                        log_debug("💰 잔고 (Unified Available Dict)", f"{usdt_balance} USDT")
                         return usdt_balance
             
-            # details에서 USDT 찾기
-            if hasattr(unified_account, 'details') and unified_account.details:
-                for detail in unified_account.details:
-                    if hasattr(detail, 'currency') and detail.currency == 'USDT':
-                        usdt_balance = float(getattr(detail, 'available', 0))
-                        if usdt_balance > 0:
-                            log_debug("💰 잔고 (Unified Available)", f"{usdt_balance} USDT")
-                            return usdt_balance
-            
-            log_debug("⚠️ Unified Account USDT 없음", "")
+            # 방법 4: 전체 객체 출력 (디버깅용)
+            log_debug("🔍 Unified 응답", f"{unified_account}")
         
         except Exception as e:
             log_debug("⚠️ Unified API 조회 실패", str(e))
