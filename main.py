@@ -219,8 +219,7 @@ def get_available_balance():
                         usdt_balance = float(available_str)
                         
                         if usdt_balance > 0:
-                            # ⭐ 로그 제거!
-                            return usdt_balance
+                            return usdt_balance  # ⭐ 로그 없이 return만
                         
                         if isinstance(usdt_data, dict):
                             equity_str = str(usdt_data.get('equity', '0'))
@@ -230,8 +229,7 @@ def get_available_balance():
                         usdt_balance = float(equity_str)
                         
                         if usdt_balance > 0:
-                            # ⭐ 로그 제거!
-                            return usdt_balance
+                            return usdt_balance  # ⭐ 로그 없이 return만
                     
                     except Exception as e:
                         log_debug("⚠️ USDT 파싱 실패", str(e))
@@ -239,14 +237,12 @@ def get_available_balance():
         except Exception as e:
             log_debug("⚠️ Unified API 실패", str(e))
         
-        # Fallback
         try:
             account = api.list_futures_accounts(settle='usdt')
             total = float(getattr(account, "total", 0))
             
             if total > 0:
-                # ⭐ 로그 제거!
-                return total
+                return total  # ⭐ 로그 없이 return만
         
         except Exception as e:
             log_debug("⚠️ Futures API 실패", str(e))
@@ -481,12 +477,22 @@ def initialize_hedge_orders():
     cancel_open_orders(symbol)
     time.sleep(1)
     
+    # ⭐ 주문 발주 전 잔고 출력
+    current_balance = get_available_balance()
+    log_debug("💰 현재 잔고", f"{current_balance:.2f} USDT")
+    
     current_price = Decimal(str(get_price(symbol)))
     obv_macd_val = get_obv_macd_value(symbol)
+    
+    cfg = get_symbol_config(symbol)
+    tick_size = cfg["tick_size"]
     
     gap_pct = Decimal("0.15") / Decimal("100")
     up_price = current_price * (1 + gap_pct)
     down_price = current_price * (1 - gap_pct)
+    
+    up_price = (up_price / tick_size).quantize(Decimal("1"), rounding=ROUND_DOWN) * tick_size
+    down_price = (down_price / tick_size).quantize(Decimal("1"), rounding=ROUND_DOWN) * tick_size
     
     # OBV MACD 역방향 수량
     if obv_macd_val >= 0:
@@ -496,12 +502,12 @@ def initialize_hedge_orders():
         short_qty = calculate_grid_qty(current_price, Decimal("1.0"))
         long_qty = calculate_grid_qty(current_price, abs(obv_macd_val))
     
-    # ⭐ 위쪽: 숏만 (지정가)
+    # 위쪽: 숏만
     if short_qty >= 1:
         place_order(symbol, "short", short_qty, up_price, wait_for_fill=False)
         log_debug("📉 위 숏", f"{symbol} qty={short_qty} @ {up_price}")
     
-    # ⭐ 아래쪽: 롱만 (지정가)
+    # 아래쪽: 롱만
     if long_qty >= 1:
         place_order(symbol, "long", long_qty, down_price, wait_for_fill=False)
         log_debug("📈 아래 롱", f"{symbol} qty={long_qty} @ {down_price}")
@@ -1006,11 +1012,16 @@ def get_default_pos_side_state():
 
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "v11.0-hedge-final")
-    initialize_states()
-    log_debug("💰 초기 자산", f"{get_total_collateral(force=True):.2f} USDT")
-    update_all_position_states()
     
-    # ⭐ 헤지 전략 초기화
+    # ⭐ 서버 시작 시 잔고 1번 출력
+    initial_balance = get_available_balance()
+    log_debug("💰 초기 잔고", f"{initial_balance:.2f} USDT")
+    
+    # OBV MACD 계산
+    obv_macd_val = get_obv_macd_value("ETH_USDT")
+    log_debug("📊 OBV MACD", f"ETH_USDT: {obv_macd_val:.2f}")
+    
+    # 그리드 초기화
     initialize_hedge_orders()
 
     # ⭐ 헤지 모니터링 스레드
