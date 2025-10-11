@@ -199,14 +199,42 @@ def get_obv_macd_value(symbol="ETH_USDT"):
     return value
 
 def get_available_balance():
-    """사용 가능한 USDT 잔고 (Total 기준)"""
+    """사용 가능한 USDT 잔고 (Unified Account 지원)"""
     try:
+        # ⭐ Unified Account 조회 시도
+        try:
+            unified_account = unified_api.list_unified_accounts()
+            if unified_account:
+                # ⭐ USDT 잔고 조회
+                if hasattr(unified_account, 'total') and unified_account.total:
+                    total_usdt = float(unified_account.total.get('USDT', 0))
+                    if total_usdt > 0:
+                        log_debug("💰 잔고 조회 (Unified)", f"Total: {total_usdt} USDT")
+                        return total_usdt
+                
+                # ⭐ 또는 details에서 조회
+                if hasattr(unified_account, 'details'):
+                    for detail in unified_account.details:
+                        if hasattr(detail, 'currency') and detail.currency == 'USDT':
+                            available = float(getattr(detail, 'available', 0))
+                            if available > 0:
+                                log_debug("💰 잔고 조회 (Unified)", f"Available: {available} USDT")
+                                return available
+        except Exception as e:
+            log_debug("⚠️ Unified 조회 실패", str(e))
+        
+        # ⭐ 일반 Futures 조회 (fallback)
         account_info = api.list_futures_accounts(settle='usdt')
-        total = float(getattr(account_info, "total", 0))  # ⭐ total로 변경
-        log_debug("💰 잔고 조회", f"Total: {total} USDT")  # 디버그 로그 추가
-        return total
+        total = float(getattr(account_info, "total", 0))
+        if total > 0:
+            log_debug("💰 잔고 조회 (Futures)", f"Total: {total} USDT")
+            return total
+        
+        log_debug("⚠️ 잔고 0", "모든 조회 방법 실패")
+        return 0.0
+        
     except Exception as e:
-        log_debug("❌ 잔고 조회 오류", str(e))
+        log_debug("❌ 잔고 조회 오류", str(e), exc_info=True)
         return 0.0
 
 def calculate_grid_qty(current_price: Decimal, obv_macd_val: float) -> Decimal:
