@@ -202,15 +202,20 @@ def get_available_balance():
     """USDT 잔고 (Unified Account 우선)"""
     try:
         # ⭐ 1. Unified Account API (최우선!)
+        log_debug("🔍 Unified API 호출 시작", "")  # ← 디버깅 로그 추가
+        
         try:
             unified_account = unified_api.list_unified_accounts()
+            log_debug("🔍 Unified 응답 받음", f"type={type(unified_account)}")  # ← 타입 확인
             
             # balances에서 USDT 찾기
             if hasattr(unified_account, 'balances') and unified_account.balances:
                 balances = unified_account.balances
+                log_debug("🔍 balances 발견", f"type={type(balances)}")  # ← balances 타입 확인
                 
                 if isinstance(balances, dict) and 'USDT' in balances:
                     usdt_data = balances['USDT']
+                    log_debug("🔍 USDT 데이터 발견", f"{usdt_data}")  # ← USDT 데이터 출력
                     
                     if isinstance(usdt_data, dict):
                         # available 사용
@@ -231,12 +236,16 @@ def get_available_balance():
                         
                         log_debug("⚠️ USDT 잔고 0", f"available={available_str}, equity={equity_str}")
                 else:
-                    log_debug("⚠️ Unified에 USDT 없음", "")
+                    log_debug("⚠️ Unified에 USDT 없음", f"balances keys={list(balances.keys())[:5] if isinstance(balances, dict) else 'not dict'}")
+            else:
+                log_debug("⚠️ balances 속성 없음", f"hasattr={hasattr(unified_account, 'balances')}")
         
         except Exception as e:
-            log_debug("⚠️ Unified API 실패", str(e))
+            log_debug("⚠️ Unified API 실패", f"{type(e).__name__}: {str(e)}", exc_info=True)  # ← 예외 타입 + 상세 로그
         
         # ⭐ 2. Fallback: Futures API (Unified 실패 시에만)
+        log_debug("🔍 Futures API 호출", "")  # ← Futures API 호출 확인
+        
         try:
             account = api.list_futures_accounts(settle='usdt')
             total = float(getattr(account, "total", 0))
