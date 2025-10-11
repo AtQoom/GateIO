@@ -454,50 +454,6 @@ def initialize_hedge_orders():
         log_debug("📈 아래 롱", f"{symbol} qty={long_qty} @ {down_price}")
     
     log_debug("🎯 그리드 초기화", f"ETH 위숏:{short_qty}@{up_price} 아래롱:{long_qty}@{down_price} OBV:{obv_macd_val:.2f}")
-  
-def get_price(symbol):
-    price = latest_prices.get(symbol, Decimal("0"))
-    if price > 0:
-        return price
-    
-    try:
-        ticker = api.list_futures_tickers(settle=SETTLE, contract=symbol)
-        if ticker and len(ticker) > 0:
-            return Decimal(str(ticker[0].last))
-    except Exception as e:
-        log_debug("⚠️ 가격 조회 실패", f"{symbol}: {e}")
-    
-    return Decimal("2000.0")
-
-def get_total_collateral(force=False):
-    try:
-        account_info = api.list_futures_accounts(settle='usdt')
-        return float(getattr(account_info, "total", 0))
-    except Exception as ex:
-        log_debug("❌ USDT 잔고 조회 오류", str(ex))
-        return 0.0
-
-def _get_api_response(api_func, *args, **kwargs):
-    try:
-        return api_func(*args, **kwargs)
-    except Exception as e:
-        log_debug("❌ API 호출 오류", str(e), exc_info=True)
-        return None
-
-def is_duplicate(data):
-    return False
-
-def calculate_position_size(symbol, entry_type, entry_score, current_signal_count):
-    return Decimal("1"), Decimal("1")
-
-def store_tp_sl(symbol, side, tp_pct, sl_pct, entry_count):
-    pass
-
-def set_manual_close_protection(symbol, side, duration):
-    pass
-
-def is_manual_close_protected(symbol, side):
-    return False
 
 def eth_hedge_fill_monitor():
     """⭐ 체결 감지 + 역방향 최소 수량 헤징"""
@@ -525,7 +481,6 @@ def eth_hedge_fill_monitor():
                 added_long = long_size - prev_long_size
                 log_debug("✅ 롱 체결", f"ETH 평단:{long_price} 추가:{added_long} 총:{long_size}")
                 
-                # ⭐ 즉시 prev 업데이트 + 헤징 전 포지션 저장
                 prev_long_size = long_size
                 prev_short_size = short_size
                 last_action_time = now
@@ -544,7 +499,7 @@ def eth_hedge_fill_monitor():
                             log_debug("🔄 숏 헤징", f"{hedge_qty}계약 시장가")
                             time.sleep(1)
                             
-                            # ⭐ 헤징 후 포지션 업데이트 및 prev 갱신
+                            # ⭐ 헤징 후 포지션 업데이트
                             update_all_position_states()
                             pos = position_state.get("ETH_USDT", {})
                             prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
@@ -564,7 +519,6 @@ def eth_hedge_fill_monitor():
                 added_short = short_size - prev_short_size
                 log_debug("✅ 숏 체결", f"ETH 평단:{short_price} 추가:{added_short} 총:{short_size}")
                 
-                # ⭐ 즉시 prev 업데이트 + 헤징 전 포지션 저장
                 prev_long_size = long_size
                 prev_short_size = short_size
                 last_action_time = now
@@ -583,7 +537,7 @@ def eth_hedge_fill_monitor():
                             log_debug("🔄 롱 헤징", f"{hedge_qty}계약 시장가")
                             time.sleep(1)
                             
-                            # ⭐ 헤징 후 포지션 업데이트 및 prev 갱신
+                            # ⭐ 헤징 후 포지션 업데이트
                             update_all_position_states()
                             pos = position_state.get("ETH_USDT", {})
                             prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
@@ -639,9 +593,6 @@ def eth_hedge_tp_monitor():
                     if current_price >= tp_price:
                         log_debug("🎯 롱 TP 도달", f"평단:{long_price} TP:{tp_price} 현재:{current_price}")
                         
-                        # ⭐ position_state 수정 제거!
-                        # position_state["ETH_USDT"]["long"] = get_default_pos_side_state()
-                        
                         try:
                             order = FuturesOrder(
                                 contract="ETH_USDT",
@@ -654,7 +605,6 @@ def eth_hedge_tp_monitor():
                             
                             if result:
                                 log_debug("✅ 롱 청산 완료", f"{long_size}계약 @ {current_price}")
-                                # ⭐ eth_hedge_fill_monitor가 자동으로 감지함
                             else:
                                 log_debug("❌ 롱 청산 실패", "API 응답 없음")
                         except Exception as e:
@@ -671,9 +621,6 @@ def eth_hedge_tp_monitor():
                     if current_price <= tp_price:
                         log_debug("🎯 숏 TP 도달", f"평단:{short_price} TP:{tp_price} 현재:{current_price}")
                         
-                        # ⭐ position_state 수정 제거!
-                        # position_state["ETH_USDT"]["short"] = get_default_pos_side_state()
-                        
                         try:
                             order = FuturesOrder(
                                 contract="ETH_USDT",
@@ -686,7 +633,6 @@ def eth_hedge_tp_monitor():
                             
                             if result:
                                 log_debug("✅ 숏 청산 완료", f"{short_size}계약 @ {current_price}")
-                                # ⭐ eth_hedge_fill_monitor가 자동으로 감지함
                             else:
                                 log_debug("❌ 숏 청산 실패", "API 응답 없음")
                         except Exception as e:
@@ -694,6 +640,50 @@ def eth_hedge_tp_monitor():
         
         except Exception as e:
             log_debug("❌ TP 모니터 오류", str(e))
+  
+def get_price(symbol):
+    price = latest_prices.get(symbol, Decimal("0"))
+    if price > 0:
+        return price
+    
+    try:
+        ticker = api.list_futures_tickers(settle=SETTLE, contract=symbol)
+        if ticker and len(ticker) > 0:
+            return Decimal(str(ticker[0].last))
+    except Exception as e:
+        log_debug("⚠️ 가격 조회 실패", f"{symbol}: {e}")
+    
+    return Decimal("2000.0")
+
+def get_total_collateral(force=False):
+    try:
+        account_info = api.list_futures_accounts(settle='usdt')
+        return float(getattr(account_info, "total", 0))
+    except Exception as ex:
+        log_debug("❌ USDT 잔고 조회 오류", str(ex))
+        return 0.0
+
+def _get_api_response(api_func, *args, **kwargs):
+    try:
+        return api_func(*args, **kwargs)
+    except Exception as e:
+        log_debug("❌ API 호출 오류", str(e), exc_info=True)
+        return None
+
+def is_duplicate(data):
+    return False
+
+def calculate_position_size(symbol, entry_type, entry_score, current_signal_count):
+    return Decimal("1"), Decimal("1")
+
+def store_tp_sl(symbol, side, tp_pct, sl_pct, entry_count):
+    pass
+
+def set_manual_close_protection(symbol, side, duration):
+    pass
+
+def is_manual_close_protected(symbol, side):
+    return False
 
 def position_monitor():
     while True:
@@ -742,7 +732,7 @@ def status():
         
         return jsonify({
             "status": "running",
-            "version": "v11.0-hedge",
+            "version": "v11.0-hedge-final",
             "balance_usdt": float(equity),
             "active_positions": active_positions,
             "eth_obv_macd": round(obv_macd, 2)
@@ -952,7 +942,7 @@ def get_default_pos_side_state():
     }
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v11.0-hedge")
+    log_debug("🚀 서버 시작", "v11.0-hedge-final")
     initialize_states()
     log_debug("💰 초기 자산", f"{get_total_collateral(force=True):.2f} USDT")
     update_all_position_states()
