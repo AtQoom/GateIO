@@ -269,11 +269,15 @@ def calculate_grid_qty(current_price: Decimal, obv_macd_val: float) -> Decimal:
         qty = position_value / (current_price * contract_size)
         qty = qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
         
+        # ⭐ 최소 1계약 보장
+        if qty < 1 and balance >= 5:  # 잔고가 5달러 이상이면 최소 1계약
+            qty = Decimal("1")
+        
         return qty
         
     except Exception as e:
         log_debug("❌ 수량 계산 오류", str(e), exc_info=True)
-        return Decimal("2.0")
+        return Decimal("1")  # ⭐ 기본값 1계약
 
 def cancel_open_orders(symbol):
     try:
