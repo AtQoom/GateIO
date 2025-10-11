@@ -202,7 +202,8 @@ def get_available_balance():
     """사용 가능한 USDT 잔고 (Total 기준)"""
     try:
         account_info = api.list_futures_accounts(settle='usdt')
-        total = float(getattr(account_info, "total", 0))
+        total = float(getattr(account_info, "total", 0))  # ⭐ total로 변경
+        log_debug("💰 잔고 조회", f"Total: {total} USDT")  # 디버그 로그 추가
         return total
     except Exception as e:
         log_debug("❌ 잔고 조회 오류", str(e))
