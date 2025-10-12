@@ -162,7 +162,7 @@ def get_available_balance():
         log_debug("❌ 잔고 조회 실패", str(e), exc_info=True)
         return 0.0
 
-def calculate_grid_qty(current_price, leverage_multiplier):
+def calculate_grid_qty(current_price):
     """그리드 수량 계산 (OBV MACD 기반)"""
     try:
         balance = Decimal(str(get_available_balance()))
@@ -170,31 +170,39 @@ def calculate_grid_qty(current_price, leverage_multiplier):
             return 1
         
         obv_macd = calculate_obv_macd("ETH_USDT")
+        abs_val = abs(float(obv_macd))  # 절댓값 사용
         
-        # OBV MACD에 따른 레버리지 조절
-        if obv_macd > 100:
-            leverage = Decimal("1.8")
-        elif obv_macd > 50:
-            leverage = Decimal("1.5")
-        elif obv_macd > 0:
-            leverage = Decimal("1.2")
-        elif obv_macd > -50:
-            leverage = Decimal("0.8")
-        elif obv_macd > -100:
+        # ⭐ OBV MACD 절댓값에 따른 레버리지 (기본 0.5배)
+        if abs_val < 20:
             leverage = Decimal("0.5")
-        else:
-            leverage = Decimal("0.3")
-        
-        leverage *= leverage_multiplier
+        elif abs_val >= 20 and abs_val < 30:
+            leverage = Decimal("0.8")
+        elif abs_val >= 30 and abs_val < 40:
+            leverage = Decimal("1.0")
+        elif abs_val >= 40 and abs_val < 50:
+            leverage = Decimal("1.2")
+        elif abs_val >= 50 and abs_val < 60:
+            leverage = Decimal("1.4")
+        elif abs_val >= 60 and abs_val < 70:
+            leverage = Decimal("1.6")
+        elif abs_val >= 70 and abs_val < 80:
+            leverage = Decimal("1.8")
+        elif abs_val >= 80 and abs_val < 90:
+            leverage = Decimal("2.0")
+        elif abs_val >= 90 and abs_val < 100:
+            leverage = Decimal("2.2")
+        elif abs_val >= 100 and abs_val < 110:
+            leverage = Decimal("2.4")
+        else:  # >= 110
+            leverage = Decimal("3.0")
         
         # 수량 계산
         qty = int((balance * leverage) / (current_price * CONTRACT_SIZE))
         
         return max(1, qty)
     except Exception as e:
-        log_debug("❌ 수량 계산 오류", str(e))
+        log_debug("❌ 그리드 수량 계산 오류", str(e))
         return 1
-
 
 def calculate_position_value(qty, price):
     """포지션 가치 계산 (USDT)"""
@@ -357,7 +365,7 @@ def cancel_open_orders(symbol):
 # =============================================================================
 
 def initialize_hedge_orders():
-    """ETH 그리드 주문 초기화"""
+    """ETH 역방향 그리드 주문 초기화"""
     try:
         symbol = "ETH_USDT"
         
@@ -371,9 +379,6 @@ def initialize_hedge_orders():
         # OBV MACD
         obv_macd = calculate_obv_macd(symbol)
         
-        # 그리드 수량 계산
-        hedge_qty = calculate_grid_qty(current_price, Decimal("0.5"))
-        
         # 그리드 가격 계산
         upper_price = float(current_price * (Decimal("1") + GRID_GAP_PCT))
         lower_price = float(current_price * (Decimal("1") - GRID_GAP_PCT))
@@ -382,11 +387,23 @@ def initialize_hedge_orders():
         cancel_open_orders(symbol)
         time.sleep(0.5)
         
+        # ⭐ 역방향 그리드: OBV MACD에 따라 주 방향 결정
+        if obv_macd >= 0:
+            # 롱 강세 → 숏을 OBV 기반 수량으로, 롱은 0.5배 고정
+            short_qty = calculate_grid_qty(current_price)  # OBV MACD 기반
+            long_qty = int((Decimal(str(get_available_balance())) * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
+            long_qty = max(1, long_qty)
+        else:
+            # 숏 강세 → 롱을 OBV 기반 수량으로, 숏은 0.5배 고정
+            long_qty = calculate_grid_qty(current_price)  # OBV MACD 기반
+            short_qty = int((Decimal(str(get_available_balance())) * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
+            short_qty = max(1, short_qty)
+        
         # 위쪽 숏 주문
         try:
             order = FuturesOrder(
                 contract=symbol,
-                size=-hedge_qty,
+                size=-short_qty,
                 price=str(round(upper_price, 2)),
                 tif="gtc"
             )
@@ -398,7 +415,7 @@ def initialize_hedge_orders():
         try:
             order = FuturesOrder(
                 contract=symbol,
-                size=hedge_qty,
+                size=long_qty,
                 price=str(round(lower_price, 2)),
                 tif="gtc"
             )
@@ -406,19 +423,18 @@ def initialize_hedge_orders():
         except Exception as e:
             log_debug("❌ 롱 주문 실패", str(e))
         
-        log_debug("🎯 그리드 초기화", 
-                 f"ETH 위숏:{hedge_qty}@{upper_price:.2f} 아래롱:{hedge_qty}@{lower_price:.2f} OBV:{float(obv_macd):.2f}")
+        log_debug("🎯 역방향 그리드 초기화", 
+                 f"ETH 위숏:{short_qty}@{upper_price:.2f} 아래롱:{long_qty}@{lower_price:.2f} OBV:{float(obv_macd):.2f}")
         
     except Exception as e:
         log_debug("❌ 그리드 초기화 실패", str(e), exc_info=True)
-
 
 # =============================================================================
 # 체결 모니터링
 # =============================================================================
 
 def eth_hedge_fill_monitor():
-    """ETH 체결 감지 및 헤징 + 진입 기록"""
+    """ETH 체결 감지 및 역방향 헤징 + 진입 기록"""
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
     last_action_time = 0
@@ -443,7 +459,10 @@ def eth_hedge_fill_monitor():
             except:
                 current_price = Decimal("0")
             
-            hedge_qty = calculate_grid_qty(current_price, Decimal("0.5"))
+            # ⭐ 헤징 수량 계산 (0.5배 고정)
+            balance = Decimal(str(get_available_balance()))
+            hedge_qty = int((balance * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
+            hedge_qty = max(1, hedge_qty)
             
             # 롱 체결 시
             if long_size > prev_long_size and now - last_action_time >= 10:
@@ -471,12 +490,12 @@ def eth_hedge_fill_monitor():
                 prev_short_size = short_size
                 last_action_time = now
                 
-                # 헤징
+                # ⭐ 숏 헤징 (0.5배 고정)
                 if hedge_qty >= 1:
                     try:
                         order = FuturesOrder(contract="ETH_USDT", size=-int(hedge_qty), price="0", tif="ioc")
                         api.create_futures_order(SETTLE, order)
-                        log_debug("🔄 숏 헤징", f"{hedge_qty}계약")
+                        log_debug("🔄 숏 헤징 (0.5배)", f"{hedge_qty}계약")
                         time.sleep(1)
                         update_position_state("ETH_USDT")
                         pos = position_state.get("ETH_USDT", {})
@@ -516,12 +535,12 @@ def eth_hedge_fill_monitor():
                 prev_short_size = short_size
                 last_action_time = now
                 
-                # 헤징
+                # ⭐ 롱 헤징 (0.5배 고정)
                 if hedge_qty >= 1:
                     try:
                         order = FuturesOrder(contract="ETH_USDT", size=int(hedge_qty), price="0", tif="ioc")
                         api.create_futures_order(SETTLE, order)
-                        log_debug("🔄 롱 헤징", f"{hedge_qty}계약")
+                        log_debug("🔄 롱 헤징 (0.5배)", f"{hedge_qty}계약")
                         time.sleep(1)
                         update_position_state("ETH_USDT")
                         pos = position_state.get("ETH_USDT", {})
@@ -534,7 +553,6 @@ def eth_hedge_fill_monitor():
                 cancel_open_orders("ETH_USDT")
                 time.sleep(1)
                 initialize_hedge_orders()
-
 
 # =============================================================================
 # 듀얼 TP 모니터링
