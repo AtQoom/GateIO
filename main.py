@@ -105,7 +105,7 @@ def calculate_obv_macd(symbol):
         log_debug("❌ OBV MACD 오류", str(e), exc_info=True)
         return Decimal("0")
 
-def get_available_balance():
+def get_available_balance(show_log=False):
     """사용 가능 잔고 조회 (Unified Account 우선)"""
     try:
         # 1. Unified Account 시도
@@ -122,7 +122,8 @@ def get_available_balance():
                             available_str = str(getattr(usdt_data, "available", "0"))
                         usdt_balance = float(available_str)
                         if usdt_balance > 0:
-                            log_debug("💰 잔고 (Unified)", f"{usdt_balance:.2f} USDT")
+                            if show_log:  # ⭐ 로그 조건 추가
+                                log_debug("💰 잔고 (Unified)", f"{usdt_balance:.2f} USDT")
                             return usdt_balance
                         
                         # available이 0이면 equity 시도
@@ -132,40 +133,47 @@ def get_available_balance():
                             equity_str = str(getattr(usdt_data, "equity", "0"))
                         usdt_balance = float(equity_str)
                         if usdt_balance > 0:
-                            log_debug("💰 잔고 (Unified Equity)", f"{usdt_balance:.2f} USDT")
+                            if show_log:  # ⭐ 로그 조건 추가
+                                log_debug("💰 잔고 (Unified Equity)", f"{usdt_balance:.2f} USDT")
                             return usdt_balance
                     except Exception as e:
-                        log_debug("⚠️ USDT 파싱 오류", str(e))
+                        if show_log:
+                            log_debug("⚠️ USDT 파싱 오류", str(e))
         except Exception as e:
-            log_debug("⚠️ Unified API 오류", str(e))
+            if show_log:
+                log_debug("⚠️ Unified API 오류", str(e))
         
         # 2. Futures Account 시도
         try:
             account = api.list_futures_accounts(settle=SETTLE)
-            # ⭐ 수정: account는 단일 객체이므로 직접 접근
             if account:
                 available = float(getattr(account, "available", "0"))
                 if available > 0:
-                    log_debug("💰 잔고 (Futures)", f"{available:.2f} USDT")
+                    if show_log:  # ⭐ 로그 조건 추가
+                        log_debug("💰 잔고 (Futures)", f"{available:.2f} USDT")
                     return available
                 # available이 0이면 total 시도
                 total = float(getattr(account, "total", "0"))
                 if total > 0:
-                    log_debug("💰 잔고 (Futures Total)", f"{total:.2f} USDT")
+                    if show_log:  # ⭐ 로그 조건 추가
+                        log_debug("💰 잔고 (Futures Total)", f"{total:.2f} USDT")
                     return total
         except Exception as e:
-            log_debug("❌ Futures API 오류", str(e))
+            if show_log:
+                log_debug("❌ Futures API 오류", str(e))
         
-        log_debug("⚠️ 잔고 0", "모든 API에서 잔고를 찾을 수 없음")
+        if show_log:
+            log_debug("⚠️ 잔고 0", "모든 API에서 잔고를 찾을 수 없음")
         return 0.0
     except Exception as e:
-        log_debug("❌ 잔고 조회 실패", str(e), exc_info=True)
+        if show_log:
+            log_debug("❌ 잔고 조회 실패", str(e), exc_info=True)
         return 0.0
 
 def calculate_grid_qty(current_price):
     """그리드 수량 계산 (OBV MACD 기반)"""
     try:
-        balance = Decimal(str(get_available_balance()))
+        balance = Decimal(str(get_available_balance(show_log=False)))  # ⭐ 로그 끄기
         if balance <= 0:
             return 1
         
@@ -391,12 +399,12 @@ def initialize_hedge_orders():
         if obv_macd >= 0:
             # 롱 강세 → 숏을 OBV 기반 수량으로, 롱은 0.5배 고정
             short_qty = calculate_grid_qty(current_price)  # OBV MACD 기반
-            long_qty = int((Decimal(str(get_available_balance())) * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
+            long_qty = int((Decimal(str(get_available_balance(show_log=False))) * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
             long_qty = max(1, long_qty)
         else:
             # 숏 강세 → 롱을 OBV 기반 수량으로, 숏은 0.5배 고정
             long_qty = calculate_grid_qty(current_price)  # OBV MACD 기반
-            short_qty = int((Decimal(str(get_available_balance())) * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
+            short_qty = int((Decimal(str(get_available_balance(show_log=False))) * Decimal("0.5")) / (current_price * CONTRACT_SIZE))  # ⭐ 수정
             short_qty = max(1, short_qty)
         
         # 위쪽 숏 주문
@@ -424,7 +432,8 @@ def initialize_hedge_orders():
             log_debug("❌ 롱 주문 실패", str(e))
         
         log_debug("🎯 역방향 그리드 초기화", 
-                 f"ETH 위숏:{short_qty}@{upper_price:.2f} 아래롱:{long_qty}@{lower_price:.2f} OBV:{float(obv_macd):.2f}")
+                 f"ETH 위숏:{short_qty}@{upper_price:.2f} 아래롱:{long_qty}@{lower_price:.2f} | "
+                 f"OBV:{float(obv_macd):.2f} {'(롱강세→숏주력)' if obv_macd >= 0 else '(숏강세→롱주력)'}")
         
     except Exception as e:
         log_debug("❌ 그리드 초기화 실패", str(e), exc_info=True)
@@ -460,12 +469,14 @@ def eth_hedge_fill_monitor():
                 current_price = Decimal("0")
             
             # ⭐ 헤징 수량 계산 (0.5배 고정)
-            balance = Decimal(str(get_available_balance()))
+            balance = Decimal(str(get_available_balance(show_log=False)))
             hedge_qty = int((balance * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
             hedge_qty = max(1, hedge_qty)
             
             # 롱 체결 시
             if long_size > prev_long_size and now - last_action_time >= 10:
+                # ⭐ 체결 시에만 잔고 로그 출력
+                current_balance = get_available_balance(show_log=True)
                 added_long = long_size - prev_long_size
                 
                 # ⭐ 자본금 사용률 계산
@@ -511,6 +522,8 @@ def eth_hedge_fill_monitor():
             
             # 숏 체결 시
             elif short_size > prev_short_size and now - last_action_time >= 10:
+                # ⭐ 체결 시에만 잔고 로그 출력
+                current_balance = get_available_balance(show_log=True)
                 added_short = short_size - prev_short_size
                 
                 # ⭐ 자본금 사용률 계산
@@ -807,10 +820,10 @@ def ping():
 # =============================================================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v13.2-grid-with-capital-monitoring")
+    log_debug("🚀 서버 시작", "v13.3-grid-reverse-dual-tp")
     
-    # ⭐ 초기 잔고 설정
-    INITIAL_BALANCE = Decimal(str(get_available_balance()))
+    # ⭐ 최초 1회만 잔고 로그 출력
+    INITIAL_BALANCE = Decimal(str(get_available_balance(show_log=True)))
     log_debug("💰 초기 잔고", f"{INITIAL_BALANCE:.2f} USDT")
     log_debug("🎯 임계값", f"{float(INITIAL_BALANCE * THRESHOLD_RATIO):.2f} USDT ({int(THRESHOLD_RATIO)}배)")
     
