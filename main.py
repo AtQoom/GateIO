@@ -8,7 +8,7 @@ import logging
 import json
 from decimal import Decimal, ROUND_DOWN
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi  # ⭐ UnifiedApi 추가
 import websockets
 import pandas as pd
 import numpy as np
@@ -30,6 +30,7 @@ if not API_KEY or not API_SECRET:
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
+unified_api = UnifiedApi(client)  # ⭐ 추가
 
 # 전역 변수
 position_lock = threading.RLock()
@@ -75,7 +76,6 @@ def get_candles(symbol, interval="1m", limit=100):
         log_debug("❌ 캔들 조회 실패", str(e), exc_info=True)
         return None
 
-
 def calculate_obv_macd(symbol):
     """OBV MACD 계산"""
     try:
@@ -105,18 +105,62 @@ def calculate_obv_macd(symbol):
         log_debug("❌ OBV MACD 오류", str(e), exc_info=True)
         return Decimal("0")
 
-
 def get_available_balance():
-    """사용 가능 잔고 조회"""
+    """사용 가능 잔고 조회 (Unified Account 우선)"""
     try:
-        accounts = api.list_futures_accounts(SETTLE)
-        if accounts and len(accounts) > 0:
-            return float(accounts[0].available)
-        return 0
+        # 1. Unified Account 시도
+        try:
+            unified_account = unified_api.list_unified_accounts()
+            if hasattr(unified_account, 'balances') and unified_account.balances:
+                balances = unified_account.balances
+                if isinstance(balances, dict) and "USDT" in balances:
+                    usdt_data = balances["USDT"]
+                    try:
+                        if isinstance(usdt_data, dict):
+                            available_str = str(usdt_data.get("available", "0"))
+                        else:
+                            available_str = str(getattr(usdt_data, "available", "0"))
+                        usdt_balance = float(available_str)
+                        if usdt_balance > 0:
+                            log_debug("💰 잔고 (Unified)", f"{usdt_balance:.2f} USDT")
+                            return usdt_balance
+                        
+                        # available이 0이면 equity 시도
+                        if isinstance(usdt_data, dict):
+                            equity_str = str(usdt_data.get("equity", "0"))
+                        else:
+                            equity_str = str(getattr(usdt_data, "equity", "0"))
+                        usdt_balance = float(equity_str)
+                        if usdt_balance > 0:
+                            log_debug("💰 잔고 (Unified Equity)", f"{usdt_balance:.2f} USDT")
+                            return usdt_balance
+                    except Exception as e:
+                        log_debug("⚠️ USDT 파싱 오류", str(e))
+        except Exception as e:
+            log_debug("⚠️ Unified API 오류", str(e))
+        
+        # 2. Futures Account 시도
+        try:
+            account = api.list_futures_accounts(settle=SETTLE)
+            # ⭐ 수정: account는 단일 객체이므로 직접 접근
+            if account:
+                available = float(getattr(account, "available", "0"))
+                if available > 0:
+                    log_debug("💰 잔고 (Futures)", f"{available:.2f} USDT")
+                    return available
+                # available이 0이면 total 시도
+                total = float(getattr(account, "total", "0"))
+                if total > 0:
+                    log_debug("💰 잔고 (Futures Total)", f"{total:.2f} USDT")
+                    return total
+        except Exception as e:
+            log_debug("❌ Futures API 오류", str(e))
+        
+        log_debug("⚠️ 잔고 0", "모든 API에서 잔고를 찾을 수 없음")
+        return 0.0
     except Exception as e:
-        log_debug("❌ 잔고 조회 실패", str(e))
-        return 0
-
+        log_debug("❌ 잔고 조회 실패", str(e), exc_info=True)
+        return 0.0
 
 def calculate_grid_qty(current_price, leverage_multiplier):
     """그리드 수량 계산 (OBV MACD 기반)"""
