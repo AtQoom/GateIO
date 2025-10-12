@@ -5,7 +5,7 @@ import time
 import asyncio
 import threading
 import logging
-import json  # ⭐ 추가
+import json
 from decimal import Decimal, ROUND_DOWN
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
@@ -38,6 +38,7 @@ latest_prices = {}
 entry_history = {}  # 진입 기록
 INITIAL_BALANCE = Decimal("100")  # 초기 자본금
 THRESHOLD_RATIO = Decimal("30.0")  # 30배 임계값
+CONTRACT_SIZE = Decimal("0.01")  # ETH 계약 크기
 
 app = Flask(__name__)
 
@@ -143,13 +144,39 @@ def calculate_grid_qty(current_price, leverage_multiplier):
         leverage *= leverage_multiplier
         
         # 수량 계산
-        contract_size = Decimal("0.01")
-        qty = int((balance * leverage) / (current_price * contract_size))
+        qty = int((balance * leverage) / (current_price * CONTRACT_SIZE))
         
         return max(1, qty)
     except Exception as e:
         log_debug("❌ 수량 계산 오류", str(e))
         return 1
+
+
+def calculate_position_value(qty, price):
+    """포지션 가치 계산 (USDT)"""
+    return qty * price * CONTRACT_SIZE
+
+
+def calculate_capital_usage_pct(symbol):
+    """자본금 사용률 계산 (%)"""
+    try:
+        pos = position_state.get(symbol, {})
+        long_size = pos.get("long", {}).get("size", Decimal("0"))
+        long_price = pos.get("long", {}).get("price", Decimal("0"))
+        short_size = pos.get("short", {}).get("size", Decimal("0"))
+        short_price = pos.get("short", {}).get("price", Decimal("0"))
+        
+        long_value = calculate_position_value(long_size, long_price)
+        short_value = calculate_position_value(short_size, short_price)
+        total_value = long_value + short_value
+        
+        if INITIAL_BALANCE > 0:
+            usage_pct = (total_value / INITIAL_BALANCE) * Decimal("100")
+            return float(usage_pct)
+        return 0.0
+    except Exception as e:
+        log_debug("❌ 자본금 사용률 계산 오류", str(e))
+        return 0.0
 
 
 # =============================================================================
@@ -167,14 +194,20 @@ def record_entry(symbol, side, price, qty):
         "timestamp": time.time()
     })
     
-    log_debug("📝 진입 기록", f"{symbol}_{side} {qty}계약 @ {price}")
+    # ⭐ 자본금 사용률 계산
+    usage_pct = calculate_capital_usage_pct(symbol)
+    position_value = calculate_position_value(Decimal(str(qty)), Decimal(str(price)))
+    
+    log_debug("📝 진입 기록", 
+             f"{symbol}_{side} {qty}계약 @ {price} | "
+             f"포지션가치: {float(position_value):.2f} USDT | "
+             f"자본금사용률: {usage_pct:.1f}%")
 
 
 def classify_positions(symbol, side):
     """포지션을 기본/초과로 분류 (30배 임계값)"""
     try:
         threshold_value = INITIAL_BALANCE * THRESHOLD_RATIO
-        contract_size = Decimal("0.01")
         
         # 현재 포지션
         pos = position_state.get(symbol, {}).get(side, {})
@@ -201,7 +234,7 @@ def classify_positions(symbol, side):
         for entry in entries:
             entry_qty = entry["qty"]
             entry_price = entry["price"]
-            entry_value = entry_qty * entry_price * contract_size
+            entry_value = calculate_position_value(entry_qty, entry_price)
             
             if accumulated_value + entry_value <= threshold_value:
                 # 기본 포지션
@@ -228,7 +261,7 @@ def classify_positions(symbol, side):
 def update_position_state(symbol):
     """포지션 상태 업데이트"""
     try:
-        # ⭐ 수정: contract 파라미터 제거하고 전체 포지션 조회 후 필터링
+        # ⭐ 수정: 전체 포지션 조회 후 필터링
         positions = api.list_positions(SETTLE)
         
         with position_lock:
@@ -371,7 +404,21 @@ def eth_hedge_fill_monitor():
             # 롱 체결 시
             if long_size > prev_long_size and now - last_action_time >= 10:
                 added_long = long_size - prev_long_size
-                log_debug("📊 롱 체결", f"ETH @ {long_price} +{added_long}계약 (총 {long_size}계약)")
+                
+                # ⭐ 자본금 사용률 계산
+                usage_pct = calculate_capital_usage_pct("ETH_USDT")
+                long_value = calculate_position_value(long_size, long_price)
+                
+                # ⭐ 듀얼 TP 상태 계산
+                classified = classify_positions("ETH_USDT", "long")
+                base_qty = sum(p["qty"] for p in classified["base"])
+                overflow_qty = sum(p["qty"] for p in classified["overflow"])
+                
+                log_debug("📊 롱 체결", 
+                         f"ETH @ {long_price} +{added_long}계약 (총 {long_size}계약) | "
+                         f"포지션가치: {float(long_value):.2f} USDT | "
+                         f"자본금사용률: {usage_pct:.1f}% | "
+                         f"기본/초과: {base_qty}/{overflow_qty}계약")
                 
                 # ⭐ 진입 기록
                 record_entry("ETH_USDT", "long", long_price, added_long)
@@ -402,7 +449,21 @@ def eth_hedge_fill_monitor():
             # 숏 체결 시
             elif short_size > prev_short_size and now - last_action_time >= 10:
                 added_short = short_size - prev_short_size
-                log_debug("📊 숏 체결", f"ETH @ {short_price} +{added_short}계약 (총 {short_size}계약)")
+                
+                # ⭐ 자본금 사용률 계산
+                usage_pct = calculate_capital_usage_pct("ETH_USDT")
+                short_value = calculate_position_value(short_size, short_price)
+                
+                # ⭐ 듀얼 TP 상태 계산
+                classified = classify_positions("ETH_USDT", "short")
+                base_qty = sum(p["qty"] for p in classified["base"])
+                overflow_qty = sum(p["qty"] for p in classified["overflow"])
+                
+                log_debug("📊 숏 체결", 
+                         f"ETH @ {short_price} +{added_short}계약 (총 {short_size}계약) | "
+                         f"포지션가치: {float(short_value):.2f} USDT | "
+                         f"자본금사용률: {usage_pct:.1f}% | "
+                         f"기본/초과: {base_qty}/{overflow_qty}계약")
                 
                 # ⭐ 진입 기록
                 record_entry("ETH_USDT", "short", short_price, added_short)
@@ -467,9 +528,15 @@ def eth_hedge_tp_monitor():
                         base_avg_price = sum(p["qty"] * p["price"] for p in base_positions) / base_total_qty
                         base_tp_price = base_avg_price * (Decimal("1") + TP_GAP_PCT)
                         
+                        # ⭐ TP까지 거리 계산
+                        distance_to_tp = ((base_tp_price - current_price) / current_price) * Decimal("100")
+                        
                         if current_price >= base_tp_price:
+                            base_value = calculate_position_value(base_total_qty, base_avg_price)
+                            
                             log_debug("🎯 기본 롱 TP 도달", 
-                                    f"{base_total_qty}계약 평단:{base_avg_price:.2f} TP:{base_tp_price:.2f}")
+                                    f"{base_total_qty}계약 평단:{base_avg_price:.2f} TP:{base_tp_price:.2f} | "
+                                    f"포지션가치: {float(base_value):.2f} USDT")
                             
                             try:
                                 order = FuturesOrder(
@@ -506,8 +573,11 @@ def eth_hedge_tp_monitor():
                         overflow_tp_price = overflow_price * (Decimal("1") + TP_GAP_PCT)
                         
                         if current_price >= overflow_tp_price:
+                            overflow_value = calculate_position_value(overflow_qty, overflow_price)
+                            
                             log_debug("🎯 초과 롱 TP 도달", 
-                                    f"{overflow_qty}계약 진입:{overflow_price:.2f} TP:{overflow_tp_price:.2f}")
+                                    f"{overflow_qty}계약 진입:{overflow_price:.2f} TP:{overflow_tp_price:.2f} | "
+                                    f"포지션가치: {float(overflow_value):.2f} USDT")
                             
                             try:
                                 order = FuturesOrder(
@@ -548,8 +618,11 @@ def eth_hedge_tp_monitor():
                         base_tp_price = base_avg_price * (Decimal("1") - TP_GAP_PCT)
                         
                         if current_price <= base_tp_price:
+                            base_value = calculate_position_value(base_total_qty, base_avg_price)
+                            
                             log_debug("🎯 기본 숏 TP 도달", 
-                                    f"{base_total_qty}계약 평단:{base_avg_price:.2f} TP:{base_tp_price:.2f}")
+                                    f"{base_total_qty}계약 평단:{base_avg_price:.2f} TP:{base_tp_price:.2f} | "
+                                    f"포지션가치: {float(base_value):.2f} USDT")
                             
                             try:
                                 order = FuturesOrder(
@@ -586,8 +659,11 @@ def eth_hedge_tp_monitor():
                         overflow_tp_price = overflow_price * (Decimal("1") - TP_GAP_PCT)
                         
                         if current_price <= overflow_tp_price:
+                            overflow_value = calculate_position_value(overflow_qty, overflow_price)
+                            
                             log_debug("🎯 초과 숏 TP 도달", 
-                                    f"{overflow_qty}계약 진입:{overflow_price:.2f} TP:{overflow_tp_price:.2f}")
+                                    f"{overflow_qty}계약 진입:{overflow_price:.2f} TP:{overflow_tp_price:.2f} | "
+                                    f"포지션가치: {float(overflow_value):.2f} USDT")
                             
                             try:
                                 order = FuturesOrder(
@@ -669,7 +745,7 @@ def ping():
 # =============================================================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v13.1-grid-only-dual-tp-fixed")
+    log_debug("🚀 서버 시작", "v13.2-grid-with-capital-monitoring")
     
     # ⭐ 초기 잔고 설정
     INITIAL_BALANCE = Decimal(str(get_available_balance()))
