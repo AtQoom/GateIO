@@ -150,7 +150,7 @@ def dema(series, period):
 def calculate_obv_macd(symbol):
     """TradingView OBV MACD 재현"""
     try:
-        df = get_candles(symbol, interval='10s', limit=100)
+        df = get_candles(symbol, interval='10s', limit=360)
         if df is None or len(df) < 50:
             return 0.0
         
