@@ -100,7 +100,7 @@ def log_debug(tag, msg, exc_info=False):
     if exc_info:
         logger.exception("")
 
-def get_candles(symbol, interval='10s', limit=100):
+def get_candles(symbol, interval='10s', limit=360):
     """Gate.io 캔들 데이터 조회"""
     try:
         candles = api.list_futures_candlesticks(
@@ -183,19 +183,9 @@ def calculate_obv_macd(symbol):
         return 0.0
 
 def get_obv_macd_value(symbol="ETH_USDT"):
-    """OBV MACD 값 조회"""
-    cache_key = f"{symbol}_obv_macd"
-    now = time.time()
-    
-    if cache_key in candle_cache:
-        cached_time, cached_value = candle_cache[cache_key]
-        if now - cached_time < 60:
-            return cached_value
-    
+    """OBV MACD 값 조회 (캐싱 없음)"""
     value = calculate_obv_macd(symbol)
-    candle_cache[cache_key] = (now, value)
     log_debug("📊 OBV MACD", f"{symbol}: {value:.2f}")
-    
     return value
 
 def get_available_balance():
