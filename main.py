@@ -51,6 +51,11 @@ dynamic_symbols = set()
 latest_prices = {}
 candle_cache = {}
 
+# ⭐ 추가: 듀얼 TP 전략용
+entry_history = {}  # {symbol: {side: [{"price": Decimal, "qty": Decimal, "timestamp": float}]}}
+INITIAL_BALANCE = Decimal("100")  # 초기 자본금 (서버 시작 시 설정)
+THRESHOLD_RATIO = Decimal("30.0")  # 자본금의 30배
+
 SYMBOL_MAPPING = {
     "BTCUSDT":"BTC_USDT","BTCUSDT.P":"BTC_USDT","BTCUSDTPERP":"BTC_USDT","BTC_USDT":"BTC_USDT","BTC":"BTC_USDT",
     "ETHUSDT":"ETH_USDT","ETHUSDT.P":"ETH_USDT","ETHUSDTPERP":"ETH_USDT","ETH_USDT":"ETH_USDT","ETH":"ETH_USDT",
@@ -293,6 +298,74 @@ def calculate_grid_qty(current_price: Decimal, obv_macd_val: float) -> Decimal:
         log_debug("❌ 수량 계산 오류", str(e), exc_info=True)
         return Decimal("1")  # ⭐ 기본값 1계약
 
+def record_entry(symbol, side, price, qty):
+    """진입 기록"""
+    global entry_history
+    
+    if symbol not in entry_history:
+        entry_history[symbol] = {"long": [], "short": []}
+    
+    entry_history[symbol][side].append({
+        "price": Decimal(str(price)),
+        "qty": Decimal(str(qty)),
+        "timestamp": time.time()
+    })
+    
+    log_debug("📝 진입 기록", f"{symbol}_{side} {qty}계약 @ {price}")
+
+
+def classify_positions(symbol, side):
+    """포지션을 기본/초과로 분류 (30배 임계값)"""
+    try:
+        threshold_value = INITIAL_BALANCE * THRESHOLD_RATIO
+        
+        cfg = get_symbol_config(symbol)
+        contract_size = cfg["contract_size"]
+        
+        # 현재 포지션
+        pos = position_state.get(symbol, {}).get(side, {})
+        total_size = pos.get("size", Decimal("0"))
+        
+        if total_size <= 0:
+            return {"base": [], "overflow": []}
+        
+        # 진입 기록에서 계산
+        entries = entry_history.get(symbol, {}).get(side, [])
+        
+        if not entries:
+            # 기록 없으면 전체 기본 포지션으로 처리
+            avg_price = pos.get("price", Decimal("0"))
+            return {
+                "base": [{"qty": total_size, "price": avg_price, "timestamp": time.time()}],
+                "overflow": []
+            }
+        
+        base_positions = []
+        overflow_positions = []
+        accumulated_value = Decimal("0")
+        
+        for entry in entries:
+            entry_qty = entry["qty"]
+            entry_price = entry["price"]
+            entry_value = entry_qty * entry_price * contract_size
+            
+            if accumulated_value + entry_value <= threshold_value:
+                # 기본 포지션
+                base_positions.append(entry)
+                accumulated_value += entry_value
+            else:
+                # 초과 포지션
+                overflow_positions.append(entry)
+        
+        return {
+            "base": base_positions,
+            "overflow": overflow_positions
+        }
+        
+    except Exception as e:
+        log_debug("❌ 포지션 분류 오류", str(e), exc_info=True)
+        return {"base": [], "overflow": []}
+
 def cancel_open_orders(symbol):
     try:
         orders = api.list_futures_orders(settle=SETTLE, contract=symbol, status='open')
@@ -477,7 +550,7 @@ def initialize_hedge_orders():
     cfg = get_symbol_config(symbol)
     tick_size = cfg["tick_size"]
     
-    gap_pct = Decimal("0.19") / Decimal("100")
+    gap_pct = Decimal("0.18") / Decimal("100")
     up_price = current_price * (1 + gap_pct)
     down_price = current_price * (1 - gap_pct)
     
@@ -505,7 +578,7 @@ def initialize_hedge_orders():
     log_debug("🎯 그리드 초기화", f"ETH 위숏:{short_qty}@{up_price} 아래롱:{long_qty}@{down_price} OBV:{obv_macd_val:.2f}")
 
 def eth_hedge_fill_monitor():
-    """ETH 체결 감지 및 헤징"""
+    """ETH 체결 감지 및 헤징 + 진입 기록"""
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
     last_action_time = 0
@@ -524,13 +597,15 @@ def eth_hedge_fill_monitor():
             now = time.time()
             current_price = get_price("ETH_USDT")
             
-            # ⭐ 수정: hedge_qty를 고정 0.5로 계산
-            hedge_qty = calculate_grid_qty(current_price, Decimal("0.5"))  # ← 1.0에서 0.5로 변경
+            hedge_qty = calculate_grid_qty(current_price, Decimal("0.5"))
             
-            # 롱 체결 시 숏 헤징
+            # 롱 체결 시
             if long_size > prev_long_size and now - last_action_time >= 10:
                 added_long = long_size - prev_long_size
                 log_debug("📊 롱 체결", f"ETH @ {long_price} +{added_long}계약 (총 {long_size}계약)")
+                
+                # ⭐ 진입 기록
+                record_entry("ETH_USDT", "long", long_price, added_long)
                 
                 prev_long_size = long_size
                 prev_short_size = short_size
@@ -540,7 +615,7 @@ def eth_hedge_fill_monitor():
                     try:
                         order = FuturesOrder(
                             contract="ETH_USDT",
-                            size=-int(hedge_qty),  # 숏 헤징
+                            size=-int(hedge_qty),
                             price="0",
                             tif="ioc"
                         )
@@ -562,10 +637,13 @@ def eth_hedge_fill_monitor():
                 time.sleep(1)
                 initialize_hedge_orders()
             
-            # 숏 체결 시 롱 헤징
+            # 숏 체결 시
             elif short_size > prev_short_size and now - last_action_time >= 10:
                 added_short = short_size - prev_short_size
                 log_debug("📊 숏 체결", f"ETH @ {short_price} +{added_short}계약 (총 {short_size}계약)")
+                
+                # ⭐ 진입 기록
+                record_entry("ETH_USDT", "short", short_price, added_short)
                 
                 prev_long_size = long_size
                 prev_short_size = short_size
@@ -575,7 +653,7 @@ def eth_hedge_fill_monitor():
                     try:
                         order = FuturesOrder(
                             contract="ETH_USDT",
-                            size=int(hedge_qty),  # 롱 헤징
+                            size=int(hedge_qty),
                             price="0",
                             tif="ioc"
                         )
@@ -598,7 +676,7 @@ def eth_hedge_fill_monitor():
                 initialize_hedge_orders()
 
 def eth_hedge_tp_monitor():
-    """⭐ ETH TP 실시간 모니터링 + 재초기화"""
+    """⭐ ETH 듀얼 TP 모니터링 (30배 임계값)"""
     while True:
         time.sleep(1)
         
@@ -607,77 +685,180 @@ def eth_hedge_tp_monitor():
             if current_price <= 0:
                 continue
             
+            gap_pct = Decimal("0.16") / Decimal("100")  # 0.16% TP
+            
             with position_lock:
                 pos = position_state.get("ETH_USDT", {})
                 
-                # 롱 포지션 TP 체크
+                # ==================== 롱 포지션 ====================
                 long_size = pos.get("long", {}).get("size", Decimal("0"))
                 long_price = pos.get("long", {}).get("price", Decimal("0"))
                 
                 if long_size > 0 and long_price > 0:
-                    gap_pct = Decimal("0.23") / Decimal("100")
-                    tp_price = long_price * (1 + gap_pct)
+                    # 포지션 분류
+                    classified = classify_positions("ETH_USDT", "long")
+                    base_positions = classified["base"]
+                    overflow_positions = classified["overflow"]
                     
-                    if current_price >= tp_price:
-                        log_debug("🎯 롱 TP 도달", f"평단:{long_price} TP:{tp_price} 현재:{current_price}")
+                    # 기본 포지션 TP (평단 기준)
+                    if base_positions:
+                        base_total_qty = sum(p["qty"] for p in base_positions)
+                        base_avg_price = sum(p["qty"] * p["price"] for p in base_positions) / base_total_qty
+                        base_tp_price = base_avg_price * (1 + gap_pct)
                         
-                        try:
-                            order = FuturesOrder(
-                                contract="ETH_USDT",
-                                size=-int(long_size),
-                                price="0",
-                                tif="ioc",
-                                reduce_only=True
-                            )
-                            result = api.create_futures_order(SETTLE, order)
+                        if current_price >= base_tp_price:
+                            log_debug("🎯 기본 롱 TP 도달", 
+                                    f"{base_total_qty}계약 평단:{base_avg_price} TP:{base_tp_price}")
                             
-                            if result:
-                                log_debug("✅ 롱 청산 완료", f"{long_size}계약 @ {current_price}")
+                            try:
+                                order = FuturesOrder(
+                                    contract="ETH_USDT",
+                                    size=-int(base_total_qty),
+                                    price="0",
+                                    tif="ioc",
+                                    reduce_only=True
+                                )
+                                result = api.create_futures_order(SETTLE, order)
                                 
-                                # ⭐ 즉시 재초기화
-                                time.sleep(2)
-                                cancel_open_orders("ETH_USDT")
-                                time.sleep(1)
-                                initialize_hedge_orders()
+                                if result:
+                                    log_debug("✅ 기본 롱 청산", f"{base_total_qty}계약 @ {current_price}")
+                                    
+                                    # 진입 기록에서 제거
+                                    if "ETH_USDT" in entry_history and "long" in entry_history["ETH_USDT"]:
+                                        for _ in range(len(base_positions)):
+                                            if entry_history["ETH_USDT"]["long"]:
+                                                entry_history["ETH_USDT"]["long"].pop(0)
+                                    
+                                    time.sleep(2)
+                                    cancel_open_orders("ETH_USDT")
+                                    time.sleep(1)
+                                    initialize_hedge_orders()
+                                    
+                            except Exception as e:
+                                log_debug("❌ 기본 롱 청산 오류", str(e))
+                    
+                    # 초과 포지션 TP (개별 진입가 기준)
+                    for overflow_pos in overflow_positions:
+                        overflow_qty = overflow_pos["qty"]
+                        overflow_price = overflow_pos["price"]
+                        overflow_tp_price = overflow_price * (1 + gap_pct)
+                        
+                        if current_price >= overflow_tp_price:
+                            log_debug("🎯 초과 롱 TP 도달", 
+                                    f"{overflow_qty}계약 진입:{overflow_price} TP:{overflow_tp_price}")
+                            
+                            try:
+                                order = FuturesOrder(
+                                    contract="ETH_USDT",
+                                    size=-int(overflow_qty),
+                                    price="0",
+                                    tif="ioc",
+                                    reduce_only=True
+                                )
+                                result = api.create_futures_order(SETTLE, order)
                                 
-                        except Exception as e:
-                            log_debug("❌ 롱 청산 오류", str(e), exc_info=True)
+                                if result:
+                                    log_debug("✅ 초과 롱 청산", f"{overflow_qty}계약 @ {current_price}")
+                                    
+                                    # 진입 기록에서 해당 항목 제거
+                                    if "ETH_USDT" in entry_history and "long" in entry_history["ETH_USDT"]:
+                                        entries = entry_history["ETH_USDT"]["long"]
+                                        for i, entry in enumerate(entries):
+                                            if (entry["price"] == overflow_price and 
+                                                entry["qty"] == overflow_qty and
+                                                entry["timestamp"] == overflow_pos["timestamp"]):
+                                                entries.pop(i)
+                                                break
+                                    
+                            except Exception as e:
+                                log_debug("❌ 초과 롱 청산 오류", str(e))
                 
-                # 숏 포지션 TP 체크
+                # ==================== 숏 포지션 ====================
                 short_size = pos.get("short", {}).get("size", Decimal("0"))
                 short_price = pos.get("short", {}).get("price", Decimal("0"))
                 
                 if short_size > 0 and short_price > 0:
-                    gap_pct = Decimal("0.23") / Decimal("100")
-                    tp_price = short_price * (1 - gap_pct)
+                    # 포지션 분류
+                    classified = classify_positions("ETH_USDT", "short")
+                    base_positions = classified["base"]
+                    overflow_positions = classified["overflow"]
                     
-                    if current_price <= tp_price:
-                        log_debug("🎯 숏 TP 도달", f"평단:{short_price} TP:{tp_price} 현재:{current_price}")
+                    # 기본 포지션 TP (평단 기준)
+                    if base_positions:
+                        base_total_qty = sum(p["qty"] for p in base_positions)
+                        base_avg_price = sum(p["qty"] * p["price"] for p in base_positions) / base_total_qty
+                        base_tp_price = base_avg_price * (1 - gap_pct)
                         
-                        try:
-                            order = FuturesOrder(
-                                contract="ETH_USDT",
-                                size=int(short_size),
-                                price="0",
-                                tif="ioc",
-                                reduce_only=True
-                            )
-                            result = api.create_futures_order(SETTLE, order)
+                        if current_price <= base_tp_price:
+                            log_debug("🎯 기본 숏 TP 도달", 
+                                    f"{base_total_qty}계약 평단:{base_avg_price} TP:{base_tp_price}")
                             
-                            if result:
-                                log_debug("✅ 숏 청산 완료", f"{short_size}계약 @ {current_price}")
+                            try:
+                                order = FuturesOrder(
+                                    contract="ETH_USDT",
+                                    size=int(base_total_qty),
+                                    price="0",
+                                    tif="ioc",
+                                    reduce_only=True
+                                )
+                                result = api.create_futures_order(SETTLE, order)
                                 
-                                # ⭐ 즉시 재초기화
-                                time.sleep(2)
-                                cancel_open_orders("ETH_USDT")
-                                time.sleep(1)
-                                initialize_hedge_orders()
+                                if result:
+                                    log_debug("✅ 기본 숏 청산", f"{base_total_qty}계약 @ {current_price}")
+                                    
+                                    # 진입 기록에서 제거
+                                    if "ETH_USDT" in entry_history and "short" in entry_history["ETH_USDT"]:
+                                        for _ in range(len(base_positions)):
+                                            if entry_history["ETH_USDT"]["short"]:
+                                                entry_history["ETH_USDT"]["short"].pop(0)
+                                    
+                                    time.sleep(2)
+                                    cancel_open_orders("ETH_USDT")
+                                    time.sleep(1)
+                                    initialize_hedge_orders()
+                                    
+                            except Exception as e:
+                                log_debug("❌ 기본 숏 청산 오류", str(e))
+                    
+                    # 초과 포지션 TP (개별 진입가 기준)
+                    for overflow_pos in overflow_positions:
+                        overflow_qty = overflow_pos["qty"]
+                        overflow_price = overflow_pos["price"]
+                        overflow_tp_price = overflow_price * (1 - gap_pct)
+                        
+                        if current_price <= overflow_tp_price:
+                            log_debug("🎯 초과 숏 TP 도달", 
+                                    f"{overflow_qty}계약 진입:{overflow_price} TP:{overflow_tp_price}")
+                            
+                            try:
+                                order = FuturesOrder(
+                                    contract="ETH_USDT",
+                                    size=int(overflow_qty),
+                                    price="0",
+                                    tif="ioc",
+                                    reduce_only=True
+                                )
+                                result = api.create_futures_order(SETTLE, order)
                                 
-                        except Exception as e:
-                            log_debug("❌ 숏 청산 오류", str(e), exc_info=True)
+                                if result:
+                                    log_debug("✅ 초과 숏 청산", f"{overflow_qty}계약 @ {current_price}")
+                                    
+                                    # 진입 기록에서 해당 항목 제거
+                                    if "ETH_USDT" in entry_history and "short" in entry_history["ETH_USDT"]:
+                                        entries = entry_history["ETH_USDT"]["short"]
+                                        for i, entry in enumerate(entries):
+                                            if (entry["price"] == overflow_price and 
+                                                entry["qty"] == overflow_qty and
+                                                entry["timestamp"] == overflow_pos["timestamp"]):
+                                                entries.pop(i)
+                                                break
+                                    
+                            except Exception as e:
+                                log_debug("❌ 초과 숏 청산 오류", str(e))
         
         except Exception as e:
-            log_debug("❌ TP 모니터 오류", str(e))
+            log_debug("❌ 듀얼 TP 모니터 오류", str(e), exc_info=True)
+            time.sleep(5)
   
 def get_price(symbol):
     price = latest_prices.get(symbol, Decimal("0"))
@@ -980,11 +1161,16 @@ def get_default_pos_side_state():
     }
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v11.0-hedge-final")
+    log_debug("🚀 서버 시작", "v12.0-dual-tp-30x")
     
-    # ⭐ 서버 시작 시 잔고 1번 출력
-    initial_balance = get_available_balance()
-    log_debug("💰 초기 잔고", f"{initial_balance:.2f} USDT")
+    # ⭐ 초기 잔고 설정
+    global INITIAL_BALANCE
+    INITIAL_BALANCE = Decimal(str(get_available_balance()))
+    log_debug("💰 초기 잔고", f"{INITIAL_BALANCE:.2f} USDT")
+    log_debug("🎯 임계값", f"{float(INITIAL_BALANCE * THRESHOLD_RATIO):.2f} USDT ({int(THRESHOLD_RATIO)}배)")
+    
+    # ⭐ 진입 기록 초기화
+    entry_history["ETH_USDT"] = {"long": [], "short": []}
     
     # OBV MACD 계산
     obv_macd_val = get_obv_macd_value("ETH_USDT")
@@ -993,7 +1179,7 @@ if __name__ == "__main__":
     # 그리드 초기화
     initialize_hedge_orders()
 
-    # ⭐ 헤지 모니터링 스레드
+    # 헤지 모니터링 스레드
     threading.Thread(target=eth_hedge_fill_monitor, daemon=True).start()
     threading.Thread(target=eth_hedge_tp_monitor, daemon=True).start()
     threading.Thread(target=position_monitor, daemon=True).start()
