@@ -5,6 +5,7 @@ import time
 import asyncio
 import threading
 import logging
+import json  # ⭐ 추가
 from decimal import Decimal, ROUND_DOWN
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder
@@ -227,7 +228,8 @@ def classify_positions(symbol, side):
 def update_position_state(symbol):
     """포지션 상태 업데이트"""
     try:
-        positions = api.list_positions(SETTLE, contract=symbol)
+        # ⭐ 수정: contract 파라미터 제거하고 전체 포지션 조회 후 필터링
+        positions = api.list_positions(SETTLE)
         
         with position_lock:
             if symbol not in position_state:
@@ -239,6 +241,10 @@ def update_position_state(symbol):
             short_price = Decimal("0")
             
             for p in positions:
+                # 해당 심볼만 필터링
+                if p.contract != symbol:
+                    continue
+                    
                 size = abs(Decimal(str(p.size)))
                 entry_price = Decimal(str(p.entry_price)) if p.entry_price else Decimal("0")
                 
@@ -663,7 +669,7 @@ def ping():
 # =============================================================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v13.0-grid-only-dual-tp")
+    log_debug("🚀 서버 시작", "v13.1-grid-only-dual-tp-fixed")
     
     # ⭐ 초기 잔고 설정
     INITIAL_BALANCE = Decimal(str(get_available_balance()))
