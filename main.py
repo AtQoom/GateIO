@@ -615,7 +615,7 @@ def eth_hedge_tp_monitor():
                 long_price = pos.get("long", {}).get("price", Decimal("0"))
                 
                 if long_size > 0 and long_price > 0:
-                    gap_pct = Decimal("0.15") / Decimal("100")
+                    gap_pct = Decimal("0.16") / Decimal("100")
                     tp_price = long_price * (1 + gap_pct)
                     
                     if current_price >= tp_price:
@@ -648,7 +648,7 @@ def eth_hedge_tp_monitor():
                 short_price = pos.get("short", {}).get("price", Decimal("0"))
                 
                 if short_size > 0 and short_price > 0:
-                    gap_pct = Decimal("0.15") / Decimal("100")
+                    gap_pct = Decimal("0.16") / Decimal("100")
                     tp_price = short_price * (1 - gap_pct)
                     
                     if current_price <= tp_price:
