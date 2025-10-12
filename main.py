@@ -477,7 +477,7 @@ def initialize_hedge_orders():
     cfg = get_symbol_config(symbol)
     tick_size = cfg["tick_size"]
     
-    gap_pct = Decimal("0.15") / Decimal("100")
+    gap_pct = Decimal("0.16") / Decimal("100")
     up_price = current_price * (1 + gap_pct)
     down_price = current_price * (1 - gap_pct)
     
@@ -883,7 +883,7 @@ def simple_tp_monitor(ticker):
                     elapsed = time.time() - long_state.get("entry_time", time.time())
                     periods = max(0, int(elapsed / 15))
                     decay = Decimal("0.002") / 100
-                    min_tp = Decimal("0.16") / 100
+                    min_tp = Decimal("0.18") / 100
                     reduction = Decimal(str(periods)) * (decay * sym_tp_mult * premium_mult)
                     current_tp = max(min_tp * sym_tp_mult * premium_mult, base_tp - reduction)
                     long_state["current_tp_pct"] = current_tp
@@ -918,7 +918,7 @@ def simple_tp_monitor(ticker):
                     elapsed = time.time() - short_state.get("entry_time", time.time())
                     periods = max(0, int(elapsed / 15))
                     decay = Decimal("0.002") / 100
-                    min_tp = Decimal("0.16") / 100
+                    min_tp = Decimal("0.18") / 100
                     reduction = Decimal(str(periods)) * (decay * sym_tp_mult * premium_mult)
                     current_tp = max(min_tp * sym_tp_mult * premium_mult, base_tp - reduction)
                     short_state["current_tp_pct"] = current_tp
