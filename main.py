@@ -38,7 +38,7 @@ position_state = {}
 latest_prices = {}
 entry_history = {}  # 진입 기록
 INITIAL_BALANCE = Decimal("100")  # 초기 자본금
-THRESHOLD_RATIO = Decimal("30.0")  # 30배 임계값
+THRESHOLD_RATIO = Decimal("20.0")  # 20배 임계값
 CONTRACT_SIZE = Decimal("0.01")  # ETH 계약 크기
 
 app = Flask(__name__)
@@ -171,16 +171,15 @@ def get_available_balance(show_log=False):
         return 0.0
 
 def calculate_grid_qty(current_price):
-    """그리드 수량 계산 (OBV MACD 기반)"""
+    """그리드 수량 계산 (OBV MACD 기반) - 초기 자본금 고정"""
     try:
-        balance = Decimal(str(get_available_balance(show_log=False)))  # ⭐ 로그 끄기
-        if balance <= 0:
+        # ⭐ INITIAL_BALANCE 사용
+        if INITIAL_BALANCE <= 0:
             return 1
         
         obv_macd = calculate_obv_macd("ETH_USDT")
-        abs_val = abs(float(obv_macd))  # 절댓값 사용
+        abs_val = abs(float(obv_macd))
         
-        # ⭐ OBV MACD 절댓값에 따른 레버리지 (기본 0.5배)
         if abs_val < 20:
             leverage = Decimal("0.5")
         elif abs_val >= 20 and abs_val < 30:
@@ -201,11 +200,11 @@ def calculate_grid_qty(current_price):
             leverage = Decimal("2.2")
         elif abs_val >= 100 and abs_val < 110:
             leverage = Decimal("2.4")
-        else:  # >= 110
+        else:
             leverage = Decimal("3.0")
         
-        # 수량 계산
-        qty = int((balance * leverage) / (current_price * CONTRACT_SIZE))
+        # ⭐ 초기 자본금 기준 계산
+        qty = int((INITIAL_BALANCE * leverage) / (current_price * CONTRACT_SIZE))
         
         return max(1, qty)
     except Exception as e:
@@ -377,34 +376,28 @@ def initialize_hedge_orders():
     try:
         symbol = "ETH_USDT"
         
-        # 현재 가격
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
         if not ticker or len(ticker) == 0:
             return
         
         current_price = Decimal(str(ticker[0].last))
-        
-        # OBV MACD
         obv_macd = calculate_obv_macd(symbol)
         
-        # 그리드 가격 계산
         upper_price = float(current_price * (Decimal("1") + GRID_GAP_PCT))
         lower_price = float(current_price * (Decimal("1") - GRID_GAP_PCT))
         
-        # 기존 주문 취소
         cancel_open_orders(symbol)
         time.sleep(0.5)
         
-        # ⭐ 역방향 그리드: OBV MACD에 따라 주 방향 결정
         if obv_macd >= 0:
-            # 롱 강세 → 숏을 OBV 기반 수량으로, 롱은 0.5배 고정
-            short_qty = calculate_grid_qty(current_price)  # OBV MACD 기반
-            long_qty = int((Decimal(str(get_available_balance(show_log=False))) * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
+            short_qty = calculate_grid_qty(current_price)  # OBV 기반
+            # ⭐ 0.5배는 초기 자본금 기준
+            long_qty = int((INITIAL_BALANCE * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
             long_qty = max(1, long_qty)
         else:
-            # 숏 강세 → 롱을 OBV 기반 수량으로, 숏은 0.5배 고정
-            long_qty = calculate_grid_qty(current_price)  # OBV MACD 기반
-            short_qty = int((Decimal(str(get_available_balance(show_log=False))) * Decimal("0.5")) / (current_price * CONTRACT_SIZE))  # ⭐ 수정
+            long_qty = calculate_grid_qty(current_price)  # OBV 기반
+            # ⭐ 0.5배는 초기 자본금 기준
+            short_qty = int((INITIAL_BALANCE * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
             short_qty = max(1, short_qty)
         
         # 위쪽 숏 주문
@@ -461,29 +454,24 @@ def eth_hedge_fill_monitor():
             
             now = time.time()
             
-            # 현재 가격
             try:
                 ticker = api.list_futures_tickers(SETTLE, contract="ETH_USDT")
                 current_price = Decimal(str(ticker[0].last)) if ticker else Decimal("0")
             except:
                 current_price = Decimal("0")
             
-            # ⭐ 헤징 수량 계산 (0.5배 고정)
-            balance = Decimal(str(get_available_balance(show_log=False)))
-            hedge_qty = int((balance * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
+            # ⭐ 헤징 수량 (초기 자본금 기준 0.5배 고정)
+            hedge_qty = int((INITIAL_BALANCE * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
             hedge_qty = max(1, hedge_qty)
             
             # 롱 체결 시
             if long_size > prev_long_size and now - last_action_time >= 10:
-                # ⭐ 체결 시에만 잔고 로그 출력
                 current_balance = get_available_balance(show_log=True)
                 added_long = long_size - prev_long_size
                 
-                # ⭐ 자본금 사용률 계산
                 usage_pct = calculate_capital_usage_pct("ETH_USDT")
                 long_value = calculate_position_value(long_size, long_price)
                 
-                # ⭐ 듀얼 TP 상태 계산
                 classified = classify_positions("ETH_USDT", "long")
                 base_qty = sum(p["qty"] for p in classified["base"])
                 overflow_qty = sum(p["qty"] for p in classified["overflow"])
@@ -494,19 +482,17 @@ def eth_hedge_fill_monitor():
                          f"자본금사용률: {usage_pct:.1f}% | "
                          f"기본/초과: {base_qty}/{overflow_qty}계약")
                 
-                # ⭐ 진입 기록
                 record_entry("ETH_USDT", "long", long_price, added_long)
                 
                 prev_long_size = long_size
                 prev_short_size = short_size
                 last_action_time = now
                 
-                # ⭐ 숏 헤징 (0.5배 고정)
                 if hedge_qty >= 1:
                     try:
                         order = FuturesOrder(contract="ETH_USDT", size=-int(hedge_qty), price="0", tif="ioc")
                         api.create_futures_order(SETTLE, order)
-                        log_debug("🔄 숏 헤징 (0.5배)", f"{hedge_qty}계약")
+                        log_debug("🔄 숏 헤징 (0.5배 고정)", f"{hedge_qty}계약")
                         time.sleep(1)
                         update_position_state("ETH_USDT")
                         pos = position_state.get("ETH_USDT", {})
@@ -522,15 +508,12 @@ def eth_hedge_fill_monitor():
             
             # 숏 체결 시
             elif short_size > prev_short_size and now - last_action_time >= 10:
-                # ⭐ 체결 시에만 잔고 로그 출력
                 current_balance = get_available_balance(show_log=True)
                 added_short = short_size - prev_short_size
                 
-                # ⭐ 자본금 사용률 계산
                 usage_pct = calculate_capital_usage_pct("ETH_USDT")
                 short_value = calculate_position_value(short_size, short_price)
                 
-                # ⭐ 듀얼 TP 상태 계산
                 classified = classify_positions("ETH_USDT", "short")
                 base_qty = sum(p["qty"] for p in classified["base"])
                 overflow_qty = sum(p["qty"] for p in classified["overflow"])
@@ -541,19 +524,17 @@ def eth_hedge_fill_monitor():
                          f"자본금사용률: {usage_pct:.1f}% | "
                          f"기본/초과: {base_qty}/{overflow_qty}계약")
                 
-                # ⭐ 진입 기록
                 record_entry("ETH_USDT", "short", short_price, added_short)
                 
                 prev_long_size = long_size
                 prev_short_size = short_size
                 last_action_time = now
                 
-                # ⭐ 롱 헤징 (0.5배 고정)
                 if hedge_qty >= 1:
                     try:
                         order = FuturesOrder(contract="ETH_USDT", size=int(hedge_qty), price="0", tif="ioc")
                         api.create_futures_order(SETTLE, order)
-                        log_debug("🔄 롱 헤징 (0.5배)", f"{hedge_qty}계약")
+                        log_debug("🔄 롱 헤징 (0.5배 고정)", f"{hedge_qty}계약")
                         time.sleep(1)
                         update_position_state("ETH_USDT")
                         pos = position_state.get("ETH_USDT", {})
