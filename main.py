@@ -264,13 +264,14 @@ def record_entry(symbol, side, price, qty):
 
 
 def classify_positions(symbol, side):
-    """포지션을 기본/초과로 분류 (30배 임계값)"""
+    """포지션을 기본/초과로 분류 (20배 임계값)"""
     try:
         threshold_value = INITIAL_BALANCE * THRESHOLD_RATIO
         
         # 현재 포지션
         pos = position_state.get(symbol, {}).get(side, {})
         total_size = pos.get("size", Decimal("0"))
+        avg_price = pos.get("price", Decimal("0"))
         
         if total_size <= 0:
             return {"base": [], "overflow": []}
@@ -278,18 +279,31 @@ def classify_positions(symbol, side):
         # 진입 기록에서 계산
         entries = entry_history.get(symbol, {}).get(side, [])
         
+        # ⭐ 수정: 기록 없어도 현재 포지션 가치로 판단
         if not entries:
-            # 기록 없으면 전체 기본 포지션으로 처리
-            avg_price = pos.get("price", Decimal("0"))
-            return {
-                "base": [{"qty": total_size, "price": avg_price, "timestamp": time.time()}],
-                "overflow": []
-            }
+            total_value = calculate_position_value(total_size, avg_price)
+            
+            if total_value <= threshold_value:
+                # 전체 기본 포지션
+                return {
+                    "base": [{"qty": total_size, "price": avg_price, "timestamp": time.time()}],
+                    "overflow": []
+                }
+            else:
+                # 임계값까지만 기본, 나머지는 초과
+                base_qty = int(threshold_value / (avg_price * CONTRACT_SIZE))
+                overflow_qty = total_size - base_qty
+                
+                return {
+                    "base": [{"qty": base_qty, "price": avg_price, "timestamp": time.time()}] if base_qty > 0 else [],
+                    "overflow": [{"qty": overflow_qty, "price": avg_price, "timestamp": time.time()}] if overflow_qty > 0 else []
+                }
         
         base_positions = []
         overflow_positions = []
         accumulated_value = Decimal("0")
         
+        # 진입 기록 순회
         for entry in entries:
             entry_qty = entry["qty"]
             entry_price = entry["price"]
@@ -303,6 +317,32 @@ def classify_positions(symbol, side):
                 # 초과 포지션
                 overflow_positions.append(entry)
         
+        # ⭐ 추가: 진입 기록 수량과 실제 포지션 수량 불일치 시 처리
+        recorded_qty = sum(p["qty"] for p in base_positions) + sum(p["qty"] for p in overflow_positions)
+        
+        if recorded_qty < total_size:
+            # 기록되지 않은 수량 처리 (수동 진입 등)
+            missing_qty = total_size - recorded_qty
+            missing_value = calculate_position_value(missing_qty, avg_price)
+            
+            if accumulated_value + missing_value <= threshold_value:
+                # 기본 포지션에 추가
+                base_positions.append({"qty": missing_qty, "price": avg_price, "timestamp": time.time()})
+            else:
+                # 일부는 기본, 나머지는 초과
+                remaining_base_value = threshold_value - accumulated_value
+                if remaining_base_value > 0:
+                    base_add_qty = int(remaining_base_value / (avg_price * CONTRACT_SIZE))
+                    overflow_add_qty = missing_qty - base_add_qty
+                    
+                    if base_add_qty > 0:
+                        base_positions.append({"qty": base_add_qty, "price": avg_price, "timestamp": time.time()})
+                    if overflow_add_qty > 0:
+                        overflow_positions.append({"qty": overflow_add_qty, "price": avg_price, "timestamp": time.time()})
+                else:
+                    # 전부 초과
+                    overflow_positions.append({"qty": missing_qty, "price": avg_price, "timestamp": time.time()})
+        
         return {
             "base": base_positions,
             "overflow": overflow_positions
@@ -311,7 +351,6 @@ def classify_positions(symbol, side):
     except Exception as e:
         log_debug("❌ 포지션 분류 오류", str(e), exc_info=True)
         return {"base": [], "overflow": []}
-
 
 # =============================================================================
 # 포지션 관리
