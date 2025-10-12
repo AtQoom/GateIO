@@ -1163,8 +1163,6 @@ def get_default_pos_side_state():
 if __name__ == "__main__":
     log_debug("🚀 서버 시작", "v12.0-dual-tp-30x")
     
-    # ⭐ 초기 잔고 설정
-    global INITIAL_BALANCE
     INITIAL_BALANCE = Decimal(str(get_available_balance()))
     log_debug("💰 초기 잔고", f"{INITIAL_BALANCE:.2f} USDT")
     log_debug("🎯 임계값", f"{float(INITIAL_BALANCE * THRESHOLD_RATIO):.2f} USDT ({int(THRESHOLD_RATIO)}배)")
