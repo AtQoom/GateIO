@@ -100,7 +100,7 @@ def log_debug(tag, msg, exc_info=False):
     if exc_info:
         logger.exception("")
 
-def get_candles(symbol, interval='1m', limit=100):
+def get_candles(symbol, interval='10s', limit=100):
     """Gate.io 캔들 데이터 조회"""
     try:
         candles = api.list_futures_candlesticks(
@@ -150,7 +150,7 @@ def dema(series, period):
 def calculate_obv_macd(symbol):
     """TradingView OBV MACD 재현"""
     try:
-        df = get_candles(symbol, interval='1m', limit=100)
+        df = get_candles(symbol, interval='10s', limit=100)
         if df is None or len(df) < 50:
             return 0.0
         
@@ -266,25 +266,25 @@ def calculate_grid_qty(current_price: Decimal, obv_macd_val: float) -> Decimal:
         
         # 레버리지 계산 (1.0~3.0)
         if abs_val < 20:
-            leverage = Decimal("1.0")
+            leverage = Decimal("0.5")
         elif abs_val >= 20 and abs_val < 30:
-            leverage = Decimal("1.2")
+            leverage = Decimal("0.8")
         elif abs_val >= 30 and abs_val < 40:
-            leverage = Decimal("1.4")
+            leverage = Decimal("1.0")
         elif abs_val >= 40 and abs_val < 50:
-            leverage = Decimal("1.6")
+            leverage = Decimal("1.2")
         elif abs_val >= 50 and abs_val < 60:
-            leverage = Decimal("1.8")
+            leverage = Decimal("1.4")
         elif abs_val >= 60 and abs_val < 70:
-            leverage = Decimal("2.0")
+            leverage = Decimal("1.6")
         elif abs_val >= 70 and abs_val < 80:
-            leverage = Decimal("2.2")
+            leverage = Decimal("1.8")
         elif abs_val >= 80 and abs_val < 90:
-            leverage = Decimal("2.4")
+            leverage = Decimal("2.0")
         elif abs_val >= 90 and abs_val < 100:
-            leverage = Decimal("2.6")
+            leverage = Decimal("2.2")
         elif abs_val >= 100 and abs_val < 110:
-            leverage = Decimal("2.8")
+            leverage = Decimal("2.4")
         else:
             leverage = Decimal("3.0")
         
