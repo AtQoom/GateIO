@@ -523,7 +523,7 @@ def initialize_hedge_orders(base_price=None):
 # =============================================================================
 
 def eth_hedge_fill_monitor():
-    """ETH 체결 감지 및 역방향 헤징 + 진입 기록"""
+    """ETH 체결 감지 및 역방향 헤징 + 진입 기록 (⭐ 중복 체결 방지)"""
     global last_long_fill_price, last_short_fill_price
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
@@ -542,17 +542,22 @@ def eth_hedge_fill_monitor():
             
             now = time.time()
             
+            # 현재 가격
             try:
                 ticker = api.list_futures_tickers(SETTLE, contract="ETH_USDT")
                 current_price = Decimal(str(ticker[0].last)) if ticker else Decimal("0")
             except:
                 current_price = Decimal("0")
             
+            # 헤징 수량 계산 (0.5배 고정)
             hedge_qty = int((INITIAL_BALANCE * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
             hedge_qty = max(1, hedge_qty)
             
-            # 롱 체결 시
+            # ==================== 롱 체결 시 ====================
             if long_size > prev_long_size and now - last_action_time >= 10:
+                # ⭐ 즉시 기존 주문 취소 (중복 체결 방지)
+                cancel_open_orders("ETH_USDT")
+                
                 current_balance = get_available_balance(show_log=True)
                 added_long = long_size - prev_long_size
                 
@@ -578,11 +583,18 @@ def eth_hedge_fill_monitor():
                 prev_short_size = short_size
                 last_action_time = now
                 
+                # 숏 헤징
                 if hedge_qty >= 1:
                     try:
-                        order = FuturesOrder(contract="ETH_USDT", size=-int(hedge_qty), price="0", tif="ioc")
+                        order = FuturesOrder(
+                            contract="ETH_USDT",
+                            size=-int(hedge_qty),
+                            price="0",
+                            tif="ioc"
+                        )
                         api.create_futures_order(SETTLE, order)
                         log_debug("🔄 숏 헤징 (0.5배 고정)", f"{hedge_qty}계약")
+                        
                         time.sleep(1)
                         update_position_state("ETH_USDT")
                         pos = position_state.get("ETH_USDT", {})
@@ -592,13 +604,14 @@ def eth_hedge_fill_monitor():
                         log_debug("❌ 헤징 실패", str(e))
                 
                 # ⭐ 체결 후 즉시 그리드 재생성 (체결가 기준)
-                time.sleep(2)
-                cancel_open_orders("ETH_USDT")
                 time.sleep(1)
                 initialize_hedge_orders(last_long_fill_price)
             
-            # 숏 체결 시
+            # ==================== 숏 체결 시 ====================
             elif short_size > prev_short_size and now - last_action_time >= 10:
+                # ⭐ 즉시 기존 주문 취소 (중복 체결 방지)
+                cancel_open_orders("ETH_USDT")
+                
                 current_balance = get_available_balance(show_log=True)
                 added_short = short_size - prev_short_size
                 
@@ -624,11 +637,18 @@ def eth_hedge_fill_monitor():
                 prev_short_size = short_size
                 last_action_time = now
                 
+                # 롱 헤징
                 if hedge_qty >= 1:
                     try:
-                        order = FuturesOrder(contract="ETH_USDT", size=int(hedge_qty), price="0", tif="ioc")
+                        order = FuturesOrder(
+                            contract="ETH_USDT",
+                            size=int(hedge_qty),
+                            price="0",
+                            tif="ioc"
+                        )
                         api.create_futures_order(SETTLE, order)
                         log_debug("🔄 롱 헤징 (0.5배 고정)", f"{hedge_qty}계약")
+                        
                         time.sleep(1)
                         update_position_state("ETH_USDT")
                         pos = position_state.get("ETH_USDT", {})
@@ -638,8 +658,6 @@ def eth_hedge_fill_monitor():
                         log_debug("❌ 헤징 실패", str(e))
                 
                 # ⭐ 체결 후 즉시 그리드 재생성 (체결가 기준)
-                time.sleep(2)
-                cancel_open_orders("ETH_USDT")
                 time.sleep(1)
                 initialize_hedge_orders(last_short_fill_price)
 
