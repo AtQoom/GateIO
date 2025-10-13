@@ -60,7 +60,7 @@ def log_debug(label, msg="", exc_info=False):
 
 
 def get_primary_direction():
-    """주력 방향 판단 (실제 포지션 물량 기준)"""
+    """주력 방향 판단 (실제 포지션 가치 기준)"""
     try:
         with position_lock:
             pos = position_state.get("ETH_USDT", {})
@@ -69,39 +69,32 @@ def get_primary_direction():
             short_size = pos.get("short", {}).get("size", Decimal("0"))
             short_price = pos.get("short", {}).get("price", Decimal("0"))
             
-            # ⭐ 포지션 가치 기준 (더 정확)
+            # 포지션 가치 기준
             long_value = calculate_position_value(long_size, long_price)
             short_value = calculate_position_value(short_size, short_price)
             
-            # 물량(가치)이 많은 쪽이 주력
             if long_value > short_value:
-                return "long"   # 롱 가치 많음 → 롱 주력
+                return "long"
             elif short_value > long_value:
-                return "short"  # 숏 가치 많음 → 숏 주력
+                return "short"
             else:
-                # 동일하면 OBV MACD로 판단
+                # 동일하면 Shadow OBV MACD로 판단
                 obv_macd = calculate_obv_macd("ETH_USDT")
-                if obv_macd >= 0:
-                    return "short"
-                else:
-                    return "long"
+                return "short" if obv_macd >= 0 else "long"
                     
     except Exception as e:
         log_debug("❌ 주력 방향 판단 오류", str(e))
-        # 에러 시 OBV MACD 백업
         try:
             obv_macd = calculate_obv_macd("ETH_USDT")
-            if obv_macd >= 0:
-                return "short"
-            else:
-                return "long"
+            return "short" if obv_macd >= 0 else "long"
         except:
             return None
 
 
-def get_candles(symbol, interval="1m", limit=100):
+def get_candles(symbol, interval="10s", limit=600):
     """캔들 데이터 가져오기"""
     try:
+        # ⭐ Gate.io는 10s 인터벌 지원
         candles = api.list_futures_candlesticks(SETTLE, contract=symbol, interval=interval, limit=limit)
         if not candles:
             return None
@@ -122,32 +115,67 @@ def get_candles(symbol, interval="1m", limit=100):
 
 
 def calculate_obv_macd(symbol):
-    """OBV MACD 계산"""
+    """Shadow OBV MACD 계산 (TradingView 버전)"""
     try:
-        df = get_candles(symbol, interval="5m", limit=200)
+        # ⭐ 인터벌 10s, 600개 (100분)
+        df = get_candles(symbol, interval="10s", limit=600)
         if df is None or len(df) < 50:
             return Decimal("0")
         
-        # OBV 계산
-        obv = [0]
-        for i in range(1, len(df)):
-            if df['close'].iloc[i] > df['close'].iloc[i-1]:
-                obv.append(obv[-1] + df['volume'].iloc[i])
-            elif df['close'].iloc[i] < df['close'].iloc[i-1]:
-                obv.append(obv[-1] - df['volume'].iloc[i])
+        # 파라미터
+        window_len = 28
+        v_len = 14
+        ma_len = 9
+        slow_length = 26
+        
+        # 1. Shadow OBV 계산
+        price_spread = df['high'] - df['low']
+        price_spread_std = price_spread.rolling(window=window_len, min_periods=1).std().fillna(0)
+        
+        # 기본 OBV
+        price_change = df['close'].diff().fillna(0)
+        volume_signed = np.sign(price_change) * df['volume']
+        v = volume_signed.cumsum()
+        
+        # OBV 스무딩
+        smooth = v.rolling(window=v_len, min_periods=1).mean()
+        
+        # OBV 스프레드
+        v_diff = v - smooth
+        v_spread = v_diff.rolling(window=window_len, min_periods=1).std().fillna(1)
+        v_spread = v_spread.replace(0, 1)
+        
+        # Shadow
+        shadow = (v_diff / v_spread) * price_spread_std
+        
+        # Out
+        out = pd.Series(index=df.index, dtype=float)
+        for i in range(len(df)):
+            if shadow.iloc[i] > 0:
+                out.iloc[i] = df['high'].iloc[i] + shadow.iloc[i]
             else:
-                obv.append(obv[-1])
+                out.iloc[i] = df['low'].iloc[i] + shadow.iloc[i]
         
-        df['obv'] = obv
+        # DEMA
+        ma1 = out.ewm(span=ma_len, adjust=False).mean()
+        ma2 = ma1.ewm(span=ma_len, adjust=False).mean()
+        dema = 2 * ma1 - ma2
         
-        # OBV MACD 계산
-        exp1 = df['obv'].ewm(span=12, adjust=False).mean()
-        exp2 = df['obv'].ewm(span=26, adjust=False).mean()
-        macd = exp1 - exp2
+        # Slow MA
+        slow_ma = df['close'].ewm(span=slow_length, adjust=False).mean()
         
-        return Decimal(str(macd.iloc[-1]))
+        # MACD
+        macd = dema - slow_ma
+        
+        final_value = macd.iloc[-1]
+        
+        if pd.isna(final_value) or np.isinf(final_value):
+            return Decimal("0")
+        
+        return Decimal(str(final_value))
+        
     except Exception as e:
-        log_debug("❌ OBV MACD 오류", str(e), exc_info=True)
+        log_debug("❌ Shadow OBV MACD 계산 오류", str(e), exc_info=True)
         return Decimal("0")
 
 
