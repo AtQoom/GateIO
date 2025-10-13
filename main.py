@@ -38,7 +38,7 @@ position_state = {}
 latest_prices = {}
 entry_history = {}  # 진입 기록
 INITIAL_BALANCE = Decimal("100")  # 초기 자본금
-THRESHOLD_RATIO = Decimal("20.0")  # 20배 임계값
+THRESHOLD_RATIO = Decimal("10.0")  # 10배 임계값
 CONTRACT_SIZE = Decimal("0.01")  # ETH 계약 크기
 
 app = Flask(__name__)
