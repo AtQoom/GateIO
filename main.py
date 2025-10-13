@@ -534,15 +534,16 @@ def refresh_tp_orders(symbol):
 # 그리드 관리
 # =============================================================================
 
-def initialize_grid(base_price=None):
+def initialize_grid(base_price=None, skip_check=False):  # ⭐ 파라미터 추가
     """그리드 초기화 (지정가 주문)"""
     try:
-        # ⭐ 기존 그리드 확인
-        orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status="open")
-        grid_orders = [o for o in orders if not o.is_reduce_only]
-        if grid_orders:
-            log_debug("⚠️ 기존 그리드 있음", f"{len(grid_orders)}개 - 생성 중단")
-            return
+        if not skip_check:  # ⭐ 중복 체크 선택적 실행
+            # ⭐ 기존 그리드 확인
+            orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status="open")
+            grid_orders = [o for o in orders if not o.is_reduce_only]
+            if grid_orders:
+                log_debug("⚠️ 기존 그리드 있음", f"{len(grid_orders)}개 - 생성 중단")
+                return
         
         # ⭐⭐⭐ 여기서 계속 진행!
         if base_price is None:
