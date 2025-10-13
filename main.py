@@ -769,6 +769,11 @@ def tp_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         refresh_tp_orders(SYMBOL)
+                        
+                        # ⭐⭐⭐ 한 번 더 확인!
+                        time.sleep(0.5)
+                        update_position_state(SYMBOL)
+                        refresh_tp_orders(SYMBOL)
                 
                 # 상태 저장
                 prev_long_size = long_size
