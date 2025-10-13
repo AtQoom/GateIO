@@ -17,8 +17,8 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(
 logger = logging.getLogger(__name__)
 
 SETTLE = "usdt"
-GRID_GAP_PCT = Decimal("0.21") / Decimal("100")  # 0.19%
-TP_GAP_PCT = Decimal("0.21") / Decimal("100")  # 0.18% TP
+GRID_GAP_PCT = Decimal("0.19") / Decimal("100")  # 0.19%
+TP_GAP_PCT = Decimal("0.18") / Decimal("100")  # 0.18% TP
 
 # API 설정
 API_KEY = os.environ.get("API_KEY", "")
@@ -36,10 +36,10 @@ unified_api = UnifiedApi(client)
 position_lock = threading.RLock()
 position_state = {}
 latest_prices = {}
-entry_history = {}  # 진입 기록
-INITIAL_BALANCE = Decimal("100")  # 초기 자본금
-THRESHOLD_RATIO = Decimal("10.0")  # 10배 임계값 (테스트)
-CONTRACT_SIZE = Decimal("0.01")  # ETH 계약 크기
+entry_history = {}
+INITIAL_BALANCE = Decimal("100")
+THRESHOLD_RATIO = Decimal("5.0")  # 10배 임계값
+CONTRACT_SIZE = Decimal("1")  # ⭐ ONDO 계약 크기
 
 # ⭐ 마지막 체결가 기록
 last_long_fill_price = None
@@ -63,7 +63,7 @@ def get_primary_direction():
     """주력 방향 판단 (실제 포지션 가치 기준)"""
     try:
         with position_lock:
-            pos = position_state.get("ETH_USDT", {})
+            pos = position_state.get("ONDO_USDT", {})
             long_size = pos.get("long", {}).get("size", Decimal("0"))
             long_price = pos.get("long", {}).get("price", Decimal("0"))
             short_size = pos.get("short", {}).get("size", Decimal("0"))
@@ -79,13 +79,13 @@ def get_primary_direction():
                 return "short"
             else:
                 # 동일하면 Shadow OBV MACD로 판단
-                obv_macd = calculate_obv_macd("ETH_USDT")
+                obv_macd = calculate_obv_macd("ONDO_USDT")
                 return "short" if obv_macd >= 0 else "long"
                     
     except Exception as e:
         log_debug("❌ 주력 방향 판단 오류", str(e))
         try:
-            obv_macd = calculate_obv_macd("ETH_USDT")
+            obv_macd = calculate_obv_macd("ONDO_USDT")
             return "short" if obv_macd >= 0 else "long"
         except:
             return None
@@ -94,7 +94,6 @@ def get_primary_direction():
 def get_candles(symbol, interval="10s", limit=600):
     """캔들 데이터 가져오기"""
     try:
-        # ⭐ Gate.io는 10s 인터벌 지원
         candles = api.list_futures_candlesticks(SETTLE, contract=symbol, interval=interval, limit=limit)
         if not candles:
             return None
@@ -117,7 +116,6 @@ def get_candles(symbol, interval="10s", limit=600):
 def calculate_obv_macd(symbol):
     """Shadow OBV MACD 계산 (TradingView 버전)"""
     try:
-        # ⭐ 인터벌 10s, 600개 (100분)
         df = get_candles(symbol, interval="10s", limit=600)
         if df is None or len(df) < 50:
             return Decimal("0")
@@ -244,36 +242,36 @@ def get_available_balance(show_log=False):
 
 
 def calculate_grid_qty(current_price):
-    """그리드 수량 계산 (OBV MACD 기반) - 초기 자본금 고정"""
+    """그리드 수량 계산 (Shadow OBV MACD 기반) - 초기 자본금 고정"""
     try:
         if INITIAL_BALANCE <= 0:
             return 1
         
-        obv_macd = calculate_obv_macd("ETH_USDT")
+        obv_macd = calculate_obv_macd("ONDO_USDT")
         abs_val = abs(float(obv_macd))
         
         if abs_val < 20:
-            leverage = Decimal("0.5")
+            leverage = Decimal("0.2")
         elif abs_val >= 20 and abs_val < 30:
-            leverage = Decimal("0.8")
+            leverage = Decimal("0.3")
         elif abs_val >= 30 and abs_val < 40:
-            leverage = Decimal("1.0")
+            leverage = Decimal("0.35")
         elif abs_val >= 40 and abs_val < 50:
-            leverage = Decimal("1.2")
+            leverage = Decimal("0.4")
         elif abs_val >= 50 and abs_val < 60:
-            leverage = Decimal("1.4")
+            leverage = Decimal("0.45")
         elif abs_val >= 60 and abs_val < 70:
-            leverage = Decimal("1.6")
+            leverage = Decimal("0.5")
         elif abs_val >= 70 and abs_val < 80:
-            leverage = Decimal("1.8")
+            leverage = Decimal("0.55")
         elif abs_val >= 80 and abs_val < 90:
-            leverage = Decimal("2.0")
+            leverage = Decimal("0.6")
         elif abs_val >= 90 and abs_val < 100:
-            leverage = Decimal("2.2")
+            leverage = Decimal("0.65")
         elif abs_val >= 100 and abs_val < 110:
-            leverage = Decimal("2.4")
+            leverage = Decimal("0.7")
         else:
-            leverage = Decimal("3.0")
+            leverage = Decimal("0.8")
         
         qty = int((INITIAL_BALANCE * leverage) / (current_price * CONTRACT_SIZE))
         
@@ -464,13 +462,13 @@ def cancel_open_orders(symbol):
 
 
 # =============================================================================
-# 그리드 주문 (⭐ 수정: 기준 가격 지정 가능)
+# 그리드 주문
 # =============================================================================
 
 def initialize_hedge_orders(base_price=None):
-    """ETH 역방향 그리드 주문 초기화 (마지막 체결가 기준)"""
+    """ONDO 역방향 그리드 주문 초기화 (마지막 체결가 기준)"""
     try:
-        symbol = "ETH_USDT"
+        symbol = "ONDO_USDT"
         
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
         if not ticker or len(ticker) == 0:
@@ -480,11 +478,9 @@ def initialize_hedge_orders(base_price=None):
         global last_long_fill_price, last_short_fill_price
         
         if base_price is not None:
-            # 명시적으로 지정된 기준가
             current_price = Decimal(str(base_price))
             log_debug("🎯 그리드 기준가", f"지정 체결가: {current_price:.2f}")
         elif last_long_fill_price is not None or last_short_fill_price is not None:
-            # 마지막 체결가 우선
             if last_long_fill_price is not None and last_short_fill_price is not None:
                 current_price = max(last_long_fill_price, last_short_fill_price)
             elif last_long_fill_price is not None:
@@ -493,7 +489,6 @@ def initialize_hedge_orders(base_price=None):
                 current_price = last_short_fill_price
             log_debug("🎯 그리드 기준가", f"마지막 체결가: {current_price:.2f}")
         else:
-            # 초기 실행 시 현재가
             current_price = Decimal(str(ticker[0].last))
             log_debug("🎯 그리드 기준가", f"현재 시장가: {current_price:.2f}")
         
@@ -507,11 +502,11 @@ def initialize_hedge_orders(base_price=None):
         
         if obv_macd >= 0:
             short_qty = calculate_grid_qty(current_price)
-            long_qty = int((INITIAL_BALANCE * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
+            long_qty = int((INITIAL_BALANCE * Decimal("0.2")) / (current_price * CONTRACT_SIZE))
             long_qty = max(1, long_qty)
         else:
             long_qty = calculate_grid_qty(current_price)
-            short_qty = int((INITIAL_BALANCE * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
+            short_qty = int((INITIAL_BALANCE * Decimal("0.2")) / (current_price * CONTRACT_SIZE))
             short_qty = max(1, short_qty)
         
         # 위쪽 숏 주문
@@ -539,7 +534,7 @@ def initialize_hedge_orders(base_price=None):
             log_debug("❌ 롱 주문 실패", str(e))
         
         log_debug("🎯 역방향 그리드 초기화", 
-                 f"ETH 위숏:{short_qty}@{upper_price:.2f} 아래롱:{long_qty}@{lower_price:.2f} | "
+                 f"ONDO 위숏:{short_qty}@{upper_price:.2f} 아래롱:{long_qty}@{lower_price:.2f} | "
                  f"기준가:{current_price:.2f} | OBV:{float(obv_macd):.2f} {'(롱강세→숏주력)' if obv_macd >= 0 else '(숏강세→롱주력)'}")
         
     except Exception as e:
@@ -547,11 +542,11 @@ def initialize_hedge_orders(base_price=None):
 
 
 # =============================================================================
-# 체결 모니터링 (⭐ 수정: 체결 시 즉시 그리드 재생성)
+# 체결 모니터링
 # =============================================================================
 
-def eth_hedge_fill_monitor():
-    """ETH 체결 감지 및 역방향 헤징 + 진입 기록 (⭐ 중복 체결 방지)"""
+def ondo_hedge_fill_monitor():
+    """ONDO 체결 감지 및 역방향 헤징 + 진입 기록 (⭐ 중복 체결 방지)"""
     global last_long_fill_price, last_short_fill_price
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
@@ -559,10 +554,10 @@ def eth_hedge_fill_monitor():
     
     while True:
         time.sleep(2)
-        update_position_state("ETH_USDT")
+        update_position_state("ONDO_USDT")
         
         with position_lock:
-            pos = position_state.get("ETH_USDT", {})
+            pos = position_state.get("ONDO_USDT", {})
             long_size = pos.get("long", {}).get("size", Decimal("0"))
             short_size = pos.get("short", {}).get("size", Decimal("0"))
             long_price = pos.get("long", {}).get("price", Decimal("0"))
@@ -572,37 +567,37 @@ def eth_hedge_fill_monitor():
             
             # 현재 가격
             try:
-                ticker = api.list_futures_tickers(SETTLE, contract="ETH_USDT")
+                ticker = api.list_futures_tickers(SETTLE, contract="ONDO_USDT")
                 current_price = Decimal(str(ticker[0].last)) if ticker else Decimal("0")
             except:
                 current_price = Decimal("0")
             
-            # 헤징 수량 계산 (0.5배 고정)
-            hedge_qty = int((INITIAL_BALANCE * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
+            # 헤징 수량 계산 (0.2배 고정)
+            hedge_qty = int((INITIAL_BALANCE * Decimal("0.2")) / (current_price * CONTRACT_SIZE))
             hedge_qty = max(1, hedge_qty)
             
             # ==================== 롱 체결 시 ====================
             if long_size > prev_long_size and now - last_action_time >= 10:
                 # ⭐ 즉시 기존 주문 취소 (중복 체결 방지)
-                cancel_open_orders("ETH_USDT")
+                cancel_open_orders("ONDO_USDT")
                 
                 current_balance = get_available_balance(show_log=True)
                 added_long = long_size - prev_long_size
                 
-                usage_pct = calculate_capital_usage_pct("ETH_USDT")
+                usage_pct = calculate_capital_usage_pct("ONDO_USDT")
                 long_value = calculate_position_value(long_size, long_price)
                 
-                classified = classify_positions("ETH_USDT", "long")
+                classified = classify_positions("ONDO_USDT", "long")
                 base_qty = sum(p["qty"] for p in classified["base"])
                 overflow_qty = sum(p["qty"] for p in classified["overflow"])
                 
                 log_debug("📊 롱 체결", 
-                         f"ETH @ {long_price} +{added_long}계약 (총 {long_size}계약) | "
+                         f"ONDO @ {long_price} +{added_long}계약 (총 {long_size}계약) | "
                          f"포지션가치: {float(long_value):.2f} USDT | "
                          f"자본금사용률: {usage_pct:.1f}% | "
                          f"기본/초과: {base_qty}/{overflow_qty}계약")
                 
-                record_entry("ETH_USDT", "long", long_price, added_long)
+                record_entry("ONDO_USDT", "long", long_price, added_long)
                 
                 # ⭐ 마지막 체결가 기록
                 last_long_fill_price = long_price
@@ -615,7 +610,7 @@ def eth_hedge_fill_monitor():
                 if hedge_qty >= 1:
                     try:
                         order = FuturesOrder(
-                            contract="ETH_USDT",
+                            contract="ONDO_USDT",
                             size=-int(hedge_qty),
                             price="0",
                             tif="ioc"
@@ -624,8 +619,8 @@ def eth_hedge_fill_monitor():
                         log_debug("🔄 숏 헤징 (0.5배 고정)", f"{hedge_qty}계약")
                         
                         time.sleep(1)
-                        update_position_state("ETH_USDT")
-                        pos = position_state.get("ETH_USDT", {})
+                        update_position_state("ONDO_USDT")
+                        pos = position_state.get("ONDO_USDT", {})
                         prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
                         prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
                     except Exception as e:
@@ -638,25 +633,25 @@ def eth_hedge_fill_monitor():
             # ==================== 숏 체결 시 ====================
             elif short_size > prev_short_size and now - last_action_time >= 10:
                 # ⭐ 즉시 기존 주문 취소 (중복 체결 방지)
-                cancel_open_orders("ETH_USDT")
+                cancel_open_orders("ONDO_USDT")
                 
                 current_balance = get_available_balance(show_log=True)
                 added_short = short_size - prev_short_size
                 
-                usage_pct = calculate_capital_usage_pct("ETH_USDT")
+                usage_pct = calculate_capital_usage_pct("ONDO_USDT")
                 short_value = calculate_position_value(short_size, short_price)
                 
-                classified = classify_positions("ETH_USDT", "short")
+                classified = classify_positions("ONDO_USDT", "short")
                 base_qty = sum(p["qty"] for p in classified["base"])
                 overflow_qty = sum(p["qty"] for p in classified["overflow"])
                 
                 log_debug("📊 숏 체결", 
-                         f"ETH @ {short_price} +{added_short}계약 (총 {short_size}계약) | "
+                         f"ONDO @ {short_price} +{added_short}계약 (총 {short_size}계약) | "
                          f"포지션가치: {float(short_value):.2f} USDT | "
                          f"자본금사용률: {usage_pct:.1f}% | "
                          f"기본/초과: {base_qty}/{overflow_qty}계약")
                 
-                record_entry("ETH_USDT", "short", short_price, added_short)
+                record_entry("ONDO_USDT", "short", short_price, added_short)
                 
                 # ⭐ 마지막 체결가 기록
                 last_short_fill_price = short_price
@@ -669,7 +664,7 @@ def eth_hedge_fill_monitor():
                 if hedge_qty >= 1:
                     try:
                         order = FuturesOrder(
-                            contract="ETH_USDT",
+                            contract="ONDO_USDT",
                             size=int(hedge_qty),
                             price="0",
                             tif="ioc"
@@ -678,8 +673,8 @@ def eth_hedge_fill_monitor():
                         log_debug("🔄 롱 헤징 (0.5배 고정)", f"{hedge_qty}계약")
                         
                         time.sleep(1)
-                        update_position_state("ETH_USDT")
-                        pos = position_state.get("ETH_USDT", {})
+                        update_position_state("ONDO_USDT")
+                        pos = position_state.get("ONDO_USDT", {})
                         prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
                         prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
                     except Exception as e:
@@ -691,16 +686,16 @@ def eth_hedge_fill_monitor():
 
 
 # =============================================================================
-# 듀얼 TP 모니터링 (⭐ 수정: 청산 시 그리드 재생성 제거)
+# 듀얼 TP 모니터링
 # =============================================================================
 
-def eth_hedge_tp_monitor():
-    """⭐ ETH TP 모니터링 (일반 TP 우선, 주력 방향만 듀얼 TP)"""
+def ondo_hedge_tp_monitor():
+    """⭐ ONDO TP 모니터링 (일반 TP 우선, 주력 방향만 듀얼 TP)"""
     while True:
         time.sleep(1)
         
         try:
-            ticker = api.list_futures_tickers(SETTLE, contract="ETH_USDT")
+            ticker = api.list_futures_tickers(SETTLE, contract="ONDO_USDT")
             if not ticker:
                 continue
             
@@ -708,7 +703,7 @@ def eth_hedge_tp_monitor():
             primary_direction = get_primary_direction()
             
             with position_lock:
-                pos = position_state.get("ETH_USDT", {})
+                pos = position_state.get("ONDO_USDT", {})
                 
                 # ==================== 롱 포지션 ====================
                 long_size = pos.get("long", {}).get("size", Decimal("0"))
@@ -727,7 +722,7 @@ def eth_hedge_tp_monitor():
                         
                         try:
                             order = FuturesOrder(
-                                contract="ETH_USDT",
+                                contract="ONDO_USDT",
                                 size=-int(long_size),
                                 price="0",
                                 tif="ioc",
@@ -738,11 +733,10 @@ def eth_hedge_tp_monitor():
                             if result:
                                 log_debug("✅ 일반 롱 청산", f"{long_size}계약 @ {current_price:.2f}")
                                 
-                                if "ETH_USDT" in entry_history and "long" in entry_history["ETH_USDT"]:
-                                    entry_history["ETH_USDT"]["long"] = []
+                                if "ONDO_USDT" in entry_history and "long" in entry_history["ONDO_USDT"]:
+                                    entry_history["ONDO_USDT"]["long"] = []
                                 
-                                # ⭐ 청산 시 그리드 재생성 없음 (체결 시에만 생성)
-                                update_position_state("ETH_USDT")
+                                update_position_state("ONDO_USDT")
                                 continue
                                 
                         except Exception as e:
@@ -750,7 +744,7 @@ def eth_hedge_tp_monitor():
                     
                     # ⭐ 2순위: 듀얼 TP (롱이 주력일 때만)
                     elif primary_direction == "long":
-                        classified = classify_positions("ETH_USDT", "long")
+                        classified = classify_positions("ONDO_USDT", "long")
                         base_positions = classified["base"]
                         overflow_positions = classified["overflow"]
                         
@@ -769,7 +763,7 @@ def eth_hedge_tp_monitor():
                                 
                                 try:
                                     order = FuturesOrder(
-                                        contract="ETH_USDT",
+                                        contract="ONDO_USDT",
                                         size=-int(base_total_qty),
                                         price="0",
                                         tif="ioc",
@@ -781,25 +775,24 @@ def eth_hedge_tp_monitor():
                                         log_debug("✅ 기본 롱 청산", f"{base_total_qty}계약 @ {current_price:.2f}")
                                         
                                         time.sleep(1)
-                                        update_position_state("ETH_USDT")
+                                        update_position_state("ONDO_USDT")
                                         
-                                        if "ETH_USDT" in entry_history and "long" in entry_history["ETH_USDT"]:
-                                            entry_history["ETH_USDT"]["long"] = [
-                                                e for e in entry_history["ETH_USDT"]["long"] 
+                                        if "ONDO_USDT" in entry_history and "long" in entry_history["ONDO_USDT"]:
+                                            entry_history["ONDO_USDT"]["long"] = [
+                                                e for e in entry_history["ONDO_USDT"]["long"] 
                                                 if e not in base_positions
                                             ]
                                         
-                                        pos_after = position_state.get("ETH_USDT", {})
+                                        pos_after = position_state.get("ONDO_USDT", {})
                                         long_size_after = pos_after.get("long", {}).get("size", Decimal("0"))
                                         
                                         if long_size_after > 0:
-                                            classified_after = classify_positions("ETH_USDT", "long")
+                                            classified_after = classify_positions("ONDO_USDT", "long")
                                             base_after = sum(p["qty"] for p in classified_after["base"])
                                             overflow_after = sum(p["qty"] for p in classified_after["overflow"])
                                             log_debug("📊 청산 후 재분류", f"남은 롱: {long_size_after}계약 | 기본/초과: {base_after}/{overflow_after}계약")
                                         
-                                        # ⭐ 청산 시 그리드 재생성 없음
-                                        update_position_state("ETH_USDT")
+                                        update_position_state("ONDO_USDT")
                                         continue
                                         
                                 except Exception as e:
@@ -820,7 +813,7 @@ def eth_hedge_tp_monitor():
                                 
                                 try:
                                     order = FuturesOrder(
-                                        contract="ETH_USDT",
+                                        contract="ONDO_USDT",
                                         size=-int(overflow_qty),
                                         price="0",
                                         tif="ioc",
@@ -832,18 +825,18 @@ def eth_hedge_tp_monitor():
                                         log_debug("✅ 초과 롱 청산", f"{overflow_qty}계약 @ {current_price:.2f}")
                                         
                                         time.sleep(1)
-                                        update_position_state("ETH_USDT")
+                                        update_position_state("ONDO_USDT")
                                         
-                                        if "ETH_USDT" in entry_history and "long" in entry_history["ETH_USDT"]:
-                                            entries = entry_history["ETH_USDT"]["long"]
+                                        if "ONDO_USDT" in entry_history and "long" in entry_history["ONDO_USDT"]:
+                                            entries = entry_history["ONDO_USDT"]["long"]
                                             if overflow_pos in entries:
                                                 entries.remove(overflow_pos)
                                         
-                                        pos_after = position_state.get("ETH_USDT", {})
+                                        pos_after = position_state.get("ONDO_USDT", {})
                                         long_size_after = pos_after.get("long", {}).get("size", Decimal("0"))
                                         
                                         if long_size_after > 0:
-                                            classified_after = classify_positions("ETH_USDT", "long")
+                                            classified_after = classify_positions("ONDO_USDT", "long")
                                             base_after = sum(p["qty"] for p in classified_after["base"])
                                             overflow_after = sum(p["qty"] for p in classified_after["overflow"])
                                             log_debug("📊 청산 후 재분류", f"남은 롱: {long_size_after}계약 | 기본/초과: {base_after}/{overflow_after}계약")
@@ -864,7 +857,7 @@ def eth_hedge_tp_monitor():
                             
                             try:
                                 order = FuturesOrder(
-                                    contract="ETH_USDT",
+                                    contract="ONDO_USDT",
                                     size=-int(long_size),
                                     price="0",
                                     tif="ioc",
@@ -875,11 +868,10 @@ def eth_hedge_tp_monitor():
                                 if result:
                                     log_debug("✅ 헤징 롱 청산", f"{long_size}계약 @ {current_price:.2f}")
                                     
-                                    if "ETH_USDT" in entry_history and "long" in entry_history["ETH_USDT"]:
-                                        entry_history["ETH_USDT"]["long"] = []
+                                    if "ONDO_USDT" in entry_history and "long" in entry_history["ONDO_USDT"]:
+                                        entry_history["ONDO_USDT"]["long"] = []
                                     
-                                    # ⭐ 청산 시 그리드 재생성 없음
-                                    update_position_state("ETH_USDT")
+                                    update_position_state("ONDO_USDT")
                                     continue
                                     
                             except Exception as e:
@@ -902,7 +894,7 @@ def eth_hedge_tp_monitor():
                         
                         try:
                             order = FuturesOrder(
-                                contract="ETH_USDT",
+                                contract="ONDO_USDT",
                                 size=int(short_size),
                                 price="0",
                                 tif="ioc",
@@ -913,11 +905,10 @@ def eth_hedge_tp_monitor():
                             if result:
                                 log_debug("✅ 일반 숏 청산", f"{short_size}계약 @ {current_price:.2f}")
                                 
-                                if "ETH_USDT" in entry_history and "short" in entry_history["ETH_USDT"]:
-                                    entry_history["ETH_USDT"]["short"] = []
+                                if "ONDO_USDT" in entry_history and "short" in entry_history["ONDO_USDT"]:
+                                    entry_history["ONDO_USDT"]["short"] = []
                                 
-                                # ⭐ 청산 시 그리드 재생성 없음
-                                update_position_state("ETH_USDT")
+                                update_position_state("ONDO_USDT")
                                 continue
                                 
                         except Exception as e:
@@ -925,7 +916,7 @@ def eth_hedge_tp_monitor():
                     
                     # ⭐ 2순위: 듀얼 TP (숏이 주력일 때)
                     elif primary_direction == "short":
-                        classified = classify_positions("ETH_USDT", "short")
+                        classified = classify_positions("ONDO_USDT", "short")
                         base_positions = classified["base"]
                         overflow_positions = classified["overflow"]
                         
@@ -944,7 +935,7 @@ def eth_hedge_tp_monitor():
                                 
                                 try:
                                     order = FuturesOrder(
-                                        contract="ETH_USDT",
+                                        contract="ONDO_USDT",
                                         size=int(base_total_qty),
                                         price="0",
                                         tif="ioc",
@@ -956,25 +947,24 @@ def eth_hedge_tp_monitor():
                                         log_debug("✅ 기본 숏 청산", f"{base_total_qty}계약 @ {current_price:.2f}")
                                         
                                         time.sleep(1)
-                                        update_position_state("ETH_USDT")
+                                        update_position_state("ONDO_USDT")
                                         
-                                        if "ETH_USDT" in entry_history and "short" in entry_history["ETH_USDT"]:
-                                            entry_history["ETH_USDT"]["short"] = [
-                                                e for e in entry_history["ETH_USDT"]["short"] 
+                                        if "ONDO_USDT" in entry_history and "short" in entry_history["ONDO_USDT"]:
+                                            entry_history["ONDO_USDT"]["short"] = [
+                                                e for e in entry_history["ONDO_USDT"]["short"] 
                                                 if e not in base_positions
                                             ]
                                         
-                                        pos_after = position_state.get("ETH_USDT", {})
+                                        pos_after = position_state.get("ONDO_USDT", {})
                                         short_size_after = pos_after.get("short", {}).get("size", Decimal("0"))
                                         
                                         if short_size_after > 0:
-                                            classified_after = classify_positions("ETH_USDT", "short")
+                                            classified_after = classify_positions("ONDO_USDT", "short")
                                             base_after = sum(p["qty"] for p in classified_after["base"])
                                             overflow_after = sum(p["qty"] for p in classified_after["overflow"])
                                             log_debug("📊 청산 후 재분류", f"남은 숏: {short_size_after}계약 | 기본/초과: {base_after}/{overflow_after}계약")
                                         
-                                        # ⭐ 청산 시 그리드 재생성 없음
-                                        update_position_state("ETH_USDT")
+                                        update_position_state("ONDO_USDT")
                                         continue
                                         
                                 except Exception as e:
@@ -995,7 +985,7 @@ def eth_hedge_tp_monitor():
                                 
                                 try:
                                     order = FuturesOrder(
-                                        contract="ETH_USDT",
+                                        contract="ONDO_USDT",
                                         size=int(overflow_qty),
                                         price="0",
                                         tif="ioc",
@@ -1007,18 +997,18 @@ def eth_hedge_tp_monitor():
                                         log_debug("✅ 초과 숏 청산", f"{overflow_qty}계약 @ {current_price:.2f}")
                                         
                                         time.sleep(1)
-                                        update_position_state("ETH_USDT")
+                                        update_position_state("ONDO_USDT")
                                         
-                                        if "ETH_USDT" in entry_history and "short" in entry_history["ETH_USDT"]:
-                                            entries = entry_history["ETH_USDT"]["short"]
+                                        if "ONDO_USDT" in entry_history and "short" in entry_history["ONDO_USDT"]:
+                                            entries = entry_history["ONDO_USDT"]["short"]
                                             if overflow_pos in entries:
                                                 entries.remove(overflow_pos)
                                         
-                                        pos_after = position_state.get("ETH_USDT", {})
+                                        pos_after = position_state.get("ONDO_USDT", {})
                                         short_size_after = pos_after.get("short", {}).get("size", Decimal("0"))
                                         
                                         if short_size_after > 0:
-                                            classified_after = classify_positions("ETH_USDT", "short")
+                                            classified_after = classify_positions("ONDO_USDT", "short")
                                             base_after = sum(p["qty"] for p in classified_after["base"])
                                             overflow_after = sum(p["qty"] for p in classified_after["overflow"])
                                             log_debug("📊 청산 후 재분류", f"남은 숏: {short_size_after}계약 | 기본/초과: {base_after}/{overflow_after}계약")
@@ -1039,7 +1029,7 @@ def eth_hedge_tp_monitor():
                             
                             try:
                                 order = FuturesOrder(
-                                    contract="ETH_USDT",
+                                    contract="ONDO_USDT",
                                     size=int(short_size),
                                     price="0",
                                     tif="ioc",
@@ -1050,11 +1040,10 @@ def eth_hedge_tp_monitor():
                                 if result:
                                     log_debug("✅ 헤징 숏 청산", f"{short_size}계약 @ {current_price:.2f}")
                                     
-                                    if "ETH_USDT" in entry_history and "short" in entry_history["ETH_USDT"]:
-                                        entry_history["ETH_USDT"]["short"] = []
+                                    if "ONDO_USDT" in entry_history and "short" in entry_history["ONDO_USDT"]:
+                                        entry_history["ONDO_USDT"]["short"] = []
                                     
-                                    # ⭐ 청산 시 그리드 재생성 없음
-                                    update_position_state("ETH_USDT")
+                                    update_position_state("ONDO_USDT")
                                     continue
                                     
                             except Exception as e:
@@ -1080,10 +1069,10 @@ async def price_monitor():
                     "time": int(time.time()),
                     "channel": "futures.tickers",
                     "event": "subscribe",
-                    "payload": ["ETH_USDT"]
+                    "payload": ["ONDO_USDT"]
                 }
                 await ws.send(json.dumps(subscribe_msg))
-                log_debug("🔗 WebSocket 연결", "ETH_USDT")
+                log_debug("🔗 WebSocket 연결", "ONDO_USDT")
                 
                 while True:
                     msg = await ws.recv()
@@ -1094,7 +1083,7 @@ async def price_monitor():
                         if result and isinstance(result, dict):
                             price = Decimal(str(result.get("last", "0")))
                             if price > 0:
-                                latest_prices["ETH_USDT"] = price
+                                latest_prices["ONDO_USDT"] = price
                     
         except Exception as e:
             log_debug("❌ WebSocket 오류", str(e))
@@ -1116,23 +1105,23 @@ def ping():
 # =============================================================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v14.0-grid-fill-based")
+    log_debug("🚀 서버 시작", "v15.0-ondo-grid-fill-based")
     
     INITIAL_BALANCE = Decimal(str(get_available_balance(show_log=True)))
     log_debug("💰 초기 잔고", f"{INITIAL_BALANCE:.2f} USDT")
     log_debug("🎯 임계값", f"{float(INITIAL_BALANCE * THRESHOLD_RATIO):.2f} USDT ({int(THRESHOLD_RATIO)}배)")
     
-    entry_history["ETH_USDT"] = {"long": [], "short": []}
+    entry_history["ONDO_USDT"] = {"long": [], "short": []}
     
-    obv_macd_val = calculate_obv_macd("ETH_USDT")
-    log_debug("📊 OBV MACD", f"ETH_USDT: {obv_macd_val:.2f}")
+    obv_macd_val = calculate_obv_macd("ONDO_USDT")
+    log_debug("📊 Shadow OBV MACD", f"ONDO_USDT: {obv_macd_val:.2f}")
     
     # 초기 그리드 생성
     initialize_hedge_orders()
 
     # 스레드 시작
-    threading.Thread(target=eth_hedge_fill_monitor, daemon=True).start()
-    threading.Thread(target=eth_hedge_tp_monitor, daemon=True).start()
+    threading.Thread(target=ondo_hedge_fill_monitor, daemon=True).start()
+    threading.Thread(target=ondo_hedge_tp_monitor, daemon=True).start()
     threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
 
     port = int(os.environ.get("PORT", 8080))
