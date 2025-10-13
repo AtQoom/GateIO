@@ -181,7 +181,8 @@ def calculate_obv_macd(symbol):
         if pd.isna(final_value) or np.isinf(final_value):
             return Decimal("0")
         
-        return Decimal(str(round(float(final_value), 2)))
+        # ⭐ 실제 값 그대로 반환 (x1000 안 함)
+        return Decimal(str(round(float(final_value), 6)))  # 소수점 6자리
         
     except Exception as e:
         log_debug("❌ OBV MACD 오류", str(e), exc_info=True)
@@ -195,7 +196,9 @@ def calculate_grid_qty(current_price):
             return 1
         
         obv_macd = calculate_obv_macd(SYMBOL)
-        abs_val = abs(float(obv_macd))
+        
+        # ⭐ x1000 해서 비교 (실제 값이 0.02면 20으로 비교)
+        abs_val = abs(float(obv_macd * 1000))
         
         if abs_val < 20:
             leverage = Decimal("0.2")
@@ -525,11 +528,13 @@ def initialize_grid(base_price=None):
         except Exception as e:
             log_debug("❌ 롱 주문 실패", str(e))
         
+        # ⭐ 로그 출력 시 x1000 표시
         log_debug("🎯 그리드 생성", 
-                 f"기준:{base_price:.4f} 위:{upper_price:.4f} 아래:{lower_price:.4f} | OBV:{float(obv_macd):.2f}")
+                 f"기준:{base_price:.4f} 위:{upper_price:.4f} 아래:{lower_price:.4f} | OBV:{float(obv_macd * 1000):.2f}")
         
     except Exception as e:
         log_debug("❌ 그리드 생성 실패", str(e), exc_info=True)
+
 
 # =============================================================================
 # 헤징 관리
@@ -792,9 +797,9 @@ if __name__ == "__main__":
     tp_orders[SYMBOL] = {"long": [], "short": []}
     tp_type[SYMBOL] = {"long": "average", "short": "average"}
     
-    # OBV MACD 확인
+    # ⭐ OBV MACD 확인 (x1000 표시)
     obv_macd_val = calculate_obv_macd(SYMBOL)
-    log_debug("📊 Shadow OBV MACD", f"{SYMBOL}: {obv_macd_val:.2f}")
+    log_debug("📊 Shadow OBV MACD", f"{SYMBOL}: {float(obv_macd_val * 1000):.2f}")
     
     # 초기 그리드 생성
     initialize_grid()
