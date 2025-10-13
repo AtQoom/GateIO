@@ -359,6 +359,8 @@ def place_average_tp_order(symbol, side, price, qty):
             tp_price = price * (Decimal("1") - TP_GAP_PCT)
             order_size = int(qty)
         
+        log_debug("🔍 TP 시도", f"{symbol}_{side} size:{order_size} price:{float(tp_price):.4f}")
+        
         order = FuturesOrder(
             contract=symbol,
             size=order_size,
@@ -368,6 +370,8 @@ def place_average_tp_order(symbol, side, price, qty):
         )
         
         result = api.create_futures_order(SETTLE, order)
+        
+        log_debug("✅ TP 성공", f"주문 ID: {result.id}")
         
         if symbol not in tp_orders:
             tp_orders[symbol] = {"long": [], "short": []}
@@ -382,7 +386,7 @@ def place_average_tp_order(symbol, side, price, qty):
         log_debug("📌 평단 TP", f"{symbol}_{side} {qty}계약 TP:{float(tp_price):.4f}")
         
     except Exception as e:
-        log_debug("❌ 평단 TP 실패", str(e))
+        log_debug("❌ 평단 TP 실패", str(e), exc_info=True)  # ⭐ 상세 오류 출력
 
 
 def place_individual_tp_orders(symbol, side, entries):
@@ -477,16 +481,24 @@ def check_and_update_tp_mode(symbol, side):
 def refresh_tp_orders(symbol):
     """TP 주문 새로고침"""
     try:
+        log_debug("🔄 TP 새로고침 시작", symbol)
+        
         for side in ["long", "short"]:
             pos = position_state.get(symbol, {}).get(side, {})
             size = pos.get("size", Decimal("0"))
+            price = pos.get("price", Decimal("0"))
+            
+            log_debug(f"🔍 포지션 체크", f"{side} size:{size} price:{price}")
             
             if size > 0:
                 cancel_tp_orders(symbol, side)
                 check_and_update_tp_mode(symbol, side)
+            else:
+                log_debug(f"⚠️ 포지션 없음", f"{side} size=0")
                 
     except Exception as e:
-        log_debug("❌ TP 새로고침 오류", str(e))
+        log_debug("❌ TP 새로고침 오류", str(e), exc_info=True)
+
 
 # =============================================================================
 # 그리드 관리
@@ -602,6 +614,7 @@ def fill_monitor():
             
             now = time.time()
             
+            # 현재가 조회
             try:
                 ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                 current_price = Decimal(str(ticker[0].last)) if ticker else Decimal("0")
@@ -637,9 +650,6 @@ def fill_monitor():
                 # TP 다시 새로고침 (헤징 포함)
                 refresh_tp_orders(SYMBOL)
                 
-                # ⭐ 그리드 재생성 제거!
-                # initialize_grid(long_price)  # ❌ 삭제!
-                
                 last_action_time = now
             
             # 숏 체결 감지
@@ -670,9 +680,6 @@ def fill_monitor():
                 
                 # TP 다시 새로고침 (헤징 포함)
                 refresh_tp_orders(SYMBOL)
-                
-                # ⭐ 그리드 재생성 제거!
-                # initialize_grid(short_price)  # ❌ 삭제!
                 
                 last_action_time = now
 
