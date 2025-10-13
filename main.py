@@ -466,13 +466,15 @@ def check_and_update_tp_mode(symbol, side):
                 
         else:
             # 임계값 미만 → 평단가 TP
-            if current_type == "individual":
-                log_debug("✅ 임계값 복귀", 
-                         f"{symbol}_{side} {float(position_value):.2f} < {float(threshold_value):.2f}")
-                
-                cancel_tp_orders(symbol, side)
-                place_average_tp_order(symbol, side, price, size)
-                tp_type[symbol][side] = "average"
+            # ⭐⭐⭐ 수정: 조건 제거하고 무조건 등록!
+            log_debug("✅ 평단가 TP", f"{symbol}_{side} {float(position_value):.2f} < {float(threshold_value):.2f}")
+            
+            cancel_tp_orders(symbol, side)
+            place_average_tp_order(symbol, side, price, size)
+            
+            if symbol not in tp_type:
+                tp_type[symbol] = {"long": "average", "short": "average"}
+            tp_type[symbol][side] = "average"
                 
     except Exception as e:
         log_debug("❌ TP 모드 체크 오류", str(e))
