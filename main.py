@@ -691,8 +691,8 @@ def fill_monitor():
 # =============================================================================
 
 def tp_monitor():
-    """TP 체결 감지 및 그리드 재생성 (변화 감지 방식)"""
-    prev_long_size = Decimal("-1")  # 초기값 -1
+    """TP 체결 감지 및 그리드 재생성"""
+    prev_long_size = Decimal("-1")
     prev_short_size = Decimal("-1")
     
     while True:
@@ -710,7 +710,6 @@ def tp_monitor():
                 if long_size == 0 and prev_long_size > 0:
                     long_type = tp_type.get(SYMBOL, {}).get("long", "average")
                     
-                    # 개별 TP는 그리드 재생성 안 함
                     if long_type == "individual":
                         prev_long_size = long_size
                         continue
@@ -730,12 +729,16 @@ def tp_monitor():
                         cancel_grid_orders(SYMBOL)
                         time.sleep(1)
                         initialize_grid(current_price)
+                        
+                        # ⭐⭐⭐ TP 새로고침 추가!
+                        time.sleep(0.5)
+                        update_position_state(SYMBOL)
+                        refresh_tp_orders(SYMBOL)
                 
                 # 숏 포지션이 0이 "되었을 때"만
                 elif short_size == 0 and prev_short_size > 0:
                     short_type = tp_type.get(SYMBOL, {}).get("short", "average")
                     
-                    # 개별 TP는 그리드 재생성 안 함
                     if short_type == "individual":
                         prev_short_size = short_size
                         continue
@@ -755,6 +758,11 @@ def tp_monitor():
                         cancel_grid_orders(SYMBOL)
                         time.sleep(1)
                         initialize_grid(current_price)
+                        
+                        # ⭐⭐⭐ TP 새로고침 추가!
+                        time.sleep(0.5)
+                        update_position_state(SYMBOL)
+                        refresh_tp_orders(SYMBOL)
                 
                 # 상태 저장
                 prev_long_size = long_size
@@ -762,6 +770,7 @@ def tp_monitor():
                 
         except Exception as e:
             log_debug("❌ TP 모니터 오류", str(e), exc_info=True)
+
 
 # =============================================================================
 # WebSocket 가격 모니터링
