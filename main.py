@@ -551,33 +551,33 @@ def initialize_grid(base_price=None):
 # =============================================================================
 
 def place_hedge_order(symbol, side, current_price):
-    """헤징 지정가 주문 (±0.05% 여유)"""
+    """헤징 시장가 주문 (즉시 체결)"""
     try:
         hedge_qty = max(1, int((INITIAL_BALANCE * HEDGE_RATIO) / (current_price * CONTRACT_SIZE)))
         
         if side == "short":
-            hedge_price = current_price * (Decimal("1") + Decimal("0.0005"))  # +0.05%
             order_size = -hedge_qty
-        else:  # long
-            hedge_price = current_price * (Decimal("1") - Decimal("0.0005"))  # -0.05%
+        else:
             order_size = hedge_qty
         
+        # ⭐ 시장가 주문
         order = FuturesOrder(
             contract=symbol,
             size=order_size,
-            price=str(round(float(hedge_price), 4)),
-            tif="gtc"
+            price="0",  # 시장가
+            tif="ioc"
         )
         
         result = api.create_futures_order(SETTLE, order)
         
-        log_debug("📌 헤징 주문", f"{symbol} {side} {hedge_qty}계약 @ {float(hedge_price):.4f}")
+        log_debug("📌 헤징 주문 (시장가)", f"{symbol} {side} {hedge_qty}계약")
         
         return result.id
         
     except Exception as e:
         log_debug("❌ 헤징 주문 실패", str(e))
         return None
+
 
 # =============================================================================
 # 체결 모니터링
