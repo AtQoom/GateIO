@@ -603,7 +603,7 @@ def eth_hedge_fill_monitor():
 # =============================================================================
 
 def eth_hedge_tp_monitor():
-    """⭐ ETH 듀얼 TP 모니터링 (주력 방향만)"""
+    """⭐ ETH TP 모니터링 (일반 TP 우선, 주력 방향만 듀얼 TP)"""
     while True:
         time.sleep(1)
         
@@ -626,8 +626,44 @@ def eth_hedge_tp_monitor():
                 long_price = pos.get("long", {}).get("price", Decimal("0"))
                 
                 if long_size > 0 and long_price > 0:
-                    # ⭐ 롱이 주력일 때만 듀얼 TP
-                    if primary_direction == "long":
+                    # ⭐ 1순위: 일반 TP 체크 (전체 평단가 기준)
+                    normal_tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
+                    
+                    if current_price >= normal_tp_price:
+                        # ✅ 일반 TP 조건 충족 → 전량 청산
+                        long_value = calculate_position_value(long_size, long_price)
+                        
+                        log_debug("🎯 일반 롱 TP 도달", 
+                                f"{long_size}계약 평단:{long_price:.2f} TP:{normal_tp_price:.2f} | "
+                                f"포지션가치: {float(long_value):.2f} USDT")
+                        
+                        try:
+                            order = FuturesOrder(
+                                contract="ETH_USDT",
+                                size=-int(long_size),
+                                price="0",
+                                tif="ioc",
+                                reduce_only=True
+                            )
+                            result = api.create_futures_order(SETTLE, order)
+                            
+                            if result:
+                                log_debug("✅ 일반 롱 청산", f"{long_size}계약 @ {current_price:.2f}")
+                                
+                                # 진입 기록 초기화
+                                if "ETH_USDT" in entry_history and "long" in entry_history["ETH_USDT"]:
+                                    entry_history["ETH_USDT"]["long"] = []
+                                
+                                time.sleep(2)
+                                cancel_open_orders("ETH_USDT")
+                                time.sleep(1)
+                                initialize_hedge_orders()
+                                
+                        except Exception as e:
+                            log_debug("❌ 일반 롱 청산 오류", str(e))
+                    
+                    # ⭐ 2순위: 일반 TP 조건 안 되면 → 듀얼 TP (롱이 주력일 때만)
+                    elif primary_direction == "long":
                         # 포지션 분류
                         classified = classify_positions("ETH_USDT", "long")
                         base_positions = classified["base"]
@@ -659,18 +695,15 @@ def eth_hedge_tp_monitor():
                                     if result:
                                         log_debug("✅ 기본 롱 청산", f"{base_total_qty}계약 @ {current_price:.2f}")
                                         
-                                        # ⭐ 청산 후 포지션 상태 업데이트
                                         time.sleep(1)
                                         update_position_state("ETH_USDT")
                                         
-                                        # 진입 기록에서 제거
                                         if "ETH_USDT" in entry_history and "long" in entry_history["ETH_USDT"]:
                                             entry_history["ETH_USDT"]["long"] = [
                                                 e for e in entry_history["ETH_USDT"]["long"] 
                                                 if e not in base_positions
                                             ]
                                         
-                                        # ⭐ 청산 후 재분류 상태 로그
                                         pos_after = position_state.get("ETH_USDT", {})
                                         long_size_after = pos_after.get("long", {}).get("size", Decimal("0"))
                                         
@@ -714,17 +747,14 @@ def eth_hedge_tp_monitor():
                                     if result:
                                         log_debug("✅ 초과 롱 청산", f"{overflow_qty}계약 @ {current_price:.2f}")
                                         
-                                        # ⭐ 청산 후 포지션 상태 업데이트
                                         time.sleep(1)
                                         update_position_state("ETH_USDT")
                                         
-                                        # 진입 기록에서 해당 항목 제거
                                         if "ETH_USDT" in entry_history and "long" in entry_history["ETH_USDT"]:
                                             entries = entry_history["ETH_USDT"]["long"]
                                             if overflow_pos in entries:
                                                 entries.remove(overflow_pos)
                                         
-                                        # ⭐ 청산 후 재분류 상태 로그
                                         pos_after = position_state.get("ETH_USDT", {})
                                         long_size_after = pos_after.get("long", {}).get("size", Decimal("0"))
                                         
@@ -737,8 +767,8 @@ def eth_hedge_tp_monitor():
                                 except Exception as e:
                                     log_debug("❌ 초과 롱 청산 오류", str(e))
                     
-                    else:
-                        # ⭐ 롱이 헤징 방향이면 일반 TP만
+                    # ⭐ 헤징 방향 (롱이 헤징일 때)
+                    elif primary_direction == "short":
                         long_tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
                         
                         if current_price >= long_tp_price:
@@ -761,7 +791,6 @@ def eth_hedge_tp_monitor():
                                 if result:
                                     log_debug("✅ 헤징 롱 청산", f"{long_size}계약 @ {current_price:.2f}")
                                     
-                                    # 진입 기록 초기화
                                     if "ETH_USDT" in entry_history and "long" in entry_history["ETH_USDT"]:
                                         entry_history["ETH_USDT"]["long"] = []
                                     
@@ -778,8 +807,44 @@ def eth_hedge_tp_monitor():
                 short_price = pos.get("short", {}).get("price", Decimal("0"))
                 
                 if short_size > 0 and short_price > 0:
-                    # ⭐ 숏이 주력일 때만 듀얼 TP
-                    if primary_direction == "short":
+                    # ⭐ 1순위: 일반 TP 체크 (전체 평단가 기준)
+                    normal_tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
+                    
+                    if current_price <= normal_tp_price:
+                        # ✅ 일반 TP 조건 충족 → 전량 청산
+                        short_value = calculate_position_value(short_size, short_price)
+                        
+                        log_debug("🎯 일반 숏 TP 도달", 
+                                f"{short_size}계약 평단:{short_price:.2f} TP:{normal_tp_price:.2f} | "
+                                f"포지션가치: {float(short_value):.2f} USDT")
+                        
+                        try:
+                            order = FuturesOrder(
+                                contract="ETH_USDT",
+                                size=int(short_size),
+                                price="0",
+                                tif="ioc",
+                                reduce_only=True
+                            )
+                            result = api.create_futures_order(SETTLE, order)
+                            
+                            if result:
+                                log_debug("✅ 일반 숏 청산", f"{short_size}계약 @ {current_price:.2f}")
+                                
+                                # 진입 기록 초기화
+                                if "ETH_USDT" in entry_history and "short" in entry_history["ETH_USDT"]:
+                                    entry_history["ETH_USDT"]["short"] = []
+                                
+                                time.sleep(2)
+                                cancel_open_orders("ETH_USDT")
+                                time.sleep(1)
+                                initialize_hedge_orders()
+                                
+                        except Exception as e:
+                            log_debug("❌ 일반 숏 청산 오류", str(e))
+                    
+                    # ⭐ 2순위: 듀얼 TP (숏이 주력일 때) ← 여기에 넣으시면 됩니다!
+                    elif primary_direction == "short":
                         # 포지션 분류
                         classified = classify_positions("ETH_USDT", "short")
                         base_positions = classified["base"]
@@ -811,18 +876,15 @@ def eth_hedge_tp_monitor():
                                     if result:
                                         log_debug("✅ 기본 숏 청산", f"{base_total_qty}계약 @ {current_price:.2f}")
                                         
-                                        # ⭐ 청산 후 포지션 상태 업데이트
                                         time.sleep(1)
                                         update_position_state("ETH_USDT")
                                         
-                                        # 진입 기록에서 제거
                                         if "ETH_USDT" in entry_history and "short" in entry_history["ETH_USDT"]:
                                             entry_history["ETH_USDT"]["short"] = [
                                                 e for e in entry_history["ETH_USDT"]["short"] 
                                                 if e not in base_positions
                                             ]
                                         
-                                        # ⭐ 청산 후 재분류 상태 로그
                                         pos_after = position_state.get("ETH_USDT", {})
                                         short_size_after = pos_after.get("short", {}).get("size", Decimal("0"))
                                         
@@ -866,17 +928,14 @@ def eth_hedge_tp_monitor():
                                     if result:
                                         log_debug("✅ 초과 숏 청산", f"{overflow_qty}계약 @ {current_price:.2f}")
                                         
-                                        # ⭐ 청산 후 포지션 상태 업데이트
                                         time.sleep(1)
                                         update_position_state("ETH_USDT")
                                         
-                                        # 진입 기록에서 해당 항목 제거
                                         if "ETH_USDT" in entry_history and "short" in entry_history["ETH_USDT"]:
                                             entries = entry_history["ETH_USDT"]["short"]
                                             if overflow_pos in entries:
                                                 entries.remove(overflow_pos)
                                         
-                                        # ⭐ 청산 후 재분류 상태 로그
                                         pos_after = position_state.get("ETH_USDT", {})
                                         short_size_after = pos_after.get("short", {}).get("size", Decimal("0"))
                                         
@@ -889,8 +948,8 @@ def eth_hedge_tp_monitor():
                                 except Exception as e:
                                     log_debug("❌ 초과 숏 청산 오류", str(e))
                     
-                    else:
-                        # ⭐ 숏이 헤징 방향이면 일반 TP만
+                    # ⭐ 헤징 방향 (숏이 헤징일 때)
+                    elif primary_direction == "long":
                         short_tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
                         
                         if current_price <= short_tp_price:
@@ -913,7 +972,6 @@ def eth_hedge_tp_monitor():
                                 if result:
                                     log_debug("✅ 헤징 숏 청산", f"{short_size}계약 @ {current_price:.2f}")
                                     
-                                    # 진입 기록 초기화
                                     if "ETH_USDT" in entry_history and "short" in entry_history["ETH_USDT"]:
                                         entry_history["ETH_USDT"]["short"] = []
                                     
@@ -926,7 +984,7 @@ def eth_hedge_tp_monitor():
                                 log_debug("❌ 헤징 숏 청산 오류", str(e))
         
         except Exception as e:
-            log_debug("❌ 듀얼 TP 모니터 오류", str(e), exc_info=True)
+            log_debug("❌ TP 모니터 오류", str(e), exc_info=True)
             time.sleep(5)
 
 # =============================================================================
