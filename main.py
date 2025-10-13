@@ -691,8 +691,8 @@ def fill_monitor():
 # =============================================================================
 
 def tp_monitor():
-    """TP 체결 감지 및 그리드 재생성"""
-    prev_long_size = Decimal("-1")
+    """TP 체결 감지 및 그리드 재생성 (변화 감지 방식)"""
+    prev_long_size = Decimal("-1")  # 초기값 -1
     prev_short_size = Decimal("-1")
     
     while True:
@@ -710,6 +710,7 @@ def tp_monitor():
                 if long_size == 0 and prev_long_size > 0:
                     long_type = tp_type.get(SYMBOL, {}).get("long", "average")
                     
+                    # 개별 TP는 그리드 재생성 안 함
                     if long_type == "individual":
                         prev_long_size = long_size
                         continue
@@ -722,15 +723,17 @@ def tp_monitor():
                     if SYMBOL in tp_type:
                         tp_type[SYMBOL]["long"] = "average"
                     
+                    # ⭐⭐⭐ 기존 그리드 취소
+                    cancel_grid_orders(SYMBOL)
+                    time.sleep(1)
+                    
                     # 그리드 재생성
                     ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                     if ticker:
                         current_price = Decimal(str(ticker[0].last))
-                        cancel_grid_orders(SYMBOL)
-                        time.sleep(1)
                         initialize_grid(current_price)
                         
-                        # ⭐⭐⭐ TP 새로고침 추가!
+                        # ⭐⭐⭐ TP 새로고침 추가
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         refresh_tp_orders(SYMBOL)
@@ -739,6 +742,7 @@ def tp_monitor():
                 elif short_size == 0 and prev_short_size > 0:
                     short_type = tp_type.get(SYMBOL, {}).get("short", "average")
                     
+                    # 개별 TP는 그리드 재생성 안 함
                     if short_type == "individual":
                         prev_short_size = short_size
                         continue
@@ -751,15 +755,17 @@ def tp_monitor():
                     if SYMBOL in tp_type:
                         tp_type[SYMBOL]["short"] = "average"
                     
+                    # ⭐⭐⭐ 기존 그리드 취소
+                    cancel_grid_orders(SYMBOL)
+                    time.sleep(1)
+                    
                     # 그리드 재생성
                     ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                     if ticker:
                         current_price = Decimal(str(ticker[0].last))
-                        cancel_grid_orders(SYMBOL)
-                        time.sleep(1)
                         initialize_grid(current_price)
                         
-                        # ⭐⭐⭐ TP 새로고침 추가!
+                        # ⭐⭐⭐ TP 새로고침 추가
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         refresh_tp_orders(SYMBOL)
