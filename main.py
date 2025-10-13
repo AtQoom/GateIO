@@ -8,7 +8,7 @@ import logging
 import json
 from decimal import Decimal, ROUND_DOWN
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi  # ⭐ UnifiedApi 추가
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
 import websockets
 import pandas as pd
 import numpy as np
@@ -30,7 +30,7 @@ if not API_KEY or not API_SECRET:
 config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
-unified_api = UnifiedApi(client)  # ⭐ 추가
+unified_api = UnifiedApi(client)
 
 # 전역 변수
 position_lock = threading.RLock()
@@ -38,8 +38,12 @@ position_state = {}
 latest_prices = {}
 entry_history = {}  # 진입 기록
 INITIAL_BALANCE = Decimal("100")  # 초기 자본금
-THRESHOLD_RATIO = Decimal("10.0")  # 10배 임계값
+THRESHOLD_RATIO = Decimal("10.0")  # 10배 임계값 (테스트)
 CONTRACT_SIZE = Decimal("0.01")  # ETH 계약 크기
+
+# ⭐ 마지막 체결가 기록
+last_long_fill_price = None
+last_short_fill_price = None
 
 app = Flask(__name__)
 
@@ -53,6 +57,18 @@ def log_debug(label, msg="", exc_info=False):
         logger.error(f"[{label}] {msg}", exc_info=True)
     else:
         logger.info(f"[{label}] {msg}")
+
+
+def get_primary_direction():
+    """주력 방향 판단 (OBV MACD 기반)"""
+    try:
+        obv_macd = calculate_obv_macd("ETH_USDT")
+        if obv_macd >= 0:
+            return "short"  # 롱 강세 → 숏이 주력
+        else:
+            return "long"  # 숏 강세 → 롱이 주력
+    except:
+        return None
 
 
 def get_candles(symbol, interval="1m", limit=100):
@@ -75,6 +91,7 @@ def get_candles(symbol, interval="1m", limit=100):
     except Exception as e:
         log_debug("❌ 캔들 조회 실패", str(e), exc_info=True)
         return None
+
 
 def calculate_obv_macd(symbol):
     """OBV MACD 계산"""
@@ -105,6 +122,7 @@ def calculate_obv_macd(symbol):
         log_debug("❌ OBV MACD 오류", str(e), exc_info=True)
         return Decimal("0")
 
+
 def get_available_balance(show_log=False):
     """사용 가능 잔고 조회 (Unified Account 우선)"""
     try:
@@ -122,18 +140,17 @@ def get_available_balance(show_log=False):
                             available_str = str(getattr(usdt_data, "available", "0"))
                         usdt_balance = float(available_str)
                         if usdt_balance > 0:
-                            if show_log:  # ⭐ 로그 조건 추가
+                            if show_log:
                                 log_debug("💰 잔고 (Unified)", f"{usdt_balance:.2f} USDT")
                             return usdt_balance
                         
-                        # available이 0이면 equity 시도
                         if isinstance(usdt_data, dict):
                             equity_str = str(usdt_data.get("equity", "0"))
                         else:
                             equity_str = str(getattr(usdt_data, "equity", "0"))
                         usdt_balance = float(equity_str)
                         if usdt_balance > 0:
-                            if show_log:  # ⭐ 로그 조건 추가
+                            if show_log:
                                 log_debug("💰 잔고 (Unified Equity)", f"{usdt_balance:.2f} USDT")
                             return usdt_balance
                     except Exception as e:
@@ -149,13 +166,12 @@ def get_available_balance(show_log=False):
             if account:
                 available = float(getattr(account, "available", "0"))
                 if available > 0:
-                    if show_log:  # ⭐ 로그 조건 추가
+                    if show_log:
                         log_debug("💰 잔고 (Futures)", f"{available:.2f} USDT")
                     return available
-                # available이 0이면 total 시도
                 total = float(getattr(account, "total", "0"))
                 if total > 0:
-                    if show_log:  # ⭐ 로그 조건 추가
+                    if show_log:
                         log_debug("💰 잔고 (Futures Total)", f"{total:.2f} USDT")
                     return total
         except Exception as e:
@@ -170,10 +186,10 @@ def get_available_balance(show_log=False):
             log_debug("❌ 잔고 조회 실패", str(e), exc_info=True)
         return 0.0
 
+
 def calculate_grid_qty(current_price):
     """그리드 수량 계산 (OBV MACD 기반) - 초기 자본금 고정"""
     try:
-        # ⭐ INITIAL_BALANCE 사용
         if INITIAL_BALANCE <= 0:
             return 1
         
@@ -203,13 +219,13 @@ def calculate_grid_qty(current_price):
         else:
             leverage = Decimal("3.0")
         
-        # ⭐ 초기 자본금 기준 계산
         qty = int((INITIAL_BALANCE * leverage) / (current_price * CONTRACT_SIZE))
         
         return max(1, qty)
     except Exception as e:
         log_debug("❌ 그리드 수량 계산 오류", str(e))
         return 1
+
 
 def calculate_position_value(qty, price):
     """포지션 가치 계산 (USDT)"""
@@ -242,17 +258,6 @@ def calculate_capital_usage_pct(symbol):
 # 진입 기록 관리
 # =============================================================================
 
-def get_primary_direction():
-    """주력 방향 판단 (OBV MACD 기반)"""
-    try:
-        obv_macd = calculate_obv_macd("ETH_USDT")
-        if obv_macd >= 0:
-            return "short"  # 롱 강세 → 숏이 주력
-        else:
-            return "long"  # 숏 강세 → 롱이 주력
-    except:
-        return None
-        
 def record_entry(symbol, side, price, qty):
     """진입 기록"""
     if symbol not in entry_history:
@@ -264,7 +269,6 @@ def record_entry(symbol, side, price, qty):
         "timestamp": time.time()
     })
     
-    # ⭐ 자본금 사용률 계산
     usage_pct = calculate_capital_usage_pct(symbol)
     position_value = calculate_position_value(Decimal(str(qty)), Decimal(str(price)))
     
@@ -275,11 +279,10 @@ def record_entry(symbol, side, price, qty):
 
 
 def classify_positions(symbol, side):
-    """포지션을 기본/초과로 분류 (20배 임계값)"""
+    """포지션을 기본/초과로 분류 (10배 임계값)"""
     try:
         threshold_value = INITIAL_BALANCE * THRESHOLD_RATIO
         
-        # 현재 포지션
         pos = position_state.get(symbol, {}).get(side, {})
         total_size = pos.get("size", Decimal("0"))
         avg_price = pos.get("price", Decimal("0"))
@@ -287,21 +290,17 @@ def classify_positions(symbol, side):
         if total_size <= 0:
             return {"base": [], "overflow": []}
         
-        # 진입 기록에서 계산
         entries = entry_history.get(symbol, {}).get(side, [])
         
-        # ⭐ 수정: 기록 없어도 현재 포지션 가치로 판단
         if not entries:
             total_value = calculate_position_value(total_size, avg_price)
             
             if total_value <= threshold_value:
-                # 전체 기본 포지션
                 return {
                     "base": [{"qty": total_size, "price": avg_price, "timestamp": time.time()}],
                     "overflow": []
                 }
             else:
-                # 임계값까지만 기본, 나머지는 초과
                 base_qty = int(threshold_value / (avg_price * CONTRACT_SIZE))
                 overflow_qty = total_size - base_qty
                 
@@ -314,33 +313,26 @@ def classify_positions(symbol, side):
         overflow_positions = []
         accumulated_value = Decimal("0")
         
-        # 진입 기록 순회
         for entry in entries:
             entry_qty = entry["qty"]
             entry_price = entry["price"]
             entry_value = calculate_position_value(entry_qty, entry_price)
             
             if accumulated_value + entry_value <= threshold_value:
-                # 기본 포지션
                 base_positions.append(entry)
                 accumulated_value += entry_value
             else:
-                # 초과 포지션
                 overflow_positions.append(entry)
         
-        # ⭐ 추가: 진입 기록 수량과 실제 포지션 수량 불일치 시 처리
         recorded_qty = sum(p["qty"] for p in base_positions) + sum(p["qty"] for p in overflow_positions)
         
         if recorded_qty < total_size:
-            # 기록되지 않은 수량 처리 (수동 진입 등)
             missing_qty = total_size - recorded_qty
             missing_value = calculate_position_value(missing_qty, avg_price)
             
             if accumulated_value + missing_value <= threshold_value:
-                # 기본 포지션에 추가
                 base_positions.append({"qty": missing_qty, "price": avg_price, "timestamp": time.time()})
             else:
-                # 일부는 기본, 나머지는 초과
                 remaining_base_value = threshold_value - accumulated_value
                 if remaining_base_value > 0:
                     base_add_qty = int(remaining_base_value / (avg_price * CONTRACT_SIZE))
@@ -351,7 +343,6 @@ def classify_positions(symbol, side):
                     if overflow_add_qty > 0:
                         overflow_positions.append({"qty": overflow_add_qty, "price": avg_price, "timestamp": time.time()})
                 else:
-                    # 전부 초과
                     overflow_positions.append({"qty": missing_qty, "price": avg_price, "timestamp": time.time()})
         
         return {
@@ -363,6 +354,7 @@ def classify_positions(symbol, side):
         log_debug("❌ 포지션 분류 오류", str(e), exc_info=True)
         return {"base": [], "overflow": []}
 
+
 # =============================================================================
 # 포지션 관리
 # =============================================================================
@@ -370,7 +362,6 @@ def classify_positions(symbol, side):
 def update_position_state(symbol):
     """포지션 상태 업데이트"""
     try:
-        # ⭐ 수정: 전체 포지션 조회 후 필터링
         positions = api.list_positions(SETTLE)
         
         with position_lock:
@@ -383,17 +374,16 @@ def update_position_state(symbol):
             short_price = Decimal("0")
             
             for p in positions:
-                # 해당 심볼만 필터링
                 if p.contract != symbol:
                     continue
                     
                 size = abs(Decimal(str(p.size)))
                 entry_price = Decimal(str(p.entry_price)) if p.entry_price else Decimal("0")
                 
-                if p.size > 0:  # 롱
+                if p.size > 0:
                     long_size = size
                     long_price = entry_price
-                elif p.size < 0:  # 숏
+                elif p.size < 0:
                     short_size = size
                     short_price = entry_price
             
@@ -418,11 +408,11 @@ def cancel_open_orders(symbol):
 
 
 # =============================================================================
-# 그리드 주문
+# 그리드 주문 (⭐ 수정: 기준 가격 지정 가능)
 # =============================================================================
 
-def initialize_hedge_orders():
-    """ETH 역방향 그리드 주문 초기화"""
+def initialize_hedge_orders(base_price=None):
+    """ETH 역방향 그리드 주문 초기화 (마지막 체결가 기준)"""
     try:
         symbol = "ETH_USDT"
         
@@ -430,7 +420,27 @@ def initialize_hedge_orders():
         if not ticker or len(ticker) == 0:
             return
         
-        current_price = Decimal(str(ticker[0].last))
+        # ⭐ 기준 가격 결정
+        global last_long_fill_price, last_short_fill_price
+        
+        if base_price is not None:
+            # 명시적으로 지정된 기준가
+            current_price = Decimal(str(base_price))
+            log_debug("🎯 그리드 기준가", f"지정 체결가: {current_price:.2f}")
+        elif last_long_fill_price is not None or last_short_fill_price is not None:
+            # 마지막 체결가 우선
+            if last_long_fill_price is not None and last_short_fill_price is not None:
+                current_price = max(last_long_fill_price, last_short_fill_price)
+            elif last_long_fill_price is not None:
+                current_price = last_long_fill_price
+            else:
+                current_price = last_short_fill_price
+            log_debug("🎯 그리드 기준가", f"마지막 체결가: {current_price:.2f}")
+        else:
+            # 초기 실행 시 현재가
+            current_price = Decimal(str(ticker[0].last))
+            log_debug("🎯 그리드 기준가", f"현재 시장가: {current_price:.2f}")
+        
         obv_macd = calculate_obv_macd(symbol)
         
         upper_price = float(current_price * (Decimal("1") + GRID_GAP_PCT))
@@ -440,13 +450,11 @@ def initialize_hedge_orders():
         time.sleep(0.5)
         
         if obv_macd >= 0:
-            short_qty = calculate_grid_qty(current_price)  # OBV 기반
-            # ⭐ 0.5배는 초기 자본금 기준
+            short_qty = calculate_grid_qty(current_price)
             long_qty = int((INITIAL_BALANCE * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
             long_qty = max(1, long_qty)
         else:
-            long_qty = calculate_grid_qty(current_price)  # OBV 기반
-            # ⭐ 0.5배는 초기 자본금 기준
+            long_qty = calculate_grid_qty(current_price)
             short_qty = int((INITIAL_BALANCE * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
             short_qty = max(1, short_qty)
         
@@ -476,17 +484,19 @@ def initialize_hedge_orders():
         
         log_debug("🎯 역방향 그리드 초기화", 
                  f"ETH 위숏:{short_qty}@{upper_price:.2f} 아래롱:{long_qty}@{lower_price:.2f} | "
-                 f"OBV:{float(obv_macd):.2f} {'(롱강세→숏주력)' if obv_macd >= 0 else '(숏강세→롱주력)'}")
+                 f"기준가:{current_price:.2f} | OBV:{float(obv_macd):.2f} {'(롱강세→숏주력)' if obv_macd >= 0 else '(숏강세→롱주력)'}")
         
     except Exception as e:
         log_debug("❌ 그리드 초기화 실패", str(e), exc_info=True)
 
+
 # =============================================================================
-# 체결 모니터링
+# 체결 모니터링 (⭐ 수정: 체결 시 즉시 그리드 재생성)
 # =============================================================================
 
 def eth_hedge_fill_monitor():
     """ETH 체결 감지 및 역방향 헤징 + 진입 기록"""
+    global last_long_fill_price, last_short_fill_price
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
     last_action_time = 0
@@ -510,7 +520,6 @@ def eth_hedge_fill_monitor():
             except:
                 current_price = Decimal("0")
             
-            # ⭐ 헤징 수량 (초기 자본금 기준 0.5배 고정)
             hedge_qty = int((INITIAL_BALANCE * Decimal("0.5")) / (current_price * CONTRACT_SIZE))
             hedge_qty = max(1, hedge_qty)
             
@@ -534,6 +543,9 @@ def eth_hedge_fill_monitor():
                 
                 record_entry("ETH_USDT", "long", long_price, added_long)
                 
+                # ⭐ 마지막 체결가 기록
+                last_long_fill_price = long_price
+                
                 prev_long_size = long_size
                 prev_short_size = short_size
                 last_action_time = now
@@ -551,10 +563,11 @@ def eth_hedge_fill_monitor():
                     except Exception as e:
                         log_debug("❌ 헤징 실패", str(e))
                 
+                # ⭐ 체결 후 즉시 그리드 재생성 (체결가 기준)
                 time.sleep(2)
                 cancel_open_orders("ETH_USDT")
                 time.sleep(1)
-                initialize_hedge_orders()
+                initialize_hedge_orders(last_long_fill_price)
             
             # 숏 체결 시
             elif short_size > prev_short_size and now - last_action_time >= 10:
@@ -576,6 +589,9 @@ def eth_hedge_fill_monitor():
                 
                 record_entry("ETH_USDT", "short", short_price, added_short)
                 
+                # ⭐ 마지막 체결가 기록
+                last_short_fill_price = short_price
+                
                 prev_long_size = long_size
                 prev_short_size = short_size
                 last_action_time = now
@@ -593,13 +609,15 @@ def eth_hedge_fill_monitor():
                     except Exception as e:
                         log_debug("❌ 헤징 실패", str(e))
                 
+                # ⭐ 체결 후 즉시 그리드 재생성 (체결가 기준)
                 time.sleep(2)
                 cancel_open_orders("ETH_USDT")
                 time.sleep(1)
-                initialize_hedge_orders()
+                initialize_hedge_orders(last_short_fill_price)
+
 
 # =============================================================================
-# 듀얼 TP 모니터링
+# 듀얼 TP 모니터링 (⭐ 수정: 청산 시 그리드 재생성 제거)
 # =============================================================================
 
 def eth_hedge_tp_monitor():
@@ -608,14 +626,11 @@ def eth_hedge_tp_monitor():
         time.sleep(1)
         
         try:
-            # 현재 가격
             ticker = api.list_futures_tickers(SETTLE, contract="ETH_USDT")
             if not ticker:
                 continue
             
             current_price = Decimal(str(ticker[0].last))
-            
-            # ⭐ 주력 방향 판단
             primary_direction = get_primary_direction()
             
             with position_lock:
@@ -626,11 +641,10 @@ def eth_hedge_tp_monitor():
                 long_price = pos.get("long", {}).get("price", Decimal("0"))
                 
                 if long_size > 0 and long_price > 0:
-                    # ⭐ 1순위: 일반 TP 체크 (전체 평단가 기준)
+                    # ⭐ 1순위: 일반 TP 체크
                     normal_tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
                     
                     if current_price >= normal_tp_price:
-                        # ✅ 일반 TP 조건 충족 → 전량 청산
                         long_value = calculate_position_value(long_size, long_price)
                         
                         log_debug("🎯 일반 롱 TP 도달", 
@@ -650,26 +664,23 @@ def eth_hedge_tp_monitor():
                             if result:
                                 log_debug("✅ 일반 롱 청산", f"{long_size}계약 @ {current_price:.2f}")
                                 
-                                # 진입 기록 초기화
                                 if "ETH_USDT" in entry_history and "long" in entry_history["ETH_USDT"]:
                                     entry_history["ETH_USDT"]["long"] = []
                                 
-                                time.sleep(2)
-                                cancel_open_orders("ETH_USDT")
-                                time.sleep(1)
-                                initialize_hedge_orders()
+                                # ⭐ 청산 시 그리드 재생성 없음 (체결 시에만 생성)
+                                update_position_state("ETH_USDT")
+                                continue
                                 
                         except Exception as e:
                             log_debug("❌ 일반 롱 청산 오류", str(e))
                     
-                    # ⭐ 2순위: 일반 TP 조건 안 되면 → 듀얼 TP (롱이 주력일 때만)
+                    # ⭐ 2순위: 듀얼 TP (롱이 주력일 때만)
                     elif primary_direction == "long":
-                        # 포지션 분류
                         classified = classify_positions("ETH_USDT", "long")
                         base_positions = classified["base"]
                         overflow_positions = classified["overflow"]
                         
-                        # 기본 포지션 TP (평단 기준)
+                        # 기본 포지션 TP
                         if base_positions:
                             base_total_qty = sum(p["qty"] for p in base_positions)
                             base_avg_price = sum(p["qty"] * p["price"] for p in base_positions) / base_total_qty
@@ -713,15 +724,14 @@ def eth_hedge_tp_monitor():
                                             overflow_after = sum(p["qty"] for p in classified_after["overflow"])
                                             log_debug("📊 청산 후 재분류", f"남은 롱: {long_size_after}계약 | 기본/초과: {base_after}/{overflow_after}계약")
                                         
-                                        time.sleep(2)
-                                        cancel_open_orders("ETH_USDT")
-                                        time.sleep(1)
-                                        initialize_hedge_orders()
+                                        # ⭐ 청산 시 그리드 재생성 없음
+                                        update_position_state("ETH_USDT")
+                                        continue
                                         
                                 except Exception as e:
                                     log_debug("❌ 기본 롱 청산 오류", str(e))
                         
-                        # 초과 포지션 TP (개별 진입가 기준)
+                        # 초과 포지션 TP
                         for overflow_pos in overflow_positions[:]:
                             overflow_qty = overflow_pos["qty"]
                             overflow_price = overflow_pos["price"]
@@ -794,10 +804,9 @@ def eth_hedge_tp_monitor():
                                     if "ETH_USDT" in entry_history and "long" in entry_history["ETH_USDT"]:
                                         entry_history["ETH_USDT"]["long"] = []
                                     
-                                    time.sleep(2)
-                                    cancel_open_orders("ETH_USDT")
-                                    time.sleep(1)
-                                    initialize_hedge_orders()
+                                    # ⭐ 청산 시 그리드 재생성 없음
+                                    update_position_state("ETH_USDT")
+                                    continue
                                     
                             except Exception as e:
                                 log_debug("❌ 헤징 롱 청산 오류", str(e))
@@ -807,11 +816,10 @@ def eth_hedge_tp_monitor():
                 short_price = pos.get("short", {}).get("price", Decimal("0"))
                 
                 if short_size > 0 and short_price > 0:
-                    # ⭐ 1순위: 일반 TP 체크 (전체 평단가 기준)
+                    # ⭐ 1순위: 일반 TP 체크
                     normal_tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
                     
                     if current_price <= normal_tp_price:
-                        # ✅ 일반 TP 조건 충족 → 전량 청산
                         short_value = calculate_position_value(short_size, short_price)
                         
                         log_debug("🎯 일반 숏 TP 도달", 
@@ -831,26 +839,23 @@ def eth_hedge_tp_monitor():
                             if result:
                                 log_debug("✅ 일반 숏 청산", f"{short_size}계약 @ {current_price:.2f}")
                                 
-                                # 진입 기록 초기화
                                 if "ETH_USDT" in entry_history and "short" in entry_history["ETH_USDT"]:
                                     entry_history["ETH_USDT"]["short"] = []
                                 
-                                time.sleep(2)
-                                cancel_open_orders("ETH_USDT")
-                                time.sleep(1)
-                                initialize_hedge_orders()
+                                # ⭐ 청산 시 그리드 재생성 없음
+                                update_position_state("ETH_USDT")
+                                continue
                                 
                         except Exception as e:
                             log_debug("❌ 일반 숏 청산 오류", str(e))
                     
-                    # ⭐ 2순위: 듀얼 TP (숏이 주력일 때) ← 여기에 넣으시면 됩니다!
+                    # ⭐ 2순위: 듀얼 TP (숏이 주력일 때)
                     elif primary_direction == "short":
-                        # 포지션 분류
                         classified = classify_positions("ETH_USDT", "short")
                         base_positions = classified["base"]
                         overflow_positions = classified["overflow"]
                         
-                        # 기본 포지션 TP (평단 기준)
+                        # 기본 포지션 TP
                         if base_positions:
                             base_total_qty = sum(p["qty"] for p in base_positions)
                             base_avg_price = sum(p["qty"] * p["price"] for p in base_positions) / base_total_qty
@@ -894,15 +899,14 @@ def eth_hedge_tp_monitor():
                                             overflow_after = sum(p["qty"] for p in classified_after["overflow"])
                                             log_debug("📊 청산 후 재분류", f"남은 숏: {short_size_after}계약 | 기본/초과: {base_after}/{overflow_after}계약")
                                         
-                                        time.sleep(2)
-                                        cancel_open_orders("ETH_USDT")
-                                        time.sleep(1)
-                                        initialize_hedge_orders()
+                                        # ⭐ 청산 시 그리드 재생성 없음
+                                        update_position_state("ETH_USDT")
+                                        continue
                                         
                                 except Exception as e:
                                     log_debug("❌ 기본 숏 청산 오류", str(e))
                         
-                        # 초과 포지션 TP (개별 진입가 기준)
+                        # 초과 포지션 TP
                         for overflow_pos in overflow_positions[:]:
                             overflow_qty = overflow_pos["qty"]
                             overflow_price = overflow_pos["price"]
@@ -975,10 +979,9 @@ def eth_hedge_tp_monitor():
                                     if "ETH_USDT" in entry_history and "short" in entry_history["ETH_USDT"]:
                                         entry_history["ETH_USDT"]["short"] = []
                                     
-                                    time.sleep(2)
-                                    cancel_open_orders("ETH_USDT")
-                                    time.sleep(1)
-                                    initialize_hedge_orders()
+                                    # ⭐ 청산 시 그리드 재생성 없음
+                                    update_position_state("ETH_USDT")
+                                    continue
                                     
                             except Exception as e:
                                 log_debug("❌ 헤징 숏 청산 오류", str(e))
@@ -986,6 +989,7 @@ def eth_hedge_tp_monitor():
         except Exception as e:
             log_debug("❌ TP 모니터 오류", str(e), exc_info=True)
             time.sleep(5)
+
 
 # =============================================================================
 # 가격 모니터링 (WebSocket)
@@ -998,7 +1002,6 @@ async def price_monitor():
     while True:
         try:
             async with websockets.connect(uri) as ws:
-                # 구독
                 subscribe_msg = {
                     "time": int(time.time()),
                     "channel": "futures.tickers",
@@ -1008,7 +1011,6 @@ async def price_monitor():
                 await ws.send(json.dumps(subscribe_msg))
                 log_debug("🔗 WebSocket 연결", "ETH_USDT")
                 
-                # 메시지 수신
                 while True:
                     msg = await ws.recv()
                     data = json.loads(msg)
@@ -1040,21 +1042,18 @@ def ping():
 # =============================================================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v13.3-grid-reverse-dual-tp")
+    log_debug("🚀 서버 시작", "v14.0-grid-fill-based")
     
-    # ⭐ 최초 1회만 잔고 로그 출력
     INITIAL_BALANCE = Decimal(str(get_available_balance(show_log=True)))
     log_debug("💰 초기 잔고", f"{INITIAL_BALANCE:.2f} USDT")
     log_debug("🎯 임계값", f"{float(INITIAL_BALANCE * THRESHOLD_RATIO):.2f} USDT ({int(THRESHOLD_RATIO)}배)")
     
-    # ⭐ 진입 기록 초기화
     entry_history["ETH_USDT"] = {"long": [], "short": []}
     
-    # OBV MACD 계산
     obv_macd_val = calculate_obv_macd("ETH_USDT")
     log_debug("📊 OBV MACD", f"ETH_USDT: {obv_macd_val:.2f}")
     
-    # 그리드 초기화
+    # 초기 그리드 생성
     initialize_hedge_orders()
 
     # 스레드 시작
