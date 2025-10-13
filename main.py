@@ -60,15 +60,43 @@ def log_debug(label, msg="", exc_info=False):
 
 
 def get_primary_direction():
-    """주력 방향 판단 (OBV MACD 기반)"""
+    """주력 방향 판단 (실제 포지션 물량 기준)"""
     try:
-        obv_macd = calculate_obv_macd("ETH_USDT")
-        if obv_macd >= 0:
-            return "short"  # 롱 강세 → 숏이 주력
-        else:
-            return "long"  # 숏 강세 → 롱이 주력
-    except:
-        return None
+        with position_lock:
+            pos = position_state.get("ETH_USDT", {})
+            long_size = pos.get("long", {}).get("size", Decimal("0"))
+            long_price = pos.get("long", {}).get("price", Decimal("0"))
+            short_size = pos.get("short", {}).get("size", Decimal("0"))
+            short_price = pos.get("short", {}).get("price", Decimal("0"))
+            
+            # ⭐ 포지션 가치 기준 (더 정확)
+            long_value = calculate_position_value(long_size, long_price)
+            short_value = calculate_position_value(short_size, short_price)
+            
+            # 물량(가치)이 많은 쪽이 주력
+            if long_value > short_value:
+                return "long"   # 롱 가치 많음 → 롱 주력
+            elif short_value > long_value:
+                return "short"  # 숏 가치 많음 → 숏 주력
+            else:
+                # 동일하면 OBV MACD로 판단
+                obv_macd = calculate_obv_macd("ETH_USDT")
+                if obv_macd >= 0:
+                    return "short"
+                else:
+                    return "long"
+                    
+    except Exception as e:
+        log_debug("❌ 주력 방향 판단 오류", str(e))
+        # 에러 시 OBV MACD 백업
+        try:
+            obv_macd = calculate_obv_macd("ETH_USDT")
+            if obv_macd >= 0:
+                return "short"
+            else:
+                return "long"
+        except:
+            return None
 
 
 def get_candles(symbol, interval="1m", limit=100):
