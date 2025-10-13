@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+ONDO 역방향 그리드 매매 시스템 v16.1
+- TP 기반 그리드 재생성
+- 듀얼 TP (평단가/개별)
+- 모든 주문 지정가
+- 헤징 복원
+"""
+
 import os
 import time
 import asyncio
@@ -16,9 +24,18 @@ import numpy as np
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# 설정
+# =============================================================================
+
 SETTLE = "usdt"
-GRID_GAP_PCT = Decimal("0.19") / Decimal("100")  # 0.19%
-TP_GAP_PCT = Decimal("0.18") / Decimal("100")  # 0.18% TP
+SYMBOL = "ONDO_USDT"
+CONTRACT_SIZE = Decimal("1")  # 1 ONDO
+
+GRID_GAP_PCT = Decimal("0.20") / Decimal("100")  # 0.20%
+TP_GAP_PCT = Decimal("0.20") / Decimal("100")    # 0.20%
+HEDGE_RATIO = Decimal("0.2")  # 헤징 0.2배
+THRESHOLD_RATIO = Decimal("5.0")  # 임계값 5배
 
 # API 설정
 API_KEY = os.environ.get("API_KEY", "")
@@ -37,62 +54,70 @@ position_lock = threading.RLock()
 position_state = {}
 latest_prices = {}
 entry_history = {}
-INITIAL_BALANCE = Decimal("100")
-THRESHOLD_RATIO = Decimal("5.0")  # 10배 임계값
-CONTRACT_SIZE = Decimal("1")  # ⭐ ONDO 계약 크기
-
-# ⭐ 마지막 체결가 기록
-last_long_fill_price = None
-last_short_fill_price = None
+tp_orders = {}
+tp_type = {}
+INITIAL_BALANCE = Decimal("0")
 
 app = Flask(__name__)
 
 # =============================================================================
-# 유틸리티 함수
+# 유틸리티
 # =============================================================================
 
 def log_debug(label, msg="", exc_info=False):
-    """로그 출력"""
     if exc_info:
         logger.error(f"[{label}] {msg}", exc_info=True)
     else:
         logger.info(f"[{label}] {msg}")
 
 
-def get_primary_direction():
-    """주력 방향 판단 (실제 포지션 가치 기준)"""
+def get_available_balance(show_log=False):
+    """사용 가능 잔고 조회"""
     try:
-        with position_lock:
-            pos = position_state.get("ONDO_USDT", {})
-            long_size = pos.get("long", {}).get("size", Decimal("0"))
-            long_price = pos.get("long", {}).get("price", Decimal("0"))
-            short_size = pos.get("short", {}).get("size", Decimal("0"))
-            short_price = pos.get("short", {}).get("price", Decimal("0"))
-            
-            # 포지션 가치 기준
-            long_value = calculate_position_value(long_size, long_price)
-            short_value = calculate_position_value(short_size, short_price)
-            
-            if long_value > short_value:
-                return "long"
-            elif short_value > long_value:
-                return "short"
-            else:
-                # 동일하면 Shadow OBV MACD로 판단
-                obv_macd = calculate_obv_macd("ONDO_USDT")
-                return "short" if obv_macd >= 0 else "long"
-                    
-    except Exception as e:
-        log_debug("❌ 주력 방향 판단 오류", str(e))
         try:
-            obv_macd = calculate_obv_macd("ONDO_USDT")
-            return "short" if obv_macd >= 0 else "long"
-        except:
-            return None
+            unified_account = unified_api.list_unified_accounts()
+            if hasattr(unified_account, 'balances') and unified_account.balances:
+                balances = unified_account.balances
+                if isinstance(balances, dict) and "USDT" in balances:
+                    usdt_data = balances["USDT"]
+                    try:
+                        if isinstance(usdt_data, dict):
+                            available_str = str(usdt_data.get("available", "0"))
+                        else:
+                            available_str = str(getattr(usdt_data, "available", "0"))
+                        usdt_balance = float(available_str)
+                        if usdt_balance > 0:
+                            if show_log:
+                                log_debug("💰 잔고 (Unified)", f"{usdt_balance:.2f} USDT")
+                            return usdt_balance
+                    except Exception as e:
+                        if show_log:
+                            log_debug("⚠️ USDT 파싱 오류", str(e))
+        except Exception as e:
+            if show_log:
+                log_debug("⚠️ Unified API 오류", str(e))
+        
+        try:
+            account = api.list_futures_accounts(settle=SETTLE)
+            if account:
+                available = float(getattr(account, "available", "0"))
+                if available > 0:
+                    if show_log:
+                        log_debug("💰 잔고 (Futures)", f"{available:.2f} USDT")
+                    return available
+        except Exception as e:
+            if show_log:
+                log_debug("❌ Futures API 오류", str(e))
+        
+        return 0.0
+    except Exception as e:
+        if show_log:
+            log_debug("❌ 잔고 조회 실패", str(e), exc_info=True)
+        return 0.0
 
 
 def get_candles(symbol, interval="10s", limit=600):
-    """캔들 데이터 가져오기"""
+    """캔들 데이터"""
     try:
         candles = api.list_futures_candlesticks(SETTLE, contract=symbol, interval=interval, limit=limit)
         if not candles:
@@ -114,39 +139,31 @@ def get_candles(symbol, interval="10s", limit=600):
 
 
 def calculate_obv_macd(symbol):
-    """Shadow OBV MACD 계산 (TradingView 버전)"""
+    """Shadow OBV MACD"""
     try:
         df = get_candles(symbol, interval="10s", limit=600)
         if df is None or len(df) < 50:
             return Decimal("0")
         
-        # 파라미터
         window_len = 28
         v_len = 14
         ma_len = 9
         slow_length = 26
         
-        # 1. Shadow OBV 계산
         price_spread = df['high'] - df['low']
         price_spread_std = price_spread.rolling(window=window_len, min_periods=1).std().fillna(0)
         
-        # 기본 OBV
         price_change = df['close'].diff().fillna(0)
         volume_signed = np.sign(price_change) * df['volume']
         v = volume_signed.cumsum()
         
-        # OBV 스무딩
         smooth = v.rolling(window=v_len, min_periods=1).mean()
-        
-        # OBV 스프레드
         v_diff = v - smooth
         v_spread = v_diff.rolling(window=window_len, min_periods=1).std().fillna(1)
         v_spread = v_spread.replace(0, 1)
         
-        # Shadow
         shadow = (v_diff / v_spread) * price_spread_std
         
-        # Out
         out = pd.Series(index=df.index, dtype=float)
         for i in range(len(df)):
             if shadow.iloc[i] > 0:
@@ -154,15 +171,11 @@ def calculate_obv_macd(symbol):
             else:
                 out.iloc[i] = df['low'].iloc[i] + shadow.iloc[i]
         
-        # DEMA
         ma1 = out.ewm(span=ma_len, adjust=False).mean()
         ma2 = ma1.ewm(span=ma_len, adjust=False).mean()
         dema = 2 * ma1 - ma2
         
-        # Slow MA
         slow_ma = df['close'].ewm(span=slow_length, adjust=False).mean()
-        
-        # MACD
         macd = dema - slow_ma
         
         final_value = macd.iloc[-1]
@@ -173,240 +186,70 @@ def calculate_obv_macd(symbol):
         return Decimal(str(final_value))
         
     except Exception as e:
-        log_debug("❌ Shadow OBV MACD 계산 오류", str(e), exc_info=True)
+        log_debug("❌ OBV MACD 오류", str(e), exc_info=True)
         return Decimal("0")
 
 
-def get_available_balance(show_log=False):
-    """사용 가능 잔고 조회 (Unified Account 우선)"""
-    try:
-        # 1. Unified Account 시도
-        try:
-            unified_account = unified_api.list_unified_accounts()
-            if hasattr(unified_account, 'balances') and unified_account.balances:
-                balances = unified_account.balances
-                if isinstance(balances, dict) and "USDT" in balances:
-                    usdt_data = balances["USDT"]
-                    try:
-                        if isinstance(usdt_data, dict):
-                            available_str = str(usdt_data.get("available", "0"))
-                        else:
-                            available_str = str(getattr(usdt_data, "available", "0"))
-                        usdt_balance = float(available_str)
-                        if usdt_balance > 0:
-                            if show_log:
-                                log_debug("💰 잔고 (Unified)", f"{usdt_balance:.2f} USDT")
-                            return usdt_balance
-                        
-                        if isinstance(usdt_data, dict):
-                            equity_str = str(usdt_data.get("equity", "0"))
-                        else:
-                            equity_str = str(getattr(usdt_data, "equity", "0"))
-                        usdt_balance = float(equity_str)
-                        if usdt_balance > 0:
-                            if show_log:
-                                log_debug("💰 잔고 (Unified Equity)", f"{usdt_balance:.2f} USDT")
-                            return usdt_balance
-                    except Exception as e:
-                        if show_log:
-                            log_debug("⚠️ USDT 파싱 오류", str(e))
-        except Exception as e:
-            if show_log:
-                log_debug("⚠️ Unified API 오류", str(e))
-        
-        # 2. Futures Account 시도
-        try:
-            account = api.list_futures_accounts(settle=SETTLE)
-            if account:
-                available = float(getattr(account, "available", "0"))
-                if available > 0:
-                    if show_log:
-                        log_debug("💰 잔고 (Futures)", f"{available:.2f} USDT")
-                    return available
-                total = float(getattr(account, "total", "0"))
-                if total > 0:
-                    if show_log:
-                        log_debug("💰 잔고 (Futures Total)", f"{total:.2f} USDT")
-                    return total
-        except Exception as e:
-            if show_log:
-                log_debug("❌ Futures API 오류", str(e))
-        
-        if show_log:
-            log_debug("⚠️ 잔고 0", "모든 API에서 잔고를 찾을 수 없음")
-        return 0.0
-    except Exception as e:
-        if show_log:
-            log_debug("❌ 잔고 조회 실패", str(e), exc_info=True)
-        return 0.0
-
-
 def calculate_grid_qty(current_price):
-    """그리드 수량 계산 (Shadow OBV MACD 기반) - 초기 자본금 고정"""
+    """그리드 수량 계산 (OBV MACD 기반)"""
     try:
         if INITIAL_BALANCE <= 0:
             return 1
         
-        obv_macd = calculate_obv_macd("ONDO_USDT")
+        obv_macd = calculate_obv_macd(SYMBOL)
         abs_val = abs(float(obv_macd))
         
         if abs_val < 20:
             leverage = Decimal("0.2")
-        elif abs_val >= 20 and abs_val < 30:
+        elif abs_val < 30:
             leverage = Decimal("0.3")
-        elif abs_val >= 30 and abs_val < 40:
-            leverage = Decimal("0.35")
-        elif abs_val >= 40 and abs_val < 50:
+        elif abs_val < 40:
             leverage = Decimal("0.4")
-        elif abs_val >= 50 and abs_val < 60:
-            leverage = Decimal("0.45")
-        elif abs_val >= 60 and abs_val < 70:
+        elif abs_val < 50:
             leverage = Decimal("0.5")
-        elif abs_val >= 70 and abs_val < 80:
-            leverage = Decimal("0.55")
-        elif abs_val >= 80 and abs_val < 90:
+        elif abs_val < 60:
             leverage = Decimal("0.6")
-        elif abs_val >= 90 and abs_val < 100:
-            leverage = Decimal("0.65")
-        elif abs_val >= 100 and abs_val < 110:
+        elif abs_val < 70:
             leverage = Decimal("0.7")
         else:
             leverage = Decimal("0.8")
         
         qty = int((INITIAL_BALANCE * leverage) / (current_price * CONTRACT_SIZE))
-        
         return max(1, qty)
     except Exception as e:
-        log_debug("❌ 그리드 수량 계산 오류", str(e))
+        log_debug("❌ 그리드 수량 오류", str(e))
         return 1
 
 
 def calculate_position_value(qty, price):
-    """포지션 가치 계산 (USDT)"""
+    """포지션 가치"""
     return qty * price * CONTRACT_SIZE
 
 
-def calculate_capital_usage_pct(symbol):
-    """자본금 사용률 계산 (%)"""
+def get_primary_direction():
+    """주력 방향 판단"""
     try:
-        pos = position_state.get(symbol, {})
-        long_size = pos.get("long", {}).get("size", Decimal("0"))
-        long_price = pos.get("long", {}).get("price", Decimal("0"))
-        short_size = pos.get("short", {}).get("size", Decimal("0"))
-        short_price = pos.get("short", {}).get("price", Decimal("0"))
-        
-        long_value = calculate_position_value(long_size, long_price)
-        short_value = calculate_position_value(short_size, short_price)
-        total_value = long_value + short_value
-        
-        if INITIAL_BALANCE > 0:
-            usage_pct = (total_value / INITIAL_BALANCE) * Decimal("100")
-            return float(usage_pct)
-        return 0.0
-    except Exception as e:
-        log_debug("❌ 자본금 사용률 계산 오류", str(e))
-        return 0.0
-
-
-# =============================================================================
-# 진입 기록 관리
-# =============================================================================
-
-def record_entry(symbol, side, price, qty):
-    """진입 기록"""
-    if symbol not in entry_history:
-        entry_history[symbol] = {"long": [], "short": []}
-    
-    entry_history[symbol][side].append({
-        "price": Decimal(str(price)),
-        "qty": Decimal(str(qty)),
-        "timestamp": time.time()
-    })
-    
-    usage_pct = calculate_capital_usage_pct(symbol)
-    position_value = calculate_position_value(Decimal(str(qty)), Decimal(str(price)))
-    
-    log_debug("📝 진입 기록", 
-             f"{symbol}_{side} {qty}계약 @ {price} | "
-             f"포지션가치: {float(position_value):.2f} USDT | "
-             f"자본금사용률: {usage_pct:.1f}%")
-
-
-def classify_positions(symbol, side):
-    """포지션을 기본/초과로 분류 (10배 임계값)"""
-    try:
-        threshold_value = INITIAL_BALANCE * THRESHOLD_RATIO
-        
-        pos = position_state.get(symbol, {}).get(side, {})
-        total_size = pos.get("size", Decimal("0"))
-        avg_price = pos.get("price", Decimal("0"))
-        
-        if total_size <= 0:
-            return {"base": [], "overflow": []}
-        
-        entries = entry_history.get(symbol, {}).get(side, [])
-        
-        if not entries:
-            total_value = calculate_position_value(total_size, avg_price)
+        with position_lock:
+            pos = position_state.get(SYMBOL, {})
+            long_size = pos.get("long", {}).get("size", Decimal("0"))
+            long_price = pos.get("long", {}).get("price", Decimal("0"))
+            short_size = pos.get("short", {}).get("size", Decimal("0"))
+            short_price = pos.get("short", {}).get("price", Decimal("0"))
             
-            if total_value <= threshold_value:
-                return {
-                    "base": [{"qty": total_size, "price": avg_price, "timestamp": time.time()}],
-                    "overflow": []
-                }
-            else:
-                base_qty = int(threshold_value / (avg_price * CONTRACT_SIZE))
-                overflow_qty = total_size - base_qty
-                
-                return {
-                    "base": [{"qty": base_qty, "price": avg_price, "timestamp": time.time()}] if base_qty > 0 else [],
-                    "overflow": [{"qty": overflow_qty, "price": avg_price, "timestamp": time.time()}] if overflow_qty > 0 else []
-                }
-        
-        base_positions = []
-        overflow_positions = []
-        accumulated_value = Decimal("0")
-        
-        for entry in entries:
-            entry_qty = entry["qty"]
-            entry_price = entry["price"]
-            entry_value = calculate_position_value(entry_qty, entry_price)
+            long_value = calculate_position_value(long_size, long_price)
+            short_value = calculate_position_value(short_size, short_price)
             
-            if accumulated_value + entry_value <= threshold_value:
-                base_positions.append(entry)
-                accumulated_value += entry_value
+            if long_value > short_value:
+                return "long"
+            elif short_value > long_value:
+                return "short"
             else:
-                overflow_positions.append(entry)
-        
-        recorded_qty = sum(p["qty"] for p in base_positions) + sum(p["qty"] for p in overflow_positions)
-        
-        if recorded_qty < total_size:
-            missing_qty = total_size - recorded_qty
-            missing_value = calculate_position_value(missing_qty, avg_price)
-            
-            if accumulated_value + missing_value <= threshold_value:
-                base_positions.append({"qty": missing_qty, "price": avg_price, "timestamp": time.time()})
-            else:
-                remaining_base_value = threshold_value - accumulated_value
-                if remaining_base_value > 0:
-                    base_add_qty = int(remaining_base_value / (avg_price * CONTRACT_SIZE))
-                    overflow_add_qty = missing_qty - base_add_qty
+                obv_macd = calculate_obv_macd(SYMBOL)
+                return "short" if obv_macd >= 0 else "long"
                     
-                    if base_add_qty > 0:
-                        base_positions.append({"qty": base_add_qty, "price": avg_price, "timestamp": time.time()})
-                    if overflow_add_qty > 0:
-                        overflow_positions.append({"qty": overflow_add_qty, "price": avg_price, "timestamp": time.time()})
-                else:
-                    overflow_positions.append({"qty": missing_qty, "price": avg_price, "timestamp": time.time()})
-        
-        return {
-            "base": base_positions,
-            "overflow": overflow_positions
-        }
-        
     except Exception as e:
-        log_debug("❌ 포지션 분류 오류", str(e), exc_info=True)
-        return {"base": [], "overflow": []}
+        log_debug("❌ 주력 방향 오류", str(e))
+        return None
 
 
 # =============================================================================
@@ -448,8 +291,26 @@ def update_position_state(symbol):
         log_debug("❌ 포지션 업데이트 실패", str(e), exc_info=True)
 
 
-def cancel_open_orders(symbol):
-    """미체결 주문 취소"""
+def record_entry(symbol, side, price, qty):
+    """진입 기록"""
+    if symbol not in entry_history:
+        entry_history[symbol] = {"long": [], "short": []}
+    
+    entry_history[symbol][side].append({
+        "price": Decimal(str(price)),
+        "qty": Decimal(str(qty)),
+        "timestamp": time.time()
+    })
+    
+    log_debug("📝 진입 기록", f"{symbol}_{side} {qty}계약 @ {price}")
+
+
+# =============================================================================
+# 주문 관리
+# =============================================================================
+
+def cancel_all_orders(symbol):
+    """모든 주문 취소"""
     try:
         orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
         for order in orders:
@@ -461,103 +322,280 @@ def cancel_open_orders(symbol):
         pass
 
 
+def cancel_grid_orders(symbol):
+    """그리드 주문만 취소 (TP는 유지)"""
+    try:
+        orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
+        for order in orders:
+            try:
+                if not order.is_reduce_only:
+                    api.cancel_futures_order(SETTLE, order.id)
+            except:
+                pass
+    except:
+        pass
+
+
+def cancel_tp_orders(symbol, side):
+    """TP 주문 취소"""
+    try:
+        if symbol in tp_orders and side in tp_orders[symbol]:
+            for tp_order in tp_orders[symbol][side][:]:
+                try:
+                    api.cancel_futures_order(SETTLE, tp_order["order_id"])
+                    tp_orders[symbol][side].remove(tp_order)
+                except:
+                    pass
+    except:
+        pass
+
+
 # =============================================================================
-# 그리드 주문
+# TP 관리
 # =============================================================================
 
-def initialize_hedge_orders(base_price=None):
-    """ONDO 역방향 그리드 주문 초기화 (마지막 체결가 기준)"""
+def place_average_tp_order(symbol, side, price, qty):
+    """평단가 TP 지정가 주문"""
     try:
-        symbol = "ONDO_USDT"
+        if side == "long":
+            tp_price = price * (Decimal("1") + TP_GAP_PCT)
+            order_size = -int(qty)
+        else:
+            tp_price = price * (Decimal("1") - TP_GAP_PCT)
+            order_size = int(qty)
         
-        ticker = api.list_futures_tickers(SETTLE, contract=symbol)
-        if not ticker or len(ticker) == 0:
-            return
+        order = FuturesOrder(
+            contract=symbol,
+            size=order_size,
+            price=str(round(float(tp_price), 4)),
+            tif="gtc",
+            reduce_only=True
+        )
         
-        # ⭐ 기준 가격 결정
-        global last_long_fill_price, last_short_fill_price
+        result = api.create_futures_order(SETTLE, order)
         
-        if base_price is not None:
-            current_price = Decimal(str(base_price))
-            log_debug("🎯 그리드 기준가", f"지정 체결가: {current_price:.2f}")
-        elif last_long_fill_price is not None or last_short_fill_price is not None:
-            if last_long_fill_price is not None and last_short_fill_price is not None:
-                current_price = max(last_long_fill_price, last_short_fill_price)
-            elif last_long_fill_price is not None:
-                current_price = last_long_fill_price
+        if symbol not in tp_orders:
+            tp_orders[symbol] = {"long": [], "short": []}
+        
+        tp_orders[symbol][side].append({
+            "order_id": result.id,
+            "tp_price": tp_price,
+            "qty": qty,
+            "type": "average"
+        })
+        
+        log_debug("📌 평단 TP", f"{symbol}_{side} {qty}계약 TP:{float(tp_price):.4f}")
+        
+    except Exception as e:
+        log_debug("❌ 평단 TP 실패", str(e))
+
+
+def place_individual_tp_orders(symbol, side, entries):
+    """개별 진입별 TP 지정가 주문"""
+    try:
+        for entry in entries:
+            entry_price = entry["price"]
+            qty = entry["qty"]
+            
+            if side == "long":
+                tp_price = entry_price * (Decimal("1") + TP_GAP_PCT)
+                order_size = -int(qty)
             else:
-                current_price = last_short_fill_price
-            log_debug("🎯 그리드 기준가", f"마지막 체결가: {current_price:.2f}")
-        else:
-            current_price = Decimal(str(ticker[0].last))
-            log_debug("🎯 그리드 기준가", f"현재 시장가: {current_price:.2f}")
-        
-        obv_macd = calculate_obv_macd(symbol)
-        
-        upper_price = float(current_price * (Decimal("1") + GRID_GAP_PCT))
-        lower_price = float(current_price * (Decimal("1") - GRID_GAP_PCT))
-        
-        cancel_open_orders(symbol)
-        time.sleep(0.5)
-        
-        if obv_macd >= 0:
-            short_qty = calculate_grid_qty(current_price)
-            long_qty = int((INITIAL_BALANCE * Decimal("0.2")) / (current_price * CONTRACT_SIZE))
-            long_qty = max(1, long_qty)
-        else:
-            long_qty = calculate_grid_qty(current_price)
-            short_qty = int((INITIAL_BALANCE * Decimal("0.2")) / (current_price * CONTRACT_SIZE))
-            short_qty = max(1, short_qty)
-        
-        # 위쪽 숏 주문
-        try:
+                tp_price = entry_price * (Decimal("1") - TP_GAP_PCT)
+                order_size = int(qty)
+            
             order = FuturesOrder(
                 contract=symbol,
+                size=order_size,
+                price=str(round(float(tp_price), 4)),
+                tif="gtc",
+                reduce_only=True
+            )
+            
+            result = api.create_futures_order(SETTLE, order)
+            
+            if symbol not in tp_orders:
+                tp_orders[symbol] = {"long": [], "short": []}
+            
+            tp_orders[symbol][side].append({
+                "order_id": result.id,
+                "entry_price": entry_price,
+                "tp_price": tp_price,
+                "qty": qty,
+                "type": "individual"
+            })
+            
+            log_debug("📌 개별 TP", 
+                     f"{symbol}_{side} {qty}계약 진입:{float(entry_price):.4f} TP:{float(tp_price):.4f}")
+            
+            time.sleep(0.1)
+            
+    except Exception as e:
+        log_debug("❌ 개별 TP 실패", str(e))
+
+
+def check_and_update_tp_mode(symbol, side):
+    """임계값 체크 및 TP 모드 전환"""
+    try:
+        pos = position_state.get(symbol, {}).get(side, {})
+        size = pos.get("size", Decimal("0"))
+        price = pos.get("price", Decimal("0"))
+        
+        if size == 0:
+            return
+        
+        position_value = calculate_position_value(size, price)
+        threshold_value = INITIAL_BALANCE * THRESHOLD_RATIO
+        
+        current_type = tp_type.get(symbol, {}).get(side, "average")
+        
+        if position_value > threshold_value:
+            if current_type != "individual":
+                log_debug("⚠️ 임계값 초과", 
+                         f"{symbol}_{side} {float(position_value):.2f} > {float(threshold_value):.2f}")
+                
+                cancel_tp_orders(symbol, side)
+                
+                entries = entry_history.get(symbol, {}).get(side, [])
+                if entries:
+                    place_individual_tp_orders(symbol, side, entries)
+                
+                if symbol not in tp_type:
+                    tp_type[symbol] = {"long": "average", "short": "average"}
+                tp_type[symbol][side] = "individual"
+                
+        else:
+            if current_type == "individual":
+                log_debug("✅ 임계값 복귀", 
+                         f"{symbol}_{side} {float(position_value):.2f} < {float(threshold_value):.2f}")
+                
+                cancel_tp_orders(symbol, side)
+                place_average_tp_order(symbol, side, price, size)
+                tp_type[symbol][side] = "average"
+                
+    except Exception as e:
+        log_debug("❌ TP 모드 체크 오류", str(e))
+
+
+def refresh_tp_orders(symbol):
+    """TP 주문 새로고침"""
+    try:
+        for side in ["long", "short"]:
+            pos = position_state.get(symbol, {}).get(side, {})
+            size = pos.get("size", Decimal("0"))
+            
+            if size > 0:
+                cancel_tp_orders(symbol, side)
+                check_and_update_tp_mode(symbol, side)
+                
+    except Exception as e:
+        log_debug("❌ TP 새로고침 오류", str(e))
+
+
+# =============================================================================
+# 그리드 관리
+# =============================================================================
+
+def initialize_grid(base_price=None):
+    """그리드 초기화"""
+    try:
+        if base_price is None:
+            ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+            if not ticker:
+                return
+            base_price = Decimal(str(ticker[0].last))
+        
+        obv_macd = calculate_obv_macd(SYMBOL)
+        
+        upper_price = float(base_price * (Decimal("1") + GRID_GAP_PCT))
+        lower_price = float(base_price * (Decimal("1") - GRID_GAP_PCT))
+        
+        if obv_macd >= 0:
+            short_qty = calculate_grid_qty(base_price)
+            long_qty = max(1, int((INITIAL_BALANCE * HEDGE_RATIO) / (base_price * CONTRACT_SIZE)))
+        else:
+            long_qty = calculate_grid_qty(base_price)
+            short_qty = max(1, int((INITIAL_BALANCE * HEDGE_RATIO) / (base_price * CONTRACT_SIZE)))
+        
+        try:
+            order = FuturesOrder(
+                contract=SYMBOL,
                 size=-short_qty,
-                price=str(round(upper_price, 2)),
+                price=str(round(upper_price, 4)),
                 tif="gtc"
             )
             api.create_futures_order(SETTLE, order)
         except Exception as e:
             log_debug("❌ 숏 주문 실패", str(e))
         
-        # 아래쪽 롱 주문
         try:
             order = FuturesOrder(
-                contract=symbol,
+                contract=SYMBOL,
                 size=long_qty,
-                price=str(round(lower_price, 2)),
+                price=str(round(lower_price, 4)),
                 tif="gtc"
             )
             api.create_futures_order(SETTLE, order)
         except Exception as e:
             log_debug("❌ 롱 주문 실패", str(e))
         
-        log_debug("🎯 역방향 그리드 초기화", 
-                 f"ONDO 위숏:{short_qty}@{upper_price:.2f} 아래롱:{long_qty}@{lower_price:.2f} | "
-                 f"기준가:{current_price:.2f} | OBV:{float(obv_macd):.2f} {'(롱강세→숏주력)' if obv_macd >= 0 else '(숏강세→롱주력)'}")
+        log_debug("🎯 그리드 생성", 
+                 f"기준:{base_price:.4f} 위:{upper_price:.4f} 아래:{lower_price:.4f} | OBV:{float(obv_macd):.2f}")
         
     except Exception as e:
-        log_debug("❌ 그리드 초기화 실패", str(e), exc_info=True)
+        log_debug("❌ 그리드 생성 실패", str(e), exc_info=True)
 
 
 # =============================================================================
-# 체결 모니터링
+# 헤징 주문 (지정가)
 # =============================================================================
 
-def ondo_hedge_fill_monitor():
-    """ONDO 체결 감지 및 역방향 헤징 + 진입 기록 (⭐ 중복 체결 방지)"""
-    global last_long_fill_price, last_short_fill_price
+def place_hedge_order(symbol, side, current_price):
+    """헤징 지정가 주문"""
+    try:
+        hedge_qty = max(1, int((INITIAL_BALANCE * HEDGE_RATIO) / (current_price * CONTRACT_SIZE)))
+        
+        if side == "short":
+            hedge_price = current_price * (Decimal("1") + Decimal("0.0005"))  # +0.05%
+            order_size = -hedge_qty
+        else:  # long
+            hedge_price = current_price * (Decimal("1") - Decimal("0.0005"))  # -0.05%
+            order_size = hedge_qty
+        
+        order = FuturesOrder(
+            contract=symbol,
+            size=order_size,
+            price=str(round(float(hedge_price), 4)),
+            tif="gtc"
+        )
+        
+        result = api.create_futures_order(SETTLE, order)
+        
+        log_debug("📌 헤징 주문", f"{symbol} {side} {hedge_qty}계약 @ {float(hedge_price):.4f}")
+        
+        return result.id
+        
+    except Exception as e:
+        log_debug("❌ 헤징 주문 실패", str(e))
+        return None
+
+
+# =============================================================================
+# 체결 모니터링 (수정)
+# =============================================================================
+
+def fill_monitor():
+    """체결 감지 및 처리"""
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
     last_action_time = 0
     
     while True:
         time.sleep(2)
-        update_position_state("ONDO_USDT")
+        update_position_state(SYMBOL)
         
         with position_lock:
-            pos = position_state.get("ONDO_USDT", {})
+            pos = position_state.get(SYMBOL, {})
             long_size = pos.get("long", {}).get("size", Decimal("0"))
             short_size = pos.get("short", {}).get("size", Decimal("0"))
             long_price = pos.get("long", {}).get("price", Decimal("0"))
@@ -565,501 +603,131 @@ def ondo_hedge_fill_monitor():
             
             now = time.time()
             
-            # 현재 가격
+            # 현재가
             try:
-                ticker = api.list_futures_tickers(SETTLE, contract="ONDO_USDT")
+                ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                 current_price = Decimal(str(ticker[0].last)) if ticker else Decimal("0")
             except:
                 current_price = Decimal("0")
             
-            # 헤징 수량 계산 (0.2배 고정)
-            hedge_qty = int((INITIAL_BALANCE * Decimal("0.2")) / (current_price * CONTRACT_SIZE))
-            hedge_qty = max(1, hedge_qty)
-            
-            # ==================== 롱 체결 시 ====================
-            if long_size > prev_long_size and now - last_action_time >= 10:
-                # ⭐ 즉시 기존 주문 취소 (중복 체결 방지)
-                cancel_open_orders("ONDO_USDT")
-                
-                current_balance = get_available_balance(show_log=True)
+            # 롱 체결
+            if long_size > prev_long_size and now - last_action_time >= 5:
                 added_long = long_size - prev_long_size
                 
-                usage_pct = calculate_capital_usage_pct("ONDO_USDT")
-                long_value = calculate_position_value(long_size, long_price)
+                log_debug("📊 롱 체결", f"{added_long}계약 @ {long_price:.4f} (총 {long_size}계약)")
                 
-                classified = classify_positions("ONDO_USDT", "long")
-                base_qty = sum(p["qty"] for p in classified["base"])
-                overflow_qty = sum(p["qty"] for p in classified["overflow"])
+                record_entry(SYMBOL, "long", long_price, added_long)
+                cancel_grid_orders(SYMBOL)
+                refresh_tp_orders(SYMBOL)
                 
-                log_debug("📊 롱 체결", 
-                         f"ONDO @ {long_price} +{added_long}계약 (총 {long_size}계약) | "
-                         f"포지션가치: {float(long_value):.2f} USDT | "
-                         f"자본금사용률: {usage_pct:.1f}% | "
-                         f"기본/초과: {base_qty}/{overflow_qty}계약")
+                # ⭐ 숏 헤징
+                if current_price > 0:
+                    place_hedge_order(SYMBOL, "short", current_price)
                 
-                record_entry("ONDO_USDT", "long", long_price, added_long)
-                
-                # ⭐ 마지막 체결가 기록
-                last_long_fill_price = long_price
-                
-                prev_long_size = long_size
-                prev_short_size = short_size
-                last_action_time = now
-                
-                # 숏 헤징
-                if hedge_qty >= 1:
-                    try:
-                        order = FuturesOrder(
-                            contract="ONDO_USDT",
-                            size=-int(hedge_qty),
-                            price="0",
-                            tif="ioc"
-                        )
-                        api.create_futures_order(SETTLE, order)
-                        log_debug("🔄 숏 헤징 (0.5배 고정)", f"{hedge_qty}계약")
-                        
-                        time.sleep(1)
-                        update_position_state("ONDO_USDT")
-                        pos = position_state.get("ONDO_USDT", {})
-                        prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
-                        prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
-                    except Exception as e:
-                        log_debug("❌ 헤징 실패", str(e))
-                
-                # ⭐ 체결 후 즉시 그리드 재생성 (체결가 기준)
+                # ⭐⭐⭐ 헤징 체결 대기 및 포지션 업데이트
                 time.sleep(1)
-                initialize_hedge_orders(last_long_fill_price)
-            
-            # ==================== 숏 체결 시 ====================
-            elif short_size > prev_short_size and now - last_action_time >= 10:
-                # ⭐ 즉시 기존 주문 취소 (중복 체결 방지)
-                cancel_open_orders("ONDO_USDT")
+                update_position_state(SYMBOL)
+                pos = position_state.get(SYMBOL, {})
+                prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
+                prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
                 
-                current_balance = get_available_balance(show_log=True)
+                # 그리드 재생성
+                initialize_grid(long_price)
+                last_action_time = now
+            
+            # 숏 체결
+            elif short_size > prev_short_size and now - last_action_time >= 5:
                 added_short = short_size - prev_short_size
                 
-                usage_pct = calculate_capital_usage_pct("ONDO_USDT")
-                short_value = calculate_position_value(short_size, short_price)
+                log_debug("📊 숏 체결", f"{added_short}계약 @ {short_price:.4f} (총 {short_size}계약)")
                 
-                classified = classify_positions("ONDO_USDT", "short")
-                base_qty = sum(p["qty"] for p in classified["base"])
-                overflow_qty = sum(p["qty"] for p in classified["overflow"])
+                record_entry(SYMBOL, "short", short_price, added_short)
+                cancel_grid_orders(SYMBOL)
+                refresh_tp_orders(SYMBOL)
                 
-                log_debug("📊 숏 체결", 
-                         f"ONDO @ {short_price} +{added_short}계약 (총 {short_size}계약) | "
-                         f"포지션가치: {float(short_value):.2f} USDT | "
-                         f"자본금사용률: {usage_pct:.1f}% | "
-                         f"기본/초과: {base_qty}/{overflow_qty}계약")
+                # ⭐ 롱 헤징
+                if current_price > 0:
+                    place_hedge_order(SYMBOL, "long", current_price)
                 
-                record_entry("ONDO_USDT", "short", short_price, added_short)
-                
-                # ⭐ 마지막 체결가 기록
-                last_short_fill_price = short_price
-                
-                prev_long_size = long_size
-                prev_short_size = short_size
-                last_action_time = now
-                
-                # 롱 헤징
-                if hedge_qty >= 1:
-                    try:
-                        order = FuturesOrder(
-                            contract="ONDO_USDT",
-                            size=int(hedge_qty),
-                            price="0",
-                            tif="ioc"
-                        )
-                        api.create_futures_order(SETTLE, order)
-                        log_debug("🔄 롱 헤징 (0.5배 고정)", f"{hedge_qty}계약")
-                        
-                        time.sleep(1)
-                        update_position_state("ONDO_USDT")
-                        pos = position_state.get("ONDO_USDT", {})
-                        prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
-                        prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
-                    except Exception as e:
-                        log_debug("❌ 헤징 실패", str(e))
-                
-                # ⭐ 체결 후 즉시 그리드 재생성 (체결가 기준)
+                # ⭐⭐⭐ 헤징 체결 대기 및 포지션 업데이트
                 time.sleep(1)
-                initialize_hedge_orders(last_short_fill_price)
+                update_position_state(SYMBOL)
+                pos = position_state.get(SYMBOL, {})
+                prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
+                prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
+                
+                # 그리드 재생성
+                initialize_grid(short_price)
+                last_action_time = now
 
 
 # =============================================================================
-# 듀얼 TP 모니터링
+# TP 체결 모니터링
 # =============================================================================
 
-def ondo_hedge_tp_monitor():
-    """⭐ ONDO TP 모니터링 (일반 TP 우선, 주력 방향만 듀얼 TP)"""
+def tp_monitor():
+    """TP 체결 감지 및 그리드 재생성"""
     while True:
-        time.sleep(1)
+        time.sleep(3)
         
         try:
-            ticker = api.list_futures_tickers(SETTLE, contract="ONDO_USDT")
-            if not ticker:
-                continue
-            
-            current_price = Decimal(str(ticker[0].last))
-            primary_direction = get_primary_direction()
+            update_position_state(SYMBOL)
             
             with position_lock:
-                pos = position_state.get("ONDO_USDT", {})
-                
-                # ==================== 롱 포지션 ====================
+                pos = position_state.get(SYMBOL, {})
                 long_size = pos.get("long", {}).get("size", Decimal("0"))
-                long_price = pos.get("long", {}).get("price", Decimal("0"))
-                
-                if long_size > 0 and long_price > 0:
-                    # ⭐ 1순위: 일반 TP 체크
-                    normal_tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
-                    
-                    if current_price >= normal_tp_price:
-                        long_value = calculate_position_value(long_size, long_price)
-                        
-                        log_debug("🎯 일반 롱 TP 도달", 
-                                f"{long_size}계약 평단:{long_price:.2f} TP:{normal_tp_price:.2f} | "
-                                f"포지션가치: {float(long_value):.2f} USDT")
-                        
-                        try:
-                            order = FuturesOrder(
-                                contract="ONDO_USDT",
-                                size=-int(long_size),
-                                price="0",
-                                tif="ioc",
-                                reduce_only=True
-                            )
-                            result = api.create_futures_order(SETTLE, order)
-                            
-                            if result:
-                                log_debug("✅ 일반 롱 청산", f"{long_size}계약 @ {current_price:.2f}")
-                                
-                                if "ONDO_USDT" in entry_history and "long" in entry_history["ONDO_USDT"]:
-                                    entry_history["ONDO_USDT"]["long"] = []
-                                
-                                update_position_state("ONDO_USDT")
-                                continue
-                                
-                        except Exception as e:
-                            log_debug("❌ 일반 롱 청산 오류", str(e))
-                    
-                    # ⭐ 2순위: 듀얼 TP (롱이 주력일 때만)
-                    elif primary_direction == "long":
-                        classified = classify_positions("ONDO_USDT", "long")
-                        base_positions = classified["base"]
-                        overflow_positions = classified["overflow"]
-                        
-                        # 기본 포지션 TP
-                        if base_positions:
-                            base_total_qty = sum(p["qty"] for p in base_positions)
-                            base_avg_price = sum(p["qty"] * p["price"] for p in base_positions) / base_total_qty
-                            base_tp_price = base_avg_price * (Decimal("1") + TP_GAP_PCT)
-                            
-                            if current_price >= base_tp_price:
-                                base_value = calculate_position_value(base_total_qty, base_avg_price)
-                                
-                                log_debug("🎯 기본 롱 TP 도달", 
-                                        f"{base_total_qty}계약 평단:{base_avg_price:.2f} TP:{base_tp_price:.2f} | "
-                                        f"포지션가치: {float(base_value):.2f} USDT")
-                                
-                                try:
-                                    order = FuturesOrder(
-                                        contract="ONDO_USDT",
-                                        size=-int(base_total_qty),
-                                        price="0",
-                                        tif="ioc",
-                                        reduce_only=True
-                                    )
-                                    result = api.create_futures_order(SETTLE, order)
-                                    
-                                    if result:
-                                        log_debug("✅ 기본 롱 청산", f"{base_total_qty}계약 @ {current_price:.2f}")
-                                        
-                                        time.sleep(1)
-                                        update_position_state("ONDO_USDT")
-                                        
-                                        if "ONDO_USDT" in entry_history and "long" in entry_history["ONDO_USDT"]:
-                                            entry_history["ONDO_USDT"]["long"] = [
-                                                e for e in entry_history["ONDO_USDT"]["long"] 
-                                                if e not in base_positions
-                                            ]
-                                        
-                                        pos_after = position_state.get("ONDO_USDT", {})
-                                        long_size_after = pos_after.get("long", {}).get("size", Decimal("0"))
-                                        
-                                        if long_size_after > 0:
-                                            classified_after = classify_positions("ONDO_USDT", "long")
-                                            base_after = sum(p["qty"] for p in classified_after["base"])
-                                            overflow_after = sum(p["qty"] for p in classified_after["overflow"])
-                                            log_debug("📊 청산 후 재분류", f"남은 롱: {long_size_after}계약 | 기본/초과: {base_after}/{overflow_after}계약")
-                                        
-                                        update_position_state("ONDO_USDT")
-                                        continue
-                                        
-                                except Exception as e:
-                                    log_debug("❌ 기본 롱 청산 오류", str(e))
-                        
-                        # 초과 포지션 TP
-                        for overflow_pos in overflow_positions[:]:
-                            overflow_qty = overflow_pos["qty"]
-                            overflow_price = overflow_pos["price"]
-                            overflow_tp_price = overflow_price * (Decimal("1") + TP_GAP_PCT)
-                            
-                            if current_price >= overflow_tp_price:
-                                overflow_value = calculate_position_value(overflow_qty, overflow_price)
-                                
-                                log_debug("🎯 초과 롱 TP 도달", 
-                                        f"{overflow_qty}계약 진입:{overflow_price:.2f} TP:{overflow_tp_price:.2f} | "
-                                        f"포지션가치: {float(overflow_value):.2f} USDT")
-                                
-                                try:
-                                    order = FuturesOrder(
-                                        contract="ONDO_USDT",
-                                        size=-int(overflow_qty),
-                                        price="0",
-                                        tif="ioc",
-                                        reduce_only=True
-                                    )
-                                    result = api.create_futures_order(SETTLE, order)
-                                    
-                                    if result:
-                                        log_debug("✅ 초과 롱 청산", f"{overflow_qty}계약 @ {current_price:.2f}")
-                                        
-                                        time.sleep(1)
-                                        update_position_state("ONDO_USDT")
-                                        
-                                        if "ONDO_USDT" in entry_history and "long" in entry_history["ONDO_USDT"]:
-                                            entries = entry_history["ONDO_USDT"]["long"]
-                                            if overflow_pos in entries:
-                                                entries.remove(overflow_pos)
-                                        
-                                        pos_after = position_state.get("ONDO_USDT", {})
-                                        long_size_after = pos_after.get("long", {}).get("size", Decimal("0"))
-                                        
-                                        if long_size_after > 0:
-                                            classified_after = classify_positions("ONDO_USDT", "long")
-                                            base_after = sum(p["qty"] for p in classified_after["base"])
-                                            overflow_after = sum(p["qty"] for p in classified_after["overflow"])
-                                            log_debug("📊 청산 후 재분류", f"남은 롱: {long_size_after}계약 | 기본/초과: {base_after}/{overflow_after}계약")
-                                        
-                                except Exception as e:
-                                    log_debug("❌ 초과 롱 청산 오류", str(e))
-                    
-                    # ⭐ 헤징 방향 (롱이 헤징일 때)
-                    elif primary_direction == "short":
-                        long_tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
-                        
-                        if current_price >= long_tp_price:
-                            long_value = calculate_position_value(long_size, long_price)
-                            
-                            log_debug("🎯 헤징 롱 TP 도달", 
-                                    f"{long_size}계약 진입:{long_price:.2f} TP:{long_tp_price:.2f} | "
-                                    f"포지션가치: {float(long_value):.2f} USDT")
-                            
-                            try:
-                                order = FuturesOrder(
-                                    contract="ONDO_USDT",
-                                    size=-int(long_size),
-                                    price="0",
-                                    tif="ioc",
-                                    reduce_only=True
-                                )
-                                result = api.create_futures_order(SETTLE, order)
-                                
-                                if result:
-                                    log_debug("✅ 헤징 롱 청산", f"{long_size}계약 @ {current_price:.2f}")
-                                    
-                                    if "ONDO_USDT" in entry_history and "long" in entry_history["ONDO_USDT"]:
-                                        entry_history["ONDO_USDT"]["long"] = []
-                                    
-                                    update_position_state("ONDO_USDT")
-                                    continue
-                                    
-                            except Exception as e:
-                                log_debug("❌ 헤징 롱 청산 오류", str(e))
-                
-                # ==================== 숏 포지션 ====================
                 short_size = pos.get("short", {}).get("size", Decimal("0"))
-                short_price = pos.get("short", {}).get("price", Decimal("0"))
                 
-                if short_size > 0 and short_price > 0:
-                    # ⭐ 1순위: 일반 TP 체크
-                    normal_tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
+                if long_size == 0 or short_size == 0:
+                    long_type = tp_type.get(SYMBOL, {}).get("long", "average")
+                    short_type = tp_type.get(SYMBOL, {}).get("short", "average")
                     
-                    if current_price <= normal_tp_price:
-                        short_value = calculate_position_value(short_size, short_price)
-                        
-                        log_debug("🎯 일반 숏 TP 도달", 
-                                f"{short_size}계약 평단:{short_price:.2f} TP:{normal_tp_price:.2f} | "
-                                f"포지션가치: {float(short_value):.2f} USDT")
-                        
-                        try:
-                            order = FuturesOrder(
-                                contract="ONDO_USDT",
-                                size=int(short_size),
-                                price="0",
-                                tif="ioc",
-                                reduce_only=True
-                            )
-                            result = api.create_futures_order(SETTLE, order)
-                            
-                            if result:
-                                log_debug("✅ 일반 숏 청산", f"{short_size}계약 @ {current_price:.2f}")
-                                
-                                if "ONDO_USDT" in entry_history and "short" in entry_history["ONDO_USDT"]:
-                                    entry_history["ONDO_USDT"]["short"] = []
-                                
-                                update_position_state("ONDO_USDT")
-                                continue
-                                
-                        except Exception as e:
-                            log_debug("❌ 일반 숏 청산 오류", str(e))
+                    if long_size == 0 and long_type == "individual":
+                        continue
                     
-                    # ⭐ 2순위: 듀얼 TP (숏이 주력일 때)
-                    elif primary_direction == "short":
-                        classified = classify_positions("ONDO_USDT", "short")
-                        base_positions = classified["base"]
-                        overflow_positions = classified["overflow"]
-                        
-                        # 기본 포지션 TP
-                        if base_positions:
-                            base_total_qty = sum(p["qty"] for p in base_positions)
-                            base_avg_price = sum(p["qty"] * p["price"] for p in base_positions) / base_total_qty
-                            base_tp_price = base_avg_price * (Decimal("1") - TP_GAP_PCT)
-                            
-                            if current_price <= base_tp_price:
-                                base_value = calculate_position_value(base_total_qty, base_avg_price)
-                                
-                                log_debug("🎯 기본 숏 TP 도달", 
-                                        f"{base_total_qty}계약 평단:{base_avg_price:.2f} TP:{base_tp_price:.2f} | "
-                                        f"포지션가치: {float(base_value):.2f} USDT")
-                                
-                                try:
-                                    order = FuturesOrder(
-                                        contract="ONDO_USDT",
-                                        size=int(base_total_qty),
-                                        price="0",
-                                        tif="ioc",
-                                        reduce_only=True
-                                    )
-                                    result = api.create_futures_order(SETTLE, order)
-                                    
-                                    if result:
-                                        log_debug("✅ 기본 숏 청산", f"{base_total_qty}계약 @ {current_price:.2f}")
-                                        
-                                        time.sleep(1)
-                                        update_position_state("ONDO_USDT")
-                                        
-                                        if "ONDO_USDT" in entry_history and "short" in entry_history["ONDO_USDT"]:
-                                            entry_history["ONDO_USDT"]["short"] = [
-                                                e for e in entry_history["ONDO_USDT"]["short"] 
-                                                if e not in base_positions
-                                            ]
-                                        
-                                        pos_after = position_state.get("ONDO_USDT", {})
-                                        short_size_after = pos_after.get("short", {}).get("size", Decimal("0"))
-                                        
-                                        if short_size_after > 0:
-                                            classified_after = classify_positions("ONDO_USDT", "short")
-                                            base_after = sum(p["qty"] for p in classified_after["base"])
-                                            overflow_after = sum(p["qty"] for p in classified_after["overflow"])
-                                            log_debug("📊 청산 후 재분류", f"남은 숏: {short_size_after}계약 | 기본/초과: {base_after}/{overflow_after}계약")
-                                        
-                                        update_position_state("ONDO_USDT")
-                                        continue
-                                        
-                                except Exception as e:
-                                    log_debug("❌ 기본 숏 청산 오류", str(e))
-                        
-                        # 초과 포지션 TP
-                        for overflow_pos in overflow_positions[:]:
-                            overflow_qty = overflow_pos["qty"]
-                            overflow_price = overflow_pos["price"]
-                            overflow_tp_price = overflow_price * (Decimal("1") - TP_GAP_PCT)
-                            
-                            if current_price <= overflow_tp_price:
-                                overflow_value = calculate_position_value(overflow_qty, overflow_price)
-                                
-                                log_debug("🎯 초과 숏 TP 도달", 
-                                        f"{overflow_qty}계약 진입:{overflow_price:.2f} TP:{overflow_tp_price:.2f} | "
-                                        f"포지션가치: {float(overflow_value):.2f} USDT")
-                                
-                                try:
-                                    order = FuturesOrder(
-                                        contract="ONDO_USDT",
-                                        size=int(overflow_qty),
-                                        price="0",
-                                        tif="ioc",
-                                        reduce_only=True
-                                    )
-                                    result = api.create_futures_order(SETTLE, order)
-                                    
-                                    if result:
-                                        log_debug("✅ 초과 숏 청산", f"{overflow_qty}계약 @ {current_price:.2f}")
-                                        
-                                        time.sleep(1)
-                                        update_position_state("ONDO_USDT")
-                                        
-                                        if "ONDO_USDT" in entry_history and "short" in entry_history["ONDO_USDT"]:
-                                            entries = entry_history["ONDO_USDT"]["short"]
-                                            if overflow_pos in entries:
-                                                entries.remove(overflow_pos)
-                                        
-                                        pos_after = position_state.get("ONDO_USDT", {})
-                                        short_size_after = pos_after.get("short", {}).get("size", Decimal("0"))
-                                        
-                                        if short_size_after > 0:
-                                            classified_after = classify_positions("ONDO_USDT", "short")
-                                            base_after = sum(p["qty"] for p in classified_after["base"])
-                                            overflow_after = sum(p["qty"] for p in classified_after["overflow"])
-                                            log_debug("📊 청산 후 재분류", f"남은 숏: {short_size_after}계약 | 기본/초과: {base_after}/{overflow_after}계약")
-                                        
-                                except Exception as e:
-                                    log_debug("❌ 초과 숏 청산 오류", str(e))
+                    if short_size == 0 and short_type == "individual":
+                        continue
                     
-                    # ⭐ 헤징 방향 (숏이 헤징일 때)
-                    elif primary_direction == "long":
-                        short_tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
+                    if long_size == 0:
+                        log_debug("✅ 롱 전량 청산", "그리드 재생성!")
                         
-                        if current_price <= short_tp_price:
-                            short_value = calculate_position_value(short_size, short_price)
-                            
-                            log_debug("🎯 헤징 숏 TP 도달", 
-                                    f"{short_size}계약 진입:{short_price:.2f} TP:{short_tp_price:.2f} | "
-                                    f"포지션가치: {float(short_value):.2f} USDT")
-                            
-                            try:
-                                order = FuturesOrder(
-                                    contract="ONDO_USDT",
-                                    size=int(short_size),
-                                    price="0",
-                                    tif="ioc",
-                                    reduce_only=True
-                                )
-                                result = api.create_futures_order(SETTLE, order)
-                                
-                                if result:
-                                    log_debug("✅ 헤징 숏 청산", f"{short_size}계약 @ {current_price:.2f}")
-                                    
-                                    if "ONDO_USDT" in entry_history and "short" in entry_history["ONDO_USDT"]:
-                                        entry_history["ONDO_USDT"]["short"] = []
-                                    
-                                    update_position_state("ONDO_USDT")
-                                    continue
-                                    
-                            except Exception as e:
-                                log_debug("❌ 헤징 숏 청산 오류", str(e))
-        
+                        if SYMBOL in entry_history:
+                            entry_history[SYMBOL]["long"] = []
+                        if SYMBOL in tp_type:
+                            tp_type[SYMBOL]["long"] = "average"
+                        
+                        ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                        if ticker:
+                            current_price = Decimal(str(ticker[0].last))
+                            cancel_grid_orders(SYMBOL)
+                            time.sleep(1)
+                            initialize_grid(current_price)
+                    
+                    elif short_size == 0:
+                        log_debug("✅ 숏 전량 청산", "그리드 재생성!")
+                        
+                        if SYMBOL in entry_history:
+                            entry_history[SYMBOL]["short"] = []
+                        if SYMBOL in tp_type:
+                            tp_type[SYMBOL]["short"] = "average"
+                        
+                        ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                        if ticker:
+                            current_price = Decimal(str(ticker[0].last))
+                            cancel_grid_orders(SYMBOL)
+                            time.sleep(1)
+                            initialize_grid(current_price)
+                
         except Exception as e:
             log_debug("❌ TP 모니터 오류", str(e), exc_info=True)
-            time.sleep(5)
 
 
 # =============================================================================
-# 가격 모니터링 (WebSocket)
+# WebSocket
 # =============================================================================
 
 async def price_monitor():
-    """가격 모니터링 (WebSocket)"""
+    """가격 모니터링"""
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
     
     while True:
@@ -1069,10 +737,10 @@ async def price_monitor():
                     "time": int(time.time()),
                     "channel": "futures.tickers",
                     "event": "subscribe",
-                    "payload": ["ONDO_USDT"]
+                    "payload": [SYMBOL]
                 }
                 await ws.send(json.dumps(subscribe_msg))
-                log_debug("🔗 WebSocket 연결", "ONDO_USDT")
+                log_debug("🔗 WebSocket 연결", SYMBOL)
                 
                 while True:
                     msg = await ws.recv()
@@ -1083,7 +751,7 @@ async def price_monitor():
                         if result and isinstance(result, dict):
                             price = Decimal(str(result.get("last", "0")))
                             if price > 0:
-                                latest_prices["ONDO_USDT"] = price
+                                latest_prices[SYMBOL] = price
                     
         except Exception as e:
             log_debug("❌ WebSocket 오류", str(e))
@@ -1096,7 +764,6 @@ async def price_monitor():
 
 @app.route("/ping", methods=["GET", "POST"])
 def ping():
-    """헬스체크"""
     return jsonify({"status": "ok", "time": time.time()})
 
 
@@ -1105,25 +772,25 @@ def ping():
 # =============================================================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v15.0-ondo-grid-fill-based")
+    log_debug("🚀 서버 시작", "v16.1-complete")
     
     INITIAL_BALANCE = Decimal(str(get_available_balance(show_log=True)))
     log_debug("💰 초기 잔고", f"{INITIAL_BALANCE:.2f} USDT")
     log_debug("🎯 임계값", f"{float(INITIAL_BALANCE * THRESHOLD_RATIO):.2f} USDT ({int(THRESHOLD_RATIO)}배)")
     
-    entry_history["ONDO_USDT"] = {"long": [], "short": []}
+    entry_history[SYMBOL] = {"long": [], "short": []}
+    tp_orders[SYMBOL] = {"long": [], "short": []}
+    tp_type[SYMBOL] = {"long": "average", "short": "average"}
     
-    obv_macd_val = calculate_obv_macd("ONDO_USDT")
-    log_debug("📊 Shadow OBV MACD", f"ONDO_USDT: {obv_macd_val:.2f}")
+    obv_macd_val = calculate_obv_macd(SYMBOL)
+    log_debug("📊 Shadow OBV MACD", f"{SYMBOL}: {obv_macd_val:.2f}")
     
-    # 초기 그리드 생성
-    initialize_hedge_orders()
-
-    # 스레드 시작
-    threading.Thread(target=ondo_hedge_fill_monitor, daemon=True).start()
-    threading.Thread(target=ondo_hedge_tp_monitor, daemon=True).start()
+    initialize_grid()
+    
+    threading.Thread(target=fill_monitor, daemon=True).start()
+    threading.Thread(target=tp_monitor, daemon=True).start()
     threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
-
+    
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 웹 서버 시작", f"0.0.0.0:{port}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
