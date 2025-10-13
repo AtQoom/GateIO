@@ -17,8 +17,8 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(
 logger = logging.getLogger(__name__)
 
 SETTLE = "usdt"
-GRID_GAP_PCT = Decimal("0.19") / Decimal("100")  # 0.19%
-TP_GAP_PCT = Decimal("0.18") / Decimal("100")  # 0.18% TP
+GRID_GAP_PCT = Decimal("0.24") / Decimal("100")  # 0.19%
+TP_GAP_PCT = Decimal("0.23") / Decimal("100")  # 0.18% TP
 
 # API 설정
 API_KEY = os.environ.get("API_KEY", "")
