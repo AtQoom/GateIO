@@ -584,7 +584,7 @@ def place_hedge_order(symbol, side, current_price):
 # =============================================================================
 
 def fill_monitor():
-    """체결 감지 및 처리"""
+    """체결 감지 (그리드 재생성 없음!)"""
     prev_long_size = Decimal("0")
     prev_short_size = Decimal("0")
     last_action_time = 0
@@ -602,7 +602,6 @@ def fill_monitor():
             
             now = time.time()
             
-            # 현재가 조회
             try:
                 ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                 current_price = Decimal(str(ticker[0].last)) if ticker else Decimal("0")
@@ -635,8 +634,12 @@ def fill_monitor():
                 prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
                 prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
                 
-                # 그리드 재생성
-                initialize_grid(long_price)
+                # TP 다시 새로고침 (헤징 포함)
+                refresh_tp_orders(SYMBOL)
+                
+                # ⭐ 그리드 재생성 제거!
+                # initialize_grid(long_price)  # ❌ 삭제!
+                
                 last_action_time = now
             
             # 숏 체결 감지
@@ -665,9 +668,14 @@ def fill_monitor():
                 prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
                 prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
                 
-                # 그리드 재생성
-                initialize_grid(short_price)
+                # TP 다시 새로고침 (헤징 포함)
+                refresh_tp_orders(SYMBOL)
+                
+                # ⭐ 그리드 재생성 제거!
+                # initialize_grid(short_price)  # ❌ 삭제!
+                
                 last_action_time = now
+
 
 # =============================================================================
 # TP 체결 모니터링
