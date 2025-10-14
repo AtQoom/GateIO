@@ -925,12 +925,17 @@ def fill_monitor():
                     except:
                         current_price = Decimal("0")
                     
-                    # 롱 체결 감지
+                    # ⭐⭐⭐ 롱 체결 감지 (OBV 로그 추가)
                     if long_size > prev_long_size and now - last_long_action_time >= 3:
                         try:
                             added_long = long_size - prev_long_size
                             
-                            log_debug("📊 롱 체결 감지", f"+{added_long}계약 @ {long_price:.4f} (총 {long_size}계약)")
+                            # ⭐ OBV MACD 계산 및 로그
+                            obv_macd = calculate_obv_macd(SYMBOL)
+                            obv_display = float(obv_macd * 1000)
+                            
+                            log_debug("📊 롱 체결 감지", 
+                                     f"+{added_long}계약 @ {long_price:.4f} (총 {long_size}계약) | OBV:{obv_display:.2f}")
                             
                             record_entry(SYMBOL, "long", long_price, added_long)
                             
@@ -966,12 +971,17 @@ def fill_monitor():
                         except Exception as e:
                             log_debug("❌ 롱 처리 오류", str(e), exc_info=True)
                     
-                    # 숏 체결 감지
+                    # ⭐⭐⭐ 숏 체결 감지 (OBV 로그 추가)
                     if short_size > prev_short_size and now - last_short_action_time >= 3:
                         try:
                             added_short = short_size - prev_short_size
                             
-                            log_debug("📊 숏 체결 감지", f"+{added_short}계약 @ {short_price:.4f} (총 {short_size}계약)")
+                            # ⭐ OBV MACD 계산 및 로그
+                            obv_macd = calculate_obv_macd(SYMBOL)
+                            obv_display = float(obv_macd * 1000)
+                            
+                            log_debug("📊 숏 체결 감지", 
+                                     f"+{added_short}계약 @ {short_price:.4f} (총 {short_size}계약) | OBV:{obv_display:.2f}")
                             
                             record_entry(SYMBOL, "short", short_price, added_short)
                             
@@ -1014,6 +1024,7 @@ def fill_monitor():
                 
     except Exception as e:
         log_debug("❌ 체결 모니터 초기화 실패", str(e), exc_info=True)
+
 
 # =============================================================================
 # TP 체결 모니터링
