@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ONDO 역방향 그리드 매매 시스템 v18.0-ENV FINAL
+ONDO 역방향 그리드 매매 시스템 v18.1-COMPOUND
+- 복리 자동화: 1시간마다 실제 잔고 업데이트
 - 환경변수 기반 설정 (속도/안정성 극대화)
 - 수량 계산: 레버리지 1배 기준
 - OBV MACD 가중 수량 (0.21~0.40)
@@ -35,13 +36,13 @@ SYMBOL = "ONDO_USDT"
 CONTRACT_SIZE = Decimal("1")
 
 # ⭐ 환경변수로 모든 설정 관리
-INITIAL_BALANCE = Decimal(os.environ.get("INITIAL_BALANCE", "63"))
 GRID_GAP_PCT = Decimal(os.environ.get("GRID_GAP_PCT", "0.16")) / Decimal("100")
 TP_GAP_PCT = Decimal(os.environ.get("TP_GAP_PCT", "0.16")) / Decimal("100")
 HEDGE_RATIO = Decimal(os.environ.get("HEDGE_RATIO", "0.2"))
 THRESHOLD_RATIO = Decimal(os.environ.get("THRESHOLD_RATIO", "1.0"))
 LEVERAGE_MIN = Decimal(os.environ.get("LEVERAGE_MIN", "0.21"))
 LEVERAGE_MAX = Decimal(os.environ.get("LEVERAGE_MAX", "0.40"))
+BALANCE_UPDATE_INTERVAL = int(os.environ.get("BALANCE_UPDATE_INTERVAL", "3600"))  # 기본 1시간
 
 # API 설정
 API_KEY = os.environ.get("API_KEY", "")
@@ -54,6 +55,11 @@ config = Configuration(key=API_KEY, secret=API_SECRET)
 client = ApiClient(config)
 api = FuturesApi(client)
 unified_api = UnifiedApi(client)
+
+# ⭐ 복리를 위한 전역 변수
+INITIAL_BALANCE = Decimal("0")
+last_balance_update = 0
+balance_lock = threading.RLock()
 
 # 전역 변수
 position_lock = threading.RLock()
@@ -75,6 +81,86 @@ def log_debug(label, msg="", exc_info=False):
         logger.error(f"[{label}] {msg}", exc_info=True)
     else:
         logger.info(f"[{label}] {msg}")
+
+
+def get_total_balance_from_api():
+    """API에서 실제 총 자산 조회"""
+    try:
+        # Unified Account
+        try:
+            unified_account = unified_api.list_unified_accounts()
+            if hasattr(unified_account, 'balances') and unified_account.balances:
+                balances = unified_account.balances
+                if isinstance(balances, dict) and "USDT" in balances:
+                    usdt_data = balances["USDT"]
+                    
+                    if isinstance(usdt_data, dict):
+                        available = float(usdt_data.get("available", "0"))
+                        freeze = float(usdt_data.get("freeze", "0"))
+                        borrowed = float(usdt_data.get("borrowed", "0"))
+                        total = available + freeze - borrowed
+                    else:
+                        available = float(getattr(usdt_data, "available", "0"))
+                        freeze = float(getattr(usdt_data, "freeze", "0"))
+                        borrowed = float(getattr(usdt_data, "borrowed", "0"))
+                        total = available + freeze - borrowed
+                    
+                    if total > 0:
+                        return total
+        except Exception as e:
+            log_debug("⚠️ Unified Account 조회 실패", str(e))
+        
+        # Futures Account (백업)
+        try:
+            account = api.list_futures_accounts(settle=SETTLE)
+            if account:
+                available = float(getattr(account, "available", "0"))
+                unrealized_pnl = 0
+                if hasattr(account, "unrealized_pnl"):
+                    unrealized_pnl = float(getattr(account, "unrealized_pnl", "0"))
+                
+                total = available + unrealized_pnl
+                if total > 0:
+                    return total
+        except Exception as e:
+            log_debug("⚠️ Futures Account 조회 실패", str(e))
+        
+        return 0.0
+    except Exception as e:
+        log_debug("❌ 잔고 조회 실패", str(e))
+        return 0.0
+
+
+def update_initial_balance(force=False):
+    """복리를 위한 자본금 업데이트 (주기적)"""
+    global INITIAL_BALANCE, last_balance_update
+    
+    now = time.time()
+    
+    # 강제 업데이트 또는 주기 도래 시
+    if force or (now - last_balance_update >= BALANCE_UPDATE_INTERVAL):
+        with balance_lock:
+            try:
+                new_balance = get_total_balance_from_api()
+                
+                if new_balance > 0:
+                    old_balance = INITIAL_BALANCE
+                    INITIAL_BALANCE = Decimal(str(new_balance))
+                    last_balance_update = now
+                    
+                    if old_balance > 0:
+                        change_pct = ((new_balance - float(old_balance)) / float(old_balance)) * 100
+                        log_debug("💰 복리 자본금 업데이트", 
+                                 f"{float(old_balance):.2f} → {new_balance:.2f} USDT ({change_pct:+.2f}%)")
+                    else:
+                        log_debug("💰 초기 자본금 설정", f"{new_balance:.2f} USDT")
+                    
+                    return True
+            except Exception as e:
+                log_debug("❌ 자본금 업데이트 실패", str(e))
+                return False
+    
+    return False
 
 
 def get_candles(symbol, interval="10s", limit=600):
@@ -154,8 +240,14 @@ def calculate_obv_macd(symbol):
 def calculate_grid_qty(current_price):
     """그리드 수량 계산 (OBV MACD 가중 0.21~0.40, 레버리지 1배)"""
     try:
-        if INITIAL_BALANCE <= 0:
-            log_debug("❌ 초기 잔고 0", f"INITIAL_BALANCE={INITIAL_BALANCE}")
+        # ⭐ 복리 자동 업데이트
+        update_initial_balance()
+        
+        with balance_lock:
+            current_balance = INITIAL_BALANCE
+        
+        if current_balance <= 0:
+            log_debug("❌ 초기 잔고 0", f"INITIAL_BALANCE={current_balance}")
             return 1
         
         if current_price <= 0:
@@ -213,7 +305,7 @@ def calculate_grid_qty(current_price):
             weight = Decimal("0.40")
         
         # ⭐ 수량 계산 (레버리지 1배 기준)
-        position_value = INITIAL_BALANCE * weight
+        position_value = current_balance * weight
         contract_value = current_price * CONTRACT_SIZE
         
         qty = int(position_value / contract_value)
@@ -221,7 +313,7 @@ def calculate_grid_qty(current_price):
         
         log_debug("🔢 수량 계산", 
                  f"OBV:{abs_val:.2f} → 가중:{float(weight)} | "
-                 f"({float(INITIAL_BALANCE):.2f} × {float(weight)}) / ({float(current_price):.4f}) = {final_qty}계약")
+                 f"({float(current_balance):.2f} × {float(weight)}) / ({float(current_price):.4f}) = {final_qty}계약")
         
         return final_qty
         
@@ -550,15 +642,18 @@ def check_and_update_tp_mode_locked(symbol, side, size, price):
         # TP 정확히 일치
         log_debug("✅ TP 정확", f"{symbol}_{side} {existing_tp_qty} == {size}")
         
-        # ⭐ 헤징 포지션 체크 (임계값의 1.5배 미만)
+        # ⭐ 현재 자본금 기준으로 임계값 계산
+        with balance_lock:
+            current_balance = INITIAL_BALANCE
+        
+        # ⭐ 헤징 포지션 체크
         position_value = calculate_position_value(size, price)
-        hedge_threshold = INITIAL_BALANCE * HEDGE_RATIO * Decimal("1.5")
+        hedge_threshold = current_balance * HEDGE_RATIO * Decimal("1.5")
         
         if position_value < hedge_threshold:
             log_debug("ℹ️ 헤징 포지션", 
                      f"{symbol}_{side} {float(position_value):.2f} < {float(hedge_threshold):.2f}")
             
-            # 헤징 포지션은 항상 평단가 TP 유지
             current_type = tp_type.get(symbol, {}).get(side, "average")
             if current_type == "individual":
                 log_debug("🔄 헤징 → 평단가 전환", f"{symbol}_{side}")
@@ -576,7 +671,7 @@ def check_and_update_tp_mode_locked(symbol, side, size, price):
             return
         
         # ⭐ 주력 포지션 임계값 체크
-        threshold_value = INITIAL_BALANCE * THRESHOLD_RATIO
+        threshold_value = current_balance * THRESHOLD_RATIO
         current_type = tp_type.get(symbol, {}).get(side, "average")
         
         if position_value > threshold_value:
@@ -628,7 +723,7 @@ def refresh_tp_orders(symbol):
             for side in ["long", "short"]:
                 pos = position_state.get(symbol, {}).get(side, {})
                 size = pos.get("size", Decimal("0"))
-                price = pos.get("price", Decimal("0"))  # ⭐ 수정! (size → price)
+                price = pos.get("price", Decimal("0"))
                 
                 if size > 0:
                     check_and_update_tp_mode_locked(symbol, side, size, price)
@@ -689,10 +784,16 @@ def initialize_grid(base_price=None, skip_check=False):
         # ⭐ OBV에 따라 주력/헤징 결정
         if obv_macd >= 0:
             short_qty = calculate_grid_qty(base_price)  # 주력
-            long_qty = max(1, int((INITIAL_BALANCE * HEDGE_RATIO) / (base_price * CONTRACT_SIZE)))  # 헤징
+            
+            with balance_lock:
+                current_balance = INITIAL_BALANCE
+            long_qty = max(1, int((current_balance * HEDGE_RATIO) / (base_price * CONTRACT_SIZE)))  # 헤징
         else:
             long_qty = calculate_grid_qty(base_price)  # 주력
-            short_qty = max(1, int((INITIAL_BALANCE * HEDGE_RATIO) / (base_price * CONTRACT_SIZE)))  # 헤징
+            
+            with balance_lock:
+                current_balance = INITIAL_BALANCE
+            short_qty = max(1, int((current_balance * HEDGE_RATIO) / (base_price * CONTRACT_SIZE)))  # 헤징
         
         try:
             order = FuturesOrder(
@@ -729,7 +830,10 @@ def initialize_grid(base_price=None, skip_check=False):
 def place_hedge_order(symbol, side, current_price):
     """헤징 시장가 주문"""
     try:
-        hedge_qty = max(1, int((INITIAL_BALANCE * HEDGE_RATIO) / (current_price * CONTRACT_SIZE)))
+        with balance_lock:
+            current_balance = INITIAL_BALANCE
+        
+        hedge_qty = max(1, int((current_balance * HEDGE_RATIO) / (current_price * CONTRACT_SIZE)))
         
         if side == "short":
             order_size = -hedge_qty
@@ -787,13 +891,21 @@ def fill_monitor():
             try:
                 time.sleep(2)
                 
+                # ⭐ 복리를 위한 주기적 자본금 업데이트
+                update_initial_balance()
+                
                 now = time.time()
                 if now - last_heartbeat >= 60:
                     with position_lock:
                         pos = position_state.get(SYMBOL, {})
                         current_long = pos.get("long", {}).get("size", Decimal("0"))
                         current_short = pos.get("short", {}).get("size", Decimal("0"))
-                    log_debug("💓 체결 모니터 작동 중", f"롱:{current_long} 숏:{current_short}")
+                    
+                    with balance_lock:
+                        current_balance = INITIAL_BALANCE
+                    
+                    log_debug("💓 체결 모니터 작동 중", 
+                             f"롱:{current_long} 숏:{current_short} | 자본금:{float(current_balance):.2f}U")
                     last_heartbeat = now
                 
                 update_position_state(SYMBOL)
@@ -945,6 +1057,9 @@ def tp_monitor():
                     if SYMBOL in tp_type:
                         tp_type[SYMBOL]["long"] = "average"
                     
+                    # ⭐ 복리: 그리드 재생성 전 자본금 업데이트
+                    update_initial_balance(force=True)
+                    
                     cancel_grid_orders(SYMBOL)
                     time.sleep(0.5)
                     
@@ -984,6 +1099,9 @@ def tp_monitor():
                         entry_history[SYMBOL]["short"] = []
                     if SYMBOL in tp_type:
                         tp_type[SYMBOL]["short"] = "average"
+                    
+                    # ⭐ 복리: 그리드 재생성 전 자본금 업데이트
+                    update_initial_balance(force=True)
                     
                     cancel_grid_orders(SYMBOL)
                     time.sleep(0.5)
@@ -1074,14 +1192,21 @@ def ping():
 # =============================================================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v18.0-ENV FINAL")
+    log_debug("🚀 서버 시작", "v18.1-COMPOUND (복리 자동화)")
+    
+    # ⭐ 초기 자본금 설정
+    update_initial_balance(force=True)
+    
+    with balance_lock:
+        current_balance = INITIAL_BALANCE
     
     # 설정 출력
-    log_debug("⚙️ 초기 자본금", f"{INITIAL_BALANCE:.2f} USDT")
+    log_debug("⚙️ 초기 자본금", f"{float(current_balance):.2f} USDT")
+    log_debug("⚙️ 복리 업데이트 주기", f"{BALANCE_UPDATE_INTERVAL}초 ({BALANCE_UPDATE_INTERVAL/3600:.1f}시간)")
     log_debug("⚙️ 그리드 간격", f"{float(GRID_GAP_PCT * 100):.2f}%")
     log_debug("⚙️ TP 간격", f"{float(TP_GAP_PCT * 100):.2f}%")
     log_debug("⚙️ 헤징 비율", f"{float(HEDGE_RATIO):.1f}배")
-    log_debug("⚙️ 임계값", f"{float(INITIAL_BALANCE * THRESHOLD_RATIO):.2f} USDT ({float(THRESHOLD_RATIO):.1f}배)")
+    log_debug("⚙️ 임계값", f"{float(current_balance * THRESHOLD_RATIO):.2f} USDT ({float(THRESHOLD_RATIO):.1f}배)")
     log_debug("⚙️ OBV 가중치", f"{float(LEVERAGE_MIN):.2f} ~ {float(LEVERAGE_MAX):.2f}")
     
     entry_history[SYMBOL] = {"long": [], "short": []}
