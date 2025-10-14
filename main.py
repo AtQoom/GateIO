@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ONDO 역방향 그리드 매매 시스템 v16.3-FINAL
+ONDO 역방향 그리드 매매 시스템 v16.5-STABLE
 - TP 기반 그리드 재생성
 - 듀얼 TP (평단가/개별)
 - 모든 주문 지정가
-- 변화 감지 방식 중복 방지
+- 헤징 후 TP 안정화
+- 중복 방지 및 오류 복구
 """
 
 import os
@@ -181,8 +182,7 @@ def calculate_obv_macd(symbol):
         if pd.isna(final_value) or np.isinf(final_value):
             return Decimal("0")
         
-        # ⭐ 실제 값 그대로 반환 (x1000 안 함)
-        return Decimal(str(round(float(final_value), 6)))  # 소수점 6자리
+        return Decimal(str(round(float(final_value), 6)))
         
     except Exception as e:
         log_debug("❌ OBV MACD 오류", str(e), exc_info=True)
@@ -190,14 +190,12 @@ def calculate_obv_macd(symbol):
 
 
 def calculate_grid_qty(current_price):
-    """그리드 수량 계산 (OBV MACD 기반 0.2~0.8배)"""
+    """그리드 수량 계산 (OBV MACD 기반 0.3~0.6배)"""
     try:
         if INITIAL_BALANCE <= 0:
             return 1
         
         obv_macd = calculate_obv_macd(SYMBOL)
-        
-        # ⭐ x1000 해서 비교 (실제 값이 0.02면 20으로 비교)
         abs_val = abs(float(obv_macd * 1000))
         
         if abs_val < 5:
@@ -235,32 +233,6 @@ def calculate_grid_qty(current_price):
 def calculate_position_value(qty, price):
     """포지션 가치 계산"""
     return qty * price * CONTRACT_SIZE
-
-
-def get_primary_direction():
-    """주력 방향 판단 (포지션 가치 기반)"""
-    try:
-        with position_lock:
-            pos = position_state.get(SYMBOL, {})
-            long_size = pos.get("long", {}).get("size", Decimal("0"))
-            long_price = pos.get("long", {}).get("price", Decimal("0"))
-            short_size = pos.get("short", {}).get("size", Decimal("0"))
-            short_price = pos.get("short", {}).get("price", Decimal("0"))
-            
-            long_value = calculate_position_value(long_size, long_price)
-            short_value = calculate_position_value(short_size, short_price)
-            
-            if long_value > short_value:
-                return "long"
-            elif short_value > long_value:
-                return "short"
-            else:
-                obv_macd = calculate_obv_macd(SYMBOL)
-                return "short" if obv_macd >= 0 else "long"
-                    
-    except Exception as e:
-        log_debug("❌ 주력 방향 오류", str(e))
-        return None
 
 # =============================================================================
 # 포지션 관리
@@ -328,36 +300,55 @@ def record_entry(symbol, side, price, qty):
 
 def cancel_grid_orders(symbol):
     """그리드 주문만 취소 (TP 유지)"""
-    try:
-        orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
-        for order in orders:
-            try:
-                if not order.is_reduce_only:
-                    api.cancel_futures_order(SETTLE, order.id)
-            except:
-                pass
-    except:
-        pass
+    for retry in range(2):
+        try:
+            orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
+            for order in orders:
+                try:
+                    if not order.is_reduce_only:
+                        api.cancel_futures_order(SETTLE, order.id)
+                except:
+                    pass
+            break
+        except:
+            if retry < 1:
+                time.sleep(0.3)
 
 
 def cancel_tp_orders(symbol, side):
-    """TP 주문 취소"""
+    """TP 주문 취소 (재시도 로직)"""
     try:
-        if symbol in tp_orders and side in tp_orders[symbol]:
-            for tp_order in tp_orders[symbol][side][:]:
+        if symbol not in tp_orders or side not in tp_orders[symbol]:
+            return
+        
+        for tp_order in tp_orders[symbol][side][:]:
+            order_id = tp_order.get("order_id")
+            if not order_id:
+                continue
+            
+            for retry in range(3):
                 try:
-                    api.cancel_futures_order(SETTLE, tp_order["order_id"])
+                    api.cancel_futures_order(SETTLE, order_id)
                     tp_orders[symbol][side].remove(tp_order)
-                except:
-                    pass
-    except:
-        pass
+                    log_debug("✅ TP 취소", f"{symbol}_{side} ID:{order_id}")
+                    break
+                except Exception as e:
+                    if retry < 2:
+                        time.sleep(0.3)
+                    else:
+                        log_debug("⚠️ TP 취소 실패", f"ID:{order_id}")
+                        try:
+                            tp_orders[symbol][side].remove(tp_order)
+                        except:
+                            pass
+    except Exception as e:
+        log_debug("❌ TP 취소 오류", str(e), exc_info=True)
 
 # =============================================================================
 # TP 관리
 # =============================================================================
 
-def place_average_tp_order(symbol, side, price, qty, retry=2):
+def place_average_tp_order(symbol, side, price, qty, retry=3):
     """평단가 TP 지정가 주문 (재시도)"""
     for attempt in range(retry):
         try:
@@ -380,19 +371,17 @@ def place_average_tp_order(symbol, side, price, qty, retry=2):
             
             result = api.create_futures_order(SETTLE, order)
             
-            log_debug("✅ TP 성공", f"주문 ID: {result.id}")
-            
             if symbol not in tp_orders:
                 tp_orders[symbol] = {"long": [], "short": []}
             
             tp_orders[symbol][side].append({
                 "order_id": result.id,
                 "tp_price": tp_price,
-                "qty": qty,
+                "qty": Decimal(str(qty)),
                 "type": "average"
             })
             
-            log_debug("📌 평단 TP", f"{symbol}_{side} {qty}계약 TP:{float(tp_price):.4f}")
+            log_debug("✅ 평단 TP", f"{symbol}_{side} {qty}계약 TP:{float(tp_price):.4f}")
             
             return True
             
@@ -436,27 +425,57 @@ def place_individual_tp_orders(symbol, side, entries):
                 "order_id": result.id,
                 "entry_price": entry_price,
                 "tp_price": tp_price,
-                "qty": qty,
+                "qty": Decimal(str(qty)),
                 "type": "individual"
             })
             
             log_debug("📌 개별 TP", 
                      f"{symbol}_{side} {qty}계약 진입:{float(entry_price):.4f} TP:{float(tp_price):.4f}")
             
-            time.sleep(0.1)  # API Rate Limit
+            time.sleep(0.1)
             
     except Exception as e:
         log_debug("❌ 개별 TP 실패", str(e))
 
 
 def check_and_update_tp_mode(symbol, side):
-    """임계값 체크 및 TP 모드 전환"""
+    """임계값 체크 및 TP 모드 전환 (거래소 주문 확인 추가)"""
     try:
         pos = position_state.get(symbol, {}).get(side, {})
         size = pos.get("size", Decimal("0"))
         price = pos.get("price", Decimal("0"))
         
         if size == 0:
+            return
+        
+        # 실제 거래소 주문 확인
+        existing_tp_qty = Decimal("0")
+        try:
+            orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
+            for order in orders:
+                if order.is_reduce_only:
+                    order_size = abs(order.size)
+                    if (side == "long" and order.size < 0) or (side == "short" and order.size > 0):
+                        existing_tp_qty += Decimal(str(order_size))
+        except Exception as e:
+            log_debug("⚠️ TP 주문 조회 실패", str(e))
+        
+        # 딕셔너리 수량과 비교 (동기화 체크)
+        dict_tp_qty = Decimal("0")
+        if symbol in tp_orders and side in tp_orders[symbol]:
+            for tp in tp_orders[symbol][side]:
+                dict_tp_qty += tp.get("qty", Decimal("0"))
+        
+        # 불일치 시 딕셔너리 정리
+        if existing_tp_qty != dict_tp_qty:
+            log_debug("⚠️ TP 수량 불일치", 
+                     f"{symbol}_{side} 거래소:{existing_tp_qty} vs 딕셔너리:{dict_tp_qty}")
+            if symbol in tp_orders and side in tp_orders[symbol]:
+                tp_orders[symbol][side] = []
+        
+        # TP가 충분하면 스킵
+        if existing_tp_qty >= size:
+            log_debug("✅ TP 충분", f"{symbol}_{side} 기존:{existing_tp_qty} >= 포지션:{size}")
             return
         
         position_value = calculate_position_value(size, price)
@@ -471,6 +490,7 @@ def check_and_update_tp_mode(symbol, side):
                          f"{symbol}_{side} {float(position_value):.2f} > {float(threshold_value):.2f}")
                 
                 cancel_tp_orders(symbol, side)
+                time.sleep(0.3)
                 
                 entries = entry_history.get(symbol, {}).get(side, [])
                 if entries:
@@ -479,38 +499,43 @@ def check_and_update_tp_mode(symbol, side):
                 if symbol not in tp_type:
                     tp_type[symbol] = {"long": "average", "short": "average"}
                 tp_type[symbol][side] = "individual"
-                
         else:
             # 임계값 미만 → 평단가 TP
-            # ⭐⭐⭐ 수정: 조건 제거하고 무조건 등록!
-            log_debug("✅ 평단가 TP", f"{symbol}_{side} {float(position_value):.2f} < {float(threshold_value):.2f}")
+            if current_type == "average" and existing_tp_qty > 0:
+                log_debug("✅ 평단 TP 유지", f"{symbol}_{side} {existing_tp_qty}계약")
+                return
+            
+            log_debug("📌 평단 TP 생성", f"{symbol}_{side} {float(position_value):.2f} < {float(threshold_value):.2f}")
             
             cancel_tp_orders(symbol, side)
-            place_average_tp_order(symbol, side, price, size)
+            time.sleep(0.3)
+            
+            place_average_tp_order(symbol, side, price, size, retry=3)
             
             if symbol not in tp_type:
                 tp_type[symbol] = {"long": "average", "short": "average"}
             tp_type[symbol][side] = "average"
                 
     except Exception as e:
-        log_debug("❌ TP 모드 체크 오류", str(e))
+        log_debug("❌ TP 모드 체크 오류", str(e), exc_info=True)
 
 
 def refresh_tp_orders(symbol):
-    """TP 주문 새로고침"""
+    """TP 주문 새로고침 (재시도 로직 추가)"""
     try:
         log_debug("🔄 TP 새로고침 시작", symbol)
         
-        # ⭐ 포지션 재조회 (실패 시 중단)
-        if not update_position_state(symbol):
+        # 포지션 재조회 (재시도 3회)
+        for retry in range(3):
+            if update_position_state(symbol):
+                break
+            log_debug(f"⚠️ 포지션 조회 재시도 {retry + 1}/3", "")
+            time.sleep(0.5)
+        else:
             log_debug("❌ 포지션 조회 실패", "TP 새로고침 중단")
             return
         
-        time.sleep(0.3)
-        
-        if not update_position_state(symbol):
-            log_debug("❌ 포지션 조회 실패", "TP 새로고침 중단")
-            return
+        time.sleep(0.5)
         
         for side in ["long", "short"]:
             pos = position_state.get(symbol, {}).get(side, {})
@@ -520,9 +545,8 @@ def refresh_tp_orders(symbol):
             log_debug(f"🔍 포지션 체크", f"{side} size:{size} price:{price}")
             
             if size > 0:
-                cancel_tp_orders(symbol, side)
-                time.sleep(0.2)
                 check_and_update_tp_mode(symbol, side)
+                time.sleep(0.3)
             else:
                 log_debug(f"⚠️ 포지션 없음", f"{side} size=0")
                 
@@ -530,22 +554,43 @@ def refresh_tp_orders(symbol):
         log_debug("❌ TP 새로고침 오류", str(e), exc_info=True)
 
 
+def emergency_tp_fix(symbol):
+    """긴급 TP 수정 (수동 실행용)"""
+    try:
+        log_debug("🚨 긴급 TP 수정 시작", symbol)
+        
+        update_position_state(symbol)
+        
+        for side in ["long", "short"]:
+            pos = position_state.get(symbol, {}).get(side, {})
+            size = pos.get("size", Decimal("0"))
+            price = pos.get("price", Decimal("0"))
+            
+            if size > 0:
+                log_debug(f"🔧 {side} TP 강제 생성", f"{size}계약 @ {price}")
+                
+                cancel_tp_orders(symbol, side)
+                time.sleep(0.5)
+                
+                place_average_tp_order(symbol, side, price, size, retry=3)
+                
+    except Exception as e:
+        log_debug("❌ 긴급 TP 수정 실패", str(e), exc_info=True)
+
 # =============================================================================
 # 그리드 관리
 # =============================================================================
 
-def initialize_grid(base_price=None, skip_check=False):  # ⭐ 파라미터 추가
+def initialize_grid(base_price=None, skip_check=False):
     """그리드 초기화 (지정가 주문)"""
     try:
-        if not skip_check:  # ⭐ 중복 체크 선택적 실행
-            # ⭐ 기존 그리드 확인
+        if not skip_check:
             orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status="open")
             grid_orders = [o for o in orders if not o.is_reduce_only]
             if grid_orders:
                 log_debug("⚠️ 기존 그리드 있음", f"{len(grid_orders)}개 - 생성 중단")
                 return
         
-        # ⭐⭐⭐ 여기서 계속 진행!
         if base_price is None:
             ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
             if not ticker:
@@ -589,13 +634,11 @@ def initialize_grid(base_price=None, skip_check=False):  # ⭐ 파라미터 추�
         except Exception as e:
             log_debug("❌ 롱 주문 실패", str(e))
         
-        # ⭐ 로그 출력 시 x1000 표시
         log_debug("🎯 그리드 생성", 
-                 f"기준:{base_price:.4f} 위:{upper_price:.4f} 아래:{lower_price:.4f} | OBV:{float(obv_macd * 1000):.2f}")
+                 f"기준:{base_price:.4f} 위:{upper_price:.4f}({short_qty}) 아래:{lower_price:.4f}({long_qty}) | OBV:{float(obv_macd * 1000):.2f}")
         
     except Exception as e:
         log_debug("❌ 그리드 생성 실패", str(e), exc_info=True)
-
 
 # =============================================================================
 # 헤징 관리
@@ -611,17 +654,27 @@ def place_hedge_order(symbol, side, current_price):
         else:
             order_size = hedge_qty
         
-        # ⭐ 시장가 주문
         order = FuturesOrder(
             contract=symbol,
             size=order_size,
-            price="0",  # 시장가
+            price="0",
             tif="ioc"
         )
         
         result = api.create_futures_order(SETTLE, order)
         
-        log_debug("📌 헤징 주문 (시장가)", f"{symbol} {side} {hedge_qty}계약")
+        log_debug("📌 헤징 주문", f"{symbol} {side} {hedge_qty}계약 ID:{result.id}")
+        
+        # ⭐ 주문 상태 확인 (선택)
+        time.sleep(0.5)
+        try:
+            order_status = api.get_futures_order(SETTLE, result.id)
+            if order_status.status == "finished":
+                log_debug("✅ 헤징 체결 완료", f"ID:{result.id}")
+            else:
+                log_debug("⚠️ 헤징 미체결", f"상태:{order_status.status}")
+        except:
+            pass
         
         return result.id
         
@@ -635,8 +688,7 @@ def place_hedge_order(symbol, side, current_price):
 # =============================================================================
 
 def fill_monitor():
-    """체결 감지 (그리드 재생성 없음!)"""
-    # ⭐ 초기 포지션 조회
+    """체결 감지 (헤징 후 TP 설정 개선)"""
     update_position_state(SYMBOL)
     
     prev_long_size = Decimal("0")
@@ -647,6 +699,8 @@ def fill_monitor():
         pos = position_state.get(SYMBOL, {})
         prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
         prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
+    
+    log_debug("👀 체결 모니터 시작", f"초기 롱:{prev_long_size} 숏:{prev_short_size}")
     
     while True:
         time.sleep(2)
@@ -668,81 +722,122 @@ def fill_monitor():
             except:
                 current_price = Decimal("0")
             
-            # 롱 체결 감지
+            # ========== 롱 체결 감지 ==========
             if long_size > prev_long_size and now - last_action_time >= 5:
                 added_long = long_size - prev_long_size
                 
-                log_debug("📊 롱 체결", f"{added_long}계약 @ {long_price:.4f} (총 {long_size}계약)")
+                log_debug("📊 롱 체결 감지", f"+{added_long}계약 @ {long_price:.4f} (총 {long_size}계약)")
                 
-                # 진입 기록
                 record_entry(SYMBOL, "long", long_price, added_long)
-                
-                # 그리드 취소
                 cancel_grid_orders(SYMBOL)
+                time.sleep(0.3)
                 
-                # TP 새로고침
+                log_debug("🔄 TP 새로고침 (롱)", "")
                 refresh_tp_orders(SYMBOL)
+                time.sleep(0.3)
                 
-                # 숏 헤징
                 if current_price > 0:
+                    log_debug("🔨 숏 헤징 주문", f"{current_price:.4f}")
                     place_hedge_order(SYMBOL, "short", current_price)
                 
-                # 헤징 체결 대기
-                time.sleep(1)
-                update_position_state(SYMBOL)
+                log_debug("⏳ 헤징 체결 대기", "3초...")
+                time.sleep(3)
                 
-                # ⭐ position_lock 안에서 업데이트
-                pos = position_state.get(SYMBOL, {})
-                prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
-                prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
+                success = False
+                for retry in range(3):
+                    if update_position_state(SYMBOL):
+                        log_debug("✅ 포지션 재조회 성공", f"재시도 {retry + 1}/3")
+                        success = True
+                        break
+                    time.sleep(0.5)
                 
-                # TP 다시 새로고침 (헤징 포함)
-                refresh_tp_orders(SYMBOL)
+                if not success:
+                    log_debug("❌ 포지션 재조회 실패", "TP 설정 스킵")
+                
+                with position_lock:
+                    pos = position_state.get(SYMBOL, {})
+                    prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
+                    prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
+                    log_debug("📊 헤징 후 포지션", f"롱:{prev_long_size} 숏:{prev_short_size}")
+                
+                if success:
+                    time.sleep(0.5)
+                    log_debug("🔄 전체 TP 재설정", "롱+숏")
+                    refresh_tp_orders(SYMBOL)
+                    
+                    time.sleep(1)
+                    update_position_state(SYMBOL)
+                    
+                    with position_lock:
+                        pos = position_state.get(SYMBOL, {})
+                        final_long = pos.get("long", {}).get("size", Decimal("0"))
+                        final_short = pos.get("short", {}).get("size", Decimal("0"))
+                        log_debug("✅ 롱 체결 처리 완료", f"최종 롱:{final_long} 숏:{final_short}")
                 
                 last_action_time = now
             
-            # 숏 체결 감지
+            # ========== 숏 체결 감지 ==========
             elif short_size > prev_short_size and now - last_action_time >= 5:
                 added_short = short_size - prev_short_size
                 
-                log_debug("📊 숏 체결", f"{added_short}계약 @ {short_price:.4f} (총 {short_size}계약)")
+                log_debug("📊 숏 체결 감지", f"+{added_short}계약 @ {short_price:.4f} (총 {short_size}계약)")
                 
-                # 진입 기록
                 record_entry(SYMBOL, "short", short_price, added_short)
-                
-                # 그리드 취소
                 cancel_grid_orders(SYMBOL)
+                time.sleep(0.3)
                 
-                # TP 새로고침
+                log_debug("🔄 TP 새로고침 (숏)", "")
                 refresh_tp_orders(SYMBOL)
+                time.sleep(0.3)
                 
-                # 롱 헤징
                 if current_price > 0:
+                    log_debug("🔨 롱 헤징 주문", f"{current_price:.4f}")
                     place_hedge_order(SYMBOL, "long", current_price)
                 
-                # 헤징 체결 대기
-                time.sleep(1)
-                update_position_state(SYMBOL)
+                log_debug("⏳ 헤징 체결 대기", "3초...")
+                time.sleep(3)
                 
-                # ⭐ position_lock 안에서 업데이트
-                pos = position_state.get(SYMBOL, {})
-                prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
-                prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
+                success = False
+                for retry in range(3):
+                    if update_position_state(SYMBOL):
+                        log_debug("✅ 포지션 재조회 성공", f"재시도 {retry + 1}/3")
+                        success = True
+                        break
+                    time.sleep(0.5)
                 
-                # TP 다시 새로고침 (헤징 포함)
-                refresh_tp_orders(SYMBOL)
+                if not success:
+                    log_debug("❌ 포지션 재조회 실패", "TP 설정 스킵")
+                
+                with position_lock:
+                    pos = position_state.get(SYMBOL, {})
+                    prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
+                    prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
+                    log_debug("📊 헤징 후 포지션", f"롱:{prev_long_size} 숏:{prev_short_size}")
+                
+                if success:
+                    time.sleep(0.5)
+                    log_debug("🔄 전체 TP 재설정", "롱+숏")
+                    refresh_tp_orders(SYMBOL)
+                    
+                    time.sleep(1)
+                    update_position_state(SYMBOL)
+                    
+                    with position_lock:
+                        pos = position_state.get(SYMBOL, {})
+                        final_long = pos.get("long", {}).get("size", Decimal("0"))
+                        final_short = pos.get("short", {}).get("size", Decimal("0"))
+                        log_debug("✅ 숏 체결 처리 완료", f"최종 롱:{final_long} 숏:{final_short}")
                 
                 last_action_time = now
-
 
 # =============================================================================
 # TP 체결 모니터링
 # =============================================================================
 
 def tp_monitor():
-    """TP 체결 감지 및 그리드 재생성 (스마트 대기 방식)"""
-    prev_long_size = Decimal("-1")
-    prev_short_size = Decimal("-1")
+    """TP 체결 감지 및 그리드 재생성"""
+    prev_long_size = None
+    prev_short_size = None
     
     while True:
         time.sleep(3)
@@ -754,6 +849,12 @@ def tp_monitor():
                 pos = position_state.get(SYMBOL, {})
                 long_size = pos.get("long", {}).get("size", Decimal("0"))
                 short_size = pos.get("short", {}).get("size", Decimal("0"))
+                
+                if prev_long_size is None:
+                    prev_long_size = long_size
+                    prev_short_size = short_size
+                    log_debug("👀 TP 모니터 시작", f"초기 롱:{long_size} 숏:{short_size}")
+                    continue
                 
                 # 롱 포지션이 0이 "되었을 때"만
                 if long_size == 0 and prev_long_size > 0:
@@ -771,8 +872,9 @@ def tp_monitor():
                         tp_type[SYMBOL]["long"] = "average"
                     
                     cancel_grid_orders(SYMBOL)
+                    time.sleep(0.5)
                     
-                    max_wait = 1.0
+                    max_wait = 2.0
                     check_interval = 0.2
                     elapsed = 0
                     
@@ -787,15 +889,12 @@ def tp_monitor():
                             log_debug("✅ 그리드 취소 완료", f"{elapsed:.1f}초")
                             break
                     else:
-                        log_debug("⚠️ 그리드 취소 미완료", "재생성 중단")
-                        prev_long_size = long_size
-                        prev_short_size = short_size
-                        continue
+                        log_debug("⚠️ 그리드 취소 미완료", "강제 재생성")
                     
                     ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                     if ticker:
                         current_price = Decimal(str(ticker[0].last))
-                        initialize_grid(current_price, skip_check=True)  # ⭐⭐⭐ 수정!
+                        initialize_grid(current_price, skip_check=True)
                         
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
@@ -804,6 +903,17 @@ def tp_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         refresh_tp_orders(SYMBOL)
+
+                        # ⭐ 최종 검증
+                        with position_lock:
+                            pos = position_state.get(SYMBOL, {})
+                            final_long = pos.get("long", {}).get("size", Decimal("0"))
+                            final_short = pos.get("short", {}).get("size", Decimal("0"))
+    
+                            if final_long > 0 or final_short > 0:
+                                log_debug("✅ 그리드 재생성 완료", f"롱:{final_long} 숏:{final_short}")
+                            else:
+                                log_debug("⚠️ 포지션 없음", "대기 상태")
                 
                 # 숏 포지션이 0이 "되었을 때"만
                 elif short_size == 0 and prev_short_size > 0:
@@ -821,8 +931,9 @@ def tp_monitor():
                         tp_type[SYMBOL]["short"] = "average"
                     
                     cancel_grid_orders(SYMBOL)
+                    time.sleep(0.5)
                     
-                    max_wait = 1.0
+                    max_wait = 2.0
                     check_interval = 0.2
                     elapsed = 0
                     
@@ -837,15 +948,12 @@ def tp_monitor():
                             log_debug("✅ 그리드 취소 완료", f"{elapsed:.1f}초")
                             break
                     else:
-                        log_debug("⚠️ 그리드 취소 미완료", "재생성 중단")
-                        prev_long_size = long_size
-                        prev_short_size = short_size
-                        continue
+                        log_debug("⚠️ 그리드 취소 미완료", "강제 재생성")
                     
                     ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                     if ticker:
                         current_price = Decimal(str(ticker[0].last))
-                        initialize_grid(current_price, skip_check=True)  # ⭐⭐⭐ 수정!
+                        initialize_grid(current_price, skip_check=True)
                         
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
@@ -854,13 +962,23 @@ def tp_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         refresh_tp_orders(SYMBOL)
+
+                        # ⭐ 최종 검증
+                        with position_lock:
+                            pos = position_state.get(SYMBOL, {})
+                            final_long = pos.get("long", {}).get("size", Decimal("0"))
+                            final_short = pos.get("short", {}).get("size", Decimal("0"))
+    
+                            if final_long > 0 or final_short > 0:
+                                log_debug("✅ 그리드 재생성 완료", f"롱:{final_long} 숏:{final_short}")
+                            else:
+                                log_debug("⚠️ 포지션 없음", "대기 상태")
                 
                 prev_long_size = long_size
                 prev_short_size = short_size
                 
         except Exception as e:
             log_debug("❌ TP 모니터 오류", str(e), exc_info=True)
-
 
 # =============================================================================
 # WebSocket 가격 모니터링
@@ -869,7 +987,7 @@ def tp_monitor():
 async def price_monitor():
     """가격 모니터링 (WebSocket)"""
     uri = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-    retry_count = 0  # ⭐⭐⭐ 개선 2: 재연결 카운터
+    retry_count = 0
     
     while True:
         try:
@@ -882,13 +1000,12 @@ async def price_monitor():
                 }
                 await ws.send(json.dumps(subscribe_msg))
                 
-                # ⭐ 연결 성공 로그 개선
                 if retry_count > 0:
                     log_debug("🔗 WebSocket 재연결 성공", f"{SYMBOL} (재시도 {retry_count}회 후)")
                 else:
                     log_debug("🔗 WebSocket 연결", SYMBOL)
                 
-                retry_count = 0  # ⭐ 성공 시 카운터 초기화
+                retry_count = 0
                 
                 while True:
                     msg = await ws.recv()
@@ -902,10 +1019,10 @@ async def price_monitor():
                                 latest_prices[SYMBOL] = price
                     
         except Exception as e:
-            retry_count += 1  # ⭐ 재연결 카운터 증가
-            log_debug("❌ WebSocket 오류", f"재시도 {retry_count}회 - {str(e)}")
+            retry_count += 1
+            if retry_count % 10 == 1:
+                log_debug("❌ WebSocket 오류", f"재시도 {retry_count}회")
             await asyncio.sleep(5)
-
 
 # =============================================================================
 # 웹 서버
@@ -921,7 +1038,7 @@ def ping():
 # =============================================================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v16.4-ENHANCED")
+    log_debug("🚀 서버 시작", "v16.5-STABLE")
     
     # 초기 자본금 설정
     INITIAL_BALANCE = Decimal(str(get_available_balance(show_log=True)))
@@ -933,15 +1050,14 @@ if __name__ == "__main__":
     tp_orders[SYMBOL] = {"long": [], "short": []}
     tp_type[SYMBOL] = {"long": "average", "short": "average"}
     
-    # ⭐ OBV MACD 확인 (x1000 표시)
+    # OBV MACD 확인
     obv_macd_val = calculate_obv_macd(SYMBOL)
     log_debug("📊 Shadow OBV MACD", f"{SYMBOL}: {float(obv_macd_val * 1000):.2f}")
     
     # 초기 그리드 생성
     initialize_grid()
     
-    # ⭐⭐⭐ 개선 1: 기존 포지션이 있으면 TP 설정
-    time.sleep(1)  # 그리드 생성 후 대기
+    # 기존 포지션 TP 설정
     update_position_state(SYMBOL)
     with position_lock:
         pos = position_state.get(SYMBOL, {})
@@ -950,7 +1066,10 @@ if __name__ == "__main__":
         
         if long_size > 0 or short_size > 0:
             log_debug("⚠️ 기존 포지션 감지", f"롱:{long_size} 숏:{short_size} - TP 설정 중...")
-            refresh_tp_orders(SYMBOL)
+            time.sleep(1)
+            emergency_tp_fix(SYMBOL)
+        else:
+            log_debug("✅ 포지션 없음", "그리드 대기 상태")
     
     # 스레드 시작
     threading.Thread(target=fill_monitor, daemon=True).start()
