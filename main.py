@@ -809,9 +809,9 @@ def fill_monitor():
             try:  # ⭐ 내부 try-except
                 time.sleep(2)
                 
-                # ⭐ 하트비트 로그 (1분마다)
+                # ⭐ 하트비트 로그 (2분마다)
                 now = time.time()
-                if now - last_heartbeat >= 60:
+                if now - last_heartbeat >= 120:
                     with position_lock:
                         pos = position_state.get(SYMBOL, {})
                         current_long = pos.get("long", {}).get("size", Decimal("0"))
