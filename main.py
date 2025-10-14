@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ONDO 역방향 그리드 매매 시스템 v17.1-FINAL
-- 총 자산(total) 기준 수량 계산 (일관성 유지)
+ONDO 역방향 그리드 매매 시스템 v17.2-FINAL
+- 환경변수 기반 초기 자본금 (안정성 극대화)
+- Unified Account 백업
+- 총 자산 기준 수량 계산
 - TP 기반 그리드 재생성
 - 듀얼 TP (평단가/개별)
 - 헤징 포지션: 항상 평단가 TP
@@ -34,10 +36,10 @@ SETTLE = "usdt"
 SYMBOL = "ONDO_USDT"
 CONTRACT_SIZE = Decimal("1")
 
-GRID_GAP_PCT = Decimal("0.16") / Decimal("100")  # 0.21%
-TP_GAP_PCT = Decimal("0.16") / Decimal("100")    # 0.21%
-HEDGE_RATIO = Decimal("0.2")  # 헤징 0.3배
-THRESHOLD_RATIO = Decimal("1.0")  # 임계값 2배
+GRID_GAP_PCT = Decimal("0.21") / Decimal("100")  # 0.21%
+TP_GAP_PCT = Decimal("0.21") / Decimal("100")    # 0.21%
+HEDGE_RATIO = Decimal("0.3")  # 헤징 0.3배
+THRESHOLD_RATIO = Decimal("2.0")  # 임계값 2배
 
 # API 설정
 API_KEY = os.environ.get("API_KEY", "")
@@ -75,47 +77,103 @@ def log_debug(label, msg="", exc_info=False):
 
 
 def get_total_balance(show_log=False):
-    """총 자산 조회 (Unified/Futures) - 주문/포지션 포함"""
+    """총 자산 조회 (환경변수 우선, Unified Account 백업)"""
+    
+    # ⭐⭐⭐ 1순위: 환경변수 (가장 안정적!)
+    initial_balance_env = os.environ.get("INITIAL_BALANCE", "")
+    if initial_balance_env:
+        try:
+            balance = float(initial_balance_env)
+            if balance > 0:
+                if show_log:
+                    log_debug("💰 초기 자본금 (환경변수)", f"{balance:.2f} USDT")
+                return balance
+        except Exception as e:
+            log_debug("⚠️ 환경변수 파싱 실패", f"INITIAL_BALANCE={initial_balance_env}: {str(e)}")
+    
+    # ⭐⭐ 2순위: Unified Account
     try:
-        # Unified Account
-        try:
-            unified_account = unified_api.list_unified_accounts()
-            if hasattr(unified_account, 'balances') and unified_account.balances:
-                balances = unified_account.balances
-                if isinstance(balances, dict) and "USDT" in balances:
-                    usdt_data = balances["USDT"]
-                    try:
-                        if isinstance(usdt_data, dict):
-                            # ⭐ total 사용 (전체 자산)
-                            total_str = str(usdt_data.get("total", "0"))
-                        else:
-                            total_str = str(getattr(usdt_data, "total", "0"))
-                        usdt_balance = float(total_str)
-                        if usdt_balance > 0:
-                            if show_log:
-                                log_debug("💰 총 자산 (Unified)", f"{usdt_balance:.2f} USDT")
-                            return usdt_balance
-                    except:
-                        pass
-        except:
-            pass
+        unified_account = unified_api.list_unified_accounts()
         
-        # Futures Account
-        try:
-            account = api.list_futures_accounts(settle=SETTLE)
-            if account:
-                # ⭐ total 사용 (전체 자산)
-                total = float(getattr(account, "total", "0"))
-                if total > 0:
+        # 방법 1: balances.USDT (가장 정확)
+        if hasattr(unified_account, 'balances') and unified_account.balances:
+            balances = unified_account.balances
+            
+            if isinstance(balances, dict) and "USDT" in balances:
+                usdt_data = balances["USDT"]
+                
+                # dict 형식
+                if isinstance(usdt_data, dict):
+                    available = float(usdt_data.get("available", "0"))
+                    freeze = float(usdt_data.get("freeze", "0"))
+                    borrowed = float(usdt_data.get("borrowed", "0"))
+                    total = available + freeze - borrowed
+                    
+                    if total > 0:
+                        if show_log:
+                            log_debug("💰 총 자산 (Unified)", 
+                                     f"{total:.2f} USDT (사용:{available:.2f} + 동결:{freeze:.2f} - 빌림:{borrowed:.2f})")
+                        return total
+                
+                # object 형식
+                else:
+                    available = float(getattr(usdt_data, "available", "0"))
+                    freeze = float(getattr(usdt_data, "freeze", "0"))
+                    borrowed = float(getattr(usdt_data, "borrowed", "0"))
+                    total = available + freeze - borrowed
+                    
+                    if total > 0:
+                        if show_log:
+                            log_debug("💰 총 자산 (Unified)", 
+                                     f"{total:.2f} USDT (사용:{available:.2f} + 동결:{freeze:.2f} - 빌림:{borrowed:.2f})")
+                        return total
+        
+        # 방법 2: total.amount
+        if hasattr(unified_account, 'total'):
+            total_obj = unified_account.total
+            
+            if isinstance(total_obj, dict):
+                amount = float(total_obj.get("amount", "0"))
+                if amount > 0:
                     if show_log:
-                        log_debug("💰 총 자산 (Futures)", f"{total:.2f} USDT")
-                    return total
-        except:
-            pass
-        
-        return 0.0
-    except:
-        return 0.0
+                        log_debug("💰 총 자산 (Unified-Total)", f"{amount:.2f} USD")
+                    return amount
+            
+            elif hasattr(total_obj, "amount"):
+                amount = float(getattr(total_obj, "amount", "0"))
+                if amount > 0:
+                    if show_log:
+                        log_debug("💰 총 자산 (Unified-Total)", f"{amount:.2f} USD")
+                    return amount
+    
+    except Exception as e:
+        log_debug("⚠️ Unified Account 조회 실패", str(e))
+    
+    # ⭐ 3순위: Futures Account (백업)
+    try:
+        account = api.list_futures_accounts(settle=SETTLE)
+        if account:
+            available = float(getattr(account, "available", "0"))
+            
+            # unrealized_pnl 포함
+            unrealized_pnl = 0
+            if hasattr(account, "unrealized_pnl"):
+                unrealized_pnl = float(getattr(account, "unrealized_pnl", "0"))
+            
+            total = available + unrealized_pnl
+            
+            if total > 0:
+                if show_log:
+                    log_debug("💰 총 자산 (Futures)", 
+                             f"{total:.2f} USDT (사용:{available:.2f} + 미실현:{unrealized_pnl:.2f})")
+                return total
+    
+    except Exception as e:
+        log_debug("⚠️ Futures Account 조회 실패", str(e))
+    
+    # 모든 방법 실패
+    log_debug("❌ 잔고 조회 실패", "환경변수 INITIAL_BALANCE 설정 필요!")
+    return 0.0
 
 
 def get_candles(symbol, interval="10s", limit=600):
@@ -193,44 +251,53 @@ def calculate_obv_macd(symbol):
 
 
 def calculate_grid_qty(current_price):
-    """그리드 수량 계산 (OBV MACD 기반 0.3~0.6배)"""
+    """그리드 수량 계산 (OBV MACD 기반 0.3~0.6배) - 디버깅 강화"""
     try:
         if INITIAL_BALANCE <= 0:
+            log_debug("❌ 초기 잔고 0", f"INITIAL_BALANCE={INITIAL_BALANCE} - 수량 1 리턴")
             return 1
         
         obv_macd = calculate_obv_macd(SYMBOL)
         abs_val = abs(float(obv_macd * 1000))
         
+        # 레버리지 결정
         if abs_val < 5:
-            leverage = Decimal("0.2")
+            leverage = Decimal("0.3")
         elif abs_val < 10:
-            leverage = Decimal("0.21")
+            leverage = Decimal("0.32")
         elif abs_val < 20:
-            leverage = Decimal("0.22")
+            leverage = Decimal("0.34")
         elif abs_val < 30:
-            leverage = Decimal("0.23")
+            leverage = Decimal("0.36")
         elif abs_val < 40:
-            leverage = Decimal("0.24")
+            leverage = Decimal("0.38")
         elif abs_val < 50:
-            leverage = Decimal("0.25")
+            leverage = Decimal("0.4")
         elif abs_val < 60:
-            leverage = Decimal("0.26")
+            leverage = Decimal("0.42")
         elif abs_val < 70:
-            leverage = Decimal("0.27")
+            leverage = Decimal("0.44")
         elif abs_val < 80:
-            leverage = Decimal("0.28")
+            leverage = Decimal("0.46")
         elif abs_val < 90:
-            leverage = Decimal("0.29")
+            leverage = Decimal("0.48")
         elif abs_val < 100:
-            leverage = Decimal("0.30")            
+            leverage = Decimal("0.50")            
         else:
-            leverage = Decimal("0.35")
+            leverage = Decimal("0.6")
         
-        # ⭐ INITIAL_BALANCE는 초기 총 자산 (고정값)
+        # 수량 계산
         qty = int((INITIAL_BALANCE * leverage) / (current_price * CONTRACT_SIZE))
-        return max(1, qty)
+        final_qty = max(1, qty)
+        
+        # ⭐ 디버깅 로그
+        log_debug("🔢 수량 계산", 
+                 f"OBV:{abs_val:.2f} → 레버:{leverage} | ({INITIAL_BALANCE:.2f} × {leverage}) / ({current_price:.4f} × {CONTRACT_SIZE}) = {final_qty}계약")
+        
+        return final_qty
+        
     except Exception as e:
-        log_debug("❌ 그리드 수량 오류", str(e))
+        log_debug("❌ 그리드 수량 오류", str(e), exc_info=True)
         return 1
 
 
@@ -1238,11 +1305,17 @@ def ping():
 # =============================================================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v17.1-FINAL")
+    log_debug("🚀 서버 시작", "v17.2-FINAL")
     
-    # ⭐ 총 자산 기준으로 변경!
+    # ⭐ 환경변수 우선 + Unified Account 백업
     INITIAL_BALANCE = Decimal(str(get_total_balance(show_log=True)))
-    log_debug("💰 초기 총 자산", f"{INITIAL_BALANCE:.2f} USDT")
+    
+    if INITIAL_BALANCE <= 0:
+        log_debug("❌ 초기 자본금 0", "환경변수 INITIAL_BALANCE 설정 필요!")
+        log_debug("📝 설정 방법", "Railway → Variables → INITIAL_BALANCE=63")
+        exit(1)
+    
+    log_debug("💰 초기 자본금 확정", f"{INITIAL_BALANCE:.2f} USDT")
     log_debug("🎯 임계값", f"{float(INITIAL_BALANCE * THRESHOLD_RATIO):.2f} USDT ({int(THRESHOLD_RATIO)}배)")
     log_debug("🛡️ 헤징 기준", f"{float(INITIAL_BALANCE * HEDGE_RATIO * Decimal('1.5')):.2f} USDT (0.45배)")
     
