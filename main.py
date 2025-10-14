@@ -1,15 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-ONDO 역방향 그리드 매매 시스템 v17.2-FINAL
-- 환경변수 기반 초기 자본금 (안정성 극대화)
-- Unified Account 백업
-- 총 자산 기준 수량 계산
-- TP 기반 그리드 재생성
-- 듀얼 TP (평단가/개별)
-- 헤징 포지션: 항상 평단가 TP
-- 주력 포지션: 임계값 초과 시 개별 TP
-- 모든 전체 청산 시 그리드 재생성
+
 """#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -641,7 +630,7 @@ def refresh_tp_orders(symbol):
             for side in ["long", "short"]:
                 pos = position_state.get(symbol, {}).get(side, {})
                 size = pos.get("size", Decimal("0"))
-                price = pos.get("size", Decimal("0"))
+                price = pos.get("price", Decimal("0"))  # ⭐ 수정! (size → price)
                 
                 if size > 0:
                     check_and_update_tp_mode_locked(symbol, side, size, price)
@@ -2425,7 +2414,7 @@ def ping():
 # =============================================================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v17.2-FINAL")
+    log_debug("🚀 서버 시작", "v18.0-ENV")  # ✅ v18.0
     
     # ⭐ 환경변수 우선 + Unified Account 백업
     INITIAL_BALANCE = Decimal(str(get_total_balance(show_log=True)))
