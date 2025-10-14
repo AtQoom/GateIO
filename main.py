@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ONDO 역방향 그리드 매매 시스템 v16.5-STABLE
+ONDO 역방향 그리드 매매 시스템 v16.6-FINAL
 - TP 기반 그리드 재생성
 - 듀얼 TP (평단가/개별)
 - 모든 주문 지정가
 - 헤징 후 TP 안정화
 - 중복 방지 및 오류 복구
+- API 지연 대응 강화
 """
 
 import os
@@ -233,13 +234,13 @@ def calculate_grid_qty(current_price):
 def calculate_position_value(qty, price):
     """포지션 가치 계산"""
     return qty * price * CONTRACT_SIZE
-\
+
 # =============================================================================
 # 포지션 관리
 # =============================================================================
 
-def update_position_state(symbol, retry=5):  # ⭐ 3회 → 5회
-    """포지션 상태 업데이트 (재시도)"""
+def update_position_state(symbol, retry=5):
+    """포지션 상태 업데이트 (재시도 5회)"""
     for attempt in range(retry):
         try:
             positions = api.list_positions(SETTLE)
@@ -270,8 +271,8 @@ def update_position_state(symbol, retry=5):  # ⭐ 3회 → 5회
                 position_state[symbol]["long"] = {"size": long_size, "price": long_price}
                 position_state[symbol]["short"] = {"size": short_size, "price": short_price}
                 
-                # ⭐ 로그 추가 (디버깅용)
-                log_debug("🔍 포지션 업데이트", f"롱:{long_size}@{long_price} 숏:{short_size}@{short_price}")
+                # 로그 추가 (디버깅용)
+                log_debug("🔍 포지션 업데이트", f"롱:{long_size}@{long_price:.4f} 숏:{short_size}@{short_price:.4f}")
                 
                 return True
                 
@@ -302,7 +303,7 @@ def record_entry(symbol, side, price, qty):
 # =============================================================================
 
 def cancel_grid_orders(symbol):
-    """그리드 주문만 취소 (TP 유지) - 개선"""
+    """그리드 주문만 취소 (TP 유지)"""
     for retry in range(2):
         try:
             orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
@@ -314,7 +315,7 @@ def cancel_grid_orders(symbol):
                         api.cancel_futures_order(SETTLE, order.id)
                         cancelled_count += 1
                         log_debug("🗑️ 그리드 취소", f"ID:{order.id} size:{order.size} price:{order.price}")
-                        time.sleep(0.1)  # ⭐ 개별 취소 후 대기
+                        time.sleep(0.1)
                 except Exception as e:
                     log_debug("⚠️ 주문 취소 실패", f"ID:{order.id} - {str(e)}")
             
@@ -458,7 +459,10 @@ def place_individual_tp_orders(symbol, side, entries):
 def check_and_update_tp_mode_locked(symbol, side, size, price):
     """임계값 체크 및 TP 모드 전환 (lock 내부에서 호출됨)"""
     try:
-        # ⚠️ position_state 접근 안함 (이미 lock 안에서 호출됨)
+        # size가 0이면 즉시 리턴
+        if size == 0:
+            log_debug("⚠️ 포지션 0", f"{symbol}_{side} size=0 - TP 생성 불가")
+            return
         
         # 실제 거래소 주문 확인
         existing_tp_qty = Decimal("0")
@@ -486,28 +490,40 @@ def check_and_update_tp_mode_locked(symbol, side, size, price):
             if symbol in tp_orders and side in tp_orders[symbol]:
                 tp_orders[symbol][side] = []
         
-        # ⭐⭐⭐ TP 부족하면 무조건 재생성
+        # TP 부족하면 무조건 재생성
         if existing_tp_qty < size:
             log_debug("⚠️ TP 부족", f"{symbol}_{side} 기존:{existing_tp_qty} < 포지션:{size}")
-            cancel_tp_orders(symbol, side)
-            time.sleep(0.3)
-            place_average_tp_order(symbol, side, price, size, retry=3)
             
-            if symbol not in tp_type:
-                tp_type[symbol] = {"long": "average", "short": "average"}
-            tp_type[symbol][side] = "average"
+            cancel_tp_orders(symbol, side)
+            time.sleep(0.5)  # 0.3초 → 0.5초
+            
+            success = place_average_tp_order(symbol, side, price, size, retry=3)
+            
+            if success:
+                if symbol not in tp_type:
+                    tp_type[symbol] = {"long": "average", "short": "average"}
+                tp_type[symbol][side] = "average"
+            else:
+                log_debug("❌ TP 생성 실패", f"{symbol}_{side}")
+            
             return
         
         # TP 초과하면 재생성
         if existing_tp_qty > size:
             log_debug("⚠️ TP 초과", f"{symbol}_{side} 기존:{existing_tp_qty} > 포지션:{size}")
-            cancel_tp_orders(symbol, side)
-            time.sleep(0.3)
-            place_average_tp_order(symbol, side, price, size, retry=3)
             
-            if symbol not in tp_type:
-                tp_type[symbol] = {"long": "average", "short": "average"}
-            tp_type[symbol][side] = "average"
+            cancel_tp_orders(symbol, side)
+            time.sleep(0.5)
+            
+            success = place_average_tp_order(symbol, side, price, size, retry=3)
+            
+            if success:
+                if symbol not in tp_type:
+                    tp_type[symbol] = {"long": "average", "short": "average"}
+                tp_type[symbol][side] = "average"
+            else:
+                log_debug("❌ TP 생성 실패", f"{symbol}_{side}")
+            
             return
         
         # TP 정확히 일치
@@ -525,7 +541,7 @@ def check_and_update_tp_mode_locked(symbol, side, size, price):
                          f"{symbol}_{side} {float(position_value):.2f} > {float(threshold_value):.2f}")
                 
                 cancel_tp_orders(symbol, side)
-                time.sleep(0.3)
+                time.sleep(0.5)
                 
                 entries = entry_history.get(symbol, {}).get(side, [])
                 if entries:
@@ -540,33 +556,36 @@ def check_and_update_tp_mode_locked(symbol, side, size, price):
 
 
 def refresh_tp_orders(symbol):
-    """TP 주문 새로고침 (재시도 로직 추가)"""
+    """TP 주문 새로고침 (API 지연 대응 강화)"""
     try:
         log_debug("🔄 TP 새로고침 시작", symbol)
         
-        # 포지션 재조회 (재시도 3회)
-        for retry in range(3):
+        # 포지션 재조회 (재시도 5회)
+        for retry in range(5):
             if update_position_state(symbol):
                 break
-            log_debug(f"⚠️ 포지션 조회 재시도 {retry + 1}/3", "")
+            log_debug(f"⚠️ 포지션 조회 재시도 {retry + 1}/5", "")
             time.sleep(0.5)
         else:
             log_debug("❌ 포지션 조회 실패", "TP 새로고침 중단")
             return
         
+        # API 반영 대기
+        time.sleep(1.0)  # 0.5초 → 1.0초
+        
+        # 한 번 더 재조회 (확실히 하기 위해)
+        update_position_state(symbol)
         time.sleep(0.5)
         
-        # ⭐⭐⭐ position_lock 안에서 처리
         with position_lock:
             for side in ["long", "short"]:
                 pos = position_state.get(symbol, {}).get(side, {})
                 size = pos.get("size", Decimal("0"))
                 price = pos.get("price", Decimal("0"))
                 
-                log_debug(f"🔍 포지션 체크", f"{side} size:{size} price:{price}")
+                log_debug(f"🔍 포지션 체크", f"{side} size:{size} price:{price:.4f}")
                 
                 if size > 0:
-                    # ⭐ lock 안에서 check_and_update_tp_mode 호출
                     check_and_update_tp_mode_locked(symbol, side, size, price)
                     time.sleep(0.3)
                 else:
@@ -662,7 +681,6 @@ def initialize_grid(base_price=None, skip_check=False):
     except Exception as e:
         log_debug("❌ 그리드 생성 실패", str(e), exc_info=True)
 
-
 # =============================================================================
 # 헤징 관리
 # =============================================================================
@@ -688,7 +706,7 @@ def place_hedge_order(symbol, side, current_price):
         
         log_debug("📌 헤징 주문", f"{symbol} {side} {hedge_qty}계약 ID:{result.id}")
         
-        # ⭐ 주문 상태 확인 (선택)
+        # 주문 상태 확인
         time.sleep(0.5)
         try:
             order_status = api.get_futures_order(SETTLE, result.id)
@@ -704,7 +722,6 @@ def place_hedge_order(symbol, side, current_price):
     except Exception as e:
         log_debug("❌ 헤징 주문 실패", str(e))
         return None
-
 
 # =============================================================================
 # 체결 모니터링
@@ -746,7 +763,7 @@ def fill_monitor():
                 current_price = Decimal("0")
             
             # ========== 롱 체결 감지 ==========
-            if long_size > prev_long_size and now - last_action_time >= 3:  # ⭐ 5초 → 3초
+            if long_size > prev_long_size and now - last_action_time >= 3:
                 added_long = long_size - prev_long_size
                 
                 log_debug("📊 롱 체결 감지", f"+{added_long}계약 @ {long_price:.4f} (총 {long_size}계약)")
@@ -758,7 +775,7 @@ def fill_monitor():
                 cancel_grid_orders(SYMBOL)
                 time.sleep(0.5)
                 
-                # ⭐ 그리드 취소 확인
+                # 그리드 취소 확인
                 max_wait = 1.0
                 check_interval = 0.2
                 elapsed = 0
@@ -789,7 +806,7 @@ def fill_monitor():
                     log_debug("🔨 숏 헤징 주문", f"{current_price:.4f}")
                     place_hedge_order(SYMBOL, "short", current_price)
                     
-                    # ⭐ 헤징 체결 확인 (재시도 10회)
+                    # 헤징 체결 확인 (재시도 10회)
                     log_debug("⏳ 헤징 체결 확인 중...", "")
                     hedge_filled = False
                     for retry in range(10):
@@ -804,14 +821,25 @@ def fill_monitor():
                                     log_debug("✅ 헤징 체결 확인", f"숏:{current_short}계약 (재시도 {retry + 1}/10)")
                                     break
                     
-                    if not hedge_filled:
+                    if hedge_filled:
+                        # 추가 대기 (포지션 확정)
+                        time.sleep(1.0)
+                        
+                        # 한 번 더 재조회
+                        update_position_state(SYMBOL)
+                        
+                        with position_lock:
+                            pos = position_state.get(SYMBOL, {})
+                            final_short = pos.get("short", {}).get("size", Decimal("0"))
+                            log_debug("🔍 최종 숏 포지션", f"{final_short}계약")
+                    else:
                         log_debug("⚠️ 헤징 미체결", "TP 설정 주의 필요")
                 
-                # 5. 포지션 재조회 (최종)
+                # 5. 포지션 재조회 (최종, 5회 재시도)
                 success = False
-                for retry in range(3):
+                for retry in range(5):
                     if update_position_state(SYMBOL):
-                        log_debug("✅ 포지션 재조회 성공", f"재시도 {retry + 1}/3")
+                        log_debug("✅ 포지션 재조회 성공", f"재시도 {retry + 1}/5")
                         success = True
                         break
                     time.sleep(0.5)
@@ -835,7 +863,7 @@ def fill_monitor():
                 last_action_time = now
             
             # ========== 숏 체결 감지 ==========
-            elif short_size > prev_short_size and now - last_action_time >= 3:  # ⭐ 5초 → 3초
+            elif short_size > prev_short_size and now - last_action_time >= 3:
                 added_short = short_size - prev_short_size
                 
                 log_debug("📊 숏 체결 감지", f"+{added_short}계약 @ {short_price:.4f} (총 {short_size}계약)")
@@ -847,7 +875,7 @@ def fill_monitor():
                 cancel_grid_orders(SYMBOL)
                 time.sleep(0.5)
                 
-                # ⭐ 그리드 취소 확인
+                # 그리드 취소 확인
                 max_wait = 1.0
                 check_interval = 0.2
                 elapsed = 0
@@ -878,7 +906,7 @@ def fill_monitor():
                     log_debug("🔨 롱 헤징 주문", f"{current_price:.4f}")
                     place_hedge_order(SYMBOL, "long", current_price)
                     
-                    # ⭐ 헤징 체결 확인 (재시도 10회)
+                    # 헤징 체결 확인 (재시도 10회)
                     log_debug("⏳ 헤징 체결 확인 중...", "")
                     hedge_filled = False
                     for retry in range(10):
@@ -893,14 +921,25 @@ def fill_monitor():
                                     log_debug("✅ 헤징 체결 확인", f"롱:{current_long}계약 (재시도 {retry + 1}/10)")
                                     break
                     
-                    if not hedge_filled:
+                    if hedge_filled:
+                        # 추가 대기 (포지션 확정)
+                        time.sleep(1.0)
+                        
+                        # 한 번 더 재조회
+                        update_position_state(SYMBOL)
+                        
+                        with position_lock:
+                            pos = position_state.get(SYMBOL, {})
+                            final_long = pos.get("long", {}).get("size", Decimal("0"))
+                            log_debug("🔍 최종 롱 포지션", f"{final_long}계약")
+                    else:
                         log_debug("⚠️ 헤징 미체결", "TP 설정 주의 필요")
                 
-                # 5. 포지션 재조회 (최종)
+                # 5. 포지션 재조회 (최종, 5회 재시도)
                 success = False
-                for retry in range(3):
+                for retry in range(5):
                     if update_position_state(SYMBOL):
-                        log_debug("✅ 포지션 재조회 성공", f"재시도 {retry + 1}/3")
+                        log_debug("✅ 포지션 재조회 성공", f"재시도 {retry + 1}/5")
                         success = True
                         break
                     time.sleep(0.5)
@@ -922,7 +961,6 @@ def fill_monitor():
                     log_debug("✅ 숏 체결 처리 완료", f"최종 롱:{prev_long_size} 숏:{prev_short_size}")
                 
                 last_action_time = now
-
 
 # =============================================================================
 # TP 체결 모니터링
@@ -990,14 +1028,14 @@ def tp_monitor():
                         current_price = Decimal(str(ticker[0].last))
                         initialize_grid(current_price, skip_check=True)
                         
-                        # ⭐ 그리드 생성 완료 대기
-                        time.sleep(1.5)  # 0.5초 → 1.5초
+                        # 그리드 생성 완료 대기
+                        time.sleep(1.5)
                         
                         update_position_state(SYMBOL)
                         refresh_tp_orders(SYMBOL)
                         
-                        # ⭐ TP 생성 완료 대기
-                        time.sleep(1.0)  # 0.5초 → 1.0초
+                        # TP 생성 완료 대기
+                        time.sleep(1.0)
                         
                         update_position_state(SYMBOL)
                         refresh_tp_orders(SYMBOL)
@@ -1053,14 +1091,14 @@ def tp_monitor():
                         current_price = Decimal(str(ticker[0].last))
                         initialize_grid(current_price, skip_check=True)
                         
-                        # ⭐ 그리드 생성 완료 대기
-                        time.sleep(1.5)  # 0.5초 → 1.5초
+                        # 그리드 생성 완료 대기
+                        time.sleep(1.5)
                         
                         update_position_state(SYMBOL)
                         refresh_tp_orders(SYMBOL)
                         
-                        # ⭐ TP 생성 완료 대기
-                        time.sleep(1.0)  # 0.5초 → 1.0초
+                        # TP 생성 완료 대기
+                        time.sleep(1.0)
                         
                         update_position_state(SYMBOL)
                         refresh_tp_orders(SYMBOL)
@@ -1081,7 +1119,6 @@ def tp_monitor():
                 
         except Exception as e:
             log_debug("❌ TP 모니터 오류", str(e), exc_info=True)
-
 
 # =============================================================================
 # WebSocket 가격 모니터링
@@ -1141,7 +1178,7 @@ def ping():
 # =============================================================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v16.5-STABLE")
+    log_debug("🚀 서버 시작", "v16.6-FINAL")
     
     # 초기 자본금 설정
     INITIAL_BALANCE = Decimal(str(get_available_balance(show_log=True)))
