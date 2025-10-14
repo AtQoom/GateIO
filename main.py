@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ONDO 역방향 그리드 매매 시스템 v18.1-COMPOUND
+ONDO 역방향 그리드 매매 시스템 v18.2-OPTIMIZED
 - 복리 자동화: 1시간마다 실제 잔고 업데이트
 - 환경변수 기반 설정 (속도/안정성 극대화)
 - 수량 계산: 레버리지 1배 기준
-- OBV MACD 가중 수량 (0.21~0.40)
-- 그리드/TP 간격 0.16%
-- 헤징 0.2배
+- OBV MACD 가중 수량 (0.10~0.35)
+- 그리드/TP 간격 0.12%
+- 헤징 0.1배
 - 임계값 1배
 """
 
@@ -36,12 +36,10 @@ SYMBOL = "ONDO_USDT"
 CONTRACT_SIZE = Decimal("1")
 
 # ⭐ 환경변수로 모든 설정 관리
-GRID_GAP_PCT = Decimal(os.environ.get("GRID_GAP_PCT", "0.16")) / Decimal("100")
-TP_GAP_PCT = Decimal(os.environ.get("TP_GAP_PCT", "0.16")) / Decimal("100")
-HEDGE_RATIO = Decimal(os.environ.get("HEDGE_RATIO", "0.2"))
+GRID_GAP_PCT = Decimal(os.environ.get("GRID_GAP_PCT", "0.12")) / Decimal("100")
+TP_GAP_PCT = Decimal(os.environ.get("TP_GAP_PCT", "0.12")) / Decimal("100")
+HEDGE_RATIO = Decimal(os.environ.get("HEDGE_RATIO", "0.1"))
 THRESHOLD_RATIO = Decimal(os.environ.get("THRESHOLD_RATIO", "1.0"))
-LEVERAGE_MIN = Decimal(os.environ.get("LEVERAGE_MIN", "0.21"))
-LEVERAGE_MAX = Decimal(os.environ.get("LEVERAGE_MAX", "0.40"))
 BALANCE_UPDATE_INTERVAL = int(os.environ.get("BALANCE_UPDATE_INTERVAL", "3600"))  # 기본 1시간
 
 # API 설정
@@ -238,7 +236,7 @@ def calculate_obv_macd(symbol):
 
 
 def calculate_grid_qty(current_price):
-    """그리드 수량 계산 (OBV MACD 가중 0.21~0.40, 레버리지 1배)"""
+    """그리드 수량 계산 (OBV MACD 가중 0.10~0.35, 레버리지 1배)"""
     try:
         # ⭐ 복리 자동 업데이트
         update_initial_balance()
@@ -262,47 +260,29 @@ def calculate_grid_qty(current_price):
             log_debug("⚠️ OBV 계산 실패", f"{str(e)} - 최소 가중치 사용")
             abs_val = 0
         
-        # ⭐ OBV 기반 가중치 (0.21 ~ 0.40)
+        # ⭐ 수정 후 (0.10~0.35)
         if abs_val < 5:
-            weight = Decimal("0.21")
+            weight = Decimal("0.10")
         elif abs_val < 10:
-            weight = Decimal("0.22")
+            weight = Decimal("0.11")
+        elif abs_val < 15:
+            weight = Decimal("0.12")
         elif abs_val < 20:
-            weight = Decimal("0.23")
+            weight = Decimal("0.13")
         elif abs_val < 30:
-            weight = Decimal("0.24")
+            weight = Decimal("0.15")
         elif abs_val < 40:
-            weight = Decimal("0.25")
+            weight = Decimal("0.17")
         elif abs_val < 50:
-            weight = Decimal("0.26")
-        elif abs_val < 60:
-            weight = Decimal("0.27")
+            weight = Decimal("0.20")
         elif abs_val < 70:
-            weight = Decimal("0.28")
-        elif abs_val < 80:
-            weight = Decimal("0.29")
-        elif abs_val < 90:
-            weight = Decimal("0.30")
+            weight = Decimal("0.23")
         elif abs_val < 100:
-            weight = Decimal("0.31")
-        elif abs_val < 110:
-            weight = Decimal("0.32")
-        elif abs_val < 120:
-            weight = Decimal("0.33")
-        elif abs_val < 130:
-            weight = Decimal("0.34")
-        elif abs_val < 140:
-            weight = Decimal("0.35")
+            weight = Decimal("0.27")
         elif abs_val < 150:
-            weight = Decimal("0.36")
-        elif abs_val < 160:
-            weight = Decimal("0.37")
-        elif abs_val < 180:
-            weight = Decimal("0.38")
-        elif abs_val < 200:
-            weight = Decimal("0.39")
+            weight = Decimal("0.30")
         else:
-            weight = Decimal("0.40")
+            weight = Decimal("0.35")
         
         # ⭐ 수량 계산 (레버리지 1배 기준)
         position_value = current_balance * weight
@@ -895,7 +875,8 @@ def fill_monitor():
                 update_initial_balance()
                 
                 now = time.time()
-                if now - last_heartbeat >= 120:
+                # ⭐⭐⭐ 하트비트 3분 (180초)
+                if now - last_heartbeat >= 180:
                     with position_lock:
                         pos = position_state.get(SYMBOL, {})
                         current_long = pos.get("long", {}).get("size", Decimal("0"))
@@ -925,7 +906,7 @@ def fill_monitor():
                     except:
                         current_price = Decimal("0")
                     
-                    # ⭐⭐⭐ 롱 체결 감지 (OBV 로그 추가)
+                    # ⭐⭐⭐ 롱 체결 감지
                     if long_size > prev_long_size and now - last_long_action_time >= 3:
                         try:
                             added_long = long_size - prev_long_size
@@ -960,10 +941,32 @@ def fill_monitor():
                             time.sleep(1)
                             update_position_state(SYMBOL, show_log=True)
                             
+                            # ⭐⭐⭐ 포지션 체크 후 그리드 생성 여부 결정
                             with position_lock:
                                 pos = position_state.get(SYMBOL, {})
-                                prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
-                                prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
+                                final_long = pos.get("long", {}).get("size", Decimal("0"))
+                                final_short = pos.get("short", {}).get("size", Decimal("0"))
+                                
+                                # 한쪽만 있으면 그리드 생성!
+                                if final_long > 0 and final_short == 0:
+                                    log_debug("⚡ 롱만 존재", "그리드 생성!")
+                                    ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                                    if ticker:
+                                        grid_price = Decimal(str(ticker[0].last))
+                                        initialize_grid(grid_price, skip_check=True)
+                                
+                                elif final_short > 0 and final_long == 0:
+                                    log_debug("⚡ 숏만 존재", "그리드 생성!")
+                                    ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                                    if ticker:
+                                        grid_price = Decimal(str(ticker[0].last))
+                                        initialize_grid(grid_price, skip_check=True)
+                                
+                                else:
+                                    log_debug("✅ 양방향 포지션", f"롱:{final_long} 숏:{final_short} → 그리드 생성 안함 (TP만)")
+                                
+                                prev_long_size = final_long
+                                prev_short_size = final_short
                                 log_debug("✅ 롱 체결 처리 완료", f"최종 롱:{prev_long_size} 숏:{prev_short_size}")
                             
                             last_long_action_time = now
@@ -971,7 +974,7 @@ def fill_monitor():
                         except Exception as e:
                             log_debug("❌ 롱 처리 오류", str(e), exc_info=True)
                     
-                    # ⭐⭐⭐ 숏 체결 감지 (OBV 로그 추가)
+                    # ⭐⭐⭐ 숏 체결 감지
                     if short_size > prev_short_size and now - last_short_action_time >= 3:
                         try:
                             added_short = short_size - prev_short_size
@@ -1006,10 +1009,32 @@ def fill_monitor():
                             time.sleep(1)
                             update_position_state(SYMBOL, show_log=True)
                             
+                            # ⭐⭐⭐ 포지션 체크 후 그리드 생성 여부 결정
                             with position_lock:
                                 pos = position_state.get(SYMBOL, {})
-                                prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
-                                prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
+                                final_long = pos.get("long", {}).get("size", Decimal("0"))
+                                final_short = pos.get("short", {}).get("size", Decimal("0"))
+                                
+                                # 한쪽만 있으면 그리드 생성!
+                                if final_long > 0 and final_short == 0:
+                                    log_debug("⚡ 롱만 존재", "그리드 생성!")
+                                    ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                                    if ticker:
+                                        grid_price = Decimal(str(ticker[0].last))
+                                        initialize_grid(grid_price, skip_check=True)
+                                
+                                elif final_short > 0 and final_long == 0:
+                                    log_debug("⚡ 숏만 존재", "그리드 생성!")
+                                    ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                                    if ticker:
+                                        grid_price = Decimal(str(ticker[0].last))
+                                        initialize_grid(grid_price, skip_check=True)
+                                
+                                else:
+                                    log_debug("✅ 양방향 포지션", f"롱:{final_long} 숏:{final_short} → 그리드 생성 안함 (TP만)")
+                                
+                                prev_long_size = final_long
+                                prev_short_size = final_short
                                 log_debug("✅ 숏 체결 처리 완료", f"최종 롱:{prev_long_size} 숏:{prev_short_size}")
                             
                             last_short_action_time = now
@@ -1239,7 +1264,7 @@ def ping():
 # =============================================================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v18.1-COMPOUND (복리 자동화)")
+    log_debug("🚀 서버 시작", "v18.2-OPTIMIZED (복리 + 최적화)")
     
     # ⭐ 초기 자본금 설정
     update_initial_balance(force=True)
@@ -1254,7 +1279,6 @@ if __name__ == "__main__":
     log_debug("⚙️ TP 간격", f"{float(TP_GAP_PCT * 100):.2f}%")
     log_debug("⚙️ 헤징 비율", f"{float(HEDGE_RATIO):.1f}배")
     log_debug("⚙️ 임계값", f"{float(current_balance * THRESHOLD_RATIO):.2f} USDT ({float(THRESHOLD_RATIO):.1f}배)")
-    log_debug("⚙️ OBV 가중치", f"{float(LEVERAGE_MIN):.2f} ~ {float(LEVERAGE_MAX):.2f}")
     
     entry_history[SYMBOL] = {"long": [], "short": []}
     tp_orders[SYMBOL] = {"long": [], "short": []}
