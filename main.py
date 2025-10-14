@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ONDO 역방향 그리드 매매 시스템 v16.7-CLEAN
+ONDO 역방향 그리드 매매 시스템 v16.8-FINAL
 - TP 기반 그리드 재생성
 - 듀얼 TP (평단가/개별)
 - 모든 주문 지정가
@@ -9,6 +9,8 @@ ONDO 역방향 그리드 매매 시스템 v16.7-CLEAN
 - 중복 방지 및 오류 복구
 - API 지연 대응 강화
 - 로그 출력 최적화
+- 기존 그리드 취소 강화
+- TP 취소 거래소 기반
 """
 
 import os
@@ -310,18 +312,24 @@ def cancel_grid_orders(symbol):
         try:
             orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
             cancelled_count = 0
+            cancelled_ids = []
             
             for order in orders:
                 try:
                     if not order.is_reduce_only:
                         api.cancel_futures_order(SETTLE, order.id)
                         cancelled_count += 1
+                        cancelled_ids.append(f"ID:{order.id} {order.size}@{order.price}")
                         time.sleep(0.1)
                 except Exception as e:
                     log_debug("⚠️ 주문 취소 실패", f"ID:{order.id}")
             
             if cancelled_count > 0:
                 log_debug("✅ 그리드 취소 완료", f"{cancelled_count}개 주문")
+                for order_info in cancelled_ids:
+                    log_debug("  ㄴ 취소", order_info)
+            else:
+                log_debug("ℹ️ 취소할 그리드 없음", "")
             break
             
         except Exception as e:
@@ -333,31 +341,53 @@ def cancel_grid_orders(symbol):
 
 
 def cancel_tp_orders(symbol, side):
-    """TP 주문 취소 (재시도 로직)"""
+    """TP 주문 취소 (거래소 주문 직접 확인)"""
     try:
-        if symbol not in tp_orders or side not in tp_orders[symbol]:
-            return
+        cancelled_count = 0
         
-        for tp_order in tp_orders[symbol][side][:]:
-            order_id = tp_order.get("order_id")
-            if not order_id:
+        # 거래소에서 직접 조회
+        orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
+        
+        for order in orders:
+            if not order.is_reduce_only:
                 continue
             
-            for retry in range(3):
-                try:
-                    api.cancel_futures_order(SETTLE, order_id)
-                    tp_orders[symbol][side].remove(tp_order)
-                    log_debug("✅ TP 취소", f"{symbol}_{side} ID:{order_id}")
-                    break
-                except Exception as e:
-                    if retry < 2:
-                        time.sleep(0.3)
-                    else:
-                        log_debug("⚠️ TP 취소 실패", f"ID:{order_id}")
-                        try:
-                            tp_orders[symbol][side].remove(tp_order)
-                        except:
-                            pass
+            # 해당 side의 TP인지 확인
+            if side == "long" and order.size < 0:  # 롱 TP (매도)
+                for retry in range(3):
+                    try:
+                        api.cancel_futures_order(SETTLE, order.id)
+                        log_debug("✅ TP 취소", f"{symbol}_{side} ID:{order.id} {order.size}@{order.price}")
+                        cancelled_count += 1
+                        break
+                    except Exception as e:
+                        if retry < 2:
+                            time.sleep(0.3)
+                        else:
+                            log_debug("⚠️ TP 취소 실패", f"ID:{order.id}")
+            
+            elif side == "short" and order.size > 0:  # 숏 TP (매수)
+                for retry in range(3):
+                    try:
+                        api.cancel_futures_order(SETTLE, order.id)
+                        log_debug("✅ TP 취소", f"{symbol}_{side} ID:{order.id} {order.size}@{order.price}")
+                        cancelled_count += 1
+                        break
+                    except Exception as e:
+                        if retry < 2:
+                            time.sleep(0.3)
+                        else:
+                            log_debug("⚠️ TP 취소 실패", f"ID:{order.id}")
+        
+        # 딕셔너리 정리
+        if symbol in tp_orders and side in tp_orders[symbol]:
+            tp_orders[symbol][side] = []
+        
+        if cancelled_count > 0:
+            log_debug("✅ TP 전체 취소", f"{symbol}_{side} {cancelled_count}개")
+        else:
+            log_debug("ℹ️ 취소할 TP 없음", f"{symbol}_{side}")
+            
     except Exception as e:
         log_debug("❌ TP 취소 오류", str(e), exc_info=True)
 
@@ -412,7 +442,13 @@ def place_average_tp_order(symbol, side, price, qty, retry=3):
 def place_individual_tp_orders(symbol, side, entries):
     """개별 진입별 TP 지정가 주문"""
     try:
-        for entry in entries:
+        if not entries:
+            log_debug("⚠️ 진입 기록 없음", f"{symbol}_{side} - 개별 TP 생성 불가")
+            return
+        
+        log_debug("📌 개별 TP 생성 시작", f"{symbol}_{side} {len(entries)}개 진입")
+        
+        for idx, entry in enumerate(entries):
             entry_price = entry["price"]
             qty = entry["qty"]
             
@@ -444,13 +480,15 @@ def place_individual_tp_orders(symbol, side, entries):
                 "type": "individual"
             })
             
-            log_debug("📌 개별 TP", 
-                     f"{symbol}_{side} {qty}계약 진입:{float(entry_price):.4f} TP:{float(tp_price):.4f}")
+            log_debug(f"  ㄴ [{idx+1}/{len(entries)}]", 
+                     f"{qty}계약 진입:{float(entry_price):.4f} → TP:{float(tp_price):.4f} ID:{result.id}")
             
             time.sleep(0.1)
+        
+        log_debug("✅ 개별 TP 생성 완료", f"{symbol}_{side} {len(entries)}개")
             
     except Exception as e:
-        log_debug("❌ 개별 TP 실패", str(e))
+        log_debug("❌ 개별 TP 실패", str(e), exc_info=True)
 
 
 def check_and_update_tp_mode_locked(symbol, side, size, price):
@@ -537,16 +575,31 @@ def check_and_update_tp_mode_locked(symbol, side, size, price):
                 log_debug("⚠️ 임계값 초과", 
                          f"{symbol}_{side} {float(position_value):.2f} > {float(threshold_value):.2f}")
                 
+                # 기존 TP 전체 취소 (거래소 기반)
                 cancel_tp_orders(symbol, side)
                 time.sleep(0.5)
                 
+                # 진입 기록 확인
                 entries = entry_history.get(symbol, {}).get(side, [])
                 if entries:
+                    log_debug("📋 진입 기록 확인", f"{symbol}_{side} {len(entries)}개 진입")
+                    
+                    # 개별 TP 생성
                     place_individual_tp_orders(symbol, side, entries)
-                
-                if symbol not in tp_type:
-                    tp_type[symbol] = {"long": "average", "short": "average"}
-                tp_type[symbol][side] = "individual"
+                    
+                    # TP 타입 업데이트
+                    if symbol not in tp_type:
+                        tp_type[symbol] = {"long": "average", "short": "average"}
+                    tp_type[symbol][side] = "individual"
+                    
+                    log_debug("✅ 개별 TP 전환 완료", f"{symbol}_{side}")
+                else:
+                    log_debug("⚠️ 진입 기록 없음", f"{symbol}_{side} - 개별 TP 생성 불가")
+                    
+                    # 진입 기록 없으면 평단가 TP 유지
+                    if symbol not in tp_type:
+                        tp_type[symbol] = {"long": "average", "short": "average"}
+                    tp_type[symbol][side] = "average"
                 
     except Exception as e:
         log_debug("❌ TP 모드 체크 오류", str(e), exc_info=True)
@@ -626,8 +679,16 @@ def initialize_grid(base_price=None, skip_check=False):
             orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status="open")
             grid_orders = [o for o in orders if not o.is_reduce_only]
             if grid_orders:
-                log_debug("⚠️ 기존 그리드 있음", f"{len(grid_orders)}개 - 생성 중단")
+                log_debug("⚠️ 기존 그리드 있음", f"{len(grid_orders)}개")
+                
+                # 상세 정보 로그
+                for order in grid_orders:
+                    log_debug("  ㄴ 그리드", f"ID:{order.id} size:{order.size} price:{order.price}")
+                
+                log_debug("⚠️ 그리드 생성 중단", "skip_check=True로 호출 필요")
                 return
+        else:
+            log_debug("🎯 그리드 강제 생성", "skip_check=True")
         
         if base_price is None:
             ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
@@ -1175,7 +1236,7 @@ def ping():
 # =============================================================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v16.7-CLEAN")
+    log_debug("🚀 서버 시작", "v16.8-FINAL")
     
     # 초기 자본금 설정
     INITIAL_BALANCE = Decimal(str(get_available_balance(show_log=True)))
@@ -1191,10 +1252,7 @@ if __name__ == "__main__":
     obv_macd_val = calculate_obv_macd(SYMBOL)
     log_debug("📊 Shadow OBV MACD", f"{SYMBOL}: {float(obv_macd_val * 1000):.2f}")
     
-    # 초기 그리드 생성
-    initialize_grid()
-    
-    # 기존 포지션 TP 설정
+    # 기존 포지션 확인
     update_position_state(SYMBOL, show_log=True)
     with position_lock:
         pos = position_state.get(SYMBOL, {})
@@ -1202,11 +1260,24 @@ if __name__ == "__main__":
         short_size = pos.get("short", {}).get("size", Decimal("0"))
         
         if long_size > 0 or short_size > 0:
-            log_debug("⚠️ 기존 포지션 감지", f"롱:{long_size} 숏:{short_size} - TP 설정 중...")
+            log_debug("⚠️ 기존 포지션 감지", f"롱:{long_size} 숏:{short_size}")
+            
+            # 1. 기존 그리드 취소
+            log_debug("🗑️ 기존 그리드 취소", "시작...")
+            cancel_grid_orders(SYMBOL)
             time.sleep(1)
+            
+            # 2. TP 설정
+            log_debug("🔧 기존 포지션 TP 설정", "시작...")
             emergency_tp_fix(SYMBOL)
+            time.sleep(1)
+            
+            # 3. 새 그리드 생성
+            log_debug("🎯 새 그리드 생성", "시작...")
+            initialize_grid(skip_check=True)
         else:
-            log_debug("✅ 포지션 없음", "그리드 대기 상태")
+            log_debug("✅ 포지션 없음", "초기 그리드 생성...")
+            initialize_grid()
     
     # 스레드 시작
     threading.Thread(target=fill_monitor, daemon=True).start()
