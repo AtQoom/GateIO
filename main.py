@@ -35,9 +35,9 @@ SETTLE = "usdt"
 SYMBOL = "ONDO_USDT"
 CONTRACT_SIZE = Decimal("1")
 
-GRID_GAP_PCT = Decimal("0.21") / Decimal("100")  # 0.21%
-TP_GAP_PCT = Decimal("0.21") / Decimal("100")    # 0.21%
-HEDGE_RATIO = Decimal("0.3")  # 헤징 0.3배
+GRID_GAP_PCT = Decimal("0.16") / Decimal("100")  # 0.21%
+TP_GAP_PCT = Decimal("0.16") / Decimal("100")    # 0.21%
+HEDGE_RATIO = Decimal("0.2")  # 헤징 0.3배
 THRESHOLD_RATIO = Decimal("2.0")  # 임계값 2배
 
 # API 설정
@@ -201,29 +201,29 @@ def calculate_grid_qty(current_price):
         abs_val = abs(float(obv_macd * 1000))
         
         if abs_val < 5:
-            leverage = Decimal("0.3")
+            leverage = Decimal("0.2")
         elif abs_val < 10:
-            leverage = Decimal("0.32")
+            leverage = Decimal("0.22")
         elif abs_val < 20:
-            leverage = Decimal("0.34")
+            leverage = Decimal("0.24")
         elif abs_val < 30:
-            leverage = Decimal("0.36")
+            leverage = Decimal("0.26")
         elif abs_val < 40:
-            leverage = Decimal("0.38")
+            leverage = Decimal("0.28")
         elif abs_val < 50:
-            leverage = Decimal("0.4")
+            leverage = Decimal("0.3")
         elif abs_val < 60:
-            leverage = Decimal("0.42")
+            leverage = Decimal("0.32")
         elif abs_val < 70:
-            leverage = Decimal("0.44")
+            leverage = Decimal("0.34")
         elif abs_val < 80:
-            leverage = Decimal("0.46")
+            leverage = Decimal("0.36")
         elif abs_val < 90:
-            leverage = Decimal("0.48")
+            leverage = Decimal("0.38")
         elif abs_val < 100:
-            leverage = Decimal("0.50")            
+            leverage = Decimal("0.40")            
         else:
-            leverage = Decimal("0.6")
+            leverage = Decimal("0.5")
         
         qty = int((INITIAL_BALANCE * leverage) / (current_price * CONTRACT_SIZE))
         return max(1, qty)
