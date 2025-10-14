@@ -233,12 +233,12 @@ def calculate_grid_qty(current_price):
 def calculate_position_value(qty, price):
     """포지션 가치 계산"""
     return qty * price * CONTRACT_SIZE
-
+\
 # =============================================================================
 # 포지션 관리
 # =============================================================================
 
-def update_position_state(symbol, retry=3):
+def update_position_state(symbol, retry=5):  # ⭐ 3회 → 5회
     """포지션 상태 업데이트 (재시도)"""
     for attempt in range(retry):
         try:
@@ -269,6 +269,9 @@ def update_position_state(symbol, retry=3):
                 
                 position_state[symbol]["long"] = {"size": long_size, "price": long_price}
                 position_state[symbol]["short"] = {"size": short_size, "price": short_price}
+                
+                # ⭐ 로그 추가 (디버깅용)
+                log_debug("🔍 포지션 업데이트", f"롱:{long_size}@{long_price} 숏:{short_size}@{short_price}")
                 
                 return True
                 
@@ -452,15 +455,10 @@ def place_individual_tp_orders(symbol, side, entries):
         log_debug("❌ 개별 TP 실패", str(e))
 
 
-def check_and_update_tp_mode(symbol, side):
-    """임계값 체크 및 TP 모드 전환 (거래소 주문 확인 추가)"""
+def check_and_update_tp_mode_locked(symbol, side, size, price):
+    """임계값 체크 및 TP 모드 전환 (lock 내부에서 호출됨)"""
     try:
-        pos = position_state.get(symbol, {}).get(side, {})
-        size = pos.get("size", Decimal("0"))
-        price = pos.get("price", Decimal("0"))
-        
-        if size == 0:
-            return
+        # ⚠️ position_state 접근 안함 (이미 lock 안에서 호출됨)
         
         # 실제 거래소 주문 확인
         existing_tp_qty = Decimal("0")
@@ -468,7 +466,6 @@ def check_and_update_tp_mode(symbol, side):
             orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
             for order in orders:
                 if order.is_reduce_only:
-                    # ⭐ 조건 체크 먼저!
                     if (side == "long" and order.size < 0) or (side == "short" and order.size > 0):
                         order_size = abs(order.size)
                         existing_tp_qty += Decimal(str(order_size))
@@ -476,7 +473,7 @@ def check_and_update_tp_mode(symbol, side):
         except Exception as e:
             log_debug("⚠️ TP 주문 조회 실패", str(e))
         
-        # 딕셔너리 수량과 비교 (동기화 체크)
+        # 딕셔너리 수량과 비교
         dict_tp_qty = Decimal("0")
         if symbol in tp_orders and side in tp_orders[symbol]:
             for tp in tp_orders[symbol][side]:
@@ -489,39 +486,31 @@ def check_and_update_tp_mode(symbol, side):
             if symbol in tp_orders and side in tp_orders[symbol]:
                 tp_orders[symbol][side] = []
         
-        # ⭐⭐⭐ TP가 부족하면 생성 (>= 대신 ==로 정확히 체크)
+        # ⭐⭐⭐ TP 부족하면 무조건 재생성
         if existing_tp_qty < size:
             log_debug("⚠️ TP 부족", f"{symbol}_{side} 기존:{existing_tp_qty} < 포지션:{size}")
-            
-            # 기존 TP 전체 취소
             cancel_tp_orders(symbol, side)
             time.sleep(0.3)
-            
-            # 새로운 TP 생성
             place_average_tp_order(symbol, side, price, size, retry=3)
             
             if symbol not in tp_type:
                 tp_type[symbol] = {"long": "average", "short": "average"}
             tp_type[symbol][side] = "average"
-            
             return
         
-        # TP가 초과하면 취소 후 재생성
+        # TP 초과하면 재생성
         if existing_tp_qty > size:
             log_debug("⚠️ TP 초과", f"{symbol}_{side} 기존:{existing_tp_qty} > 포지션:{size}")
-            
             cancel_tp_orders(symbol, side)
             time.sleep(0.3)
-            
             place_average_tp_order(symbol, side, price, size, retry=3)
             
             if symbol not in tp_type:
                 tp_type[symbol] = {"long": "average", "short": "average"}
             tp_type[symbol][side] = "average"
-            
             return
         
-        # TP가 정확히 일치
+        # TP 정확히 일치
         log_debug("✅ TP 정확", f"{symbol}_{side} 기존:{existing_tp_qty} == 포지션:{size}")
         
         # 임계값 체크
@@ -531,7 +520,6 @@ def check_and_update_tp_mode(symbol, side):
         current_type = tp_type.get(symbol, {}).get(side, "average")
         
         if position_value > threshold_value:
-            # 임계값 초과 → 개별 TP
             if current_type != "individual":
                 log_debug("⚠️ 임계값 초과", 
                          f"{symbol}_{side} {float(position_value):.2f} > {float(threshold_value):.2f}")
@@ -568,19 +556,22 @@ def refresh_tp_orders(symbol):
         
         time.sleep(0.5)
         
-        for side in ["long", "short"]:
-            pos = position_state.get(symbol, {}).get(side, {})
-            size = pos.get("size", Decimal("0"))
-            price = pos.get("price", Decimal("0"))
-            
-            log_debug(f"🔍 포지션 체크", f"{side} size:{size} price:{price}")
-            
-            if size > 0:
-                check_and_update_tp_mode(symbol, side)
-                time.sleep(0.3)
-            else:
-                log_debug(f"⚠️ 포지션 없음", f"{side} size=0")
+        # ⭐⭐⭐ position_lock 안에서 처리
+        with position_lock:
+            for side in ["long", "short"]:
+                pos = position_state.get(symbol, {}).get(side, {})
+                size = pos.get("size", Decimal("0"))
+                price = pos.get("price", Decimal("0"))
                 
+                log_debug(f"🔍 포지션 체크", f"{side} size:{size} price:{price}")
+                
+                if size > 0:
+                    # ⭐ lock 안에서 check_and_update_tp_mode 호출
+                    check_and_update_tp_mode_locked(symbol, side, size, price)
+                    time.sleep(0.3)
+                else:
+                    log_debug(f"⚠️ 포지션 없음", f"{side} size=0")
+                    
     except Exception as e:
         log_debug("❌ TP 새로고침 오류", str(e), exc_info=True)
 
