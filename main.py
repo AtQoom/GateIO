@@ -895,7 +895,7 @@ def fill_monitor():
                 update_initial_balance()
                 
                 now = time.time()
-                if now - last_heartbeat >= 60:
+                if now - last_heartbeat >= 120:
                     with position_lock:
                         pos = position_state.get(SYMBOL, {})
                         current_long = pos.get("long", {}).get("size", Decimal("0"))
@@ -1034,6 +1034,7 @@ def tp_monitor():
     """TP 체결 감지 및 그리드 재생성"""
     prev_long_size = None
     prev_short_size = None
+    last_grid_check = time.time()  # ⭐ 안전장치
     
     while True:
         time.sleep(3)
@@ -1051,6 +1052,11 @@ def tp_monitor():
                     prev_short_size = short_size
                     log_debug("👀 TP 모니터 시작", f"초기 롱:{long_size} 숏:{short_size}")
                     continue
+                
+                # ⭐⭐⭐ 디버깅 로그 추가
+                if long_size != prev_long_size or short_size != prev_short_size:
+                    log_debug("🔍 TP 모니터 포지션 변화 감지", 
+                             f"롱: {prev_long_size} → {long_size} | 숏: {prev_short_size} → {short_size}")
                 
                 # 롱 포지션 0 감지
                 if long_size == 0 and prev_long_size > 0:
@@ -1086,6 +1092,8 @@ def tp_monitor():
                         time.sleep(1.0)
                         update_position_state(SYMBOL, show_log=True)
                         refresh_tp_orders(SYMBOL)
+                        
+                        last_grid_check = time.time()  # ⭐ 안전장치 리셋
 
                         with position_lock:
                             pos = position_state.get(SYMBOL, {})
@@ -1129,6 +1137,8 @@ def tp_monitor():
                         time.sleep(1.0)
                         update_position_state(SYMBOL, show_log=True)
                         refresh_tp_orders(SYMBOL)
+                        
+                        last_grid_check = time.time()  # ⭐ 안전장치 리셋
 
                         with position_lock:
                             pos = position_state.get(SYMBOL, {})
@@ -1142,8 +1152,34 @@ def tp_monitor():
                     prev_long_size = long_size
                     prev_short_size = short_size
                 
+                # ⭐⭐⭐ 안전장치: 5분마다 그리드 체크
+                now = time.time()
+                if now - last_grid_check >= 300:  # 5분
+                    log_debug("⏰ 안전장치: 그리드 상태 확인", f"롱:{long_size} 숏:{short_size}")
+                    
+                    # 그리드 주문 확인
+                    try:
+                        orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status="open")
+                        grid_orders = [o for o in orders if not o.is_reduce_only]
+                        
+                        if not grid_orders and (long_size > 0 or short_size > 0):
+                            log_debug("⚠️ 안전장치: 그리드 없음!", "강제 재생성")
+                            
+                            ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                            if ticker:
+                                current_price = Decimal(str(ticker[0].last))
+                                initialize_grid(current_price, skip_check=True)
+                                
+                                time.sleep(1.0)
+                                refresh_tp_orders(SYMBOL)
+                    except Exception as e:
+                        log_debug("❌ 안전장치 오류", str(e))
+                    
+                    last_grid_check = now
+                
         except Exception as e:
             log_debug("❌ TP 모니터 오류", str(e), exc_info=True)
+
 
 # =============================================================================
 # WebSocket 가격 모니터링
