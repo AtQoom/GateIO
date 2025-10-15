@@ -20,7 +20,7 @@ import logging
 import json
 from decimal import Decimal, ROUND_DOWN
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi, GateApiException
 import websockets
 import pandas as pd
 import numpy as np
@@ -291,32 +291,32 @@ def calculate_grid_qty(current_price):
 
 
 def place_limit_order(symbol, side, price, size, reduce_only=False):
-    """지정가 주문"""
+    """지정가 주문 - Gate.io API 완벽 호환"""
     try:
-        # ✅ reduce_only일 때는 size 파라미터 제외
-        if reduce_only:
-            order = FuturesOrder(
-                contract=symbol,
-                price=str(price),
-                tif='gtc',
-                reduce_only=True
-            )
-        else:
-            order_size = max(int(size), CONTRACT_SIZE)
-            order = FuturesOrder(
-                contract=symbol,
-                size=order_size,
-                price=str(price),
-                tif='gtc',
-                reduce_only=False
-            )
+        # size 계산
+        base_size = max(int(size), int(CONTRACT_SIZE))
+        
+        if side == "long":
+            order_size = base_size  # 양수
+        else:  # short
+            order_size = -base_size  # 음수
+        
+        # 주문 생성
+        order = FuturesOrder(
+            contract=symbol,
+            size=order_size,
+            price=str(round(float(price), 4)),
+            tif='gtc',
+            reduce_only=reduce_only
+        )
         
         result = api.create_futures_order(SETTLE, order)
         
+        # 로그
         if reduce_only:
-            log_debug(f"✅ {side.upper()} TP", f"@{float(price):.4f}")
+            log_debug(f"✅ {side.upper()} TP", f"{abs(order_size)}개 @{float(price):.4f}")
         else:
-            log_debug(f"✅ {side.upper()} 그리드", f"{order_size}개 @{float(price):.4f}")
+            log_debug(f"✅ {side.upper()} 그리드", f"{abs(order_size)}개 @{float(price):.4f}")
         
         return result
         
