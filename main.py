@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 SETTLE = "usdt"
 SYMBOL = "ONDO_USDT"
 CONTRACT_SIZE = Decimal("1")
+BASE_QTY = Decimal("0.2")  # ✅ 이 한 줄만 추가!
 
 # ⭐ 환경변수로 모든 설정 관리
 GRID_GAP_PCT = Decimal(os.environ.get("GRID_GAP_PCT", "0.12")) / Decimal("100")
