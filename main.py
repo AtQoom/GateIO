@@ -478,7 +478,7 @@ def cancel_grid_orders(symbol):
                 time.sleep(0.3)
 
 
-def cancel_tp_orders(symbol, side):
+def cancel_tp_orders(symbol):  # ← side 파라미터 제거!
     """TP 주문 취소"""
     try:
         cancelled_count = 0
@@ -488,7 +488,8 @@ def cancel_tp_orders(symbol, side):
             if not order.is_reduce_only:
                 continue
             
-            if side == "long" and order.size < 0:
+            # 롱 TP (숏 주문)
+            if order.size < 0:
                 for retry in range(3):
                     try:
                         api.cancel_futures_order(SETTLE, order.id)
@@ -498,7 +499,8 @@ def cancel_tp_orders(symbol, side):
                         if retry < 2:
                             time.sleep(0.3)
             
-            elif side == "short" and order.size > 0:
+            # 숏 TP (롱 주문)
+            elif order.size > 0:
                 for retry in range(3):
                     try:
                         api.cancel_futures_order(SETTLE, order.id)
@@ -508,8 +510,12 @@ def cancel_tp_orders(symbol, side):
                         if retry < 2:
                             time.sleep(0.3)
         
-        if symbol in tp_orders and side in tp_orders[symbol]:
-            tp_orders[symbol][side] = []
+        if cancelled_count > 0:
+            log_debug("✅ TP 취소", f"{cancelled_count}개")
+        
+        if symbol in tp_orders:
+            tp_orders[symbol]["long"] = []
+            tp_orders[symbol]["short"] = []
             
     except Exception as e:
         log_debug("❌ TP 취소 오류", str(e), exc_info=True)
@@ -615,44 +621,49 @@ def close_counter_position_on_main_tp(symbol, main_side, main_tp_qty):
 def refresh_tp_orders(symbol):
     """TP 주문 갱신"""
     try:
-        # 기존 TP 주문 모두 취소
-        orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
+        cancel_tp_orders(symbol)
+        time.sleep(0.5)  # ✅ 0.2 → 0.5초로 증가!
         
-        for order in orders:
-            if order.is_reduce_only:
-                try:
-                    api.cancel_futures_order(SETTLE, str(order.id))
-                except Exception as e:
-                    if "not found" not in str(e).lower():
-                        pass
-        
-        # 현재 포지션 확인
         with position_lock:
             pos = position_state.get(symbol, {})
-            long_pos = pos.get("long", {})
-            short_pos = pos.get("short", {})
-            
-            long_size = long_pos.get("size", Decimal("0"))
-            short_size = short_pos.get("size", Decimal("0"))
-            long_entry = long_pos.get("price", Decimal("0"))
-            short_entry = short_pos.get("price", Decimal("0"))
+            long_size = pos.get("long", {}).get("size", Decimal("0"))
+            short_size = pos.get("short", {}).get("size", Decimal("0"))
+            long_entry = pos.get("long", {}).get("price", Decimal("0"))
+            short_entry = pos.get("short", {}).get("price", Decimal("0"))
+        
+        log_debug("🔍 TP 갱신 시작", 
+                 f"롱:{long_size}@{long_entry} 숏:{short_size}@{short_entry}")
         
         # 롱 포지션 TP 생성
         if long_size > 0:
             tp_qty = int(long_size)
             if long_entry > 0 and tp_qty >= CONTRACT_SIZE:
                 tp_price = long_entry * (Decimal("1") + TP_GAP_PCT)
-                place_limit_order(symbol, "short", tp_price, tp_qty, reduce_only=True)
-                log_debug("🎯 롱 TP", f"{tp_qty} @{tp_price:.4f}")
+                tp_price = round(tp_price, 4)
+                result = place_limit_order(symbol, "short", tp_price, tp_qty, reduce_only=True)
+                if result:
+                    log_debug("✅ 롱 TP", f"{tp_qty} @{tp_price}")
+                else:
+                    log_debug("❌ 롱 TP 실패", f"{tp_qty} @{tp_price}")
+            else:
+                log_debug("⚠️ 롱 TP 스킵", 
+                         f"entry:{long_entry} qty:{tp_qty}")
         
         # 숏 포지션 TP 생성
         if short_size > 0:
             tp_qty = int(short_size)
             if short_entry > 0 and tp_qty >= CONTRACT_SIZE:
                 tp_price = short_entry * (Decimal("1") - TP_GAP_PCT)
-                place_limit_order(symbol, "long", tp_price, tp_qty, reduce_only=True)
-                log_debug("🎯 숏 TP", f"{tp_qty} @{tp_price:.4f}")
-        
+                tp_price = round(tp_price, 4)
+                result = place_limit_order(symbol, "long", tp_price, tp_qty, reduce_only=True)
+                if result:
+                    log_debug("✅ 숏 TP", f"{tp_qty} @{tp_price}")
+                else:
+                    log_debug("❌ 숏 TP 실패", f"{tp_qty} @{tp_price}")
+            else:
+                log_debug("⚠️ 숏 TP 스킵", 
+                         f"entry:{short_entry} qty:{tp_qty}")
+    
     except Exception as e:
         log_debug("❌ TP 갱신 오류", str(e), exc_info=True)
 
