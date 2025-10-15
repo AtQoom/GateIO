@@ -1478,49 +1478,70 @@ def ping():
 # =============================================================================
 
 if __name__ == "__main__":
-    log_debug("🚀 서버 시작", "v19.0-ADVANCED (역방향 10% + TP 동반 청산 20%)")
+    log_debug("=" * 50)
+    log_debug("🚀 시작", "v19.0-ADVANCED (임계값 10% 전환 + TP 동적 20% 청산)")
     
+    # 초기 잔고 업데이트
     update_initial_balance(force=True)
     
     with balance_lock:
         current_balance = INITIAL_BALANCE
+    log_debug("💰 초기 잔고", f"{float(current_balance):.2f} USDT")
+    log_debug("⏱️ 잔고 갱신", f"{BALANCE_UPDATE_INTERVAL/3600:.1f}시간마다")
+    log_debug("📊 그리드 간격", f"{float(GRID_GAP_PCT) * 100:.2f}%")
+    log_debug("🎯 TP 간격", f"{float(TP_GAP_PCT) * 100:.2f}%")
+    log_debug("🔒 헤지 비율", f"{float(HEDGE_RATIO):.1f}배")
+    log_debug("⚠️ 임계값", f"{float(current_balance * THRESHOLD_RATIO):.2f} USDT")
+    log_debug("📍 역방향 진입", f"주력 {float(COUNTER_POSITION_RATIO) * 100:.0f}%")
+    log_debug("📍 역방향 TP", f"역방향 TP {float(COUNTER_CLOSE_RATIO) * 100:.0f}%씩")
     
-    log_debug("⚙️ 초기 자본금", f"{float(current_balance):.2f} USDT")
-    log_debug("⚙️ 복리 업데이트", f"{BALANCE_UPDATE_INTERVAL/3600:.1f}시간")
-    log_debug("⚙️ 그리드 간격", f"{float(GRID_GAP_PCT * 100):.2f}%")
-    log_debug("⚙️ TP 간격", f"{float(TP_GAP_PCT * 100):.2f}%")
-    log_debug("⚙️ 헤징 비율", f"{float(HEDGE_RATIO):.1f}배")
-    log_debug("⚙️ 임계값", f"{float(current_balance * THRESHOLD_RATIO):.2f} USDT")
-    log_debug("⚙️⭐ 역방향 그리드", f"주력의 {float(COUNTER_POSITION_RATIO * 100):.0f}%")
-    log_debug("⚙️⭐ TP 동반 청산", f"주력 TP의 {float(COUNTER_CLOSE_RATIO * 100):.0f}%")
-    
+    # 전역 변수 초기화
     entry_history[SYMBOL] = {"long": [], "short": []}
     tp_orders[SYMBOL] = {"long": [], "short": []}
     tp_type[SYMBOL] = {"long": "average", "short": "average"}
     
-    obv_macd_val = calculate_obv_macd(SYMBOL)
-    log_debug("📊 Shadow OBV MACD", f"{float(obv_macd_val * 1000):.2f}")
+    # Shadow OBV MACD 계산
+    obvmacd_val = calculate_obv_macd(SYMBOL)
+    log_debug("🌑 Shadow OBV MACD", f"{float(obvmacd_val) * 1000:.2f}")
     
+    # 현재 포지션 확인
     update_position_state(SYMBOL, show_log=True)
+    
     with position_lock:
         pos = position_state.get(SYMBOL, {})
         long_size = pos.get("long", {}).get("size", Decimal("0"))
         short_size = pos.get("short", {}).get("size", Decimal("0"))
-        
-        if long_size > 0 or short_size > 0:
-            log_debug("⚠️ 기존 포지션", f"롱:{long_size} 숏:{short_size}")
-            cancel_grid_orders(SYMBOL)
-            time.sleep(1)
-            refresh_tp_orders(SYMBOL)
-            time.sleep(1)
-            initialize_grid(skip_check=True)
-        else:
-            initialize_grid()
+    
+    # ✅ 현재가 조회
+    ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+    if not ticker or len(ticker) == 0:
+        log_debug("❌ 현재가 조회 실패", "시스템 종료")
+        exit(1)
+    
+    entry_price = Decimal(str(ticker[0].last))
+    log_debug("📈 현재가", f"{float(entry_price):.4f} USDT")
+    
+    # ✅ 포지션 유무에 따른 초기화
+    if long_size == 0 and short_size == 0:
+        log_debug("🔷 초기 그리드 생성", "포지션 없음")
+        initialize_grid(entry_price, skip_check=False)
+    else:
+        log_debug("🔶 기존 포지션 존재", f"롱:{long_size} 숏:{short_size}")
+        cancel_grid_orders(SYMBOL)
+        time.sleep(0.5)
+        refresh_tp_orders(SYMBOL)
+    
+    # 모니터 시작
+    log_debug("=" * 50)
+    log_debug("🎬 모니터 시작")
+    log_debug("=" * 50)
     
     threading.Thread(target=fill_monitor, daemon=True).start()
     threading.Thread(target=tp_monitor, daemon=True).start()
     threading.Thread(target=lambda: asyncio.run(price_monitor()), daemon=True).start()
     
+    # Flask 서버
     port = int(os.environ.get("PORT", 8080))
-    log_debug("🌐 웹 서버 시작", f"0.0.0.0:{port}")
+    log_debug("🌐 Flask 서버", f"0.0.0.0:{port} 시작")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+
