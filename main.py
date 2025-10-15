@@ -332,19 +332,23 @@ def place_hedge_order(symbol, side, price):
                 log_debug("⚠️ 헤징 불가", "반대 포지션 없음")
                 return None
             
-            # ⭐ 0.1배 계산 후 최소 1개 보장
-            hedge_qty = int(opposite_size * HEDGE_RATIO)
+            # ⭐ 0.1배 계산
+            hedge_ratio_decimal = opposite_size * HEDGE_RATIO
+            hedge_qty = int(hedge_ratio_decimal)
+            
+            # ⭐ 최소 1개 보장
             if hedge_qty < 1 and opposite_size >= 1:
-                hedge_qty = 1  # 최소 1개
+                hedge_qty = 1
             
             if hedge_qty < CONTRACT_SIZE:
-                log_debug("⚠️ 헤징 불가", f"반대 포지션 너무 작음 ({opposite_size})")
+                log_debug("⚠️ 헤징 불가", f"반대 포지션 너무 작음 ({int(opposite_size)}개)")
                 return None
             
+            # ⭐⭐⭐ 주문 크기 계산
             if side == "long":
-                order_size = int(hedge_qty)
+                order_size = hedge_qty  # int만 사용
             else:
-                order_size = -int(hedge_qty)
+                order_size = -hedge_qty  # int만 사용
             
             order = FuturesOrder(
                 contract=symbol,
@@ -354,7 +358,8 @@ def place_hedge_order(symbol, side, price):
                 reduce_only=False
             )
             result = api.create_futures_order(SETTLE, order)
-            log_debug("🔄 헤징 주문", f"{symbol}_{side} {hedge_qty}@{price:.4f} (반대 {opposite_size}의 {float(HEDGE_RATIO):.1f}배)")
+            log_debug("🔄 헤징 주문", 
+                     f"{symbol}_{side} {hedge_qty}개@{price:.4f} (반대 {int(opposite_size)}개의 {float(HEDGE_RATIO):.1f}배)")
             return result.id
             
     except Exception as e:
