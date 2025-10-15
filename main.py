@@ -738,28 +738,20 @@ def emergency_tp_fix(symbol):
 def initialize_grid(current_price=None, skip_check=False):
     """그리드 초기화 (양방향 포지션 시 생성 방지)"""
     try:
-        # ⭐ current_price가 None이면 현재가 가져오기
-        if current_price is None:
-            try:
-                ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
-                if ticker:
-                    current_price = Decimal(str(ticker[0].last))
-                else:
-                    log_debug("❌ 현재가 조회 실패", "그리드 생성 중단")
-                    return
-            except Exception as e:
-                log_debug("❌ 현재가 조회 오류", str(e))
-                return
+        # current_price 처리...
         
-        # ⭐ skip_check=True여도 양방향 포지션 체크!
+        # ⭐ 첫 번째 체크 (디버그 로그 추가)
         with position_lock:
             pos = position_state.get(SYMBOL, {})
             long_size = pos.get("long", {}).get("size", Decimal("0"))
             short_size = pos.get("short", {}).get("size", Decimal("0"))
             
+            # ⭐⭐⭐ 디버그 로그 추가!
+            log_debug("🔍 그리드 생성 체크", f"롱:{long_size} 숏:{short_size}")
+            
             # 양방향 있으면 절대 그리드 생성 안함!
             if long_size > 0 and short_size > 0:
-                log_debug("⚠️ 양방향 포지션 감지", "그리드 생성 중단!")
+                log_debug("⚠️ 양방향 포지션 감지", f"롱:{long_size} 숏:{short_size} → 그리드 생성 중단!")
                 return
             
             # 한쪽만 있으면 반대쪽만 생성
@@ -778,9 +770,6 @@ def initialize_grid(current_price=None, skip_check=False):
                 place_limit_order(SYMBOL, "long", lower_price, qty)
                 log_debug("✅ 롱 그리드 생성", f"{qty}@{lower_price:.4f}")
                 return
-        
-        # ⭐⭐⭐ 여기 도달 = 포지션 없음 → 양방향 그리드 생성
-        # (skip_check 상관없이 항상 생성!)
         
         # 양방향 그리드 생성
         cancel_grid_orders(SYMBOL)
