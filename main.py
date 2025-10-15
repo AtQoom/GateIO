@@ -290,32 +290,42 @@ def calculate_grid_qty(current_price):
         return int(Decimal("10"))
 
 
-def place_limit_order(symbol, side, price, qty, retry=3):
-    """지정가 주문 (그리드용)"""
-    for attempt in range(retry):
-        try:
-            if side == "short":
-                order_size = -int(qty)
-            else:
-                order_size = int(qty)
-            
+def place_limit_order(symbol, side, price, size, reduce_only=False):
+    """지정가 주문"""
+    try:
+        # ✅ reduce_only일 때는 size 파라미터 제외
+        if reduce_only:
+            order = FuturesOrder(
+                contract=symbol,
+                price=str(price),
+                tif='gtc',
+                reduce_only=True
+            )
+        else:
+            order_size = max(int(size), CONTRACT_SIZE)
             order = FuturesOrder(
                 contract=symbol,
                 size=order_size,
-                price=str(round(float(price), 4)),
-                tif="gtc",
+                price=str(price),
+                tif='gtc',
                 reduce_only=False
             )
-            result = api.create_futures_order(SETTLE, order)
-            log_debug("📍 그리드 주문 생성", f"{symbol}_{side} {qty}@{price:.4f} ID:{result.id}")
-            return result.id
-        except Exception as e:
-            if attempt < retry - 1:
-                log_debug(f"⚠️ 그리드 주문 재시도 ({attempt+1}/{retry})", str(e))
-                time.sleep(0.5)
-            else:
-                log_debug("❌ 그리드 주문 오류", str(e), exc_info=True)
-                return None
+        
+        result = api.create_futures_order(SETTLE, order)
+        
+        if reduce_only:
+            log_debug(f"✅ {side.upper()} TP", f"@{float(price):.4f}")
+        else:
+            log_debug(f"✅ {side.upper()} 그리드", f"{order_size}개 @{float(price):.4f}")
+        
+        return result
+        
+    except GateApiException as e:
+        log_debug(f"❌ {side.upper()} 주문 실패", str(e))
+        return None
+    except Exception as e:
+        log_debug(f"❌ {side.upper()} 오류", str(e), exc_info=True)
+        return None
 
 
 def place_hedge_order(symbol, side, price):
