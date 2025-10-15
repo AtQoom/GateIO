@@ -654,7 +654,7 @@ def refresh_tp_orders(symbol):
 # =============================================================================
 
 def initialize_grid(entry_price, skip_check=False):
-    """그리드 초기화 - 1개씩 배치"""
+    """그리드 초기화 - 1개만 배치"""
     try:
         with balance_lock:
             current_balance = INITIAL_BALANCE
@@ -676,11 +676,11 @@ def initialize_grid(entry_price, skip_check=False):
         
         cancel_grid_orders(SYMBOL)
         
-        COUNTER_ENTRY_RATIO = Decimal("0.30")  # 30%
-        SAME_SIDE_RATIO = Decimal("0.10")  # 10%
+        COUNTER_ENTRY_RATIO = Decimal("0.30")
+        SAME_SIDE_RATIO = Decimal("0.10")
         
-        # ⚡⚡⚡ 수정: 개별 그리드 수량 = 1개
-        GRID_QTY = int(CONTRACT_SIZE)  # 1개 고정!
+        # ⚡⚡⚡ 그리드 1개 고정
+        GRID_QTY = int(CONTRACT_SIZE)
         
         # ============================================================
         # 롱 주력 + 임계값 초과
@@ -692,34 +692,28 @@ def initialize_grid(entry_price, skip_check=False):
                 long_grid_count = 0
                 short_grid_count = 0
                 
-                # 역방향 숏 그리드 (30%)
+                # 역방향 숏 그리드 (1개만)
                 if counter_qty >= CONTRACT_SIZE:
-                    for i in range(5):
-                        gap_multiplier = Decimal(str(i + 1))
-                        short_grid_price = entry_price * (Decimal("1") + GRID_GAP_PCT * gap_multiplier)
-                        short_grid_price = round(short_grid_price, 4)
-                        
-                        # ⚡ 수정: 1개씩만
-                        if place_limit_order(SYMBOL, "short", short_grid_price, GRID_QTY):
-                            short_grid_count += 1
-                        time.sleep(0.1)
+                    short_grid_price = entry_price * (Decimal("1") + GRID_GAP_PCT)
+                    short_grid_price = round(short_grid_price, 4)
+                    
+                    if place_limit_order(SYMBOL, "short", short_grid_price, GRID_QTY):
+                        short_grid_count += 1
+                    time.sleep(0.1)
                 
-                # 같은 방향 롱 그리드 (10%)
+                # 같은 방향 롱 그리드 (1개만)
                 same_side_qty = int(long_size * SAME_SIDE_RATIO)
                 
                 if same_side_qty >= CONTRACT_SIZE:
-                    for i in range(5):
-                        gap_multiplier = Decimal(str(i + 1))
-                        long_grid_price = entry_price * (Decimal("1") - GRID_GAP_PCT * gap_multiplier)
-                        long_grid_price = round(long_grid_price, 4)
-                        
-                        # ⚡ 수정: 1개씩만
-                        if place_limit_order(SYMBOL, "long", long_grid_price, GRID_QTY):
-                            long_grid_count += 1
-                        time.sleep(0.1)
+                    long_grid_price = entry_price * (Decimal("1") - GRID_GAP_PCT)
+                    long_grid_price = round(long_grid_price, 4)
+                    
+                    if place_limit_order(SYMBOL, "long", long_grid_price, GRID_QTY):
+                        long_grid_count += 1
+                    time.sleep(0.1)
                 
                 log_debug("✅ 그리드 완료", 
-                         f"롱{long_grid_count}개 숏{short_grid_count}개 (각 1개씩)")
+                         f"롱{long_grid_count}개 숏{short_grid_count}개")
                 return
         
         # ============================================================
@@ -732,34 +726,28 @@ def initialize_grid(entry_price, skip_check=False):
                 long_grid_count = 0
                 short_grid_count = 0
                 
-                # 역방향 롱 그리드 (30%)
+                # 역방향 롱 그리드 (1개만)
                 if counter_qty >= CONTRACT_SIZE:
-                    for i in range(5):
-                        gap_multiplier = Decimal(str(i + 1))
-                        long_grid_price = entry_price * (Decimal("1") - GRID_GAP_PCT * gap_multiplier)
-                        long_grid_price = round(long_grid_price, 4)
-                        
-                        # ⚡ 수정: 1개씩만
-                        if place_limit_order(SYMBOL, "long", long_grid_price, GRID_QTY):
-                            long_grid_count += 1
-                        time.sleep(0.1)
+                    long_grid_price = entry_price * (Decimal("1") - GRID_GAP_PCT)
+                    long_grid_price = round(long_grid_price, 4)
+                    
+                    if place_limit_order(SYMBOL, "long", long_grid_price, GRID_QTY):
+                        long_grid_count += 1
+                    time.sleep(0.1)
                 
-                # 같은 방향 숏 그리드 (10%)
+                # 같은 방향 숏 그리드 (1개만)
                 same_side_qty = int(short_size * SAME_SIDE_RATIO)
                 
                 if same_side_qty >= CONTRACT_SIZE:
-                    for i in range(5):
-                        gap_multiplier = Decimal(str(i + 1))
-                        short_grid_price = entry_price * (Decimal("1") + GRID_GAP_PCT * gap_multiplier)
-                        short_grid_price = round(short_grid_price, 4)
-                        
-                        # ⚡ 수정: 1개씩만
-                        if place_limit_order(SYMBOL, "short", short_grid_price, GRID_QTY):
-                            short_grid_count += 1
-                        time.sleep(0.1)
+                    short_grid_price = entry_price * (Decimal("1") + GRID_GAP_PCT)
+                    short_grid_price = round(short_grid_price, 4)
+                    
+                    if place_limit_order(SYMBOL, "short", short_grid_price, GRID_QTY):
+                        short_grid_count += 1
+                    time.sleep(0.1)
                 
                 log_debug("✅ 그리드 완료", 
-                         f"롱{long_grid_count}개 숏{short_grid_count}개 (각 1개씩)")
+                         f"롱{long_grid_count}개 숏{short_grid_count}개")
                 return
         
         # ============================================================
@@ -768,30 +756,24 @@ def initialize_grid(entry_price, skip_check=False):
         long_grid_count = 0
         short_grid_count = 0
         
-        # 롱 그리드
-        for i in range(5):
-            gap_multiplier = Decimal(str(i + 1))
-            long_grid_price = entry_price * (Decimal("1") - GRID_GAP_PCT * gap_multiplier)
-            long_grid_price = round(long_grid_price, 4)
-            
-            # ⚡ 수정: 1개씩만
-            if place_limit_order(SYMBOL, "long", long_grid_price, GRID_QTY):
-                long_grid_count += 1
-            time.sleep(0.1)
+        # 롱 그리드 (1개만)
+        long_grid_price = entry_price * (Decimal("1") - GRID_GAP_PCT)
+        long_grid_price = round(long_grid_price, 4)
         
-        # 숏 그리드
-        for i in range(5):
-            gap_multiplier = Decimal(str(i + 1))
-            short_grid_price = entry_price * (Decimal("1") + GRID_GAP_PCT * gap_multiplier)
-            short_grid_price = round(short_grid_price, 4)
-            
-            # ⚡ 수정: 1개씩만
-            if place_limit_order(SYMBOL, "short", short_grid_price, GRID_QTY):
-                short_grid_count += 1
-            time.sleep(0.1)
+        if place_limit_order(SYMBOL, "long", long_grid_price, GRID_QTY):
+            long_grid_count += 1
+        time.sleep(0.1)
+        
+        # 숏 그리드 (1개만)
+        short_grid_price = entry_price * (Decimal("1") + GRID_GAP_PCT)
+        short_grid_price = round(short_grid_price, 4)
+        
+        if place_limit_order(SYMBOL, "short", short_grid_price, GRID_QTY):
+            short_grid_count += 1
+        time.sleep(0.1)
         
         log_debug("✅ 그리드 완료", 
-                 f"양방향 롱{long_grid_count}개 숏{short_grid_count}개 (각 1개씩)")
+                 f"양방향 롱{long_grid_count}개 숏{short_grid_count}개")
         
     except Exception as e:
         log_debug("❌ 그리드 초기화 오류", str(e), exc_info=True)
@@ -802,7 +784,9 @@ def initialize_grid(entry_price, skip_check=False):
 # =============================================================================
 
 def fill_monitor():
-    """체결 모니터링 - 로그 최적화"""
+    """체결 모니터링 - 헤징 추가"""
+    global last_grid_generation_time
+    
     try:
         update_position_state(SYMBOL, show_log=True)
         
@@ -825,7 +809,7 @@ def fill_monitor():
                 update_initial_balance()
                 now = time.time()
                 
-                # ✅ 하트비트 (3분마다)
+                # 하트비트
                 if now - last_heartbeat >= 180:
                     with position_lock:
                         pos = position_state.get(SYMBOL, {})
@@ -845,54 +829,70 @@ def fill_monitor():
                 
                 # ⚡ 역방향 청산 감지 (롱 주력 → 숏 청산)
                 if prev_short_size > 0 and short_size == 0 and long_size > 0:
-                    log_debug("⚡ 역방향 청산", "숏 0개 → 그리드 재생성")
-                    
-                    with balance_lock:
-                        current_balance = INITIAL_BALANCE
-                    
-                    threshold = current_balance * THRESHOLD_RATIO
-                    long_value = long_size * long_price if long_price > 0 else Decimal("0")
-                    
-                    time.sleep(0.5)
-                    update_position_state(SYMBOL)
-                    
-                    with position_lock:
-                        pos2 = position_state.get(SYMBOL, {})
-                        final_long = pos2.get("long", {}).get("size", Decimal("0"))
-                        final_short = pos2.get("short", {}).get("size", Decimal("0"))
-                        final_long_price = pos2.get("long", {}).get("price", Decimal("0"))
-                    
-                    final_long_value = final_long * final_long_price if final_long_price > 0 else Decimal("0")
-                    
-                    ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
-                    if ticker:
-                        grid_price = Decimal(str(ticker[0].last))
-                        initialize_grid(grid_price, skip_check=False)
-                    
-                    prev_long_size = final_long
-                    prev_short_size = final_short
-                    continue
+                    with grid_generation_lock:
+                        now_time = time.time()
+                        if now_time - last_grid_generation_time < 5:
+                            log_debug("⏭️ 그리드 스킵", "최근 생성됨")
+                            prev_short_size = short_size
+                            continue
+                        
+                        last_grid_generation_time = now_time
+                        log_debug("⚡ 역방향 청산", "숏 0개 → 그리드 재생성")
+                        
+                        with balance_lock:
+                            current_balance = INITIAL_BALANCE
+                        
+                        threshold = current_balance * THRESHOLD_RATIO
+                        long_value = long_size * long_price if long_price > 0 else Decimal("0")
+                        
+                        time.sleep(0.5)
+                        update_position_state(SYMBOL)
+                        
+                        with position_lock:
+                            pos2 = position_state.get(SYMBOL, {})
+                            final_long = pos2.get("long", {}).get("size", Decimal("0"))
+                            final_short = pos2.get("short", {}).get("size", Decimal("0"))
+                            final_long_price = pos2.get("long", {}).get("price", Decimal("0"))
+                        
+                        final_long_value = final_long * final_long_price if final_long_price > 0 else Decimal("0")
+                        
+                        ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                        if ticker:
+                            grid_price = Decimal(str(ticker[0].last))
+                            initialize_grid(grid_price, skip_check=False)
+                        
+                        prev_long_size = final_long
+                        prev_short_size = final_short
+                        continue
                 
                 # ⚡ 역방향 청산 감지 (숏 주력 → 롱 청산)
                 elif prev_long_size > 0 and long_size == 0 and short_size > 0:
-                    log_debug("⚡ 역방향 청산", "롱 0개 → 그리드 재생성")
-                    
-                    time.sleep(0.5)
-                    update_position_state(SYMBOL)
-                    
-                    with position_lock:
-                        pos2 = position_state.get(SYMBOL, {})
-                        final_long = pos2.get("long", {}).get("size", Decimal("0"))
-                        final_short = pos2.get("short", {}).get("size", Decimal("0"))
-                    
-                    ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
-                    if ticker:
-                        grid_price = Decimal(str(ticker[0].last))
-                        initialize_grid(grid_price, skip_check=False)
-                    
-                    prev_long_size = final_long
-                    prev_short_size = final_short
-                    continue
+                    with grid_generation_lock:
+                        now_time = time.time()
+                        if now_time - last_grid_generation_time < 5:
+                            log_debug("⏭️ 그리드 스킵", "최근 생성됨")
+                            prev_long_size = long_size
+                            continue
+                        
+                        last_grid_generation_time = now_time
+                        log_debug("⚡ 역방향 청산", "롱 0개 → 그리드 재생성")
+                        
+                        time.sleep(0.5)
+                        update_position_state(SYMBOL)
+                        
+                        with position_lock:
+                            pos2 = position_state.get(SYMBOL, {})
+                            final_long = pos2.get("long", {}).get("size", Decimal("0"))
+                            final_short = pos2.get("short", {}).get("size", Decimal("0"))
+                        
+                        ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                        if ticker:
+                            grid_price = Decimal(str(ticker[0].last))
+                            initialize_grid(grid_price, skip_check=False)
+                        
+                        prev_long_size = final_long
+                        prev_short_size = final_short
+                        continue
                 
                 # ⚡ 롱 변화 감지
                 if long_size != prev_long_size:
@@ -902,6 +902,12 @@ def fill_monitor():
                         if added_long > 0:
                             log_debug("📊 롱 진입", f"+{added_long}")
                             record_entry(SYMBOL, "long", long_price, added_long)
+                            
+                            # ⚡⚡⚡ 헤징 추가!
+                            ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                            if ticker:
+                                current_price = Decimal(str(ticker[0].last))
+                                place_hedge_order(SYMBOL, "long", current_price)
                             
                             time.sleep(0.5)
                             update_position_state(SYMBOL)
@@ -971,7 +977,7 @@ def fill_monitor():
                         
                         last_long_action_time = now
                 
-                # ⚡ 숏 변화 감지 (동일 로직)
+                # ⚡ 숏 변화 감지
                 if short_size != prev_short_size:
                     if now - last_short_action_time >= 3:
                         added_short = short_size - prev_short_size
@@ -979,6 +985,12 @@ def fill_monitor():
                         if added_short > 0:
                             log_debug("📊 숏 진입", f"+{added_short}")
                             record_entry(SYMBOL, "short", short_price, added_short)
+                            
+                            # ⚡⚡⚡ 헤징 추가!
+                            ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                            if ticker:
+                                current_price = Decimal(str(ticker[0].last))
+                                place_hedge_order(SYMBOL, "short", current_price)
                             
                             time.sleep(0.5)
                             update_position_state(SYMBOL)
@@ -1061,7 +1073,9 @@ def fill_monitor():
 # =============================================================================
 
 def tp_monitor():
-    """TP 체결 감지 및 그리드 재생성"""
+    """TP 체결 감지 및 그리드 재생성 - 중복 방지"""
+    global last_grid_generation_time
+    
     prev_long_size = None
     prev_short_size = None
     last_grid_check = time.time()
@@ -1083,63 +1097,79 @@ def tp_monitor():
                     log_debug("👀 TP 모니터 시작", f"롱:{long_size} 숏:{short_size}")
                     continue
                 
-                # ✅ 롱 포지션 0 감지
+                # ✅ 롱 포지션 0 감지 (중복 방지)
                 if long_size == 0 and prev_long_size > 0:
-                    prev_long_size = long_size
-                    log_debug("✅ 롱 TP 전체 청산", "그리드 재생성")
-                    
-                    if SYMBOL in entry_history:
-                        entry_history[SYMBOL]["long"] = []
-                    if SYMBOL in tp_type:
-                        tp_type[SYMBOL]["long"] = "average"
-                    
-                    update_initial_balance(force=True)
-                    cancel_grid_orders(SYMBOL)
-                    time.sleep(0.5)
-                    
-                    ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
-                    if ticker:
-                        current_price = Decimal(str(ticker[0].last))
-                        initialize_grid(current_price, skip_check=True)
-                        time.sleep(1.5)
-                        update_position_state(SYMBOL)
-                        refresh_tp_orders(SYMBOL)
-                        time.sleep(1.0)
-                        update_position_state(SYMBOL, show_log=True)
-                        refresh_tp_orders(SYMBOL)
-                        last_grid_check = time.time()
+                    with grid_generation_lock:
+                        now_time = time.time()
+                        if now_time - last_grid_generation_time < 5:
+                            log_debug("⏭️ 그리드 스킵", "최근 생성됨")
+                            prev_long_size = long_size
+                            continue
+                        
+                        last_grid_generation_time = now_time
+                        prev_long_size = long_size
+                        log_debug("✅ 롱 TP 전체 청산", "그리드 재생성")
+                        
+                        if SYMBOL in entry_history:
+                            entry_history[SYMBOL]["long"] = []
+                        if SYMBOL in tp_type:
+                            tp_type[SYMBOL]["long"] = "average"
+                        
+                        update_initial_balance(force=True)
+                        cancel_grid_orders(SYMBOL)
+                        time.sleep(0.5)
+                        
+                        ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                        if ticker:
+                            current_price = Decimal(str(ticker[0].last))
+                            initialize_grid(current_price, skip_check=True)
+                            time.sleep(1.5)
+                            update_position_state(SYMBOL)
+                            refresh_tp_orders(SYMBOL)
+                            time.sleep(1.0)
+                            update_position_state(SYMBOL, show_log=True)
+                            refresh_tp_orders(SYMBOL)
+                            last_grid_check = time.time()
                 
-                # ✅ 숏 포지션 0 감지
+                # ✅ 숏 포지션 0 감지 (중복 방지)
                 elif short_size == 0 and prev_short_size > 0:
-                    prev_short_size = short_size
-                    log_debug("✅ 숏 TP 전체 청산", "그리드 재생성")
-                    
-                    if SYMBOL in entry_history:
-                        entry_history[SYMBOL]["short"] = []
-                    if SYMBOL in tp_type:
-                        tp_type[SYMBOL]["short"] = "average"
-                    
-                    update_initial_balance(force=True)
-                    cancel_grid_orders(SYMBOL)
-                    time.sleep(0.5)
-                    
-                    ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
-                    if ticker:
-                        current_price = Decimal(str(ticker[0].last))
-                        initialize_grid(current_price, skip_check=True)
-                        time.sleep(1.5)
-                        update_position_state(SYMBOL)
-                        refresh_tp_orders(SYMBOL)
-                        time.sleep(1.0)
-                        update_position_state(SYMBOL, show_log=True)
-                        refresh_tp_orders(SYMBOL)
-                        last_grid_check = time.time()
+                    with grid_generation_lock:
+                        now_time = time.time()
+                        if now_time - last_grid_generation_time < 5:
+                            log_debug("⏭️ 그리드 스킵", "최근 생성됨")
+                            prev_short_size = short_size
+                            continue
+                        
+                        last_grid_generation_time = now_time
+                        prev_short_size = short_size
+                        log_debug("✅ 숏 TP 전체 청산", "그리드 재생성")
+                        
+                        if SYMBOL in entry_history:
+                            entry_history[SYMBOL]["short"] = []
+                        if SYMBOL in tp_type:
+                            tp_type[SYMBOL]["short"] = "average"
+                        
+                        update_initial_balance(force=True)
+                        cancel_grid_orders(SYMBOL)
+                        time.sleep(0.5)
+                        
+                        ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                        if ticker:
+                            current_price = Decimal(str(ticker[0].last))
+                            initialize_grid(current_price, skip_check=True)
+                            time.sleep(1.5)
+                            update_position_state(SYMBOL)
+                            refresh_tp_orders(SYMBOL)
+                            time.sleep(1.0)
+                            update_position_state(SYMBOL, show_log=True)
+                            refresh_tp_orders(SYMBOL)
+                            last_grid_check = time.time()
                 
                 else:
                     prev_long_size = long_size
                     prev_short_size = short_size
                 
-                # ✅ 안전장치: 5분마다 그리드 체크
+                # 안전장치: 5분마다 그리드 체크
                 now = time.time()
                 if now - last_grid_check >= 300:
                     try:
