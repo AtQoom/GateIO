@@ -40,11 +40,11 @@ CONTRACT_SIZE = Decimal("1")
 GRID_GAP_PCT = Decimal(os.environ.get("GRID_GAP_PCT", "0.12")) / Decimal("100")
 TP_GAP_PCT = Decimal(os.environ.get("TP_GAP_PCT", "0.12")) / Decimal("100")
 HEDGE_RATIO = Decimal(os.environ.get("HEDGE_RATIO", "0.1"))
-THRESHOLD_RATIO = Decimal(os.environ.get("THRESHOLD_RATIO", "1.0"))
+THRESHOLD_RATIO = Decimal(os.environ.get("THRESHOLD_RATIO", "0.8"))
 BALANCE_UPDATE_INTERVAL = int(os.environ.get("BALANCE_UPDATE_INTERVAL", "3600"))  # 기본 1시간
 
 # ⭐⭐⭐ 새로운 설정
-COUNTER_POSITION_RATIO = Decimal("0.10")  # 역방향 그리드: 주력의 10%
+COUNTER_POSITION_RATIO = Decimal("0.20")  # 역방향 그리드: 주력의 10%
 COUNTER_CLOSE_RATIO = Decimal("0.20")     # 주력 TP 시 역방향 동반 청산: 20%
 
 # API 설정
