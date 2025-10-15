@@ -49,11 +49,11 @@ GRID_GAP_PCT = Decimal(os.environ.get("GRID_GAP_PCT", "0.12")) / Decimal("100")
 TP_GAP_PCT = Decimal(os.environ.get("TP_GAP_PCT", "0.12")) / Decimal("100")
 HEDGE_RATIO = Decimal(os.environ.get("HEDGE_RATIO", "0.1"))
 THRESHOLD_RATIO = Decimal(os.environ.get("THRESHOLD_RATIO", "0.8"))
-BALANCE_UPDATE_INTERVAL = int(os.environ.get("BALANCE_UPDATE_INTERVAL", "3600"))  # 기본 1시간
+BALANCE_UPDATE_INTERVAL = int(os.environ.get("BALANCE_UPDATE_INTERVAL", "3600"))
 
 # ⭐⭐⭐ 새로운 설정
-COUNTER_POSITION_RATIO = Decimal("0.30")  # 역방향 그리드: 주력의 30%
-COUNTER_CLOSE_RATIO = Decimal("0.20")     # 주력 TP 시 역방향 동반 청산: 20%
+COUNTER_POSITION_RATIO = Decimal("0.30")
+COUNTER_CLOSE_RATIO = Decimal("0.20")
 
 # API 설정
 API_KEY = os.environ.get("API_KEY", "")
@@ -67,6 +67,14 @@ client = ApiClient(config)
 api = FuturesApi(client)
 unified_api = UnifiedApi(client)
 
+# =============================================================================
+# 전역 변수
+# =============================================================================
+
+# ⚡⚡⚡ 중복 그리드 생성 방지
+grid_generation_lock = threading.RLock()
+last_grid_generation_time = 0
+
 # ⭐ 복리를 위한 전역 변수
 INITIAL_BALANCE = Decimal("0")
 last_balance_update = 0
@@ -79,8 +87,8 @@ latest_prices = {}
 entry_history = {}
 tp_orders = {}
 tp_type = {}
-threshold_exceeded_time = {}  # 임계값 초과 시점 기록
-post_threshold_entries = {}   # 임계값 초과 후 진입 기록
+threshold_exceeded_time = {}
+post_threshold_entries = {}
 
 app = Flask(__name__)
 
@@ -89,7 +97,7 @@ app = Flask(__name__)
 # =============================================================================
 
 def log_debug(label, msg="", exc_info=False):
-    """로그 출력 (간소화)"""
+    """로그 출력"""
     if exc_info:
         logger.error(f"[{label}] {msg}", exc_info=True)
     else:
