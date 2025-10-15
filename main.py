@@ -240,7 +240,12 @@ def calculate_obv_macd(symbol):
 def calculate_grid_qty(current_price):
     """그리드 수량 계산 (OBV MACD 가중 0.10~0.35, 레버리지 1배)"""
     try:
-        # ✅ 수정: get_current_balance() → INITIAL_BALANCE 사용
+        # ⭐ current_price 체크 추가!
+        if current_price is None or current_price <= 0:
+            log_debug("❌ 수량 계산 오류", "가격 정보 없음")
+            return int(Decimal("10"))
+        
+        # 잔고 가져오기
         with balance_lock:
             current_balance = INITIAL_BALANCE
         
@@ -738,8 +743,23 @@ def emergency_tp_fix(symbol):
 def initialize_grid(current_price=None, skip_check=False):
     """그리드 초기화 (양방향 포지션 시 생성 방지)"""
     try:
-        # current_price 처리...
+        if current_price is None:
+            try:
+                ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                if ticker:
+                    current_price = Decimal(str(ticker[0].last))
+                else:
+                    log_debug("❌ 현재가 조회 실패", "그리드 생성 중단")
+                    return
+            except Exception as e:
+                log_debug("❌ 현재가 조회 오류", str(e))
+                return
         
+        # ⭐⭐⭐ 추가 체크: current_price가 여전히 None이거나 0 이하면 중단
+        if current_price is None or current_price <= 0:
+            log_debug("❌ 유효하지 않은 가격", f"current_price: {current_price}")
+            return
+            
         # ⭐ 첫 번째 체크 (디버그 로그 추가)
         with position_lock:
             pos = position_state.get(SYMBOL, {})
