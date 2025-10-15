@@ -960,7 +960,7 @@ def fill_monitor():
                 except:
                     current_price = Decimal("0")
                 
-                # 롱 포지션 변화
+                # ⭐⭐⭐ 롱 포지션 변화 (속도 개선 버전)
                 if long_size != prev_long_size and now - last_long_action_time >= 3:
                     try:
                         added_long = long_size - prev_long_size
@@ -971,7 +971,7 @@ def fill_monitor():
                             log_debug("📊 롱 진입", f"+{added_long}@{long_price:.4f} → 총:{long_size} OBV:{obv_display:.2f}")
                             record_entry(SYMBOL, "long", long_price, added_long)
                             
-                            time.sleep(3.0)
+                            time.sleep(1.5)  # ⭐ 3.0 → 1.5초
                             update_position_state(SYMBOL)
                             
                             with position_lock:
@@ -982,24 +982,22 @@ def fill_monitor():
                                 if recheck_long > 0 and recheck_short > 0:
                                     log_debug("✅ 재확인 → 양방향", f"롱:{recheck_long} 숏:{recheck_short} → TP만")
                                     cancel_grid_orders(SYMBOL)
-                                    time.sleep(0.5)
+                                    time.sleep(0.3)  # ⭐ 0.5 → 0.3초
                                     refresh_tp_orders(SYMBOL)
                                 
                                 elif recheck_long > 0 and recheck_short == 0:
                                     log_debug("⚡ 재확인 → 롱만", "그리드 생성")
                                     cancel_grid_orders(SYMBOL)
-                                    time.sleep(0.5)
+                                    time.sleep(0.3)  # ⭐ 0.5 → 0.3초
                                     refresh_tp_orders(SYMBOL)
                                     
-                                    # ⭐⭐⭐ 헤징 호출 제거!
-                                    # if current_price > 0:
-                                    #     place_hedge_order(SYMBOL, "short", current_price)
+                                    # ⭐ 헤징 호출 제거 (initialize_grid에서 임계값 체크)
                                     
-                                    time.sleep(5)
+                                    time.sleep(1.0)  # ⭐ 5 → 1초
                                     update_position_state(SYMBOL)
-                                    time.sleep(0.5)
+                                    time.sleep(0.3)  # ⭐ 0.5 → 0.3초
                                     refresh_tp_orders(SYMBOL)
-                                    time.sleep(1)
+                                    time.sleep(0.5)  # ⭐ 1 → 0.5초
                                     update_position_state(SYMBOL, show_log=True)
                                     
                                     with position_lock:
@@ -1030,7 +1028,7 @@ def fill_monitor():
                     except Exception as e:
                         log_debug("❌ 롱 처리 오류", str(e), exc_info=True)
                 
-                # 숏 포지션 변화
+                # ⭐⭐⭐ 숏 포지션 변화 (속도 개선 버전)
                 if short_size != prev_short_size and now - last_short_action_time >= 3:
                     try:
                         added_short = short_size - prev_short_size
@@ -1041,7 +1039,7 @@ def fill_monitor():
                             log_debug("📊 숏 진입", f"+{added_short}@{short_price:.4f} → 총:{short_size} OBV:{obv_display:.2f}")
                             record_entry(SYMBOL, "short", short_price, added_short)
                             
-                            time.sleep(3.0)
+                            time.sleep(1.5)  # ⭐ 3.0 → 1.5초
                             update_position_state(SYMBOL)
                             
                             with position_lock:
@@ -1052,24 +1050,22 @@ def fill_monitor():
                                 if recheck_long > 0 and recheck_short > 0:
                                     log_debug("✅ 재확인 → 양방향", f"롱:{recheck_long} 숏:{recheck_short} → TP만")
                                     cancel_grid_orders(SYMBOL)
-                                    time.sleep(0.5)
+                                    time.sleep(0.3)  # ⭐ 0.5 → 0.3초
                                     refresh_tp_orders(SYMBOL)
                                 
                                 elif recheck_short > 0 and recheck_long == 0:
                                     log_debug("⚡ 재확인 → 숏만", "그리드 생성")
                                     cancel_grid_orders(SYMBOL)
-                                    time.sleep(0.5)
+                                    time.sleep(0.3)  # ⭐ 0.5 → 0.3초
                                     refresh_tp_orders(SYMBOL)
                                     
-                                    # ⭐⭐⭐ 헤징 호출 제거!
-                                    # if current_price > 0:
-                                    #     place_hedge_order(SYMBOL, "long", current_price)
+                                    # ⭐ 헤징 호출 제거 (initialize_grid에서 임계값 체크)
                                     
-                                    time.sleep(5)
+                                    time.sleep(1.0)  # ⭐ 5 → 1초
                                     update_position_state(SYMBOL)
-                                    time.sleep(0.5)
+                                    time.sleep(0.3)  # ⭐ 0.5 → 0.3초
                                     refresh_tp_orders(SYMBOL)
-                                    time.sleep(1)
+                                    time.sleep(0.5)  # ⭐ 1 → 0.5초
                                     update_position_state(SYMBOL, show_log=True)
                                     
                                     with position_lock:
