@@ -991,8 +991,9 @@ def fill_monitor():
                                     time.sleep(0.5)
                                     refresh_tp_orders(SYMBOL)
                                     
-                                    if current_price > 0:
-                                        place_hedge_order(SYMBOL, "short", current_price)
+                                    # ⭐⭐⭐ 헤징 호출 제거!
+                                    # if current_price > 0:
+                                    #     place_hedge_order(SYMBOL, "short", current_price)
                                     
                                     time.sleep(5)
                                     update_position_state(SYMBOL)
@@ -1060,8 +1061,9 @@ def fill_monitor():
                                     time.sleep(0.5)
                                     refresh_tp_orders(SYMBOL)
                                     
-                                    if current_price > 0:
-                                        place_hedge_order(SYMBOL, "long", current_price)
+                                    # ⭐⭐⭐ 헤징 호출 제거!
+                                    # if current_price > 0:
+                                    #     place_hedge_order(SYMBOL, "long", current_price)
                                     
                                     time.sleep(5)
                                     update_position_state(SYMBOL)
