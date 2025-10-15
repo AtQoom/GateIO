@@ -756,13 +756,17 @@ def refresh_tp_orders(symbol):
     """TP 주문 갱신 - 임계값 초과 시만 역방향 부분청산"""
     
     try:
-        # 기존 TP 주문 모두 취소
+        # ✅ 수정: 기존 TP 주문 모두 취소
         orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
         
         for order in orders:
-            if order.reduce_only:
+            if order.is_reduce_only:
                 try:
-                    api.cancel_futures_order(SETTLE, symbol, str(order.id))
+                    # ❌ 기존 (오류)
+                    # api.cancel_futures_order(SETTLE, symbol, str(order.id))
+                    
+                    # ✅ 수정
+                    api.cancel_futures_order(SETTLE, str(order.id))
                 except Exception as e:
                     if "not found" not in str(e).lower():
                         log_debug("❌ TP 취소 실패", str(e))
@@ -775,8 +779,8 @@ def refresh_tp_orders(symbol):
             
             long_size = long_pos.get("size", Decimal("0"))
             short_size = short_pos.get("size", Decimal("0"))
-            long_entry = long_pos.get("entry_price", Decimal("0"))
-            short_entry = short_pos.get("entry_price", Decimal("0"))
+            long_entry = long_pos.get("price", Decimal("0"))
+            short_entry = short_pos.get("price", Decimal("0"))
         
         # 임계값 확인
         with balance_lock:
@@ -830,9 +834,6 @@ def refresh_tp_orders(symbol):
                 counter_tp_price = long_entry * (Decimal("1") + TP_GAP_PCT * Decimal("2"))
                 place_limit_order(symbol, "short", counter_tp_price, counter_close_qty, reduce_only=True)
                 log_debug("🔄 역방향 롱 20% 청산", f"{counter_close_qty} @ {counter_tp_price:.4f}")
-        
-        # ⚡⚡⚡ 임계값 미달 시 - 역방향 부분청산 없음!
-        # → 주력 TP만 실행 (이미 위에서 생성됨)
         
     except Exception as e:
         log_debug("❌ TP 갱신 오류", str(e), exc_info=True)
