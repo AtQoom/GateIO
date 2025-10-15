@@ -910,9 +910,10 @@ def initialize_grid(current_price=None, skip_check=False):
 # =============================================================================
 
 def fill_monitor():
-    """체결 모니터링"""
+    """체결 모니터링 - 최적화 버전 (0.5초 대기)"""
     try:
         update_position_state(SYMBOL, show_log=True)
+        
         prev_long_size = Decimal("0")
         prev_short_size = Decimal("0")
         last_long_action_time = 0
@@ -932,15 +933,13 @@ def fill_monitor():
                 update_initial_balance()
                 now = time.time()
                 
-                # 하트비트
+                # 하트비트 (3분마다)
                 if now - last_heartbeat >= 180:
                     with position_lock:
                         pos = position_state.get(SYMBOL, {})
                         current_long = pos.get("long", {}).get("size", Decimal("0"))
                         current_short = pos.get("short", {}).get("size", Decimal("0"))
-                    with balance_lock:
-                        current_balance = INITIAL_BALANCE
-                    log_debug("💓 하트비트", f"롱:{current_long} 숏:{current_short} 잔고:{float(current_balance):.2f}U")
+                    log_debug("💓 하트비트", f"롱:{current_long} 숏:{current_short}")
                     last_heartbeat = now
                 
                 update_position_state(SYMBOL)
@@ -949,155 +948,192 @@ def fill_monitor():
                     pos = position_state.get(SYMBOL, {})
                     long_size = pos.get("long", {}).get("size", Decimal("0"))
                     short_size = pos.get("short", {}).get("size", Decimal("0"))
-                    long_price = pos.get("long", {}).get("price", Decimal("0"))
-                    short_price = pos.get("short", {}).get("price", Decimal("0"))
+                    long_price = pos.get("long", {}).get("entry_price", Decimal("0"))
+                    short_price = pos.get("short", {}).get("entry_price", Decimal("0"))
                 
-                now = time.time()
-                
-                try:
-                    ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
-                    current_price = Decimal(str(ticker[0].last)) if ticker else Decimal("0")
-                except:
-                    current_price = Decimal("0")
-                
-                # ⭐⭐⭐ 롱 포지션 변화 (속도 개선 버전)
-                if long_size != prev_long_size and now - last_long_action_time >= 3:
-                    try:
+                # ⚡⚡⚡ 롱 변화 감지
+                if long_size != prev_long_size:
+                    if now - last_long_action_time >= 3:
                         added_long = long_size - prev_long_size
                         
                         if added_long > 0:
-                            obv_macd = calculate_obv_macd(SYMBOL)
-                            obv_display = float(obv_macd) * 1000
-                            log_debug("📊 롱 진입", f"+{added_long}@{long_price:.4f} → 총:{long_size} OBV:{obv_display:.2f}")
+                            log_debug("📊 롱 진입", f"+{added_long}")
                             record_entry(SYMBOL, "long", long_price, added_long)
                             
-                            time.sleep(1.5)  # ⭐ 3.0 → 1.5초
+                            # ⚡ 0.5초 대기 (Gate.io API 응답)
+                            time.sleep(0.5)
                             update_position_state(SYMBOL)
                             
                             with position_lock:
                                 pos2 = position_state.get(SYMBOL, {})
                                 recheck_long = pos2.get("long", {}).get("size", Decimal("0"))
                                 recheck_short = pos2.get("short", {}).get("size", Decimal("0"))
+                            
+                            # 양방향 vs 단방향 판단
+                            if recheck_long > 0 and recheck_short > 0:
+                                log_debug("⚡ 재확인 → 양방향", "TP만")
+                                cancel_grid_orders(SYMBOL)
+                                refresh_tp_orders(SYMBOL)
                                 
-                                if recheck_long > 0 and recheck_short > 0:
-                                    log_debug("✅ 재확인 → 양방향", f"롱:{recheck_long} 숏:{recheck_short} → TP만")
-                                    cancel_grid_orders(SYMBOL)
-                                    time.sleep(0.3)  # ⭐ 0.5 → 0.3초
-                                    refresh_tp_orders(SYMBOL)
+                            elif recheck_long > 0 and recheck_short == 0:
+                                log_debug("⚡ 재확인 → 롱만", "그리드 생성")
+                                cancel_grid_orders(SYMBOL)
+                                refresh_tp_orders(SYMBOL)
                                 
-                                elif recheck_long > 0 and recheck_short == 0:
-                                    log_debug("⚡ 재확인 → 롱만", "그리드 생성")
-                                    cancel_grid_orders(SYMBOL)
-                                    time.sleep(0.3)  # ⭐ 0.5 → 0.3초
-                                    refresh_tp_orders(SYMBOL)
-                                    
-                                    # ⭐ 헤징 호출 제거 (initialize_grid에서 임계값 체크)
-                                    
-                                    time.sleep(1.0)  # ⭐ 5 → 1초
-                                    update_position_state(SYMBOL)
-                                    time.sleep(0.3)  # ⭐ 0.5 → 0.3초
-                                    refresh_tp_orders(SYMBOL)
-                                    time.sleep(0.5)  # ⭐ 1 → 0.5초
-                                    update_position_state(SYMBOL, show_log=True)
-                                    
-                                    with position_lock:
-                                        pos3 = position_state.get(SYMBOL, {})
-                                        final_long = pos3.get("long", {}).get("size", Decimal("0"))
-                                        final_short = pos3.get("short", {}).get("size", Decimal("0"))
-                                        
-                                        if final_long > 0 and final_short == 0:
-                                            ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
-                                            if ticker:
-                                                grid_price = Decimal(str(ticker[0].last))
-                                                initialize_grid(grid_price, skip_check=True)
-                                        elif final_short > 0 and final_long == 0:
-                                            ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
-                                            if ticker:
-                                                grid_price = Decimal(str(ticker[0].last))
-                                                initialize_grid(grid_price, skip_check=True)
-                                        
-                                        prev_long_size = final_long
-                                        prev_short_size = final_short
+                                # ⚡ 0.5초 대기 (TP 생성 확인)
+                                time.sleep(0.5)
+                                update_position_state(SYMBOL)
+                                refresh_tp_orders(SYMBOL)
+                                
+                                # ⚡ 0.3초 대기 (최종 확인)
+                                time.sleep(0.3)
+                                update_position_state(SYMBOL, show_log=True)
+                                
+                                with position_lock:
+                                    pos3 = position_state.get(SYMBOL, {})
+                                    final_long = pos3.get("long", {}).get("size", Decimal("0"))
+                                    final_short = pos3.get("short", {}).get("size", Decimal("0"))
+                                
+                                # 그리드 재생성
+                                if final_long > 0 or final_short > 0:
+                                    ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                                    if ticker:
+                                        grid_price = Decimal(str(ticker[0].last))
+                                        initialize_grid(grid_price, skip_check=True)
+                            
+                            prev_long_size = recheck_long
+                            prev_short_size = recheck_short
                         
-                        else:
-                            log_debug("📊 롱 청산", f"{added_long} → 총:{long_size}")
-                            prev_long_size = long_size
+                        elif added_long < 0:
+                            # 청산 로직
+                            reduced_long = abs(added_long)
+                            log_debug("📉 롱 청산", f"-{reduced_long}")
+                            
+                            # ⚡ 0.5초 대기
+                            time.sleep(0.5)
+                            update_position_state(SYMBOL)
+                            
+                            with position_lock:
+                                pos2 = position_state.get(SYMBOL, {})
+                                recheck_long = pos2.get("long", {}).get("size", Decimal("0"))
+                                recheck_short = pos2.get("short", {}).get("size", Decimal("0"))
+                            
+                            if recheck_long == 0 and recheck_short == 0:
+                                log_debug("⚡ 전체 청산", "그리드 재시작")
+                                cancel_all_orders(SYMBOL)
+                                time.sleep(0.3)
+                                ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                                if ticker:
+                                    grid_price = Decimal(str(ticker[0].last))
+                                    initialize_grid(grid_price, skip_check=False)
+                            
+                            elif recheck_long > 0 and recheck_short == 0:
+                                log_debug("⚡ 일부 청산 → 롱", "그리드 재생성")
+                                cancel_grid_orders(SYMBOL)
+                                refresh_tp_orders(SYMBOL)
+                                time.sleep(0.5)
+                                ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                                if ticker:
+                                    grid_price = Decimal(str(ticker[0].last))
+                                    initialize_grid(grid_price, skip_check=True)
+                            
+                            prev_long_size = recheck_long
+                            prev_short_size = recheck_short
                         
                         last_long_action_time = now
-                        
-                    except Exception as e:
-                        log_debug("❌ 롱 처리 오류", str(e), exc_info=True)
                 
-                # ⭐⭐⭐ 숏 포지션 변화 (속도 개선 버전)
-                if short_size != prev_short_size and now - last_short_action_time >= 3:
-                    try:
+                # ⚡⚡⚡ 숏 변화 감지
+                if short_size != prev_short_size:
+                    if now - last_short_action_time >= 3:
                         added_short = short_size - prev_short_size
                         
                         if added_short > 0:
-                            obv_macd = calculate_obv_macd(SYMBOL)
-                            obv_display = float(obv_macd) * 1000
-                            log_debug("📊 숏 진입", f"+{added_short}@{short_price:.4f} → 총:{short_size} OBV:{obv_display:.2f}")
+                            log_debug("📊 숏 진입", f"+{added_short}")
                             record_entry(SYMBOL, "short", short_price, added_short)
                             
-                            time.sleep(1.5)  # ⭐ 3.0 → 1.5초
+                            # ⚡ 0.5초 대기
+                            time.sleep(0.5)
                             update_position_state(SYMBOL)
                             
                             with position_lock:
                                 pos2 = position_state.get(SYMBOL, {})
                                 recheck_long = pos2.get("long", {}).get("size", Decimal("0"))
                                 recheck_short = pos2.get("short", {}).get("size", Decimal("0"))
+                            
+                            if recheck_long > 0 and recheck_short > 0:
+                                log_debug("⚡ 재확인 → 양방향", "TP만")
+                                cancel_grid_orders(SYMBOL)
+                                refresh_tp_orders(SYMBOL)
                                 
-                                if recheck_long > 0 and recheck_short > 0:
-                                    log_debug("✅ 재확인 → 양방향", f"롱:{recheck_long} 숏:{recheck_short} → TP만")
-                                    cancel_grid_orders(SYMBOL)
-                                    time.sleep(0.3)  # ⭐ 0.5 → 0.3초
-                                    refresh_tp_orders(SYMBOL)
+                            elif recheck_short > 0 and recheck_long == 0:
+                                log_debug("⚡ 재확인 → 숏만", "그리드 생성")
+                                cancel_grid_orders(SYMBOL)
+                                refresh_tp_orders(SYMBOL)
                                 
-                                elif recheck_short > 0 and recheck_long == 0:
-                                    log_debug("⚡ 재확인 → 숏만", "그리드 생성")
-                                    cancel_grid_orders(SYMBOL)
-                                    time.sleep(0.3)  # ⭐ 0.5 → 0.3초
-                                    refresh_tp_orders(SYMBOL)
-                                    
-                                    # ⭐ 헤징 호출 제거 (initialize_grid에서 임계값 체크)
-                                    
-                                    time.sleep(1.0)  # ⭐ 5 → 1초
-                                    update_position_state(SYMBOL)
-                                    time.sleep(0.3)  # ⭐ 0.5 → 0.3초
-                                    refresh_tp_orders(SYMBOL)
-                                    time.sleep(0.5)  # ⭐ 1 → 0.5초
-                                    update_position_state(SYMBOL, show_log=True)
-                                    
-                                    with position_lock:
-                                        pos3 = position_state.get(SYMBOL, {})
-                                        final_long = pos3.get("long", {}).get("size", Decimal("0"))
-                                        final_short = pos3.get("short", {}).get("size", Decimal("0"))
-                                        
-                                        if final_short > 0 and final_long == 0:
-                                            ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
-                                            if ticker:
-                                                grid_price = Decimal(str(ticker[0].last))
-                                                initialize_grid(grid_price, skip_check=True)
-                                        elif final_long > 0 and final_short == 0:
-                                            ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
-                                            if ticker:
-                                                grid_price = Decimal(str(ticker[0].last))
-                                                initialize_grid(grid_price, skip_check=True)
-                                        
-                                        prev_long_size = final_long
-                                        prev_short_size = final_short
+                                # ⚡ 0.5초 대기
+                                time.sleep(0.5)
+                                update_position_state(SYMBOL)
+                                refresh_tp_orders(SYMBOL)
+                                
+                                # ⚡ 0.3초 대기
+                                time.sleep(0.3)
+                                update_position_state(SYMBOL, show_log=True)
+                                
+                                with position_lock:
+                                    pos3 = position_state.get(SYMBOL, {})
+                                    final_long = pos3.get("long", {}).get("size", Decimal("0"))
+                                    final_short = pos3.get("short", {}).get("size", Decimal("0"))
+                                
+                                if final_long > 0 or final_short > 0:
+                                    ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                                    if ticker:
+                                        grid_price = Decimal(str(ticker[0].last))
+                                        initialize_grid(grid_price, skip_check=True)
+                            
+                            prev_long_size = recheck_long
+                            prev_short_size = recheck_short
                         
-                        else:
-                            log_debug("📊 숏 청산", f"{added_short} → 총:{short_size}")
-                            prev_short_size = short_size
+                        elif added_short < 0:
+                            # 청산 로직
+                            reduced_short = abs(added_short)
+                            log_debug("📉 숏 청산", f"-{reduced_short}")
+                            
+                            # ⚡ 0.5초 대기
+                            time.sleep(0.5)
+                            update_position_state(SYMBOL)
+                            
+                            with position_lock:
+                                pos2 = position_state.get(SYMBOL, {})
+                                recheck_long = pos2.get("long", {}).get("size", Decimal("0"))
+                                recheck_short = pos2.get("short", {}).get("size", Decimal("0"))
+                            
+                            if recheck_long == 0 and recheck_short == 0:
+                                log_debug("⚡ 전체 청산", "그리드 재시작")
+                                cancel_all_orders(SYMBOL)
+                                time.sleep(0.3)
+                                ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                                if ticker:
+                                    grid_price = Decimal(str(ticker[0].last))
+                                    initialize_grid(grid_price, skip_check=False)
+                            
+                            elif recheck_short > 0 and recheck_long == 0:
+                                log_debug("⚡ 일부 청산 → 숏", "그리드 재생성")
+                                cancel_grid_orders(SYMBOL)
+                                refresh_tp_orders(SYMBOL)
+                                time.sleep(0.5)
+                                ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                                if ticker:
+                                    grid_price = Decimal(str(ticker[0].last))
+                                    initialize_grid(grid_price, skip_check=True)
+                            
+                            prev_long_size = recheck_long
+                            prev_short_size = recheck_short
                         
                         last_short_action_time = now
-                        
-                    except Exception as e:
-                        log_debug("❌ 숏 처리 오류", str(e), exc_info=True)
                 
             except Exception as e:
                 log_debug("❌ 모니터 루프 오류", str(e), exc_info=True)
+                time.sleep(3)
                 
     except Exception as e:
         log_debug("❌ fill_monitor 오류", str(e), exc_info=True)
