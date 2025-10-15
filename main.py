@@ -1539,7 +1539,7 @@ if __name__ == "__main__":
     entry_price = Decimal(str(ticker[0].last))
     log_debug("📈 현재가", f"{float(entry_price):.4f} USDT")
     
-    # ✅ 포지션 유무에 따른 초기화
+    # ✅✅✅ 포지션 유무에 따른 초기화 (수정!)
     if long_size == 0 and short_size == 0:
         log_debug("🔷 초기 그리드 생성", "포지션 없음")
         initialize_grid(entry_price, skip_check=False)
@@ -1548,6 +1548,11 @@ if __name__ == "__main__":
         cancel_grid_orders(SYMBOL)
         time.sleep(0.5)
         refresh_tp_orders(SYMBOL)
+        
+        # ⚡⚡⚡ 핵심 수정: 그리드 생성 추가!
+        time.sleep(0.5)
+        log_debug("📊 그리드 재생성", "기존 포지션 기준")
+        initialize_grid(entry_price, skip_check=False)
     
     # 모니터 시작
     log_debug("=" * 50)
@@ -1562,4 +1567,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     log_debug("🌐 Flask 서버", f"0.0.0.0:{port} 시작")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
-
