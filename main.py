@@ -861,8 +861,8 @@ def initialize_grid(entry_price, skip_check=False):
             pos = position_state.get(SYMBOL, {})
             long_size = pos.get("long", {}).get("size", Decimal("0"))
             short_size = pos.get("short", {}).get("size", Decimal("0"))
-            long_price = pos.get("long", {}).get("entry_price", Decimal("0"))
-            short_price = pos.get("short", {}).get("entry_price", Decimal("0"))
+            long_price = pos.get("long", {}).get("price", Decimal("0"))
+            short_price = pos.get("short", {}).get("price", Decimal("0"))
         
         long_value = long_size * long_price if long_price > 0 else Decimal("0")
         short_value = short_size * short_price if short_price > 0 else Decimal("0")
@@ -874,8 +874,8 @@ def initialize_grid(entry_price, skip_check=False):
         
         cancel_grid_orders(SYMBOL)
         
-        # ✅ 수정: 역방향 30%, 같은방향 10% (또는 기본수량)
-        COUNTER_ENTRY_RATIO = Decimal("0.30")  # 20% → 30%
+        # ✅ 수정: 역방향 30%, 같은방향 10%
+        COUNTER_ENTRY_RATIO = Decimal("0.30")  # 30%
         SAME_SIDE_RATIO = Decimal("0.10")  # 10%
         
         # ============================================================
@@ -895,7 +895,7 @@ def initialize_grid(entry_price, skip_check=False):
                         
                         grid_qty = counter_qty
                         if i == 0:
-                            grid_qty = max(counter_qty, CONTRACT_SIZE)
+                            grid_qty = max(counter_qty, int(CONTRACT_SIZE))
                         
                         if place_limit_order(SYMBOL, "short", short_grid_price, grid_qty):
                             log_debug("🔴 숏 그리드", f"{grid_qty}개 @ {short_grid_price:.4f}")
@@ -904,10 +904,14 @@ def initialize_grid(entry_price, skip_check=False):
                     log_debug("🔵 임계값 초과 (롱 주력)", 
                              f"역방향 숏 {counter_qty}개 (30%) 그리드 생성")
                 
-                # ✅ 같은 방향 롱 (10% vs 기본수량)
+                # ⚡⚡⚡ 수정: 같은 방향 롱 계산 방식 변경!
                 same_side_qty_pct = int(long_size * SAME_SIDE_RATIO)
-                same_side_qty_base = int(BASE_QTY)
-                same_side_qty = max(same_side_qty_pct, same_side_qty_base)
+                
+                # ⚡ 핵심: calculate_grid_qty로 기본 수량 계산
+                base_qty_calculated = calculate_grid_qty(entry_price)
+                
+                # ⚡ 10% vs 계산된 기본수량 중 큰 값
+                same_side_qty = max(same_side_qty_pct, base_qty_calculated)
                 
                 # 롱 그리드 (같은 방향)
                 for i in range(5):
@@ -917,14 +921,14 @@ def initialize_grid(entry_price, skip_check=False):
                     
                     grid_qty = same_side_qty
                     if i == 0:
-                        grid_qty = max(same_side_qty, CONTRACT_SIZE)
+                        grid_qty = max(same_side_qty, int(CONTRACT_SIZE))
                     
                     if place_limit_order(SYMBOL, "long", long_grid_price, grid_qty):
                         log_debug("🟢 롱 그리드", f"{grid_qty}개 @ {long_grid_price:.4f}")
                     time.sleep(0.1)
                 
                 log_debug("🟢 같은방향 롱", 
-                         f"max({same_side_qty_pct}(10%), {same_side_qty_base}(기본)) = {same_side_qty}개")
+                         f"max({same_side_qty_pct}(10%), {base_qty_calculated}(계산)) = {same_side_qty}개")
                 return
         
         # ============================================================
@@ -944,7 +948,7 @@ def initialize_grid(entry_price, skip_check=False):
                         
                         grid_qty = counter_qty
                         if i == 0:
-                            grid_qty = max(counter_qty, CONTRACT_SIZE)
+                            grid_qty = max(counter_qty, int(CONTRACT_SIZE))
                         
                         if place_limit_order(SYMBOL, "long", long_grid_price, grid_qty):
                             log_debug("🟢 롱 그리드", f"{grid_qty}개 @ {long_grid_price:.4f}")
@@ -953,10 +957,14 @@ def initialize_grid(entry_price, skip_check=False):
                     log_debug("🔵 임계값 초과 (숏 주력)", 
                              f"역방향 롱 {counter_qty}개 (30%) 그리드 생성")
                 
-                # ✅ 같은 방향 숏 (10% vs 기본수량)
+                # ⚡⚡⚡ 수정: 같은 방향 숏 계산 방식 변경!
                 same_side_qty_pct = int(short_size * SAME_SIDE_RATIO)
-                same_side_qty_base = int(BASE_QTY)
-                same_side_qty = max(same_side_qty_pct, same_side_qty_base)
+                
+                # ⚡ 핵심: calculate_grid_qty로 기본 수량 계산
+                base_qty_calculated = calculate_grid_qty(entry_price)
+                
+                # ⚡ 10% vs 계산된 기본수량 중 큰 값
+                same_side_qty = max(same_side_qty_pct, base_qty_calculated)
                 
                 # 숏 그리드 (같은 방향)
                 for i in range(5):
@@ -966,14 +974,14 @@ def initialize_grid(entry_price, skip_check=False):
                     
                     grid_qty = same_side_qty
                     if i == 0:
-                        grid_qty = max(same_side_qty, CONTRACT_SIZE)
+                        grid_qty = max(same_side_qty, int(CONTRACT_SIZE))
                     
                     if place_limit_order(SYMBOL, "short", short_grid_price, grid_qty):
                         log_debug("🔴 숏 그리드", f"{grid_qty}개 @ {short_grid_price:.4f}")
                     time.sleep(0.1)
                 
                 log_debug("🔴 같은방향 숏", 
-                         f"max({same_side_qty_pct}(10%), {same_side_qty_base}(기본)) = {same_side_qty}개")
+                         f"max({same_side_qty_pct}(10%), {base_qty_calculated}(계산)) = {same_side_qty}개")
                 return
         
         # ============================================================
@@ -981,7 +989,7 @@ def initialize_grid(entry_price, skip_check=False):
         # ============================================================
         log_debug("🟡 임계값 미달", "양방향 그리드 생성")
         
-        base_qty = int(BASE_QTY)
+        base_qty = calculate_grid_qty(entry_price)
         
         # 롱 그리드
         for i in range(5):
@@ -991,7 +999,7 @@ def initialize_grid(entry_price, skip_check=False):
             
             grid_qty = base_qty
             if i == 0:
-                grid_qty = max(base_qty, CONTRACT_SIZE)
+                grid_qty = max(base_qty, int(CONTRACT_SIZE))
             
             if place_limit_order(SYMBOL, "long", long_grid_price, grid_qty):
                 log_debug("🟢 롱 그리드", f"{grid_qty}개 @ {long_grid_price:.4f}")
@@ -1005,7 +1013,7 @@ def initialize_grid(entry_price, skip_check=False):
             
             grid_qty = base_qty
             if i == 0:
-                grid_qty = max(base_qty, CONTRACT_SIZE)
+                grid_qty = max(base_qty, int(CONTRACT_SIZE))
             
             if place_limit_order(SYMBOL, "short", short_grid_price, grid_qty):
                 log_debug("🔴 숏 그리드", f"{grid_qty}개 @ {short_grid_price:.4f}")
