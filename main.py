@@ -318,7 +318,7 @@ def place_limit_order(symbol, side, price, qty, retry=3):
 
 
 def place_hedge_order(symbol, side, price):
-    """헤징 주문 (기존 0.1배 유지)"""
+    """헤징 주문 (최소 1개 보장)"""
     try:
         with position_lock:
             pos = position_state.get(symbol, {})
@@ -332,10 +332,13 @@ def place_hedge_order(symbol, side, price):
                 log_debug("⚠️ 헤징 불가", "반대 포지션 없음")
                 return None
             
+            # ⭐ 0.1배 계산 후 최소 1개 보장
             hedge_qty = int(opposite_size * HEDGE_RATIO)
+            if hedge_qty < 1 and opposite_size >= 1:
+                hedge_qty = 1  # 최소 1개
             
             if hedge_qty < CONTRACT_SIZE:
-                log_debug("⚠️ 헤징 수량 부족", f"{hedge_qty} < {CONTRACT_SIZE}")
+                log_debug("⚠️ 헤징 불가", f"반대 포지션 너무 작음 ({opposite_size})")
                 return None
             
             if side == "long":
@@ -624,7 +627,7 @@ def close_counter_position_on_main_tp(symbol, main_side, main_tp_qty):
 
 
 def check_and_update_tp_mode_locked(symbol, side, size, price):
-    """TP 모드 체크 및 업데이트 (임계값 초과 후 진입만 개별 TP)"""
+    """TP 모드 체크 및 업데이트"""
     try:
         if size == 0:
             return
@@ -640,13 +643,19 @@ def check_and_update_tp_mode_locked(symbol, side, size, price):
         except:
             pass
         
-        # 임계값 체크
+        # ⭐⭐⭐ 임계값 체크 (평균가 사용!)
         with balance_lock:
             current_balance = INITIAL_BALANCE
-        position_value = size * price
+        
+        # ⭐ position_state에서 평균가 가져오기
+        with position_lock:
+            pos = position_state.get(symbol, {})
+            avg_price = pos.get(side, {}).get("price", price)  # 평균가 우선, 없으면 현재가
+        
+        position_value = size * avg_price  # ⭐ 평균가 사용!
         threshold_value = current_balance * THRESHOLD_RATIO
         
-        # 임계값 초과 여부 확인
+        # ⭐⭐⭐ 임계값 초과 여부
         if position_value >= threshold_value:
             # 임계값 초과 시점 기록 (최초 1회만)
             if symbol not in threshold_exceeded_time:
@@ -706,17 +715,26 @@ def check_and_update_tp_mode_locked(symbol, side, size, price):
                 return
         
         else:
+            # ⭐⭐⭐ 임계값 미만 → threshold_exceeded_time 삭제!
+            if symbol in threshold_exceeded_time and side in threshold_exceeded_time[symbol]:
+                del threshold_exceeded_time[symbol][side]
+                log_debug("🔄 임계값 미만 전환", f"{symbol}_{side}")
+                
+                # post_threshold_entries도 삭제
+                if symbol in post_threshold_entries and side in post_threshold_entries[symbol]:
+                    post_threshold_entries[symbol][side] = []
+            
             # 임계값 미만 = 헤징 포지션 → 평단 TP
             if existing_tp_qty != size:
                 cancel_tp_orders(symbol, side)
                 time.sleep(0.5)
                 place_average_tp_order(symbol, side, price, size)
-                log_debug("✅ 헤징 TP", f"{symbol}_{side} 평단 {size}계약")
+                log_debug("✅ 헤징 TP (평단)", f"{symbol}_{side} {size}계약")
             return
             
     except Exception as e:
         log_debug("❌ TP 모드 체크 오류", str(e), exc_info=True)
-
+        
 
 def refresh_tp_orders(symbol):
     """TP 주문 새로고침"""
