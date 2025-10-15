@@ -309,6 +309,25 @@ def calculate_grid_qty(current_price):
 def place_limit_order(symbol, side, price, size, reduce_only=False):
     """지정가 주문 - Gate.io API 완벽 호환"""
     try:
+        # ⚡⚡⚡ reduce_only일 때 포지션 체크!
+        if reduce_only:
+            with position_lock:
+                pos = position_state.get(symbol, {})
+                
+                if side == "long":  # 숏 청산
+                    current_short = pos.get("short", {}).get("size", Decimal("0"))
+                    if current_short == 0:
+                        log_debug("⚠️ TP 스킵", "숏 포지션 없음")
+                        return None
+                    size = min(int(size), int(current_short))  # 최대 수량 제한!
+                
+                else:  # side == "short" → 롱 청산
+                    current_long = pos.get("long", {}).get("size", Decimal("0"))
+                    if current_long == 0:
+                        log_debug("⚠️ TP 스킵", "롱 포지션 없음")
+                        return None
+                    size = min(int(size), int(current_long))  # 최대 수량 제한!
+        
         # size 계산
         base_size = max(int(size), int(CONTRACT_SIZE))
         
@@ -327,9 +346,6 @@ def place_limit_order(symbol, side, price, size, reduce_only=False):
         )
         
         result = api.create_futures_order(SETTLE, order)
-        
-        # ✅ 로그 없음 (initialize_grid에서 요약)
-        
         return result
         
     except GateApiException as e:
