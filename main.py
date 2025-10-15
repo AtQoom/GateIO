@@ -245,7 +245,7 @@ def calculate_grid_qty(current_price):
             current_balance = INITIAL_BALANCE
         
         # OBV MACD 값 가져오기
-        obv_macd_value = get_latest_obv_macd()
+        obv_macd_value = calculate_obv_macd(SYMBOL)
         abs_val = abs(obv_macd_value * 1000)
         
         # ⭐ OBV 기반 가중치 (0.10 ~ 0.35)
