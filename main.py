@@ -20,7 +20,13 @@ import logging
 import json
 from decimal import Decimal, ROUND_DOWN
 from flask import Flask, request, jsonify
-from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi, GateApiException
+from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
+
+# ✅ 버전 호환 Exception import
+try:
+    from gate_api.exceptions import ApiException as GateApiException
+except ImportError:
+    from gate_api import ApiException as GateApiException
 import websockets
 import pandas as pd
 import numpy as np
