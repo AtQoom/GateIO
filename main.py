@@ -341,46 +341,53 @@ def place_limit_order(symbol, side, price, size, reduce_only=False):
 
 
 def place_hedge_order(symbol, side, price):
-    """헤징 주문 (최소 1개 보장)"""
+    """헤징 주문 (역방향 포지션 청산)"""
     try:
         with position_lock:
             pos = position_state.get(symbol, {})
             
-            if side == "long":
+            # ⚡⚡⚡ 수정!
+            if side == "long":  # 롱 진입 시
                 opposite_size = pos.get("short", {}).get("size", Decimal("0"))
-            else:
+                opposite_side = "long"  # ← 숏 청산 = 롱 주문!
+            else:  # 숏 진입 시
                 opposite_size = pos.get("long", {}).get("size", Decimal("0"))
+                opposite_side = "short"  # ← 롱 청산 = 숏 주문!
             
             if opposite_size == 0:
+                log_debug("⚠️ 헤징 스킵", "역방향 포지션 없음")
                 return None
             
+            # 헤징 수량 = 역방향 * 0.1
             hedge_ratio_decimal = opposite_size * HEDGE_RATIO
             hedge_qty = int(hedge_ratio_decimal)
             
+            # 최소 1개 보장
             if hedge_qty < 1 and opposite_size >= 1:
                 hedge_qty = 1
             
-            if hedge_qty < CONTRACT_SIZE:
+            if hedge_qty < 1:
+                log_debug("⚠️ 헤징 스킵", f"수량 부족 {hedge_qty}")
                 return None
             
-            if side == "long":
-                order_size = hedge_qty
-            else:
-                order_size = -hedge_qty
-            
-            order = FuturesOrder(
-                contract=symbol,
-                size=order_size,
-                price=str(round(float(price), 4)),
-                tif="gtc",
-                reduce_only=False
+            # ⚡⚡⚡ reduce_only=True 필수!
+            order = place_limit_order(
+                symbol, 
+                opposite_side, 
+                price, 
+                hedge_qty, 
+                reduce_only=True
             )
-            result = api.create_futures_order(SETTLE, order)
-            log_debug("🔄 헤징 주문", f"{hedge_qty}개")
-            return result.id
+            
+            if order:
+                log_debug(f"✅ 헤징", f"{opposite_side.upper()} {hedge_qty}개 @{price}")
+            else:
+                log_debug(f"❌ 헤징 실패", f"{opposite_side.upper()} {hedge_qty}개")
+            
+            return order
             
     except Exception as e:
-        log_debug("❌ 헤징 주문 오류", str(e), exc_info=True)
+        log_debug("❌ 헤징 오류", str(e), exc_info=True)
         return None
 
 
