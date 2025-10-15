@@ -736,7 +736,7 @@ def initialize_grid(current_price=None, skip_check=False):
                 log_debug("📍 롱만 존재", "숏 그리드만 생성")
                 qty = calculate_grid_qty(current_price)
                 upper_price = current_price * (Decimal("1") + GRID_GAP_PCT)
-                place_grid_order(SYMBOL, "short", upper_price, qty)
+                place_limit_order(SYMBOL, "short", upper_price, qty)  # ✅ place_limit_order
                 log_debug("✅ 숏 그리드 생성", f"{qty}@{upper_price:.4f}")
                 return
             
@@ -744,7 +744,7 @@ def initialize_grid(current_price=None, skip_check=False):
                 log_debug("📍 숏만 존재", "롱 그리드만 생성")
                 qty = calculate_grid_qty(current_price)
                 lower_price = current_price * (Decimal("1") - GRID_GAP_PCT)
-                place_grid_order(SYMBOL, "long", lower_price, qty)
+                place_limit_order(SYMBOL, "long", lower_price, qty)  # ✅ place_limit_order
                 log_debug("✅ 롱 그리드 생성", f"{qty}@{lower_price:.4f}")
                 return
         
@@ -767,9 +767,9 @@ def initialize_grid(current_price=None, skip_check=False):
         upper_price = current_price * (Decimal("1") + GRID_GAP_PCT)
         lower_price = current_price * (Decimal("1") - GRID_GAP_PCT)
         
-        place_grid_order(SYMBOL, "short", upper_price, qty)
+        place_limit_order(SYMBOL, "short", upper_price, qty)  # ✅ place_limit_order
         time.sleep(0.2)
-        place_grid_order(SYMBOL, "long", lower_price, qty)
+        place_limit_order(SYMBOL, "long", lower_price, qty)   # ✅ place_limit_order
         
         log_debug("✅ 그리드 생성 완료", f"상:{upper_price:.4f} 하:{lower_price:.4f}")
         
