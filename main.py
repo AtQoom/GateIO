@@ -673,7 +673,7 @@ def refresh_tp_orders(symbol):
 # =============================================================================
 
 def initialize_grid(entry_price, skip_check=False):
-    """그리드 초기화 - 1개만 배치"""
+    """그리드 초기화"""
     try:
         with balance_lock:
             current_balance = INITIAL_BALANCE
@@ -690,6 +690,10 @@ def initialize_grid(entry_price, skip_check=False):
         long_value = long_size * long_price if long_price > 0 else Decimal("0")
         short_value = short_size * short_price if short_price > 0 else Decimal("0")
         
+        # ⚡⚡⚡ 그리드 수량 계산!
+        GRID_QTY = calculate_grid_qty(entry_price)
+        log_debug("🔢 그리드 수량", f"{GRID_QTY}개")
+        
         log_debug("📊 그리드 시작", 
                  f"롱:{long_size} 숏:{short_size} 임계:{float(threshold):.1f}")
         
@@ -697,9 +701,6 @@ def initialize_grid(entry_price, skip_check=False):
         
         COUNTER_ENTRY_RATIO = Decimal("0.30")
         SAME_SIDE_RATIO = Decimal("0.10")
-        
-        # ⚡⚡⚡ 그리드 1개 고정
-        GRID_QTY = int(CONTRACT_SIZE)
         
         # ============================================================
         # 롱 주력 + 임계값 초과
