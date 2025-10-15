@@ -742,31 +742,89 @@ def check_and_update_tp_mode_locked(symbol, side, size, price):
         
 
 def refresh_tp_orders(symbol):
-    """TP 주문 새로고침"""
+    """TP 주문 갱신 - 임계값 초과 시만 역방향 부분청산"""
+    
     try:
-        for retry in range(5):
-            if update_position_state(symbol):
-                break
-            time.sleep(0.5)
-        else:
-            return
+        # 기존 TP 주문 모두 취소
+        orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
         
-        time.sleep(1.0)
-        update_position_state(symbol)
-        time.sleep(0.5)
+        for order in orders:
+            if order.reduce_only:
+                try:
+                    api.cancel_futures_order(SETTLE, symbol, str(order.id))
+                except Exception as e:
+                    if "not found" not in str(e).lower():
+                        log_debug("❌ TP 취소 실패", str(e))
         
+        # 현재 포지션 확인
         with position_lock:
-            for side in ["long", "short"]:
-                pos = position_state.get(symbol, {}).get(side, {})
-                size = pos.get("size", Decimal("0"))
-                price = pos.get("price", Decimal("0"))
-                
-                if size > 0:
-                    check_and_update_tp_mode_locked(symbol, side, size, price)
-                    time.sleep(0.3)
-                    
+            pos = position_state.get(symbol, {})
+            long_pos = pos.get("long", {})
+            short_pos = pos.get("short", {})
+            
+            long_size = long_pos.get("size", Decimal("0"))
+            short_size = short_pos.get("size", Decimal("0"))
+            long_entry = long_pos.get("entry_price", Decimal("0"))
+            short_entry = short_pos.get("entry_price", Decimal("0"))
+        
+        # 임계값 확인
+        with balance_lock:
+            current_balance = INITIAL_BALANCE
+        
+        threshold = current_balance * THRESHOLD_RATIO
+        long_value = long_size * long_entry if long_entry > 0 else Decimal("0")
+        short_value = short_size * short_entry if short_entry > 0 else Decimal("0")
+        
+        # ⚡⚡⚡ 롱 포지션 TP 생성
+        if long_size > 0:
+            tp_qty = int(long_size)
+            if long_entry > 0 and tp_qty >= CONTRACT_SIZE:
+                tp_price = long_entry * (Decimal("1") + TP_GAP_PCT)
+                place_limit_order(symbol, "short", tp_price, tp_qty, reduce_only=True)
+                log_debug("🎯 롱 TP", f"{tp_qty} @ {tp_price:.4f}")
+        
+        # ⚡⚡⚡ 숏 포지션 TP 생성
+        if short_size > 0:
+            tp_qty = int(short_size)
+            if short_entry > 0 and tp_qty >= CONTRACT_SIZE:
+                tp_price = short_entry * (Decimal("1") - TP_GAP_PCT)
+                place_limit_order(symbol, "long", tp_price, tp_qty, reduce_only=True)
+                log_debug("🎯 숏 TP", f"{tp_qty} @ {tp_price:.4f}")
+        
+        # ⚡⚡⚡ 역방향 부분청산 (임계값 초과 시만!)
+        # 롱 주력 + 숏 역방향
+        if long_value >= threshold and short_value < threshold and short_size > 0:
+            counter_close_qty = int(short_size * COUNTER_CLOSE_RATIO)
+            
+            # ⚡ 핵심: 20% 이하면 전량 청산
+            if counter_close_qty < CONTRACT_SIZE:
+                counter_close_qty = int(short_size)
+                log_debug("⚡ 역방향 잔량 청산", f"숏 {counter_close_qty}개")
+            
+            if counter_close_qty >= CONTRACT_SIZE and short_entry > 0:
+                counter_tp_price = short_entry * (Decimal("1") - TP_GAP_PCT * Decimal("2"))
+                place_limit_order(symbol, "long", counter_tp_price, counter_close_qty, reduce_only=True)
+                log_debug("🔄 역방향 숏 20% 청산", f"{counter_close_qty} @ {counter_tp_price:.4f}")
+        
+        # 숏 주력 + 롱 역방향
+        elif short_value >= threshold and long_value < threshold and long_size > 0:
+            counter_close_qty = int(long_size * COUNTER_CLOSE_RATIO)
+            
+            # ⚡ 핵심: 20% 이하면 전량 청산
+            if counter_close_qty < CONTRACT_SIZE:
+                counter_close_qty = int(long_size)
+                log_debug("⚡ 역방향 잔량 청산", f"롱 {counter_close_qty}개")
+            
+            if counter_close_qty >= CONTRACT_SIZE and long_entry > 0:
+                counter_tp_price = long_entry * (Decimal("1") + TP_GAP_PCT * Decimal("2"))
+                place_limit_order(symbol, "short", counter_tp_price, counter_close_qty, reduce_only=True)
+                log_debug("🔄 역방향 롱 20% 청산", f"{counter_close_qty} @ {counter_tp_price:.4f}")
+        
+        # ⚡⚡⚡ 임계값 미달 시 - 역방향 부분청산 없음!
+        # → 주력 TP만 실행 (이미 위에서 생성됨)
+        
     except Exception as e:
-        log_debug("❌ TP 새로고침 오류", str(e), exc_info=True)
+        log_debug("❌ TP 갱신 오류", str(e), exc_info=True)
 
 
 # =============================================================================
@@ -910,7 +968,7 @@ def initialize_grid(current_price=None, skip_check=False):
 # =============================================================================
 
 def fill_monitor():
-    """체결 모니터링 - 최적화 버전 (0.5초 대기)"""
+    """체결 모니터링 - 최적화 및 버그 수정 완료"""
     try:
         update_position_state(SYMBOL, show_log=True)
         
@@ -951,6 +1009,90 @@ def fill_monitor():
                     long_price = pos.get("long", {}).get("entry_price", Decimal("0"))
                     short_price = pos.get("short", {}).get("entry_price", Decimal("0"))
                 
+                # ⚡⚡⚡ 역방향 청산 감지 (우선순위 높음)
+                # 롱 주력 → 숏 청산 완료
+                if prev_short_size > 0 and short_size == 0 and long_size > 0:
+                    log_debug("⚡ 역방향 청산 감지", "숏 0개 → 그리드 재생성")
+                    
+                    # 임계값 확인
+                    with balance_lock:
+                        current_balance = INITIAL_BALANCE
+                    
+                    threshold = current_balance * THRESHOLD_RATIO
+                    long_value = long_size * long_price if long_price > 0 else Decimal("0")
+                    
+                    time.sleep(0.5)
+                    update_position_state(SYMBOL)
+                    
+                    with position_lock:
+                        pos2 = position_state.get(SYMBOL, {})
+                        final_long = pos2.get("long", {}).get("size", Decimal("0"))
+                        final_short = pos2.get("short", {}).get("size", Decimal("0"))
+                        final_long_price = pos2.get("long", {}).get("entry_price", Decimal("0"))
+                    
+                    final_long_value = final_long * final_long_price if final_long_price > 0 else Decimal("0")
+                    
+                    # ✅ 수정: 임계값 체크 후 분기
+                    if final_long_value >= threshold and final_short == 0:
+                        # 여전히 임계값 초과 → 역방향 20% 재진입
+                        log_debug("🔵 임계값 초과", f"역방향 20% 재진입")
+                        ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                        if ticker:
+                            grid_price = Decimal(str(ticker[0].last))
+                            initialize_grid(grid_price, skip_check=True)
+                    
+                    elif final_long > 0 and final_short == 0:
+                        # ✅ 수정: skip_check=False로 변경
+                        log_debug("🟢 임계값 미달", "양방향 그리드 생성")
+                        ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                        if ticker:
+                            grid_price = Decimal(str(ticker[0].last))
+                            initialize_grid(grid_price, skip_check=False)
+                    
+                    prev_long_size = final_long
+                    prev_short_size = final_short
+                    continue
+                
+                # 숏 주력 → 롱 청산 완료
+                elif prev_long_size > 0 and long_size == 0 and short_size > 0:
+                    log_debug("⚡ 역방향 청산 감지", "롱 0개 → 그리드 재생성")
+                    
+                    with balance_lock:
+                        current_balance = INITIAL_BALANCE
+                    
+                    threshold = current_balance * THRESHOLD_RATIO
+                    short_value = short_size * short_price if short_price > 0 else Decimal("0")
+                    
+                    time.sleep(0.5)
+                    update_position_state(SYMBOL)
+                    
+                    with position_lock:
+                        pos2 = position_state.get(SYMBOL, {})
+                        final_long = pos2.get("long", {}).get("size", Decimal("0"))
+                        final_short = pos2.get("short", {}).get("size", Decimal("0"))
+                        final_short_price = pos2.get("short", {}).get("entry_price", Decimal("0"))
+                    
+                    final_short_value = final_short * final_short_price if final_short_price > 0 else Decimal("0")
+                    
+                    if final_short_value >= threshold and final_long == 0:
+                        log_debug("🔵 임계값 초과", f"역방향 20% 재진입")
+                        ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                        if ticker:
+                            grid_price = Decimal(str(ticker[0].last))
+                            initialize_grid(grid_price, skip_check=True)
+                    
+                    elif final_short > 0 and final_long == 0:
+                        # ✅ 수정: skip_check=False로 변경
+                        log_debug("🟢 임계값 미달", "양방향 그리드 생성")
+                        ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+                        if ticker:
+                            grid_price = Decimal(str(ticker[0].last))
+                            initialize_grid(grid_price, skip_check=False)
+                    
+                    prev_long_size = final_long
+                    prev_short_size = final_short
+                    continue
+                
                 # ⚡⚡⚡ 롱 변화 감지
                 if long_size != prev_long_size:
                     if now - last_long_action_time >= 3:
@@ -960,7 +1102,7 @@ def fill_monitor():
                             log_debug("📊 롱 진입", f"+{added_long}")
                             record_entry(SYMBOL, "long", long_price, added_long)
                             
-                            # ⚡ 0.5초 대기 (Gate.io API 응답)
+                            # ✅ 최적화: 0.5초로 단축
                             time.sleep(0.5)
                             update_position_state(SYMBOL)
                             
@@ -969,7 +1111,6 @@ def fill_monitor():
                                 recheck_long = pos2.get("long", {}).get("size", Decimal("0"))
                                 recheck_short = pos2.get("short", {}).get("size", Decimal("0"))
                             
-                            # 양방향 vs 단방향 판단
                             if recheck_long > 0 and recheck_short > 0:
                                 log_debug("⚡ 재확인 → 양방향", "TP만")
                                 cancel_grid_orders(SYMBOL)
@@ -980,12 +1121,12 @@ def fill_monitor():
                                 cancel_grid_orders(SYMBOL)
                                 refresh_tp_orders(SYMBOL)
                                 
-                                # ⚡ 0.5초 대기 (TP 생성 확인)
+                                # ✅ 최적화: 0.5초로 단축
                                 time.sleep(0.5)
                                 update_position_state(SYMBOL)
                                 refresh_tp_orders(SYMBOL)
                                 
-                                # ⚡ 0.3초 대기 (최종 확인)
+                                # ✅ 최적화: 0.3초로 단축
                                 time.sleep(0.3)
                                 update_position_state(SYMBOL, show_log=True)
                                 
@@ -994,12 +1135,12 @@ def fill_monitor():
                                     final_long = pos3.get("long", {}).get("size", Decimal("0"))
                                     final_short = pos3.get("short", {}).get("size", Decimal("0"))
                                 
-                                # 그리드 재생성
                                 if final_long > 0 or final_short > 0:
                                     ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                                     if ticker:
                                         grid_price = Decimal(str(ticker[0].last))
-                                        initialize_grid(grid_price, skip_check=True)
+                                        # ✅ 수정: skip_check=False로 변경
+                                        initialize_grid(grid_price, skip_check=False)
                             
                             prev_long_size = recheck_long
                             prev_short_size = recheck_short
@@ -1009,7 +1150,7 @@ def fill_monitor():
                             reduced_long = abs(added_long)
                             log_debug("📉 롱 청산", f"-{reduced_long}")
                             
-                            # ⚡ 0.5초 대기
+                            # ✅ 최적화: 0.5초로 단축
                             time.sleep(0.5)
                             update_position_state(SYMBOL)
                             
@@ -1035,7 +1176,8 @@ def fill_monitor():
                                 ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                                 if ticker:
                                     grid_price = Decimal(str(ticker[0].last))
-                                    initialize_grid(grid_price, skip_check=True)
+                                    # ✅ 수정: skip_check=False로 변경
+                                    initialize_grid(grid_price, skip_check=False)
                             
                             prev_long_size = recheck_long
                             prev_short_size = recheck_short
@@ -1051,7 +1193,7 @@ def fill_monitor():
                             log_debug("📊 숏 진입", f"+{added_short}")
                             record_entry(SYMBOL, "short", short_price, added_short)
                             
-                            # ⚡ 0.5초 대기
+                            # ✅ 최적화: 0.5초로 단축
                             time.sleep(0.5)
                             update_position_state(SYMBOL)
                             
@@ -1070,12 +1212,12 @@ def fill_monitor():
                                 cancel_grid_orders(SYMBOL)
                                 refresh_tp_orders(SYMBOL)
                                 
-                                # ⚡ 0.5초 대기
+                                # ✅ 최적화: 0.5초로 단축
                                 time.sleep(0.5)
                                 update_position_state(SYMBOL)
                                 refresh_tp_orders(SYMBOL)
                                 
-                                # ⚡ 0.3초 대기
+                                # ✅ 최적화: 0.3초로 단축
                                 time.sleep(0.3)
                                 update_position_state(SYMBOL, show_log=True)
                                 
@@ -1088,7 +1230,8 @@ def fill_monitor():
                                     ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                                     if ticker:
                                         grid_price = Decimal(str(ticker[0].last))
-                                        initialize_grid(grid_price, skip_check=True)
+                                        # ✅ 수정: skip_check=False로 변경
+                                        initialize_grid(grid_price, skip_check=False)
                             
                             prev_long_size = recheck_long
                             prev_short_size = recheck_short
@@ -1098,7 +1241,7 @@ def fill_monitor():
                             reduced_short = abs(added_short)
                             log_debug("📉 숏 청산", f"-{reduced_short}")
                             
-                            # ⚡ 0.5초 대기
+                            # ✅ 최적화: 0.5초로 단축
                             time.sleep(0.5)
                             update_position_state(SYMBOL)
                             
@@ -1124,7 +1267,8 @@ def fill_monitor():
                                 ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                                 if ticker:
                                     grid_price = Decimal(str(ticker[0].last))
-                                    initialize_grid(grid_price, skip_check=True)
+                                    # ✅ 수정: skip_check=False로 변경
+                                    initialize_grid(grid_price, skip_check=False)
                             
                             prev_long_size = recheck_long
                             prev_short_size = recheck_short
