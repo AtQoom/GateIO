@@ -767,7 +767,7 @@ def initialize_grid(current_price=None, skip_check=False):
                 log_debug("📍 롱만 존재", "숏 그리드만 생성")
                 qty = calculate_grid_qty(current_price)
                 upper_price = current_price * (Decimal("1") + GRID_GAP_PCT)
-                place_limit_order(SYMBOL, "short", upper_price, qty)  # ✅ place_limit_order
+                place_limit_order(SYMBOL, "short", upper_price, qty)
                 log_debug("✅ 숏 그리드 생성", f"{qty}@{upper_price:.4f}")
                 return
             
@@ -775,20 +775,12 @@ def initialize_grid(current_price=None, skip_check=False):
                 log_debug("📍 숏만 존재", "롱 그리드만 생성")
                 qty = calculate_grid_qty(current_price)
                 lower_price = current_price * (Decimal("1") - GRID_GAP_PCT)
-                place_limit_order(SYMBOL, "long", lower_price, qty)  # ✅ place_limit_order
+                place_limit_order(SYMBOL, "long", lower_price, qty)
                 log_debug("✅ 롱 그리드 생성", f"{qty}@{lower_price:.4f}")
                 return
         
-        # 포지션 없을 때만 양방향 그리드
-        if not skip_check:
-            with position_lock:
-                pos = position_state.get(SYMBOL, {})
-                long_size = pos.get("long", {}).get("size", Decimal("0"))
-                short_size = pos.get("short", {}).get("size", Decimal("0"))
-                
-                if long_size > 0 or short_size > 0:
-                    log_debug("⚠️ 포지션 존재", "그리드 생성 안함")
-                    return
+        # ⭐⭐⭐ 여기 도달 = 포지션 없음 → 양방향 그리드 생성
+        # (skip_check 상관없이 항상 생성!)
         
         # 양방향 그리드 생성
         cancel_grid_orders(SYMBOL)
@@ -798,57 +790,14 @@ def initialize_grid(current_price=None, skip_check=False):
         upper_price = current_price * (Decimal("1") + GRID_GAP_PCT)
         lower_price = current_price * (Decimal("1") - GRID_GAP_PCT)
         
-        place_limit_order(SYMBOL, "short", upper_price, qty)  # ✅ place_limit_order
+        place_limit_order(SYMBOL, "short", upper_price, qty)
         time.sleep(0.2)
-        place_limit_order(SYMBOL, "long", lower_price, qty)   # ✅ place_limit_order
+        place_limit_order(SYMBOL, "long", lower_price, qty)
         
         log_debug("✅ 그리드 생성 완료", f"상:{upper_price:.4f} 하:{lower_price:.4f}")
         
     except Exception as e:
         log_debug("❌ 그리드 생성 오류", str(e), exc_info=True)
-
-
-# =============================================================================
-# 헤징 관리
-# =============================================================================
-
-def place_hedge_order(symbol, side, current_price):
-    """헤징 시장가 주문"""
-    try:
-        with balance_lock:
-            current_balance = INITIAL_BALANCE
-        
-        hedge_qty = max(1, int((current_balance * HEDGE_RATIO) / (current_price * CONTRACT_SIZE)))
-        
-        if side == "short":
-            order_size = -hedge_qty
-        else:
-            order_size = hedge_qty
-        
-        order = FuturesOrder(
-            contract=symbol,
-            size=order_size,
-            price="0",
-            tif="ioc"
-        )
-        
-        result = api.create_futures_order(SETTLE, order)
-        
-        log_debug("📌 헤징 주문", f"{symbol} {side} {hedge_qty}계약 ID:{result.id}")
-        
-        time.sleep(0.5)
-        try:
-            order_status = api.get_futures_order(SETTLE, result.id)
-            if order_status.status == "finished":
-                log_debug("✅ 헤징 체결 완료", f"ID:{result.id}")
-        except:
-            pass
-        
-        return result.id
-        
-    except Exception as e:
-        log_debug("❌ 헤징 주문 실패", str(e))
-        return None
 
 
 # =============================================================================
