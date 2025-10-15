@@ -606,39 +606,75 @@ def place_average_tp_order(symbol, side, price, qty, retry=3):
 
 
 def close_counter_position_on_main_tp(symbol, main_side, main_tp_qty):
-    """⭐⭐⭐ 주력 TP 청산 시 역방향 포지션 20% 동반 청산"""
+    """
+    ⭐ 주력 TP 체결 시 역방향 20% 동반 청산
+    ⭐ 조건: 주력 포지션이 임계값 초과 상태여야 함!
+    """
     try:
         counter_side = "long" if main_side == "short" else "short"
-        counter_close_qty = int(main_tp_qty * COUNTER_CLOSE_RATIO)
         
-        if counter_close_qty < 1:
-            return
-        
+        # ⚡⚡⚡ 임계값 체크 추가!
         with position_lock:
             pos = position_state.get(symbol, {})
+            
+            # 주력 포지션 확인
+            main_size = pos.get(main_side, {}).get("size", Decimal("0"))
+            main_entry = pos.get(main_side, {}).get("price", Decimal("0"))
+            main_value = main_size * main_entry
+            
+            # 역방향 포지션 확인
             counter_size = pos.get(counter_side, {}).get("size", Decimal("0"))
+            counter_entry = pos.get(counter_side, {}).get("price", Decimal("0"))
+            counter_value = counter_size * counter_entry
+            
+            # 임계값 계산
+            threshold = current_balance * THRESHOLD_RATIO
         
-        if counter_size == 0:
+        # ⚡⚡⚡ 임계값 초과 체크!
+        if main_value < threshold:
+            log_debug("⚠️ 동반 청산 스킵", 
+                     f"주력 미달 (현재:{main_value:.1f} < 임계:{threshold:.1f})")
             return
         
+        # ⚡⚡⚡ 역방향 포지션 있어야 함!
+        if counter_value < threshold:
+            log_debug("⚠️ 동반 청산 스킵", 
+                     f"역방향 미달 (현재:{counter_value:.1f} < 임계:{threshold:.1f})")
+            return
+        
+        # 청산 수량 계산
+        counter_close_qty = int(main_tp_qty * COUNTER_CLOSE_RATIO)  # 20%
+        
+        if counter_close_qty < 1:
+            log_debug("⚠️ 동반 청산 스킵", "수량 부족")
+            return
+        
+        if counter_size == 0:
+            log_debug("⚠️ 동반 청산 스킵", "역방향 포지션 없음")
+            return
+        
+        # 최대 수량 제한
         counter_close_qty = min(counter_close_qty, int(counter_size))
         
+        # ⚡⚡⚡ IOC 주문으로 즉시 청산!
         if counter_side == "long":
-            order_size = -counter_close_qty
+            order_size = -counter_close_qty  # 롱 청산 = 숏 주문
         else:
-            order_size = counter_close_qty
+            order_size = counter_close_qty   # 숏 청산 = 롱 주문
         
         order = FuturesOrder(
             contract=symbol,
             size=order_size,
-            tif="ioc",
+            tif='ioc',  # 즉시 체결
             reduce_only=True
         )
+        
         result = api.create_futures_order(SETTLE, order)
-        log_debug("🔄 역방향 동반 청산", f"{counter_side} {counter_close_qty}개")
+        log_debug(f"✅ 동반 청산", 
+                 f"{counter_side.upper()} {counter_close_qty}개 (주력 TP {main_tp_qty}개)")
         
     except Exception as e:
-        log_debug("❌ 역방향 청산 오류", str(e), exc_info=True)
+        log_debug("❌ 동반 청산 오류", str(e), exc_info=True)
 
 
 def refresh_tp_orders(symbol):
