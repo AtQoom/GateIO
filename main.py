@@ -240,7 +240,9 @@ def calculate_obv_macd(symbol):
 def calculate_grid_qty(current_price):
     """그리드 수량 계산 (OBV MACD 가중 0.10~0.35, 레버리지 1배)"""
     try:
-        current_balance = get_current_balance()
+        # ✅ 수정: get_current_balance() → INITIAL_BALANCE 사용
+        with balance_lock:
+            current_balance = INITIAL_BALANCE
         
         # OBV MACD 값 가져오기
         obv_macd_value = get_latest_obv_macd()
@@ -279,6 +281,34 @@ def calculate_grid_qty(current_price):
     except Exception as e:
         log_debug("❌ 수량 계산 오류", str(e), exc_info=True)
         return int(Decimal("10"))
+
+
+def place_limit_order(symbol, side, price, qty, retry=3):
+    """지정가 주문 (그리드용)"""
+    for attempt in range(retry):
+        try:
+            if side == "short":
+                order_size = -int(qty)
+            else:
+                order_size = int(qty)
+            
+            order = FuturesOrder(
+                contract=symbol,
+                size=order_size,
+                price=str(round(float(price), 4)),
+                tif="gtc",
+                reduce_only=False
+            )
+            result = api.create_futures_order(SETTLE, order)
+            log_debug("📍 그리드 주문 생성", f"{symbol}_{side} {qty}@{price:.4f} ID:{result.id}")
+            return result.id
+        except Exception as e:
+            if attempt < retry - 1:
+                log_debug(f"⚠️ 그리드 주문 재시도 ({attempt+1}/{retry})", str(e))
+                time.sleep(0.5)
+            else:
+                log_debug("❌ 그리드 주문 오류", str(e), exc_info=True)
+                return None
 
 
 def calculate_position_value(qty, price):
@@ -552,7 +582,8 @@ def check_and_update_tp_mode_locked(symbol, side, size, price):
             pass
         
         # 임계값 체크
-        current_balance = get_current_balance()
+        with balance_lock:
+            current_balance = INITIAL_BALANCE
         position_value = size * price
         threshold_value = current_balance * THRESHOLD_RATIO
         
