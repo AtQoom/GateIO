@@ -831,136 +831,170 @@ def refresh_tp_orders(symbol):
 # 그리드 관리
 # =============================================================================
 
-def initialize_grid(current_price=None, skip_check=False):
-    """그리드 초기화"""
+def initialize_grid(entry_price, skip_check=False):
+    """그리드 초기화 - 임계값 기반 역방향 30% + 같은방향 10% 적용"""
     try:
-        if current_price is None:
-            try:
-                ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
-                if ticker:
-                    current_price = Decimal(str(ticker[0].last))
-                else:
-                    log_debug("❌ 현재가 조회 실패", "")
-                    return
-            except Exception as e:
-                log_debug("❌ 현재가 조회 오류", str(e))
-                return
+        with balance_lock:
+            current_balance = INITIAL_BALANCE
         
-        if current_price is None or current_price <= 0:
-            log_debug("❌ 유효하지 않은 가격", f"{current_price}")
-            return
-            
+        threshold = current_balance * THRESHOLD_RATIO
+        
         with position_lock:
             pos = position_state.get(SYMBOL, {})
             long_size = pos.get("long", {}).get("size", Decimal("0"))
             short_size = pos.get("short", {}).get("size", Decimal("0"))
-            long_price = pos.get("long", {}).get("price", Decimal("0"))
-            short_price = pos.get("short", {}).get("price", Decimal("0"))
-            
-            # ⭐ 양방향 있으면 그리드 생성 안함
-            if long_size > 0 and short_size > 0:
-                log_debug("⚠️ 양방향 포지션", "그리드 생성 중단")
-                return
-            
-            # ⭐⭐⭐ 한쪽만 있을 때
-            if long_size > 0 and short_size == 0:
-                # 롱만 있음 → 임계값 체크
-                with balance_lock:
-                    current_balance = INITIAL_BALANCE
-                
-                # ⭐ 롱 포지션 가치 = 롱 수량 × 롱 평균가
-                position_value = long_size * long_price
-                threshold_value = current_balance * THRESHOLD_RATIO
-                
-                # 기본 수량 (OBV)
-                base_qty = calculate_grid_qty(current_price)
-                
-                # ⭐⭐⭐ 임계값 초과 여부
-                if position_value >= threshold_value:
-                    # 임계값 초과 → 역방향 주력 10%
-                    counter_qty = int(long_size * COUNTER_POSITION_RATIO)
-                    counter_qty = max(counter_qty, CONTRACT_SIZE)
-                    
-                    log_debug("📍 임계값 초과 그리드", f"주력롱:{base_qty} 역숏:{counter_qty}")
-                    
-                    # 숏 그리드 (역방향, 큰 물량)
-                    upper_price = current_price * (Decimal("1") + GRID_GAP_PCT)
-                    place_limit_order(SYMBOL, "short", upper_price, counter_qty)
-                    
-                    # 롱 그리드 (주력, OBV)
-                    lower_price = current_price * (Decimal("1") - GRID_GAP_PCT)
-                    place_limit_order(SYMBOL, "long", lower_price, base_qty)
-                    
-                else:
-                    # ⭐ 임계값 미만 → 양방향 동일 수량
-                    log_debug("📍 임계값 미만", f"양방향 동일:{base_qty}")
-                    
-                    upper_price = current_price * (Decimal("1") + GRID_GAP_PCT)
-                    lower_price = current_price * (Decimal("1") - GRID_GAP_PCT)
-                    
-                    place_limit_order(SYMBOL, "short", upper_price, base_qty)
-                    time.sleep(0.2)
-                    place_limit_order(SYMBOL, "long", lower_price, base_qty)
-                
-                return
-            
-            elif short_size > 0 and long_size == 0:
-                # 숏만 있음 → 임계값 체크
-                with balance_lock:
-                    current_balance = INITIAL_BALANCE
-                
-                # ⭐ 숏 포지션 가치 = 숏 수량 × 숏 평균가
-                position_value = short_size * short_price
-                threshold_value = current_balance * THRESHOLD_RATIO
-                
-                # 기본 수량 (OBV)
-                base_qty = calculate_grid_qty(current_price)
-                
-                # ⭐⭐⭐ 임계값 초과 여부
-                if position_value >= threshold_value:
-                    # 임계값 초과 → 역방향 주력 10%
-                    counter_qty = int(short_size * COUNTER_POSITION_RATIO)
-                    counter_qty = max(counter_qty, CONTRACT_SIZE)
-                    
-                    log_debug("📍 임계값 초과 그리드", f"주력숏:{base_qty} 역롱:{counter_qty}")
-                    
-                    # 롱 그리드 (역방향, 큰 물량)
-                    lower_price = current_price * (Decimal("1") - GRID_GAP_PCT)
-                    place_limit_order(SYMBOL, "long", lower_price, counter_qty)
-                    
-                    # 숏 그리드 (주력, OBV)
-                    upper_price = current_price * (Decimal("1") + GRID_GAP_PCT)
-                    place_limit_order(SYMBOL, "short", upper_price, base_qty)
-                    
-                else:
-                    # ⭐ 임계값 미만 → 양방향 동일 수량
-                    log_debug("📍 임계값 미만", f"양방향 동일:{base_qty}")
-                    
-                    upper_price = current_price * (Decimal("1") + GRID_GAP_PCT)
-                    lower_price = current_price * (Decimal("1") - GRID_GAP_PCT)
-                    
-                    place_limit_order(SYMBOL, "short", upper_price, base_qty)
-                    time.sleep(0.2)
-                    place_limit_order(SYMBOL, "long", lower_price, base_qty)
-                
-                return
+            long_price = pos.get("long", {}).get("entry_price", Decimal("0"))
+            short_price = pos.get("short", {}).get("entry_price", Decimal("0"))
         
-        # ⭐ 포지션 없을 때 = 양방향 동일 그리드
+        long_value = long_size * long_price if long_price > 0 else Decimal("0")
+        short_value = short_size * short_price if short_price > 0 else Decimal("0")
+        
+        log_debug("📊 그리드 초기화", 
+                 f"롱:{long_size} 숏:{short_size} "
+                 f"롱가치:{float(long_value):.1f} 숏가치:{float(short_value):.1f} "
+                 f"임계값:{float(threshold):.1f}")
+        
         cancel_grid_orders(SYMBOL)
-        time.sleep(0.3)
         
-        qty = calculate_grid_qty(current_price)
-        upper_price = current_price * (Decimal("1") + GRID_GAP_PCT)
-        lower_price = current_price * (Decimal("1") - GRID_GAP_PCT)
+        # ✅ 수정: 역방향 30%, 같은방향 10% (또는 기본수량)
+        COUNTER_ENTRY_RATIO = Decimal("0.30")  # 20% → 30%
+        SAME_SIDE_RATIO = Decimal("0.10")  # 10%
         
-        place_limit_order(SYMBOL, "short", upper_price, qty)
-        time.sleep(0.2)
-        place_limit_order(SYMBOL, "long", lower_price, qty)
+        # ============================================================
+        # 롱 주력 + 임계값 초과 → 역방향 숏 30% + 같은방향 롱 10%
+        # ============================================================
+        if long_value >= threshold and short_value < threshold:
+            if not skip_check or (skip_check and long_value >= threshold):
+                # ✅ 역방향 숏 30%
+                counter_qty = int(long_size * COUNTER_ENTRY_RATIO)
+                
+                if counter_qty >= CONTRACT_SIZE:
+                    # 숏 그리드 (역방향)
+                    for i in range(5):
+                        gap_multiplier = Decimal(str(i + 1))
+                        short_grid_price = entry_price * (Decimal("1") + GRID_GAP_PCT * gap_multiplier)
+                        short_grid_price = round(short_grid_price, 4)
+                        
+                        grid_qty = counter_qty
+                        if i == 0:
+                            grid_qty = max(counter_qty, CONTRACT_SIZE)
+                        
+                        if place_limit_order(SYMBOL, "short", short_grid_price, grid_qty):
+                            log_debug("🔴 숏 그리드", f"{grid_qty}개 @ {short_grid_price:.4f}")
+                        time.sleep(0.1)
+                    
+                    log_debug("🔵 임계값 초과 (롱 주력)", 
+                             f"역방향 숏 {counter_qty}개 (30%) 그리드 생성")
+                
+                # ✅ 같은 방향 롱 (10% vs 기본수량)
+                same_side_qty_pct = int(long_size * SAME_SIDE_RATIO)
+                same_side_qty_base = int(BASE_QTY)
+                same_side_qty = max(same_side_qty_pct, same_side_qty_base)
+                
+                # 롱 그리드 (같은 방향)
+                for i in range(5):
+                    gap_multiplier = Decimal(str(i + 1))
+                    long_grid_price = entry_price * (Decimal("1") - GRID_GAP_PCT * gap_multiplier)
+                    long_grid_price = round(long_grid_price, 4)
+                    
+                    grid_qty = same_side_qty
+                    if i == 0:
+                        grid_qty = max(same_side_qty, CONTRACT_SIZE)
+                    
+                    if place_limit_order(SYMBOL, "long", long_grid_price, grid_qty):
+                        log_debug("🟢 롱 그리드", f"{grid_qty}개 @ {long_grid_price:.4f}")
+                    time.sleep(0.1)
+                
+                log_debug("🟢 같은방향 롱", 
+                         f"max({same_side_qty_pct}(10%), {same_side_qty_base}(기본)) = {same_side_qty}개")
+                return
         
-        log_debug("✅ 그리드 생성 완료", f"상:{upper_price:.4f} 하:{lower_price:.4f}")
+        # ============================================================
+        # 숏 주력 + 임계값 초과 → 역방향 롱 30% + 같은방향 숏 10%
+        # ============================================================
+        elif short_value >= threshold and long_value < threshold:
+            if not skip_check or (skip_check and short_value >= threshold):
+                # ✅ 역방향 롱 30%
+                counter_qty = int(short_size * COUNTER_ENTRY_RATIO)
+                
+                if counter_qty >= CONTRACT_SIZE:
+                    # 롱 그리드 (역방향)
+                    for i in range(5):
+                        gap_multiplier = Decimal(str(i + 1))
+                        long_grid_price = entry_price * (Decimal("1") - GRID_GAP_PCT * gap_multiplier)
+                        long_grid_price = round(long_grid_price, 4)
+                        
+                        grid_qty = counter_qty
+                        if i == 0:
+                            grid_qty = max(counter_qty, CONTRACT_SIZE)
+                        
+                        if place_limit_order(SYMBOL, "long", long_grid_price, grid_qty):
+                            log_debug("🟢 롱 그리드", f"{grid_qty}개 @ {long_grid_price:.4f}")
+                        time.sleep(0.1)
+                    
+                    log_debug("🔵 임계값 초과 (숏 주력)", 
+                             f"역방향 롱 {counter_qty}개 (30%) 그리드 생성")
+                
+                # ✅ 같은 방향 숏 (10% vs 기본수량)
+                same_side_qty_pct = int(short_size * SAME_SIDE_RATIO)
+                same_side_qty_base = int(BASE_QTY)
+                same_side_qty = max(same_side_qty_pct, same_side_qty_base)
+                
+                # 숏 그리드 (같은 방향)
+                for i in range(5):
+                    gap_multiplier = Decimal(str(i + 1))
+                    short_grid_price = entry_price * (Decimal("1") + GRID_GAP_PCT * gap_multiplier)
+                    short_grid_price = round(short_grid_price, 4)
+                    
+                    grid_qty = same_side_qty
+                    if i == 0:
+                        grid_qty = max(same_side_qty, CONTRACT_SIZE)
+                    
+                    if place_limit_order(SYMBOL, "short", short_grid_price, grid_qty):
+                        log_debug("🔴 숏 그리드", f"{grid_qty}개 @ {short_grid_price:.4f}")
+                    time.sleep(0.1)
+                
+                log_debug("🔴 같은방향 숏", 
+                         f"max({same_side_qty_pct}(10%), {same_side_qty_base}(기본)) = {same_side_qty}개")
+                return
+        
+        # ============================================================
+        # 임계값 미달 → 양방향 그리드 (기존과 동일)
+        # ============================================================
+        log_debug("🟡 임계값 미달", "양방향 그리드 생성")
+        
+        base_qty = int(BASE_QTY)
+        
+        # 롱 그리드
+        for i in range(5):
+            gap_multiplier = Decimal(str(i + 1))
+            long_grid_price = entry_price * (Decimal("1") - GRID_GAP_PCT * gap_multiplier)
+            long_grid_price = round(long_grid_price, 4)
+            
+            grid_qty = base_qty
+            if i == 0:
+                grid_qty = max(base_qty, CONTRACT_SIZE)
+            
+            if place_limit_order(SYMBOL, "long", long_grid_price, grid_qty):
+                log_debug("🟢 롱 그리드", f"{grid_qty}개 @ {long_grid_price:.4f}")
+            time.sleep(0.1)
+        
+        # 숏 그리드
+        for i in range(5):
+            gap_multiplier = Decimal(str(i + 1))
+            short_grid_price = entry_price * (Decimal("1") + GRID_GAP_PCT * gap_multiplier)
+            short_grid_price = round(short_grid_price, 4)
+            
+            grid_qty = base_qty
+            if i == 0:
+                grid_qty = max(base_qty, CONTRACT_SIZE)
+            
+            if place_limit_order(SYMBOL, "short", short_grid_price, grid_qty):
+                log_debug("🔴 숏 그리드", f"{grid_qty}개 @ {short_grid_price:.4f}")
+            time.sleep(0.1)
         
     except Exception as e:
-        log_debug("❌ 그리드 생성 오류", str(e), exc_info=True)
+        log_debug("❌ 그리드 초기화 오류", str(e), exc_info=True)
 
 
 # =============================================================================
