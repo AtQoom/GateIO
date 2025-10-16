@@ -1009,18 +1009,18 @@ def refresh_tp_orders(symbol):
 # 그리드 관리 (initialize_grid 함수 - 비주력 헤징 로직 추가)
 # =============================================================================
 def initialize_grid(entry_price, skip_check=False):
-    """그리드 초기화 - 중복 생성 방지"""
+    """그리드 초기화 - 강화된 중복 방지"""
     try:
-        # ⚡⚡⚡ 기존 그리드 확인 (중복 방지)
-        if not skip_check:
-            try:
-                orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status="open")
-                grid_orders = [o for o in orders if not o.is_reduce_only]
-                
-                if len(grid_orders) > 0:
-                    return  # 로그 없이 스킵
-            except:
-                pass
+        # ⚡⚡⚡ 항상 기존 그리드 확인
+        try:
+            orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status="open")
+            grid_orders = [o for o in orders if not o.is_reduce_only]
+            
+            if len(grid_orders) > 0:
+                log_debug("⚠️ 그리드 스킵", f"기존 {len(grid_orders)}개 존재")
+                return  # 이미 있으면 무조건 스킵
+        except:
+            pass
         
         with balance_lock:
             current_balance = INITIAL_BALANCE
