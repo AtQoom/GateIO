@@ -1486,6 +1486,7 @@ if __name__ == "__main__":
     else:
         log_debug("🔶 기존 포지션 존재", f"롱:{long_size} 숏:{short_size}")
         cancel_grid_orders(SYMBOL)
+        cancel_tp_orders(SYMBOL)  # ← 추가!
         time.sleep(0.5)
         refresh_tp_orders(SYMBOL)
         
