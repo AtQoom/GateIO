@@ -357,7 +357,7 @@ def place_limit_order(symbol, side, price, size, reduce_only=False):
 
 
 # =============================================================================
-# 헤징 로직 수정 (시장가 주문)
+# 헤징 로직 수정 (시장가 주문 - price 추가)
 # =============================================================================
 
 def place_hedge_order(symbol, side, price):
@@ -384,7 +384,15 @@ def place_hedge_order(symbol, side, price):
         # 역방향 헤징
         hedge_side = "short" if side == "long" else "long"
         
-        # ⚡⚡⚡ 시장가 주문 (IOC)
+        # ⚡⚡⚡ 현재가 조회
+        ticker = api.list_futures_tickers(SETTLE, contract=symbol)
+        if not ticker:
+            log_debug("❌ 헤징 실패", "현재가 조회 실패")
+            return None
+        
+        current_price = Decimal(str(ticker[0].last))
+        
+        # ⚡⚡⚡ 시장가 주문 (IOC) - price 필수!
         if hedge_side == "long":
             order_size = hedge_qty  # 양수
         else:
@@ -393,7 +401,8 @@ def place_hedge_order(symbol, side, price):
         order = FuturesOrder(
             contract=symbol,
             size=order_size,
-            tif='ioc',  # ⚡ 시장가 주문
+            price=str(round(float(current_price), 4)),  # ⚡ price 필수!
+            tif='ioc',  # 시장가 주문
             reduce_only=False
         )
         
@@ -452,6 +461,14 @@ def place_hedge_order_with_counter_check(symbol, side, price):
             if hedge_qty < 1:
                 hedge_qty = 1
             
+            # ⚡⚡⚡ 현재가 조회
+            ticker = api.list_futures_tickers(SETTLE, contract=symbol)
+            if not ticker:
+                log_debug("❌ 비주력 헤징 실패", "현재가 조회 실패")
+                return None
+            
+            current_price = Decimal(str(ticker[0].last))
+            
             # ⚡⚡⚡ 같은 방향으로 헤징 (주력과 같은 방향 추가 진입) - 시장가
             if main_side == "long":
                 order_size = hedge_qty  # 양수
@@ -461,7 +478,8 @@ def place_hedge_order_with_counter_check(symbol, side, price):
             order = FuturesOrder(
                 contract=symbol,
                 size=order_size,
-                tif='ioc',  # ⚡ 시장가 주문
+                price=str(round(float(current_price), 4)),  # ⚡ price 필수!
+                tif='ioc',  # 시장가 주문
                 reduce_only=False
             )
             
