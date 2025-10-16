@@ -850,7 +850,7 @@ def close_counter_position_on_main_tp(symbol, main_side, main_tp_qty):
 
 
 def refresh_tp_orders(symbol):
-    """TP 재생성 - 포지션별 TP 개수 확인"""
+    """TP 재생성 - 외부에서 cancel_tp_orders() 호출 후 사용"""
     global threshold_exceeded_time, tp_type
     
     try:
@@ -869,26 +869,6 @@ def refresh_tp_orders(symbol):
         long_value = long_size * long_entry if long_entry > 0 else Decimal("0")
         short_value = short_size * short_entry if short_entry > 0 else Decimal("0")
         
-        # ⚡⚡⚡ 기존 TP 개수 확인 (방향별)
-        long_tp_count = 0
-        short_tp_count = 0
-        
-        try:
-            orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
-            
-            for order in orders:
-                if not order.is_reduce_only:
-                    continue
-                
-                if order.size < 0:  # 롱 TP (숏 주문)
-                    long_tp_count += 1
-                elif order.size > 0:  # 숏 TP (롱 주문)
-                    short_tp_count += 1
-        except:
-            pass
-        
-        log_debug("TP 개수 확인", f"롱 TP:{long_tp_count}개, 숏 TP:{short_tp_count}개")
-        
         # ============================================================
         # 롱 주력 + 임계값 초과
         # ============================================================
@@ -896,8 +876,8 @@ def refresh_tp_orders(symbol):
             log_debug("🔵 롱 주력 TP", "개별 TP 생성")
             tp_type[symbol] = "individual"
             
-            # 비주력 숏: 평단가 TP (없으면 생성)
-            if short_size > 0 and short_entry > 0 and short_tp_count == 0:
+            # 비주력 숏: 평단가 TP
+            if short_size > 0 and short_entry > 0:
                 place_average_tp_order(symbol, "short", short_entry, int(short_size))
             
             # 주력 롱: 개별 진입가 TP
@@ -933,7 +913,7 @@ def refresh_tp_orders(symbol):
                         pass
             
             # 평단가 TP도 추가 (안전장치)
-            elif long_size > 0 and long_entry > 0 and long_tp_count == 0:
+            elif long_size > 0 and long_entry > 0:
                 place_average_tp_order(symbol, "long", long_entry, int(long_size))
             
             return
@@ -945,8 +925,8 @@ def refresh_tp_orders(symbol):
             log_debug("🔴 숏 주력 TP", "개별 TP 생성")
             tp_type[symbol] = "individual"
             
-            # 비주력 롱: 평단가 TP (없으면 생성)
-            if long_size > 0 and long_entry > 0 and long_tp_count == 0:
+            # 비주력 롱: 평단가 TP
+            if long_size > 0 and long_entry > 0:
                 place_average_tp_order(symbol, "long", long_entry, int(long_size))
             
             # 주력 숏: 개별 진입가 TP
@@ -982,7 +962,7 @@ def refresh_tp_orders(symbol):
                         pass
             
             # 평단가 TP도 추가 (안전장치)
-            elif short_size > 0 and short_entry > 0 and short_tp_count == 0:
+            elif short_size > 0 and short_entry > 0:
                 place_average_tp_order(symbol, "short", short_entry, int(short_size))
             
             return
@@ -993,12 +973,12 @@ def refresh_tp_orders(symbol):
         log_debug("⚪ 평단가 TP", "양방향 or 임계값 미달")
         tp_type[symbol] = "average"
         
-        # ⚡⚡⚡ 롱 포지션 있는데 롱 TP 없으면 생성
-        if long_size > 0 and long_entry > 0 and long_tp_count == 0:
+        # ⚡⚡⚡ 롱 포지션 있으면 TP 생성
+        if long_size > 0 and long_entry > 0:
             place_average_tp_order(symbol, "long", long_entry, int(long_size))
         
-        # ⚡⚡⚡ 숏 포지션 있는데 숏 TP 없으면 생성
-        if short_size > 0 and short_entry > 0 and short_tp_count == 0:
+        # ⚡⚡⚡ 숏 포지션 있으면 TP 생성
+        if short_size > 0 and short_entry > 0:
             place_average_tp_order(symbol, "short", short_entry, int(short_size))
         
     except Exception as e:
@@ -1175,7 +1155,7 @@ def initialize_grid(entry_price, skip_check=False):
 # =============================================================================
 
 def fill_monitor():
-    """체결 모니터링 - TP 자동 재생성 포함"""
+    """체결 모니터링 - TP 전체 취소 후 재생성"""
     global threshold_exceeded_time, post_threshold_entries
     
     try:
@@ -1250,11 +1230,12 @@ def fill_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         
-                        # ⚡⚡⚡ 그리드 취소 + TP 재생성 + 그리드 재생성
+                        # ⚡⚡⚡ 그리드 취소 + TP 전체 취소 + TP 재생성 + 그리드 재생성
                         cancel_grid_orders(SYMBOL)
+                        cancel_tp_orders(SYMBOL)
                         refresh_tp_orders(SYMBOL)
                         
-                        time.sleep(0.3)
+                        time.sleep(0.5)
                         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                         if ticker:
                             grid_price = Decimal(str(ticker[0].last))
@@ -1276,11 +1257,12 @@ def fill_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         
-                        # ⚡⚡⚡ 그리드 취소 + TP 재생성 + 그리드 재생성
+                        # ⚡⚡⚡ 그리드 취소 + TP 전체 취소 + TP 재생성 + 그리드 재생성
                         cancel_grid_orders(SYMBOL)
+                        cancel_tp_orders(SYMBOL)
                         refresh_tp_orders(SYMBOL)
                         
-                        time.sleep(0.3)
+                        time.sleep(0.5)
                         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                         if ticker:
                             grid_price = Decimal(str(ticker[0].last))
@@ -1308,11 +1290,12 @@ def fill_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         
-                        # ⚡⚡⚡ 그리드 취소 + TP 재생성 + 그리드 재생성
+                        # ⚡⚡⚡ 그리드 취소 + TP 전체 취소 + TP 재생성 + 그리드 재생성
                         cancel_grid_orders(SYMBOL)
+                        cancel_tp_orders(SYMBOL)
                         refresh_tp_orders(SYMBOL)
                         
-                        time.sleep(0.3)
+                        time.sleep(0.5)
                         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                         if ticker:
                             grid_price = Decimal(str(ticker[0].last))
@@ -1334,11 +1317,12 @@ def fill_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         
-                        # ⚡⚡⚡ 그리드 취소 + TP 재생성 + 그리드 재생성
+                        # ⚡⚡⚡ 그리드 취소 + TP 전체 취소 + TP 재생성 + 그리드 재생성
                         cancel_grid_orders(SYMBOL)
+                        cancel_tp_orders(SYMBOL)
                         refresh_tp_orders(SYMBOL)
                         
-                        time.sleep(0.3)
+                        time.sleep(0.5)
                         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                         if ticker:
                             grid_price = Decimal(str(ticker[0].last))
