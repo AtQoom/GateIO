@@ -1137,7 +1137,7 @@ def initialize_grid(entry_price, skip_check=False):
 # =============================================================================
 
 def fill_monitor():
-    """체결 모니터링 - 그리드 재생성 포함"""
+    """체결 모니터링 - 포지션 변화 시에만 재생성"""
     global threshold_exceeded_time, post_threshold_entries
     
     try:
@@ -1162,7 +1162,8 @@ def fill_monitor():
                 update_initial_balance()
                 now = time.time()
                 
-                if now - last_heartbeat >= 180:
+                # 하트비트: 600초마다
+                if now - last_heartbeat >= 600:
                     with position_lock:
                         pos = position_state.get(SYMBOL, {})
                         current_long = pos.get("long", {}).get("size", Decimal("0"))
@@ -1179,6 +1180,10 @@ def fill_monitor():
                     long_price = pos.get("long", {}).get("price", Decimal("0"))
                     short_price = pos.get("short", {}).get("price", Decimal("0"))
                 
+                # ⚡⚡⚡ 포지션 변화 없으면 스킵!
+                if long_size == prev_long_size and short_size == prev_short_size:
+                    continue
+                
                 # 임계값 확인
                 with balance_lock:
                     current_balance = INITIAL_BALANCE
@@ -1190,7 +1195,7 @@ def fill_monitor():
                 if long_value < threshold and short_value < threshold and threshold_exceeded_time > 0:
                     log_debug("⚪ 임계값 미달 복귀", "초과 추적 초기화")
                     threshold_exceeded_time = 0
-                    post_threshold_entries[SYMBOL] = {"long": [], "short": []}  # ✅ 수정
+                    post_threshold_entries[SYMBOL] = {"long": [], "short": []}
                 
                 # ⚡ 롱 증가 (진입)
                 if long_size > prev_long_size:
@@ -1207,12 +1212,7 @@ def fill_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         
-                        with position_lock:
-                            pos2 = position_state.get(SYMBOL, {})
-                            recheck_long = pos2.get("long", {}).get("size", Decimal("0"))
-                            recheck_short = pos2.get("short", {}).get("size", Decimal("0"))
-                        
-                        # ⚡⚡⚡ 그리드 취소 후 TP 재생성 → 그리드 재생성
+                        # ⚡⚡⚡ TP & 그리드 재생성
                         cancel_grid_orders(SYMBOL)
                         refresh_tp_orders(SYMBOL)
                         
@@ -1222,8 +1222,12 @@ def fill_monitor():
                             grid_price = Decimal(str(ticker[0].last))
                             initialize_grid(grid_price, skip_check=False)
                         
-                        prev_long_size = recheck_long
-                        prev_short_size = recheck_short
+                        # ⚡⚡⚡ 포지션 업데이트 (중요!)
+                        with position_lock:
+                            pos = position_state.get(SYMBOL, {})
+                            prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
+                            prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
+                        
                         last_long_action_time = now
                 
                 # ⚡ 롱 감소 (청산)
@@ -1235,12 +1239,7 @@ def fill_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         
-                        with position_lock:
-                            pos2 = position_state.get(SYMBOL, {})
-                            recheck_long = pos2.get("long", {}).get("size", Decimal("0"))
-                            recheck_short = pos2.get("short", {}).get("size", Decimal("0"))
-                        
-                        # ⚡⚡⚡ 청산 후 그리드 재생성
+                        # ⚡⚡⚡ TP & 그리드 재생성
                         cancel_grid_orders(SYMBOL)
                         refresh_tp_orders(SYMBOL)
                         
@@ -1250,8 +1249,12 @@ def fill_monitor():
                             grid_price = Decimal(str(ticker[0].last))
                             initialize_grid(grid_price, skip_check=False)
                         
-                        prev_long_size = recheck_long
-                        prev_short_size = recheck_short
+                        # ⚡⚡⚡ 포지션 업데이트
+                        with position_lock:
+                            pos = position_state.get(SYMBOL, {})
+                            prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
+                            prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
+                        
                         last_long_action_time = now
                 
                 # ⚡ 숏 증가 (진입)
@@ -1269,12 +1272,7 @@ def fill_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         
-                        with position_lock:
-                            pos2 = position_state.get(SYMBOL, {})
-                            recheck_long = pos2.get("long", {}).get("size", Decimal("0"))
-                            recheck_short = pos2.get("short", {}).get("size", Decimal("0"))
-                        
-                        # ⚡⚡⚡ 그리드 취소 후 재생성
+                        # ⚡⚡⚡ TP & 그리드 재생성
                         cancel_grid_orders(SYMBOL)
                         refresh_tp_orders(SYMBOL)
                         
@@ -1284,8 +1282,12 @@ def fill_monitor():
                             grid_price = Decimal(str(ticker[0].last))
                             initialize_grid(grid_price, skip_check=False)
                         
-                        prev_long_size = recheck_long
-                        prev_short_size = recheck_short
+                        # ⚡⚡⚡ 포지션 업데이트
+                        with position_lock:
+                            pos = position_state.get(SYMBOL, {})
+                            prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
+                            prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
+                        
                         last_short_action_time = now
                 
                 # ⚡ 숏 감소 (청산)
@@ -1297,12 +1299,7 @@ def fill_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         
-                        with position_lock:
-                            pos2 = position_state.get(SYMBOL, {})
-                            recheck_long = pos2.get("long", {}).get("size", Decimal("0"))
-                            recheck_short = pos2.get("short", {}).get("size", Decimal("0"))
-                        
-                        # ⚡⚡⚡ 청산 후 그리드 재생성
+                        # ⚡⚡⚡ TP & 그리드 재생성
                         cancel_grid_orders(SYMBOL)
                         refresh_tp_orders(SYMBOL)
                         
@@ -1312,8 +1309,12 @@ def fill_monitor():
                             grid_price = Decimal(str(ticker[0].last))
                             initialize_grid(grid_price, skip_check=False)
                         
-                        prev_long_size = recheck_long
-                        prev_short_size = recheck_short
+                        # ⚡⚡⚡ 포지션 업데이트
+                        with position_lock:
+                            pos = position_state.get(SYMBOL, {})
+                            prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
+                            prev_short_size = pos.get("short", {}).get("size", Decimal("0"))
+                        
                         last_short_action_time = now
                 
             except Exception as e:
