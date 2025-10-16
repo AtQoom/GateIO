@@ -1369,19 +1369,30 @@ def tp_monitor():
                         
                         tp_orders[SYMBOL][side] = remaining_tps
             
-            # 안전장치: 포지션은 있는데 그리드가 없는 경우
+            # ⚡⚡⚡ 안전장치 수정: 양방향 포지션 제외
             try:
+                # 양방향 포지션이면 스킵
+                if long_size > 0 and short_size > 0:
+                    continue
+                
                 orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status="open")
                 grid_orders = [o for o in orders if not o.is_reduce_only]
+                tp_orders_list = [o for o in orders if o.is_reduce_only]
                 
-                if not grid_orders and (long_size > 0 or short_size > 0):
-                    log_debug("⚠️ 안전장치", "그리드 없음 → 재생성")
+                # ⚡⚡⚡ 그리드 없고 + TP도 없으면 재생성
+                if not grid_orders and not tp_orders_list and (long_size > 0 or short_size > 0):
+                    log_debug("⚠️ 안전장치", "주문 없음 → 재생성")
+                    
+                    # TP 먼저 생성
+                    cancel_tp_orders(SYMBOL)
+                    refresh_tp_orders(SYMBOL)
+                    time.sleep(0.5)
+                    
+                    # 그리드 생성
                     ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                     if ticker:
                         current_price = Decimal(str(ticker[0].last))
                         initialize_grid(current_price, skip_check=True)
-                        time.sleep(1.0)
-                        refresh_tp_orders(SYMBOL)
             except:
                 pass
             
