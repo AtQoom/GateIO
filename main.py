@@ -1327,7 +1327,7 @@ def fill_monitor():
 # =============================================================================
 
 def tp_monitor():
-    """TP 체결 감지 - 개별 TP 청산 시 비주력 20% 동반 청산"""
+    """TP 체결 감지 - 안전장치 개선"""
     while True:
         time.sleep(5)
         
@@ -1349,17 +1349,14 @@ def tp_monitor():
                             tp_type_val = tp_info.get("type", "average")
                             
                             try:
-                                # 주문 상태 확인
                                 order = api.get_futures_order(SETTLE, order_id)
                                 
                                 if order.status == "finished":
                                     log_debug("✅ TP 청산", f"{side.upper()} {tp_qty}개")
                                     
-                                    # 개별 TP인 경우 비주력 20% 동반 청산
                                     if tp_type_val == "individual":
                                         close_counter_position_on_main_tp(SYMBOL, side, tp_qty)
                                     
-                                    # TP 목록에서 제거
                                     continue
                                 else:
                                     remaining_tps.append(tp_info)
@@ -1369,26 +1366,27 @@ def tp_monitor():
                         
                         tp_orders[SYMBOL][side] = remaining_tps
             
-            # ⚡⚡⚡ 안전장치 수정: 양방향 포지션 제외
+            # ⚡⚡⚡ 안전장치: 포지션 있는데 주문 없으면 재생성
             try:
-                # 양방향 포지션이면 스킵
-                if long_size > 0 and short_size > 0:
-                    continue
+                if long_size == 0 and short_size == 0:
+                    continue  # 포지션 없으면 스킵
                 
                 orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status="open")
                 grid_orders = [o for o in orders if not o.is_reduce_only]
                 tp_orders_list = [o for o in orders if o.is_reduce_only]
                 
-                # ⚡⚡⚡ 그리드 없고 + TP도 없으면 재생성
-                if not grid_orders and not tp_orders_list and (long_size > 0 or short_size > 0):
-                    log_debug("⚠️ 안전장치", "주문 없음 → 재생성")
+                # ⚡⚡⚡ TP가 없으면 재생성 (그리드는 양방향 포지션 시 제외)
+                if not tp_orders_list:
+                    log_debug("⚠️ 안전장치", "TP 없음 → 재생성")
                     
-                    # TP 먼저 생성
                     cancel_tp_orders(SYMBOL)
                     refresh_tp_orders(SYMBOL)
                     time.sleep(0.5)
+                
+                # ⚡⚡⚡ 그리드는 양방향 아닐 때만 재생성
+                if not grid_orders and not (long_size > 0 and short_size > 0):
+                    log_debug("⚠️ 안전장치", "그리드 없음 → 재생성")
                     
-                    # 그리드 생성
                     ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
                     if ticker:
                         current_price = Decimal(str(ticker[0].last))
