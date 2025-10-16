@@ -1175,7 +1175,7 @@ def initialize_grid(entry_price, skip_check=False):
 # =============================================================================
 
 def fill_monitor():
-    """체결 모니터링 - 포지션 변화 시에만 재생성"""
+    """체결 모니터링 - TP 자동 재생성 포함"""
     global threshold_exceeded_time, post_threshold_entries
     
     try:
@@ -1250,8 +1250,9 @@ def fill_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         
-                        # ⚡⚡⚡ TP & 그리드 재생성
+                        # ⚡⚡⚡ 그리드 취소 + TP 재생성 + 그리드 재생성
                         cancel_grid_orders(SYMBOL)
+                        refresh_tp_orders(SYMBOL)
                         
                         time.sleep(0.3)
                         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
@@ -1259,7 +1260,6 @@ def fill_monitor():
                             grid_price = Decimal(str(ticker[0].last))
                             initialize_grid(grid_price, skip_check=False)
                         
-                        # ⚡⚡⚡ 포지션 업데이트 (중요!)
                         with position_lock:
                             pos = position_state.get(SYMBOL, {})
                             prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
@@ -1276,8 +1276,9 @@ def fill_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         
-                        # ⚡⚡⚡ TP & 그리드 재생성
+                        # ⚡⚡⚡ 그리드 취소 + TP 재생성 + 그리드 재생성
                         cancel_grid_orders(SYMBOL)
+                        refresh_tp_orders(SYMBOL)
                         
                         time.sleep(0.3)
                         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
@@ -1285,7 +1286,6 @@ def fill_monitor():
                             grid_price = Decimal(str(ticker[0].last))
                             initialize_grid(grid_price, skip_check=False)
                         
-                        # ⚡⚡⚡ 포지션 업데이트
                         with position_lock:
                             pos = position_state.get(SYMBOL, {})
                             prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
@@ -1308,8 +1308,9 @@ def fill_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         
-                        # ⚡⚡⚡ TP & 그리드 재생성
+                        # ⚡⚡⚡ 그리드 취소 + TP 재생성 + 그리드 재생성
                         cancel_grid_orders(SYMBOL)
+                        refresh_tp_orders(SYMBOL)
                         
                         time.sleep(0.3)
                         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
@@ -1317,7 +1318,6 @@ def fill_monitor():
                             grid_price = Decimal(str(ticker[0].last))
                             initialize_grid(grid_price, skip_check=False)
                         
-                        # ⚡⚡⚡ 포지션 업데이트
                         with position_lock:
                             pos = position_state.get(SYMBOL, {})
                             prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
@@ -1334,8 +1334,9 @@ def fill_monitor():
                         time.sleep(0.5)
                         update_position_state(SYMBOL)
                         
-                        # ⚡⚡⚡ TP & 그리드 재생성
+                        # ⚡⚡⚡ 그리드 취소 + TP 재생성 + 그리드 재생성
                         cancel_grid_orders(SYMBOL)
+                        refresh_tp_orders(SYMBOL)
                         
                         time.sleep(0.3)
                         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
@@ -1343,7 +1344,6 @@ def fill_monitor():
                             grid_price = Decimal(str(ticker[0].last))
                             initialize_grid(grid_price, skip_check=False)
                         
-                        # ⚡⚡⚡ 포지션 업데이트
                         with position_lock:
                             pos = position_state.get(SYMBOL, {})
                             prev_long_size = pos.get("long", {}).get("size", Decimal("0"))
