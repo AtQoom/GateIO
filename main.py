@@ -357,34 +357,20 @@ def place_limit_order(symbol, side, price, size, reduce_only=False):
 
 
 # =============================================================================
-# 헤징 로직 수정 (시장가 주문 - price 추가)
+# 헤징 로직 수정 (자산의 0.1배)
 # =============================================================================
 
 def place_hedge_order(symbol, side, price):
-    """일반 헤징 (0.1배) - 시장가 주문"""
+    """일반 헤징 (자산의 0.1배) - 시장가 주문"""
     try:
-        with position_lock:
-            pos = position_state.get(symbol, {})
-            
-            # 진입한 포지션 수량 확인
-            if side == "long":
-                filled_size = pos.get("long", {}).get("size", Decimal("0"))
-            else:
-                filled_size = pos.get("short", {}).get("size", Decimal("0"))
+        # ⚡⚡⚡ 자산(잔고)의 0.1배 계산
+        with balance_lock:
+            current_balance = INITIAL_BALANCE
         
-        if filled_size == 0:
+        if current_balance == 0:
             return None
         
-        # 헤징 수량: 0.1배
-        hedge_qty = int(filled_size * HEDGE_RATIO)
-        
-        if hedge_qty < 1:
-            hedge_qty = 1
-        
-        # 역방향 헤징
-        hedge_side = "short" if side == "long" else "long"
-        
-        # ⚡⚡⚡ 현재가 조회
+        # 현재가 조회
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
         if not ticker:
             log_debug("❌ 헤징 실패", "현재가 조회 실패")
@@ -392,7 +378,17 @@ def place_hedge_order(symbol, side, price):
         
         current_price = Decimal(str(ticker[0].last))
         
-        # ⚡⚡⚡ 시장가 주문 (IOC) - price 필수!
+        # ⚡⚡⚡ 자산의 0.1배를 현재가로 환산하여 수량 계산
+        target_value = current_balance * HEDGE_RATIO  # 자산 × 0.1
+        hedge_qty = round(float(target_value / current_price))  # 수량 = 자산 / 가격
+        
+        if hedge_qty < 1:
+            hedge_qty = 1
+        
+        # 역방향 헤징
+        hedge_side = "short" if side == "long" else "long"
+        
+        # 시장가 주문 (IOC)
         if hedge_side == "long":
             order_size = hedge_qty  # 양수
         else:
@@ -401,7 +397,7 @@ def place_hedge_order(symbol, side, price):
         order = FuturesOrder(
             contract=symbol,
             size=order_size,
-            price=str(round(float(current_price), 4)),  # ⚡ price 필수!
+            price=str(round(float(current_price), 4)),
             tif='ioc',  # 시장가 주문
             reduce_only=False
         )
@@ -409,7 +405,7 @@ def place_hedge_order(symbol, side, price):
         result = api.create_futures_order(SETTLE, order)
         
         if result:
-            log_debug(f"✅ 헤징", f"{hedge_side.upper()} {hedge_qty}개 (0.1배 시장가)")
+            log_debug(f"✅ 헤징", f"{hedge_side.upper()} {hedge_qty}개 (자산 0.1배)")
         
         return result
         
@@ -420,8 +416,8 @@ def place_hedge_order(symbol, side, price):
 
 def place_hedge_order_with_counter_check(symbol, side, price):
     """
-    ⚡ 비주력 그리드 체결 시: 주력의 10%와 기본 헤지 중 큰 수량 (시장가)
-    ⚡ 일반 그리드 체결 시: 0.1배 헤징 (시장가)
+    ⚡ 비주력 그리드 체결 시: 주력의 10%와 자산 0.1배 중 큰 수량 (시장가)
+    ⚡ 일반 그리드 체결 시: 자산의 0.1배 헤징 (시장가)
     """
     try:
         with balance_lock:
@@ -453,15 +449,7 @@ def place_hedge_order_with_counter_check(symbol, side, price):
         
         # ⚡ 비주력 그리드 체결인 경우
         if is_counter_entry and main_size > 0:
-            # max(주력 10%, 기본 헤지 0.1배)
-            counter_hedge_qty = int(main_size * Decimal("0.10"))
-            base_hedge_qty = int(main_size * HEDGE_RATIO)
-            hedge_qty = max(counter_hedge_qty, base_hedge_qty)
-            
-            if hedge_qty < 1:
-                hedge_qty = 1
-            
-            # ⚡⚡⚡ 현재가 조회
+            # 현재가 조회
             ticker = api.list_futures_tickers(SETTLE, contract=symbol)
             if not ticker:
                 log_debug("❌ 비주력 헤징 실패", "현재가 조회 실패")
@@ -469,7 +457,18 @@ def place_hedge_order_with_counter_check(symbol, side, price):
             
             current_price = Decimal(str(ticker[0].last))
             
-            # ⚡⚡⚡ 같은 방향으로 헤징 (주력과 같은 방향 추가 진입) - 시장가
+            # ⚡⚡⚡ max(주력 10%, 자산 0.1배)
+            counter_hedge_qty = round(float(main_size * Decimal("0.10")))  # 주력의 10%
+            
+            target_value = current_balance * HEDGE_RATIO  # 자산의 0.1배
+            base_hedge_qty = round(float(target_value / current_price))
+            
+            hedge_qty = max(counter_hedge_qty, base_hedge_qty)
+            
+            if hedge_qty < 1:
+                hedge_qty = 1
+            
+            # 같은 방향으로 헤징 (주력과 같은 방향 추가 진입)
             if main_side == "long":
                 order_size = hedge_qty  # 양수
             else:
@@ -478,7 +477,7 @@ def place_hedge_order_with_counter_check(symbol, side, price):
             order = FuturesOrder(
                 contract=symbol,
                 size=order_size,
-                price=str(round(float(current_price), 4)),  # ⚡ price 필수!
+                price=str(round(float(current_price), 4)),
                 tif='ioc',  # 시장가 주문
                 reduce_only=False
             )
@@ -487,10 +486,10 @@ def place_hedge_order_with_counter_check(symbol, side, price):
             
             if result:
                 log_debug(f"✅ 비주력 헤징", 
-                         f"{main_side.upper()} {hedge_qty}개 (max(10%, 헤지) 시장가)")
+                         f"{main_side.upper()} {hedge_qty}개 (max(10%, 자산0.1배))")
             return result
         
-        # ⚡ 일반 헤징 (0.1배 시장가)
+        # ⚡ 일반 헤징 (자산의 0.1배)
         return place_hedge_order(symbol, side, price)
         
     except Exception as e:
@@ -690,7 +689,7 @@ def place_average_tp_order(symbol, side, price, qty, retry=3):
     """평단가 TP 지정가 주문 - 중복 방지"""
     for attempt in range(retry):
         try:
-            # ⚡⚡⚡ 기존 TP 주문 확인
+            # ⚡⚡⚡ 기존 TP 주문 확인 (중복 방지)
             try:
                 orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
                 
@@ -700,29 +699,11 @@ def place_average_tp_order(symbol, side, price, qty, retry=3):
                     
                     # 같은 방향의 TP가 이미 있으면 스킵
                     if side == "long" and order.size < 0:  # 롱 TP = 숏 주문
-                        log_debug("⚠️ TP 스킵", f"롱 TP 이미 존재 (order_id: {order.id})")
                         return False
                     elif side == "short" and order.size > 0:  # 숏 TP = 롱 주문
-                        log_debug("⚠️ TP 스킵", f"숏 TP 이미 존재 (order_id: {order.id})")
                         return False
             except:
                 pass
-            
-            # ⚡⚡⚡ 포지션 수량 재확인
-            with position_lock:
-                pos = position_state.get(symbol, {})
-                
-                if side == "long":
-                    current_size = pos.get("long", {}).get("size", Decimal("0"))
-                else:
-                    current_size = pos.get("short", {}).get("size", Decimal("0"))
-            
-            if current_size == 0:
-                log_debug("⚠️ TP 스킵", f"{side} 포지션 없음")
-                return False
-            
-            # 최대 수량 제한
-            qty = min(int(qty), int(current_size))
             
             if side == "long":
                 tp_price = price * (Decimal("1") + TP_GAP_PCT)
@@ -751,25 +732,21 @@ def place_average_tp_order(symbol, side, price, qty, retry=3):
                 "type": "average"
             })
             
-            # ✅ 로그 간소화
             log_debug("✅ TP 생성", f"{side} {qty}개 @{float(tp_price):.4f}")
             return True
             
         except GateApiException as e:
             error_msg = str(e)
             if "REDUCE_ONLY_FAIL" in error_msg:
-                log_debug("⚠️ TP 중복", f"{side} TP 이미 존재")
-                return False
+                return False  # 로그 없이 스킵
             elif attempt < retry - 1:
                 time.sleep(0.5)
             else:
-                log_debug("❌ TP 실패", str(e), exc_info=True)
                 return False
         except Exception as e:
             if attempt < retry - 1:
                 time.sleep(0.5)
             else:
-                log_debug("❌ TP 실패", str(e), exc_info=True)
                 return False
 
 def close_counter_position_on_main_tp(symbol, main_side, main_tp_qty):
@@ -994,8 +971,19 @@ def refresh_tp_orders(symbol):
 # 그리드 관리 (initialize_grid 함수 - 비주력 헤징 로직 추가)
 # =============================================================================
 def initialize_grid(entry_price, skip_check=False):
-    """그리드 초기화 - 전략 v19.0 완벽 구현"""
+    """그리드 초기화 - 중복 생성 방지"""
     try:
+        # ⚡⚡⚡ 기존 그리드 확인 (중복 방지)
+        if not skip_check:
+            try:
+                orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status="open")
+                grid_orders = [o for o in orders if not o.is_reduce_only]
+                
+                if len(grid_orders) > 0:
+                    return  # 로그 없이 스킵
+            except:
+                pass
+        
         with balance_lock:
             current_balance = INITIAL_BALANCE
         
