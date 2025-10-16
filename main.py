@@ -850,14 +850,10 @@ def close_counter_position_on_main_tp(symbol, main_side, main_tp_qty):
 
 
 def refresh_tp_orders(symbol):
-    """TP 재생성 - 기존 TP는 외부에서 취소해야 함"""
+    """TP 재생성 - 포지션별 TP 개수 확인"""
     global threshold_exceeded_time, tp_type
     
     try:
-        # ⚡⚡⚡ cancel_tp_orders() 호출 제거!
-        # cancel_tp_orders(symbol)  ← 삭제!
-        # time.sleep(0.5)
-        
         with balance_lock:
             current_balance = INITIAL_BALANCE
         
@@ -873,7 +869,25 @@ def refresh_tp_orders(symbol):
         long_value = long_size * long_entry if long_entry > 0 else Decimal("0")
         short_value = short_size * short_entry if short_entry > 0 else Decimal("0")
         
-        log_debug("TP 재생성", f"롱{long_size}@{long_entry:.4f} 숏{short_size}@{short_entry:.4f}")
+        # ⚡⚡⚡ 기존 TP 개수 확인 (방향별)
+        long_tp_count = 0
+        short_tp_count = 0
+        
+        try:
+            orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
+            
+            for order in orders:
+                if not order.is_reduce_only:
+                    continue
+                
+                if order.size < 0:  # 롱 TP (숏 주문)
+                    long_tp_count += 1
+                elif order.size > 0:  # 숏 TP (롱 주문)
+                    short_tp_count += 1
+        except:
+            pass
+        
+        log_debug("TP 개수 확인", f"롱 TP:{long_tp_count}개, 숏 TP:{short_tp_count}개")
         
         # ============================================================
         # 롱 주력 + 임계값 초과
@@ -882,15 +896,11 @@ def refresh_tp_orders(symbol):
             log_debug("🔵 롱 주력 TP", "개별 TP 생성")
             tp_type[symbol] = "individual"
             
-            # 비주력 숏: 평단가 TP
-            if short_size > 0 and short_entry > 0:
-                tp_price = short_entry * (Decimal("1") - TP_GAP_PCT)
-                tp_price = round(tp_price, 4)
+            # 비주력 숏: 평단가 TP (없으면 생성)
+            if short_size > 0 and short_entry > 0 and short_tp_count == 0:
                 place_average_tp_order(symbol, "short", short_entry, int(short_size))
             
             # 주력 롱: 개별 진입가 TP
-            # ⚡⚡⚡ 수정: post_threshold_entries.get("long", []) 
-            #        → post_threshold_entries.get(symbol, {}).get("long", [])
             if long_size > 0 and len(post_threshold_entries.get(symbol, {}).get("long", [])) > 0:
                 for entry_info in post_threshold_entries[symbol]["long"]:
                     entry_price = entry_info["price"]
@@ -923,7 +933,7 @@ def refresh_tp_orders(symbol):
                         pass
             
             # 평단가 TP도 추가 (안전장치)
-            elif long_size > 0 and long_entry > 0:
+            elif long_size > 0 and long_entry > 0 and long_tp_count == 0:
                 place_average_tp_order(symbol, "long", long_entry, int(long_size))
             
             return
@@ -931,19 +941,15 @@ def refresh_tp_orders(symbol):
         # ============================================================
         # 숏 주력 + 임계값 초과
         # ============================================================
-        elif short_value >= threshold and long_value < threshold:
+        if short_value >= threshold and long_value < threshold:
             log_debug("🔴 숏 주력 TP", "개별 TP 생성")
             tp_type[symbol] = "individual"
             
-            # 비주력 롱: 평단가 TP
-            if long_size > 0 and long_entry > 0:
-                tp_price = long_entry * (Decimal("1") + TP_GAP_PCT)
-                tp_price = round(tp_price, 4)
+            # 비주력 롱: 평단가 TP (없으면 생성)
+            if long_size > 0 and long_entry > 0 and long_tp_count == 0:
                 place_average_tp_order(symbol, "long", long_entry, int(long_size))
             
             # 주력 숏: 개별 진입가 TP
-            # ⚡⚡⚡ 수정: post_threshold_entries.get("short", [])
-            #        → post_threshold_entries.get(symbol, {}).get("short", [])
             if short_size > 0 and len(post_threshold_entries.get(symbol, {}).get("short", [])) > 0:
                 for entry_info in post_threshold_entries[symbol]["short"]:
                     entry_price = entry_info["price"]
@@ -976,21 +982,23 @@ def refresh_tp_orders(symbol):
                         pass
             
             # 평단가 TP도 추가 (안전장치)
-            elif short_size > 0 and short_entry > 0:
+            elif short_size > 0 and short_entry > 0 and short_tp_count == 0:
                 place_average_tp_order(symbol, "short", short_entry, int(short_size))
             
             return
         
         # ============================================================
-        # 임계값 미달 → 평단가 TP
+        # 임계값 미달 or 양방향 포지션
         # ============================================================
-        log_debug("⚪ 평단가 TP", "임계값 미달")
+        log_debug("⚪ 평단가 TP", "양방향 or 임계값 미달")
         tp_type[symbol] = "average"
         
-        if long_size > 0 and long_entry > 0:
+        # ⚡⚡⚡ 롱 포지션 있는데 롱 TP 없으면 생성
+        if long_size > 0 and long_entry > 0 and long_tp_count == 0:
             place_average_tp_order(symbol, "long", long_entry, int(long_size))
         
-        if short_size > 0 and short_entry > 0:
+        # ⚡⚡⚡ 숏 포지션 있는데 숏 TP 없으면 생성
+        if short_size > 0 and short_entry > 0 and short_tp_count == 0:
             place_average_tp_order(symbol, "short", short_entry, int(short_size))
         
     except Exception as e:
