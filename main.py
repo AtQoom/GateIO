@@ -686,22 +686,50 @@ def cancel_all_orders(symbol):
 # =============================================================================
 
 def place_average_tp_order(symbol, side, price, qty, retry=3):
-    """평단가 TP 지정가 주문 - 중복 방지"""
+    """평단가 TP 지정가 주문 - 총 수량 기준 중복 방지"""
     for attempt in range(retry):
         try:
-            # ⚡⚡⚡ 기존 TP 주문 확인 (중복 방지)
+            # ⚡⚡⚡ 포지션 수량 확인
+            with position_lock:
+                pos = position_state.get(symbol, {})
+                
+                if side == "long":
+                    current_size = pos.get("long", {}).get("size", Decimal("0"))
+                else:
+                    current_size = pos.get("short", {}).get("size", Decimal("0"))
+            
+            if current_size == 0:
+                return False  # 포지션 없으면 스킵
+            
+            # 최대 수량 제한
+            qty = min(int(qty), int(current_size))
+            
+            # ⚡⚡⚡ 기존 TP의 총 수량 계산
             try:
                 orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
                 
+                total_tp_qty = 0
                 for order in orders:
                     if not order.is_reduce_only:
                         continue
                     
-                    # 같은 방향의 TP가 이미 있으면 스킵
-                    if side == "long" and order.size < 0:  # 롱 TP = 숏 주문
-                        return False
-                    elif side == "short" and order.size > 0:  # 숏 TP = 롱 주문
-                        return False
+                    # 같은 방향의 TP 수량 합산
+                    if side == "long" and order.size < 0:
+                        total_tp_qty += abs(order.size)
+                    elif side == "short" and order.size > 0:
+                        total_tp_qty += abs(order.size)
+                
+                # ⚡⚡⚡ TP 총 수량이 포지션 수량과 같거나 크면 스킵
+                if total_tp_qty >= current_size:
+                    return False  # 충분한 TP가 있음
+                
+                # ⚡⚡⚡ 부족한 수량만큼만 TP 생성
+                remaining_qty = int(current_size - total_tp_qty)
+                if remaining_qty <= 0:
+                    return False
+                
+                qty = min(qty, remaining_qty)
+                
             except:
                 pass
             
@@ -738,7 +766,7 @@ def place_average_tp_order(symbol, side, price, qty, retry=3):
         except GateApiException as e:
             error_msg = str(e)
             if "REDUCE_ONLY_FAIL" in error_msg:
-                return False  # 로그 없이 스킵
+                return False
             elif attempt < retry - 1:
                 time.sleep(0.5)
             else:
@@ -748,6 +776,7 @@ def place_average_tp_order(symbol, side, price, qty, retry=3):
                 time.sleep(0.5)
             else:
                 return False
+
 
 def close_counter_position_on_main_tp(symbol, main_side, main_tp_qty):
     """
