@@ -821,12 +821,13 @@ def close_counter_position_on_main_tp(symbol, main_side, main_tp_qty):
 
 
 def refresh_tp_orders(symbol):
-    """TP 재생성 - 임계값 확인하여 평단가 TP 또는 개별 TP"""
+    """TP 재생성 - 기존 TP는 외부에서 취소해야 함"""
     global threshold_exceeded_time, tp_type
     
     try:
-        cancel_tp_orders(symbol)
-        time.sleep(0.5)
+        # ⚡⚡⚡ cancel_tp_orders() 호출 제거!
+        # cancel_tp_orders(symbol)  ← 삭제!
+        # time.sleep(0.5)
         
         with balance_lock:
             current_balance = INITIAL_BALANCE
@@ -1214,7 +1215,6 @@ def fill_monitor():
                         
                         # ⚡⚡⚡ TP & 그리드 재생성
                         cancel_grid_orders(SYMBOL)
-                        refresh_tp_orders(SYMBOL)
                         
                         time.sleep(0.3)
                         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
@@ -1241,7 +1241,6 @@ def fill_monitor():
                         
                         # ⚡⚡⚡ TP & 그리드 재생성
                         cancel_grid_orders(SYMBOL)
-                        refresh_tp_orders(SYMBOL)
                         
                         time.sleep(0.3)
                         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
@@ -1274,7 +1273,6 @@ def fill_monitor():
                         
                         # ⚡⚡⚡ TP & 그리드 재생성
                         cancel_grid_orders(SYMBOL)
-                        refresh_tp_orders(SYMBOL)
                         
                         time.sleep(0.3)
                         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
@@ -1301,7 +1299,6 @@ def fill_monitor():
                         
                         # ⚡⚡⚡ TP & 그리드 재생성
                         cancel_grid_orders(SYMBOL)
-                        refresh_tp_orders(SYMBOL)
                         
                         time.sleep(0.3)
                         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
