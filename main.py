@@ -357,10 +357,11 @@ def place_limit_order(symbol, side, price, size, reduce_only=False):
 
 
 # =============================================================================
-# 헤징 로직 수정 (비주력 그리드 체결 감지)
+# 헤징 로직 수정 (시장가 주문)
 # =============================================================================
+
 def place_hedge_order(symbol, side, price):
-    """일반 헤징 (0.1배)"""
+    """일반 헤징 (0.1배) - 시장가 주문"""
     try:
         with position_lock:
             pos = position_state.get(symbol, {})
@@ -383,22 +384,35 @@ def place_hedge_order(symbol, side, price):
         # 역방향 헤징
         hedge_side = "short" if side == "long" else "long"
         
-        order = place_limit_order(symbol, hedge_side, price, hedge_qty, reduce_only=False)
+        # ⚡⚡⚡ 시장가 주문 (IOC)
+        if hedge_side == "long":
+            order_size = hedge_qty  # 양수
+        else:
+            order_size = -hedge_qty  # 음수
         
-        if order:
-            log_debug(f"✅ 헤징", f"{hedge_side.upper()} {hedge_qty}개 (0.1배)")
+        order = FuturesOrder(
+            contract=symbol,
+            size=order_size,
+            tif='ioc',  # ⚡ 시장가 주문
+            reduce_only=False
+        )
         
-        return order
+        result = api.create_futures_order(SETTLE, order)
+        
+        if result:
+            log_debug(f"✅ 헤징", f"{hedge_side.upper()} {hedge_qty}개 (0.1배 시장가)")
+        
+        return result
         
     except Exception as e:
         log_debug("❌ 헤징 오류", str(e), exc_info=True)
         return None
-        
-        
+
+
 def place_hedge_order_with_counter_check(symbol, side, price):
     """
-    ⚡ 비주력 그리드 체결 시: 주력의 10%와 기본 헤지 중 큰 수량
-    ⚡ 일반 그리드 체결 시: 0.1배 헤징
+    ⚡ 비주력 그리드 체결 시: 주력의 10%와 기본 헤지 중 큰 수량 (시장가)
+    ⚡ 일반 그리드 체결 시: 0.1배 헤징 (시장가)
     """
     try:
         with balance_lock:
@@ -438,15 +452,27 @@ def place_hedge_order_with_counter_check(symbol, side, price):
             if hedge_qty < 1:
                 hedge_qty = 1
             
-            # ⚡ 같은 방향으로 헤징 (주력과 같은 방향 추가 진입)
-            order = place_limit_order(symbol, main_side, price, hedge_qty, reduce_only=False)
+            # ⚡⚡⚡ 같은 방향으로 헤징 (주력과 같은 방향 추가 진입) - 시장가
+            if main_side == "long":
+                order_size = hedge_qty  # 양수
+            else:
+                order_size = -hedge_qty  # 음수
             
-            if order:
+            order = FuturesOrder(
+                contract=symbol,
+                size=order_size,
+                tif='ioc',  # ⚡ 시장가 주문
+                reduce_only=False
+            )
+            
+            result = api.create_futures_order(SETTLE, order)
+            
+            if result:
                 log_debug(f"✅ 비주력 헤징", 
-                         f"{main_side.upper()} {hedge_qty}개 (max(10%, 헤지))")
-            return order
+                         f"{main_side.upper()} {hedge_qty}개 (max(10%, 헤지) 시장가)")
+            return result
         
-        # ⚡ 일반 헤징 (0.1배)
+        # ⚡ 일반 헤징 (0.1배 시장가)
         return place_hedge_order(symbol, side, price)
         
     except Exception as e:
