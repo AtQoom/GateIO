@@ -687,9 +687,43 @@ def cancel_all_orders(symbol):
 # =============================================================================
 
 def place_average_tp_order(symbol, side, price, qty, retry=3):
-    """평단가 TP 지정가 주문"""
+    """평단가 TP 지정가 주문 - 중복 방지"""
     for attempt in range(retry):
         try:
+            # ⚡⚡⚡ 기존 TP 주문 확인
+            try:
+                orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
+                
+                for order in orders:
+                    if not order.is_reduce_only:
+                        continue
+                    
+                    # 같은 방향의 TP가 이미 있으면 스킵
+                    if side == "long" and order.size < 0:  # 롱 TP = 숏 주문
+                        log_debug("⚠️ TP 스킵", f"롱 TP 이미 존재 (order_id: {order.id})")
+                        return False
+                    elif side == "short" and order.size > 0:  # 숏 TP = 롱 주문
+                        log_debug("⚠️ TP 스킵", f"숏 TP 이미 존재 (order_id: {order.id})")
+                        return False
+            except:
+                pass
+            
+            # ⚡⚡⚡ 포지션 수량 재확인
+            with position_lock:
+                pos = position_state.get(symbol, {})
+                
+                if side == "long":
+                    current_size = pos.get("long", {}).get("size", Decimal("0"))
+                else:
+                    current_size = pos.get("short", {}).get("size", Decimal("0"))
+            
+            if current_size == 0:
+                log_debug("⚠️ TP 스킵", f"{side} 포지션 없음")
+                return False
+            
+            # 최대 수량 제한
+            qty = min(int(qty), int(current_size))
+            
             if side == "long":
                 tp_price = price * (Decimal("1") + TP_GAP_PCT)
                 order_size = -int(qty)
@@ -721,13 +755,22 @@ def place_average_tp_order(symbol, side, price, qty, retry=3):
             log_debug("✅ TP 생성", f"{side} {qty}개 @{float(tp_price):.4f}")
             return True
             
+        except GateApiException as e:
+            error_msg = str(e)
+            if "REDUCE_ONLY_FAIL" in error_msg:
+                log_debug("⚠️ TP 중복", f"{side} TP 이미 존재")
+                return False
+            elif attempt < retry - 1:
+                time.sleep(0.5)
+            else:
+                log_debug("❌ TP 실패", str(e), exc_info=True)
+                return False
         except Exception as e:
             if attempt < retry - 1:
                 time.sleep(0.5)
             else:
                 log_debug("❌ TP 실패", str(e), exc_info=True)
                 return False
-
 
 def close_counter_position_on_main_tp(symbol, main_side, main_tp_qty):
     """
