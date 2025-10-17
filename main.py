@@ -99,6 +99,7 @@ threshold_exceeded_time = 0  # 임계값 초과 시점 기록
 post_threshold_entries = {SYMBOL: {"long": [], "short": []}}
 grid_lock = threading.Lock()
 grid_creation_time = 0
+last_grid_time = 0  # ⭐ 이 줄 추가!
 grid_orders = {SYMBOL: {"long": [], "short": []}}
 
 app = Flask(__name__)
