@@ -1323,14 +1323,14 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
                 order = FuturesOrder(
                     contract=SYMBOL,
                     size=-hedge_qty,
-                    price="0",  # ⭐ 시장가
+                    price="0",
                     tif="ioc",
                     reduce_only=False
                 )
                 api.create_futures_order(SETTLE, order)
                 time.sleep(0.5)
                 cancel_grid_orders(SYMBOL)
-                return True  # ⭐⭐⭐ 헤징 완료!
+                return True
             except Exception as e:
                 log_debug("❌ 헤징 실패", str(e))
         
@@ -1342,18 +1342,18 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
                 order = FuturesOrder(
                     contract=SYMBOL,
                     size=hedge_qty,
-                    price="0",  # ⭐ 시장가
+                    price="0",
                     tif="ioc",
                     reduce_only=False
                 )
                 api.create_futures_order(SETTLE, order)
                 time.sleep(0.5)
                 cancel_grid_orders(SYMBOL)
-                return True  # ⭐⭐⭐ 헤징 완료!
+                return True
             except Exception as e:
                 log_debug("❌ 헤징 실패", str(e))
         
-        return False  # ⭐ 헤징 안 함
+        return False
     
     # ⭐ 임계값 초과: 후속 헤징 + 동반 청산
     # 롱 주력일 때
@@ -1371,6 +1371,8 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
                     reduce_only=False
                 )
                 api.create_futures_order(SETTLE, order)
+                time.sleep(0.5)
+                cancel_grid_orders(SYMBOL)  # ⭐ 추가!
             except:
                 pass
         
@@ -1405,6 +1407,8 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
                     reduce_only=False
                 )
                 api.create_futures_order(SETTLE, order)
+                time.sleep(0.5)
+                cancel_grid_orders(SYMBOL)  # ⭐ 추가!
             except:
                 pass
         
@@ -1423,6 +1427,9 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
                 api.create_futures_order(SETTLE, order)
             except:
                 pass
+    
+    return False  # ⭐⭐⭐ 추가!
+
 
 def track_threshold_entries(long_size, short_size, prev_long_size, prev_short_size, long_price, short_price, long_value, short_value, threshold):
     """임계값 초과 진입 추적"""
