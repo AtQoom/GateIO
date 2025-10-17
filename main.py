@@ -827,13 +827,12 @@ def place_average_tp_order(symbol, side, price, qty, retry=3):
                 return False
 
 def refresh_tp_orders(symbol):
-    """TP 주문 전체 재생성 (개별 TP + 평단가 TP)"""
+    """TP 주문 재생성"""
     try:
-        # 1단계: 기존 TP 모두 취소
+        # 기존 TP 취소
         try:
             orders = api.list_futures_orders(SETTLE, contract=symbol, status='open')
             tp_list = [o for o in orders if o.is_reduce_only]
-            
             if tp_list:
                 for tp in tp_list:
                     api.cancel_futures_order(SETTLE, tp.id)
@@ -859,47 +858,75 @@ def refresh_tp_orders(symbol):
         long_value = long_size * long_price if long_price > 0 else Decimal("0")
         short_value = short_size * short_price if short_price > 0 else Decimal("0")
         
-        # 롱 포지션 TP
+        # ============================================================
+        # 롱 포지션 TP 생성
+        # ============================================================
         if long_size > 0:
-            # 개별 TP 수량 (임계값 초과 후 진입분)
-            individual_qty_total = sum(Decimal(str(e['qty'])) for e in post_threshold_entries.get(symbol, {}).get('long', []))
-            average_qty = long_size - individual_qty_total
-            
-            # 개별 TP 생성
-            for entry_info in post_threshold_entries.get(symbol, {}).get('long', []):
-                entry_price = entry_info["price"]
-                entry_qty = int(entry_info["qty"])
-                tp_price = entry_price * (Decimal("1") + TP_GAP_PCT)
-                tp_price = round(tp_price, 4)
+            # ⭐⭐⭐ 임계값 체크
+            if long_value >= threshold:
+                # 임계값 초과: 개별 + 평단가 TP
+                individual_qty_total = sum(Decimal(str(e['qty'])) for e in post_threshold_entries.get(symbol, {}).get('long', []))
+                average_qty = long_size - individual_qty_total
                 
-                try:
-                    order = FuturesOrder(
-                        contract=symbol,
-                        size=-entry_qty,
-                        price=str(tp_price),
-                        tif="gtc",
-                        reduce_only=True
-                    )
-                    result = api.create_futures_order(SETTLE, order)
-                    tp_orders[symbol]["long"].append({
-                        "order_id": result.id,
-                        "tp_price": tp_price,
-                        "qty": Decimal(str(entry_qty)),
-                        "type": "individual"
-                    })
-                    log_debug("✅ 개별 TP", f"롱 {entry_qty}개 @{tp_price}")
-                except Exception as e:
-                    log_debug("❌ 개별 TP", str(e))
+                # 개별 TP
+                for entry_info in post_threshold_entries.get(symbol, {}).get('long', []):
+                    entry_price = entry_info["price"]
+                    entry_qty = int(entry_info["qty"])
+                    tp_price = entry_price * (Decimal("1") + TP_GAP_PCT)
+                    tp_price = round(tp_price, 4)
+                    
+                    try:
+                        order = FuturesOrder(
+                            contract=symbol,
+                            size=-entry_qty,
+                            price=str(tp_price),
+                            tif="gtc",
+                            reduce_only=True
+                        )
+                        result = api.create_futures_order(SETTLE, order)
+                        tp_orders[symbol]["long"].append({
+                            "order_id": result.id,
+                            "tp_price": tp_price,
+                            "qty": Decimal(str(entry_qty)),
+                            "type": "individual"
+                        })
+                        log_debug("✅ 개별 TP", f"롱 {entry_qty}개 @{tp_price}")
+                    except Exception as e:
+                        log_debug("❌ 개별 TP", str(e))
+                
+                # 평단가 TP (임계값 초과)
+                if average_qty > 0:
+                    tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
+                    tp_price = round(tp_price, 4)
+                    
+                    try:
+                        order = FuturesOrder(
+                            contract=symbol,
+                            size=-int(average_qty),
+                            price=str(tp_price),
+                            tif="gtc",
+                            reduce_only=True
+                        )
+                        result = api.create_futures_order(SETTLE, order)
+                        tp_orders[symbol]["long"].append({
+                            "order_id": result.id,
+                            "tp_price": tp_price,
+                            "qty": average_qty,
+                            "type": "average"
+                        })
+                        log_debug("✅ 평단가 TP", f"롱 {int(average_qty)}개 @{tp_price}")
+                    except Exception as e:
+                        log_debug("❌ 평단가 TP", str(e))
             
-            # 평단가 TP
-            if average_qty > 0:
+            else:
+                # ⭐ 임계값 미만: 평단가 TP만
                 tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
                 tp_price = round(tp_price, 4)
                 
                 try:
                     order = FuturesOrder(
                         contract=symbol,
-                        size=-int(average_qty),
+                        size=-int(long_size),
                         price=str(tp_price),
                         tif="gtc",
                         reduce_only=True
@@ -908,54 +935,82 @@ def refresh_tp_orders(symbol):
                     tp_orders[symbol]["long"].append({
                         "order_id": result.id,
                         "tp_price": tp_price,
-                        "qty": average_qty,
+                        "qty": long_size,
                         "type": "average"
                     })
-                    log_debug("✅ 평단가 TP", f"롱 {int(average_qty)}개 @{tp_price}")
+                    log_debug("✅ 평단가 TP", f"롱 {int(long_size)}개 @{tp_price}")
                 except Exception as e:
                     log_debug("❌ 평단가 TP", str(e))
         
-        # 숏 포지션 TP
+        # ============================================================
+        # 숏 포지션 TP 생성
+        # ============================================================
         if short_size > 0:
-            # 개별 TP 수량
-            individual_qty_total = sum(Decimal(str(e['qty'])) for e in post_threshold_entries.get(symbol, {}).get('short', []))
-            average_qty = short_size - individual_qty_total
-            
-            # 개별 TP
-            for entry_info in post_threshold_entries.get(symbol, {}).get('short', []):
-                entry_price = entry_info["price"]
-                entry_qty = int(entry_info["qty"])
-                tp_price = entry_price * (Decimal("1") - TP_GAP_PCT)
-                tp_price = round(tp_price, 4)
+            # ⭐⭐⭐ 임계값 체크
+            if short_value >= threshold:
+                # 임계값 초과: 개별 + 평단가 TP
+                individual_qty_total = sum(Decimal(str(e['qty'])) for e in post_threshold_entries.get(symbol, {}).get('short', []))
+                average_qty = short_size - individual_qty_total
                 
-                try:
-                    order = FuturesOrder(
-                        contract=symbol,
-                        size=entry_qty,
-                        price=str(tp_price),
-                        tif="gtc",
-                        reduce_only=True
-                    )
-                    result = api.create_futures_order(SETTLE, order)
-                    tp_orders[symbol]["short"].append({
-                        "order_id": result.id,
-                        "tp_price": tp_price,
-                        "qty": Decimal(str(entry_qty)),
-                        "type": "individual"
-                    })
-                    log_debug("✅ 개별 TP", f"숏 {entry_qty}개 @{tp_price}")
-                except Exception as e:
-                    log_debug("❌ 개별 TP", str(e))
+                # 개별 TP
+                for entry_info in post_threshold_entries.get(symbol, {}).get('short', []):
+                    entry_price = entry_info["price"]
+                    entry_qty = int(entry_info["qty"])
+                    tp_price = entry_price * (Decimal("1") - TP_GAP_PCT)
+                    tp_price = round(tp_price, 4)
+                    
+                    try:
+                        order = FuturesOrder(
+                            contract=symbol,
+                            size=entry_qty,
+                            price=str(tp_price),
+                            tif="gtc",
+                            reduce_only=True
+                        )
+                        result = api.create_futures_order(SETTLE, order)
+                        tp_orders[symbol]["short"].append({
+                            "order_id": result.id,
+                            "tp_price": tp_price,
+                            "qty": Decimal(str(entry_qty)),
+                            "type": "individual"
+                        })
+                        log_debug("✅ 개별 TP", f"숏 {entry_qty}개 @{tp_price}")
+                    except Exception as e:
+                        log_debug("❌ 개별 TP", str(e))
+                
+                # 평단가 TP (임계값 초과)
+                if average_qty > 0:
+                    tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
+                    tp_price = round(tp_price, 4)
+                    
+                    try:
+                        order = FuturesOrder(
+                            contract=symbol,
+                            size=int(average_qty),
+                            price=str(tp_price),
+                            tif="gtc",
+                            reduce_only=True
+                        )
+                        result = api.create_futures_order(SETTLE, order)
+                        tp_orders[symbol]["short"].append({
+                            "order_id": result.id,
+                            "tp_price": tp_price,
+                            "qty": average_qty,
+                            "type": "average"
+                        })
+                        log_debug("✅ 평단가 TP", f"숏 {int(average_qty)}개 @{tp_price}")
+                    except Exception as e:
+                        log_debug("❌ 평단가 TP", str(e))
             
-            # 평단가 TP
-            if average_qty > 0:
+            else:
+                # ⭐ 임계값 미만: 평단가 TP만
                 tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
                 tp_price = round(tp_price, 4)
                 
                 try:
                     order = FuturesOrder(
                         contract=symbol,
-                        size=int(average_qty),
+                        size=int(short_size),
                         price=str(tp_price),
                         tif="gtc",
                         reduce_only=True
@@ -964,16 +1019,15 @@ def refresh_tp_orders(symbol):
                     tp_orders[symbol]["short"].append({
                         "order_id": result.id,
                         "tp_price": tp_price,
-                        "qty": average_qty,
+                        "qty": short_size,
                         "type": "average"
                     })
-                    log_debug("✅ 평단가 TP", f"숏 {int(average_qty)}개 @{tp_price}")
+                    log_debug("✅ 평단가 TP", f"숏 {int(short_size)}개 @{tp_price}")
                 except Exception as e:
                     log_debug("❌ 평단가 TP", str(e))
                     
     except Exception as e:
         log_debug("❌ TP 재생성", str(e))
-
 
 
 # =============================================================================
