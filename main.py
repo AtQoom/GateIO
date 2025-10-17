@@ -811,15 +811,18 @@ def place_average_tp_order(symbol, side, price, qty, retry=3):
                 return False
 
 def refresh_tp_orders(symbol):
-    """⭐ TP 공존 로직: 개별 TP + 평단가 TP"""
+    """TP 주문 전체 재생성"""
     try:
-        # 기존 TP 전체 취소
+        # ⭐ 1단계: 기존 TP 모두 취소
         try:
-            orders = api.list_futures_orders(SETTLE, contract=symbol, status="open")
+            orders = api.list_futures_orders(SETTLE, contract=symbol, status='open')
             tp_list = [o for o in orders if o.is_reduce_only]
-            for tp in tp_list:
-                api.cancel_futures_order(SETTLE, tp.id)
-            log_debug("🔄 TP 취소", f"{len(tp_list)}개")
+            
+            if tp_list:  # ⭐ TP가 있으면 취소
+                for tp in tp_list:
+                    api.cancel_futures_order(SETTLE, tp.id)
+                log_debug("🔄 TP 취소", f"{len(tp_list)}개")
+                time.sleep(0.3)  # ⭐ 취소 완료 대기
         except:
             pass
         
@@ -1166,7 +1169,7 @@ def fill_monitor():
                 continue
             current_price = Decimal(str(ticker[0].last))
             
-            # 포지션 조회
+            # ⭐ 포지션 조회 (settle만 전달)
             positions = api.list_positions(SETTLE)
             
             long_size = Decimal("0")
@@ -1176,7 +1179,7 @@ def fill_monitor():
             
             if positions:
                 for p in positions:
-                    if p.contract == SYMBOL:  # ← 이 줄 추가
+                    if p.contract == SYMBOL:  # ⭐ contract 필터링
                         size_dec = Decimal(str(p.size))
                         if size_dec > 0:
                             long_size = size_dec
@@ -1248,26 +1251,46 @@ def fill_monitor():
                     else:
                         initialize_grid(current_price)
                 
-                # 임계값 초과 시 후속 헤징
+                # ⭐⭐⭐ 임계값 초과 시 후속 헤징 (수정된 버전)
                 threshold = current_balance * THRESHOLD_RATIO
                 
-                if long_value >= threshold and short_value < threshold:
-                    # 롱 주력
+                # 롱 주력일 때
+                if long_value >= threshold and short_value < threshold:  # ⭐ short_value로 수정!
+                    # 역방향(숏) 그리드 체결 시 -> 주력 방향(롱) 추가 진입
                     if short_size > prev_short_size:
-                        # 숏(역방향) 그리드 체결 -> 롱 추가 진입
-                        hedge_qty_ratio = max(long_size * Decimal("0.10"), current_balance * HEDGE_RATIO / current_price)
-                        hedge_qty = max(1, int(hedge_qty_ratio))
-                        log_debug("🔥 후속 헤징", f"롱 {hedge_qty}개 추가 (숏 그리드 체결)")
-                        place_hedge_order(SYMBOL, "long", current_price)
+                        hedge_qty = max(1, int(long_size * Decimal("0.10")))
+                        log_debug("🔥 후속 헤징", f"롱 {hedge_qty}개 추가 (역방향 숏 체결됨)")
+                        # ⭐ 주력 방향(롱) IOC 시장가 주문
+                        try:
+                            order = FuturesOrder(
+                                contract=SYMBOL,
+                                size=hedge_qty,  # ⭐ 양수 = 롱
+                                price="0",
+                                tif="ioc",
+                                reduce_only=False
+                            )
+                            api.create_futures_order(SETTLE, order)
+                        except:
+                            pass
                 
-                elif short_value >= threshold and long_value < threshold:
-                    # 숏 주력
+                # 숏 주력일 때
+                if short_value >= threshold and long_value < threshold:  # ⭐ long_value로 수정!
+                    # 역방향(롱) 그리드 체결 시 -> 주력 방향(숏) 추가 진입
                     if long_size > prev_long_size:
-                        # 롱(역방향) 그리드 체결 -> 숏 추가 진입
-                        hedge_qty_ratio = max(short_size * Decimal("0.10"), current_balance * HEDGE_RATIO / current_price)
-                        hedge_qty = max(1, int(hedge_qty_ratio))
-                        log_debug("🔥 후속 헤징", f"숏 {hedge_qty}개 추가 (롱 그리드 체결)")
-                        place_hedge_order(SYMBOL, "short", current_price)
+                        hedge_qty = max(1, int(short_size * Decimal("0.10")))
+                        log_debug("🔥 후속 헤징", f"숏 {hedge_qty}개 추가 (역방향 롱 체결됨)")
+                        # ⭐ 주력 방향(숏) IOC 시장가 주문
+                        try:
+                            order = FuturesOrder(
+                                contract=SYMBOL,
+                                size=-hedge_qty,  # ⭐ 음수 = 숏
+                                price="0",
+                                tif="ioc",
+                                reduce_only=False
+                            )
+                            api.create_futures_order(SETTLE, order)
+                        except:
+                            pass
                 
                 # 이전 값 업데이트
                 prev_long_size = long_size
@@ -1276,7 +1299,6 @@ def fill_monitor():
         except Exception as e:
             log_debug("❌ 체결 모니터 오류", str(e))
             time.sleep(1)
-
 
 
 # =============================================================================
