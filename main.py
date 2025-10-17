@@ -1253,14 +1253,13 @@ def fill_monitor():
 def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_value, short_value, threshold):
     """헤징 처리"""
     
-    # ⭐ 임계값 미만: 기본 헤징 (첫 진입부터!)
+    # ⭐ 임계값 미만: 그리드 취소 → 헤징 진입
     if long_value < threshold and short_value < threshold:
         # 롱 체결 → 그리드 취소 + 숏 헤징
         if long_size > prev_long_size:
-            cancel_grid_orders(SYMBOL)
+            cancel_grid_orders(SYMBOL)  # ⭐⭐⭐ 즉시 취소!
             time.sleep(0.3)
             
-            # ⭐⭐⭐ 첫 진입부터 헤징!
             hedge_qty = calculate_base_quantity()
             log_debug("🔥 기본 헤징", f"숏 {hedge_qty}개 (시장가)")
             try:
@@ -1279,10 +1278,9 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
         
         # 숏 체결 → 그리드 취소 + 롱 헤징
         if short_size > prev_short_size:
-            cancel_grid_orders(SYMBOL)
+            cancel_grid_orders(SYMBOL)  # ⭐⭐⭐ 즉시 취소!
             time.sleep(0.3)
             
-            # ⭐⭐⭐ 첫 진입부터 헤징!
             hedge_qty = calculate_base_quantity()
             log_debug("🔥 기본 헤징", f"롱 {hedge_qty}개 (시장가)")
             try:
@@ -1301,10 +1299,9 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
         
         return False
     
-    # ⭐ 임계값 초과: 후속 헤징 + 동반 청산 (그리드는 유지!)
-    # 롱 주력일 때
+    # ⭐ 임계값 초과: 후속 헤징 + 동반 청산
+    # 롱 주력
     if long_value >= threshold and short_value < threshold:
-        # 역방향(숏) 체결 → 주력(롱) 10% 추가
         if short_size > prev_short_size:
             hedge_qty = max(1, int(long_size * Decimal("0.10")))
             log_debug("🔥 후속 헤징", f"롱 {hedge_qty}개")
@@ -1318,11 +1315,10 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
                 )
                 api.create_futures_order(SETTLE, order)
                 time.sleep(0.5)
-                cancel_grid_orders(SYMBOL)
+                cancel_grid_orders(SYMBOL)  # ⭐ 헤징 후 취소
             except:
                 pass
         
-        # 주력(롱) TP 체결 → 역방향(숏) 20% 청산
         if long_size < prev_long_size and short_size > 0:
             close_qty = max(1, int(short_size * COUNTER_CLOSE_RATIO))
             log_debug("🔥 동반 청산", f"숏 {close_qty}개")
@@ -1338,9 +1334,8 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
             except:
                 pass
     
-    # 숏 주력일 때
+    # 숏 주력
     if short_value >= threshold and long_value < threshold:
-        # 역방향(롱) 체결 → 주력(숏) 10% 추가
         if long_size > prev_long_size:
             hedge_qty = max(1, int(short_size * Decimal("0.10")))
             log_debug("🔥 후속 헤징", f"숏 {hedge_qty}개")
@@ -1354,11 +1349,10 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
                 )
                 api.create_futures_order(SETTLE, order)
                 time.sleep(0.5)
-                cancel_grid_orders(SYMBOL)
+                cancel_grid_orders(SYMBOL)  # ⭐ 헤징 후 취소
             except:
                 pass
         
-        # 주력(숏) TP 체결 → 역방향(롱) 20% 청산
         if short_size < prev_short_size and long_size > 0:
             close_qty = max(1, int(long_size * COUNTER_CLOSE_RATIO))
             log_debug("🔥 동반 청산", f"롱 {close_qty}개")
@@ -1375,7 +1369,6 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
                 pass
     
     return False
-
 
 def track_threshold_entries(long_size, short_size, prev_long_size, prev_short_size, long_price, short_price, long_value, short_value, threshold):
     """임계값 초과 진입 추적"""
