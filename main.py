@@ -973,10 +973,10 @@ def initialize_grid(current_price, skip_check=False):
     
     # ⭐⭐⭐ 최신 포지션 강제 동기화 (중복 진입 방지)
     try:
-        positions = api.list_positions(SETTLE, SYMBOL)
+        positions = api.list_positions(SETTLE)  # ⭐ settle만 전달
         if positions:
             for p in positions:
-                if abs(float(p.size)) > 0:
+                if p.contract == SYMBOL and abs(float(p.size)) > 0:
                     side = "long" if float(p.size) > 0 else "short"
                     with position_lock:
                         position_state[SYMBOL][side]["size"] = abs(Decimal(str(p.size)))
@@ -1026,7 +1026,7 @@ def initialize_grid(current_price, skip_check=False):
         # ⚡⚡⚡ 최대 포지션 제한 체크 - 그리드 차단만
         max_position_value = current_balance * MAX_POSITION_RATIO
         if long_value >= max_position_value or short_value >= max_position_value:
-            log_debug("⚠️ 그리드 차단", f"최대 포지션 도달 - TP 대기 중 (롱:{long_value:.2f} 숏:{short_value:.2f})")
+            log_debug("⚠️ 그리드 차단", f"최대 포지션 도달 - TP 대기 중")
             return
         
         # ⚡⚡⚡ 양방향 포지션 존재 시 그리드 생성 금지 (최우선)
@@ -1035,41 +1035,36 @@ def initialize_grid(current_price, skip_check=False):
             return
         
         # ⚡ 임계값 초과 시: 역방향 그리드 30%
-        if long_value >= threshold and short_value < threshold:
+        if long_value >= threshold and short_size == 0:
             # 롱이 주력 -> 숏 그리드 생성
             counter_qty = int(long_size * COUNTER_ENTRY_RATIO)
             if counter_qty > 0:
                 log_debug("⚡ 역방향 그리드", f"숏 {counter_qty}개 생성 (롱 주력)")
-                place_grid_order(SYMBOL, "short", counter_qty, current_price)
+                grid_price = current_price * (Decimal("1") + GRID_GAP_PCT)
+                place_grid_order(SYMBOL, "short", counter_qty, grid_price)
             return
         
-        if short_value >= threshold and long_value < threshold:
+        if short_value >= threshold and long_size == 0:
             # 숏이 주력 -> 롱 그리드 생성
             counter_qty = int(short_size * COUNTER_ENTRY_RATIO)
             if counter_qty > 0:
                 log_debug("⚡ 역방향 그리드", f"롱 {counter_qty}개 생성 (숏 주력)")
-                place_grid_order(SYMBOL, "long", counter_qty, current_price)
+                grid_price = current_price * (Decimal("1") - GRID_GAP_PCT)
+                place_grid_order(SYMBOL, "long", counter_qty, grid_price)
             return
         
         # ⚡ 한쪽만 있을 때: 양방향 그리드 1개씩 생성
         if long_size > 0 or short_size > 0:
             log_debug("⚡ 양방향 그리드", "한쪽만 존재 -> 양방향 생성")
-            place_grid_order(SYMBOL, "long", grid_price_long, base_qty)
-            place_grid_order(SYMBOL, "short", grid_price_short, base_qty)
-            return
-        
-        # ⭐ 포지션 없을 때: 초기 양방향 그리드
-        if long_size == 0 and short_size == 0:
-            log_debug("⚪ 포지션 없음", "현재가 기준 양방향 그리드 생성")
-            
+            base_qty = 1
             grid_price_long = current_price * (Decimal("1") - GRID_GAP_PCT)
             grid_price_short = current_price * (Decimal("1") + GRID_GAP_PCT)
-            
-            base_qty = calculate_base_quantity()
-            
             place_grid_order(SYMBOL, "long", base_qty, grid_price_long)
             place_grid_order(SYMBOL, "short", base_qty, grid_price_short)
             return
+        
+        # 포지션 없음
+        log_debug("⚪ 포지션 없음", "그리드 생성 안 함")
             
     finally:
         last_grid_time = now
@@ -1172,7 +1167,7 @@ def fill_monitor():
             current_price = Decimal(str(ticker[0].last))
             
             # 포지션 조회
-            positions = api.list_positions(SETTLE, SYMBOL)
+            positions = api.list_positions(SETTLE)
             
             long_size = Decimal("0")
             short_size = Decimal("0")
@@ -1181,13 +1176,14 @@ def fill_monitor():
             
             if positions:
                 for p in positions:
-                    size_dec = Decimal(str(p.size))
-                    if size_dec > 0:
-                        long_size = size_dec
-                        long_price = abs(Decimal(str(p.entry_price)))
-                    elif size_dec < 0:
-                        short_size = abs(size_dec)
-                        short_price = abs(Decimal(str(p.entry_price)))
+                    if p.contract == SYMBOL:  # ← 이 줄 추가
+                        size_dec = Decimal(str(p.size))
+                        if size_dec > 0:
+                            long_size = size_dec
+                            long_price = abs(Decimal(str(p.entry_price)))
+                        elif size_dec < 0:
+                            short_size = abs(size_dec)
+                            short_price = abs(Decimal(str(p.entry_price)))
             
             # position_state 업데이트
             with position_lock:
