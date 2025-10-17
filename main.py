@@ -976,7 +976,7 @@ def initialize_grid(current_price, skip_check=False):
     
     # ⭐⭐⭐ 최신 포지션 강제 동기화 (중복 진입 방지)
     try:
-        positions = api.list_positions(SETTLE)  # ⭐ settle만 전달
+        positions = api.list_positions(SETTLE)
         if positions:
             for p in positions:
                 if p.contract == SYMBOL and abs(float(p.size)) > 0:
@@ -1056,18 +1056,23 @@ def initialize_grid(current_price, skip_check=False):
                 place_grid_order(SYMBOL, "long", counter_qty, grid_price)
             return
         
-        # ⚡ 한쪽만 있을 때: 양방향 그리드 1개씩 생성
+        # ⚡ 한쪽만 있을 때: 양방향 그리드 생성
         if long_size > 0 or short_size > 0:
-            log_debug("⚡ 양방향 그리드", "한쪽만 존재 -> 양방향 생성")
-            base_qty = 1
+            log_debug("⚡ 양방향 그리드", "한쪽만 존재 -> 양방향 그리드 생성")
+            base_qty = calculate_base_quantity()  # ⭐ OBV MACD 기반 수량 계산
             grid_price_long = current_price * (Decimal("1") - GRID_GAP_PCT)
             grid_price_short = current_price * (Decimal("1") + GRID_GAP_PCT)
             place_grid_order(SYMBOL, "long", base_qty, grid_price_long)
             place_grid_order(SYMBOL, "short", base_qty, grid_price_short)
             return
         
-        # 포지션 없음
-        log_debug("⚪ 포지션 없음", "그리드 생성 안 함")
+        # ⭐⭐⭐ 포지션 없을 때: 초기 양방향 그리드
+        log_debug("⚪ 포지션 없음", "현재가 기준 양방향 그리드 생성")
+        base_qty = calculate_base_quantity()  # ⭐ OBV MACD 기반 수량 계산
+        grid_price_long = current_price * (Decimal("1") - GRID_GAP_PCT)
+        grid_price_short = current_price * (Decimal("1") + GRID_GAP_PCT)
+        place_grid_order(SYMBOL, "long", base_qty, grid_price_long)
+        place_grid_order(SYMBOL, "short", base_qty, grid_price_short)
             
     finally:
         last_grid_time = now
