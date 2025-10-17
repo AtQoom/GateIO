@@ -696,7 +696,7 @@ def cancel_all_orders(symbol):
     except:
         pass
 
-def place_grid_order(symbol, side, price, qty):
+def place_grid_order(symbol, side, qty, price):  # ⭐ qty와 price 순서 변경
     """그리드 주문 생성 및 ID 저장"""
     try:
         result = place_limit_order(symbol, side, price, qty, reduce_only=False)
