@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 SETTLE = "usdt"
 SYMBOL = "ONDO_USDT"
 CONTRACT_SIZE = Decimal("1")
-BASE_QTY = Decimal("0.2")
+BASE_QTY = Decimal("0.1")
 
 # ⭐ 환경변수로 모든 설정 관리
 GRID_GAP_PCT = Decimal(os.environ.get("GRID_GAP_PCT", "0.12")) / Decimal("100")
@@ -52,8 +52,10 @@ THRESHOLD_RATIO = Decimal(os.environ.get("THRESHOLD_RATIO", "0.8"))
 BALANCE_UPDATE_INTERVAL = int(os.environ.get("BALANCE_UPDATE_INTERVAL", "3600"))
 
 # ⭐⭐⭐ 새로운 설정
-COUNTER_POSITION_RATIO = Decimal("0.30")
-COUNTER_CLOSE_RATIO = Decimal("0.20")
+COUNTER_POSITION_RATIO = Decimal("0.30")  # 역방향 그리드 비율
+COUNTER_CLOSE_RATIO = Decimal("0.20")     # 동반 청산 비율
+COUNTER_ENTRY_RATIO = Decimal("0.30")     # ⭐ 추가! 역방향 진입 비율
+max_position_locked = {"long": False, "short": False}  # ⭐ 추가! 500% 제한 플래그
 
 # API 설정
 API_KEY = os.environ.get("API_KEY", "")
@@ -964,7 +966,22 @@ def refresh_tp_orders(symbol):
 # =============================================================================
 # 그리드 관리 (initialize_grid 함수 - 비주력 헤징 로직 추가)
 # =============================================================================
-def initialize_grid(entry_price, skip_check=False):
+def initialize_grid(current_price, skip_check=False):
+    """그리드 초기화 (중복 방지 + 양방향 체크 강화)"""
+    global last_grid_time
+    
+    # ⭐ 최신 포지션 상태 강제 업데이트 (중복 진입 방지)
+    try:
+        positions = api.list_all_positions(SETTLE, contract=SYMBOL)
+        if positions:
+            for p in positions:
+                side = "long" if p.size > 0 else "short"
+                with position_lock:
+                    position_state[SYMBOL][side]["size"] = abs(Decimal(str(p.size)))
+                    position_state[SYMBOL][side]["price"] = abs(Decimal(str(p.entry_price)))
+    except:
+        pass
+
     """그리드 초기화 - 중복 생성 완전 차단 + 500% 제한"""
     global grid_creation_time
     
@@ -1007,10 +1024,10 @@ def initialize_grid(entry_price, skip_check=False):
             long_value = long_size * long_price if long_price > 0 else Decimal("0")
             short_value = short_size * short_price if short_price > 0 else Decimal("0")
             
-            # ⚡ 500% 최대 포지션 제한 체크
+            # ⚡ 500% 최대 포지션 제한 체크 - 그리드 생성 차단만
             max_position_value = current_balance * MAX_POSITION_RATIO
             if long_value >= max_position_value or short_value >= max_position_value:
-                log_debug("⚠️ 그리드 스킵", f"최대 포지션 초과 (롱:{long_value:.2f} 숏:{short_value:.2f})")
+                log_debug("⚠️ 그리드 차단", f"최대 포지션 도달 - TP 대기 중")
                 return
             
             # ============================================================
@@ -1062,8 +1079,19 @@ def initialize_grid(entry_price, skip_check=False):
                 grid_creation_time = now
                 return
             
-            # 포지션 없음
-            log_debug("⚪ 포지션 없음", "그리드 생성 안 함")
+            # ⭐ 포지션 없음 - 현재가 기준 양방향 그리드 1개씩
+            log_debug("⚪ 포지션 없음", "현재가 기준 양방향 그리드 생성")
+
+            grid_price_long = current_price * (Decimal("1") - GRID_GAP_PCT)
+            grid_price_short = current_price * (Decimal("1") + GRID_GAP_PCT)
+
+            base_qty = calculate_base_quantity()
+
+            place_grid_order(SYMBOL, "long", grid_price_long, base_qty)
+            place_grid_order(SYMBOL, "short", grid_price_short, base_qty)
+
+            grid_creation_time = now
+            return
             
         finally:
             grid_lock.release()
@@ -1204,19 +1232,35 @@ def fill_monitor():
                 long_value = long_size * long_price if long_price > 0 else Decimal("0")
                 short_value = short_size * short_price if short_price > 0 else Decimal("0")
                 
-                # 긴급 청산
-                if long_value >= max_position_value:
-                    log_debug("🚨 긴급 청산", f"롱 500% 초과 ({long_value:.2f})")
-                    emergency_close_position(SYMBOL, "long")
-                    prev_long_size = Decimal("0")
-                    prev_short_size = Decimal("0")
+                # ⭐ 500% 제한: 청산 대신 진입 차단
+                if long_value >= max_position_value and not max_position_locked["long"]:
+                    log_debug("⚠️ 최대 포지션", f"롱 500% 도달 - 추가 진입 차단")
+                    max_position_locked["long"] = True
+                    cancel_grid_orders(SYMBOL)  # 그리드만 취소 (TP는 유지)
+
+                if short_value >= max_position_value and not max_position_locked["short"]:
+                    log_debug("⚠️ 최대 포지션", f"숏 500% 도달 - 추가 진입 차단")
+                    max_position_locked["short"] = True
+                    cancel_grid_orders(SYMBOL)  # 그리드만 취소 (TP는 유지)
+
+                # TP로 포지션 감소 시 잠금 해제
+                if long_value < max_position_value and max_position_locked["long"]:
+                    log_debug("✅ 잠금 해제", "롱 500% 미만 복귀")
+                    max_position_locked["long"] = False
+
+                if short_value < max_position_value and max_position_locked["short"]:
+                    log_debug("✅ 잠금 해제", "숏 500% 미만 복귀")
+                    max_position_locked["short"] = False
+
+                # 잠금 상태에서는 진입 로직 스킵
+                if max_position_locked["long"] and long_size > prev_long_size:
+                    log_debug("🚫 진입 차단", "롱 최대 포지션 잠금 중")
+                    prev_long_size = long_size
                     continue
-                
-                if short_value >= max_position_value:
-                    log_debug("🚨 긴급 청산", f"숏 500% 초과 ({short_value:.2f})")
-                    emergency_close_position(SYMBOL, "short")
-                    prev_long_size = Decimal("0")
-                    prev_short_size = Decimal("0")
+
+                if max_position_locked["short"] and short_size > prev_short_size:
+                    log_debug("🚫 진입 차단", "숏 최대 포지션 잠금 중")
+                    prev_short_size = short_size
                     continue
                 
                 # 임계값 확인
@@ -1460,40 +1504,6 @@ def close_counter_on_individual_tp(symbol, main_side, tp_qty):
     except Exception as e:
         log_debug("❌ 동반 청산 오류", str(e), exc_info=True)
 
-
-# =============================================================================
-# emergency_close
-# =============================================================================
-
-def emergency_close_position(symbol, side):
-    """긴급 청산 - 500% 초과 시 시장가 전체 청산"""
-    try:
-        with position_lock:
-            pos = position_state.get(symbol, {})
-            size = pos.get(side, {}).get("size", Decimal("0"))
-        
-        if size <= 0:
-            return
-        
-        log_debug("🚨 긴급 청산", f"{side.upper()} {size}개 전체 시장가")
-        
-        order_size = -int(size) if side == "long" else int(size)
-        order = FuturesOrder(
-            contract=symbol,
-            size=order_size,
-            price="0",
-            tif='ioc',
-            reduce_only=True
-        )
-        
-        api.create_futures_order(SETTLE, order)
-        
-        # 모든 주문 취소
-        cancel_grid_orders(symbol)
-        cancel_tp_orders(symbol)
-        
-    except Exception as e:
-        log_debug("❌ 긴급 청산 오류", str(e), exc_info=True)
 
 
 # =============================================================================
