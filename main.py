@@ -1034,7 +1034,7 @@ def refresh_tp_orders(symbol):
 # 그리드 관리 (initialize_grid 함수 - 비주력 헤징 로직 추가)
 # =============================================================================
 def initialize_grid(entry_price, skip_check=False):
-    """그리드 초기화 (완전 재설계)"""
+    """그리드 초기화 (현재가 기준 양방향)"""
     global last_grid_time
     
     # ⭐ 포지션 강제 동기화
@@ -1066,6 +1066,12 @@ def initialize_grid(entry_price, skip_check=False):
                 return
         except:
             pass
+        
+        # ⭐⭐⭐ 현재가 조회
+        ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+        if not ticker:
+            return
+        current_price = Decimal(str(ticker[0].last))
         
         # 현재 포지션
         with position_lock:
@@ -1101,19 +1107,18 @@ def initialize_grid(entry_price, skip_check=False):
             # 역방향 그리드 30%
             counter_qty = max(1, int(main_size * COUNTER_ENTRY_RATIO))
             counter_side = "short" if is_long_main else "long"
-            counter_price = entry_price * (Decimal("1") + GRID_GAP_PCT if is_long_main else Decimal("1") - GRID_GAP_PCT)
+            counter_price = current_price * (Decimal("1") + GRID_GAP_PCT if is_long_main else Decimal("1") - GRID_GAP_PCT)
             
             log_debug("⚡ 역방향 그리드", f"{counter_side.upper()} {counter_qty}개 (주력 {main_size})")
             place_grid_order(SYMBOL, counter_side, counter_qty, counter_price)
             return
         
-        # ⭐ 임계값 미만 (기본 모드)
-        # 포지션 0개 또는 1개: 양방향 그리드
+        # ⭐⭐⭐ 임계값 미만 (기본 모드) - 현재가 기준 양방향!
         base_qty = calculate_base_quantity()  # 자산의 10%
-        grid_price_long = entry_price * (Decimal("1") - GRID_GAP_PCT)
-        grid_price_short = entry_price * (Decimal("1") + GRID_GAP_PCT)
+        grid_price_long = current_price * (Decimal("1") - GRID_GAP_PCT)   # 현재가 - 0.12%
+        grid_price_short = current_price * (Decimal("1") + GRID_GAP_PCT)  # 현재가 + 0.12%
         
-        log_debug("⚡ 양방향 그리드", f"{base_qty}개씩 생성")
+        log_debug("⚡ 양방향 그리드", f"{base_qty}개씩 (현재가: {current_price})")
         place_grid_order(SYMBOL, "long", base_qty, grid_price_long)
         place_grid_order(SYMBOL, "short", base_qty, grid_price_short)
             
