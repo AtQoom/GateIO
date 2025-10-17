@@ -1252,12 +1252,12 @@ def fill_monitor():
             time.sleep(1)
 
 def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_value, short_value, threshold):
-    """헤징 처리 (임계값 미만: 기본 / 임계값 초과: 후속+동반청산)"""
+    """헤징 처리"""
     
     # ⭐ 임계값 미만: 기본 헤징
     if long_value < threshold and short_value < threshold:
         # 롱 체결 → 숏 헤징
-        if long_size > prev_long_size:
+        if long_size > prev_long_size and prev_long_size > 0:  # ⭐ 기존 포지션 있을 때만
             hedge_qty = calculate_base_quantity()
             log_debug("🔥 기본 헤징", f"숏 {hedge_qty}개")
             try:
@@ -1272,11 +1272,12 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
                 time.sleep(0.5)
                 cancel_grid_orders(SYMBOL)
                 log_debug("🔄 그리드 취소", "헤징 완료")
+                return True  # ⭐⭐⭐ 헤징 완료 신호
             except:
                 pass
         
         # 숏 체결 → 롱 헤징
-        if short_size > prev_short_size:
+        if short_size > prev_short_size and prev_short_size > 0:  # ⭐ 기존 포지션 있을 때만
             hedge_qty = calculate_base_quantity()
             log_debug("🔥 기본 헤징", f"롱 {hedge_qty}개")
             try:
@@ -1291,9 +1292,10 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
                 time.sleep(0.5)
                 cancel_grid_orders(SYMBOL)
                 log_debug("🔄 그리드 취소", "헤징 완료")
+                return True  # ⭐⭐⭐ 헤징 완료 신호
             except:
                 pass
-        return
+        return False  # ⭐ 헤징 안 함
     
     # ⭐ 임계값 초과: 후속 헤징 + 동반 청산
     # 롱 주력일 때
