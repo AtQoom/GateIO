@@ -973,7 +973,7 @@ def initialize_grid(current_price, skip_check=False):
     
     # ⭐⭐⭐ 최신 포지션 강제 동기화 (중복 진입 방지)
     try:
-        positions = api.list_all_positions(SETTLE, contract=SYMBOL)
+        positions = api.list_positions(SETTLE, contract=SYMBOL)
         if positions:
             for p in positions:
                 if abs(float(p.size)) > 0:
@@ -1172,7 +1172,7 @@ def fill_monitor():
             current_price = Decimal(str(ticker[0].last))
             
             # 포지션 조회
-            positions = api.list_all_positions(SETTLE, contract=SYMBOL)
+            positions = api.list_positions(SETTLE, contract=SYMBOL)
             
             long_size = Decimal("0")
             short_size = Decimal("0")
