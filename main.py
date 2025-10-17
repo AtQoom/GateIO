@@ -1237,8 +1237,8 @@ def fill_monitor():
                 handle_hedging(long_size, short_size, prev_long_size, prev_short_size,
                              long_value, short_value, threshold)
                 
-                # 3. 그리드 생성 (감소 시만)
-                if long_size < prev_long_size or short_size < prev_short_size:
+                # 3. 그리드 생성 (헤징 안 했고, 감소 시만)
+                if not hedged and (long_size < prev_long_size or short_size < prev_short_size):
                     if long_size > 0 and short_size > 0:
                         log_debug("🚫 그리드 차단", "양방향")
                     else:
