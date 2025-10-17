@@ -973,7 +973,7 @@ def initialize_grid(current_price, skip_check=False):
     
     # ⭐⭐⭐ 최신 포지션 강제 동기화 (중복 진입 방지)
     try:
-        positions = api.list_positions(SETTLE, contract=SYMBOL)
+        positions = api.list_positions(SETTLE, SYMBOL)
         if positions:
             for p in positions:
                 if abs(float(p.size)) > 0:
@@ -1054,8 +1054,8 @@ def initialize_grid(current_price, skip_check=False):
         # ⚡ 한쪽만 있을 때: 양방향 그리드 1개씩 생성
         if long_size > 0 or short_size > 0:
             log_debug("⚡ 양방향 그리드", "한쪽만 존재 -> 양방향 생성")
-            place_grid_order(SYMBOL, "long", 1, current_price)
-            place_grid_order(SYMBOL, "short", 1, current_price)
+            place_grid_order(SYMBOL, "long", grid_price_long, base_qty)
+            place_grid_order(SYMBOL, "short", grid_price_short, base_qty)
             return
         
         # ⭐ 포지션 없을 때: 초기 양방향 그리드
@@ -1172,7 +1172,7 @@ def fill_monitor():
             current_price = Decimal(str(ticker[0].last))
             
             # 포지션 조회
-            positions = api.list_positions(SETTLE, contract=SYMBOL)
+            positions = api.list_positions(SETTLE, SYMBOL)
             
             long_size = Decimal("0")
             short_size = Decimal("0")
