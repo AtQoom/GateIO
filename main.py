@@ -922,15 +922,18 @@ def create_short_tp_orders(symbol, short_size, short_price, short_value, thresho
 def refresh_tp_orders(symbol):
     """TP 주문 재생성"""
     try:
-        # 기존 TP 취소
+        # ⭐⭐⭐ 기존 TP 완전 삭제 (0.5초 대기)
         try:
             orders = api.list_futures_orders(SETTLE, contract=symbol, status='open')
             tp_list = [o for o in orders if o.is_reduce_only]
             if tp_list:
                 for tp in tp_list:
-                    api.cancel_futures_order(SETTLE, tp.id)
+                    try:
+                        api.cancel_futures_order(SETTLE, tp.id)
+                    except:
+                        pass
                 log_debug("🔄 TP 취소", f"{len(tp_list)}개")
-                time.sleep(0.3)
+                time.sleep(0.5)  # ⭐ 0.3 → 0.5초로 증가!
         except:
             pass
         
@@ -950,18 +953,21 @@ def refresh_tp_orders(symbol):
             long_price = pos.get("long", {}).get("price", Decimal("0"))
             short_price = pos.get("short", {}).get("price", Decimal("0"))
         
+        # ⭐⭐⭐ 포지션 없으면 종료
+        if long_size == 0 and short_size == 0:
+            return
+        
         long_value = long_size * long_price if long_price > 0 else Decimal("0")
         short_value = short_size * short_price if short_price > 0 else Decimal("0")
         
-        # ⭐ 롱 TP 생성
+        # 롱 TP 생성
         create_long_tp_orders(symbol, long_size, long_price, long_value, threshold)
         
-        # ⭐ 숏 TP 생성
+        # 숏 TP 생성
         create_short_tp_orders(symbol, short_size, short_price, short_value, threshold)
         
     except Exception as e:
         log_debug("❌ TP 재생성", str(e))
-
 
 
 # =============================================================================
