@@ -696,8 +696,8 @@ def cancel_all_orders(symbol):
     except:
         pass
 
-def place_grid_order(symbol, side, qty, price):  # ⭐ qty, price 순서로 변경!
-    """그리드 주문 생성 (0.12% 간격)"""
+def place_grid_order(symbol, side, qty, price):
+    """그리드 주문 생성 (추적 포함)"""
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=symbol)
         if not ticker:
@@ -706,10 +706,9 @@ def place_grid_order(symbol, side, qty, price):  # ⭐ qty, price 순서로 변�
         current_price = Decimal(str(ticker[0].last))
         price_dec = Decimal(str(price))
         
-        # 가격 검증
         deviation = abs(price_dec - current_price) / current_price
         if deviation > Decimal("0.10"):
-            log_debug("⚠️ 가격 이탈", f"{side.upper()} {price} (현재가: {current_price})")
+            log_debug("⚠️ 가격 이탈", f"{side.upper()} {price}")
             return
         
         size = qty if side == "long" else -qty
@@ -723,6 +722,18 @@ def place_grid_order(symbol, side, qty, price):  # ⭐ qty, price 순서로 변�
         )
         
         result = api.create_futures_order(SETTLE, order)
+        
+        # ⭐⭐⭐ 그리드 주문 추적
+        if result and hasattr(result, 'id'):
+            if symbol not in grid_orders:
+                grid_orders[symbol] = {"long": [], "short": []}
+            
+            grid_orders[symbol][side].append({
+                "order_id": result.id,
+                "price": float(price),
+                "qty": int(qty)
+            })
+        
         log_debug("🟢 그리드 생성", f"{side.upper()} {abs(qty)}개 @ {price}")
         return result
         
@@ -862,9 +873,7 @@ def create_long_tp_orders(symbol, long_size, long_price, long_value, threshold):
     if long_size <= 0 or long_price <= 0:
         return
     
-    # 임계값 초과
     if long_value >= threshold:
-        # 개별 TP
         individual_qty_total = sum(Decimal(str(e['qty'])) 
                                    for e in post_threshold_entries.get(symbol, {}).get('long', []))
         
@@ -872,18 +881,16 @@ def create_long_tp_orders(symbol, long_size, long_price, long_value, threshold):
             entry_price = entry_info["price"]
             entry_qty = int(entry_info["qty"])
             tp_price = entry_price * (Decimal("1") + TP_GAP_PCT)
-            create_tp_order(symbol, "long", entry_qty, tp_price, "개별")
+            create_tp_order(symbol, "long", entry_qty, tp_price, "individual")  # ✅
         
-        # 평단가 TP
         average_qty = long_size - individual_qty_total
         if average_qty > 0:
             tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
-            create_tp_order(symbol, "long", average_qty, tp_price, "평단가")
+            create_tp_order(symbol, "long", average_qty, tp_price, "average")  # ✅
     
-    # 임계값 미만
     else:
         tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
-        create_tp_order(symbol, "long", long_size, tp_price, "평단가")
+        create_tp_order(symbol, "long", long_size, tp_price, "average")  # ✅
 
 
 def create_short_tp_orders(symbol, short_size, short_price, short_value, threshold):
@@ -891,9 +898,7 @@ def create_short_tp_orders(symbol, short_size, short_price, short_value, thresho
     if short_size <= 0 or short_price <= 0:
         return
     
-    # 임계값 초과
     if short_value >= threshold:
-        # 개별 TP
         individual_qty_total = sum(Decimal(str(e['qty'])) 
                                    for e in post_threshold_entries.get(symbol, {}).get('short', []))
         
@@ -901,18 +906,16 @@ def create_short_tp_orders(symbol, short_size, short_price, short_value, thresho
             entry_price = entry_info["price"]
             entry_qty = int(entry_info["qty"])
             tp_price = entry_price * (Decimal("1") - TP_GAP_PCT)
-            create_tp_order(symbol, "short", entry_qty, tp_price, "개별")
+            create_tp_order(symbol, "short", entry_qty, tp_price, "individual")  # ✅
         
-        # 평단가 TP
         average_qty = short_size - individual_qty_total
         if average_qty > 0:
             tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
-            create_tp_order(symbol, "short", average_qty, tp_price, "평단가")
+            create_tp_order(symbol, "short", average_qty, tp_price, "average")  # ✅
     
-    # 임계값 미만
     else:
         tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
-        create_tp_order(symbol, "short", short_size, tp_price, "평단가")
+        create_tp_order(symbol, "short", short_size, tp_price, "average")  # ✅
 
 
 # =============================================================================
@@ -998,19 +1001,9 @@ def initialize_grid(entry_price, skip_check=False):
         return
     
     try:
-        # ⭐⭐⭐ 기존 그리드 확인 (양방향 2개 있으면 스킵)
-        try:
-            existing_orders = [o for o in api.list_futures_orders(SETTLE, SYMBOL, status='open')
-                               if not o.is_reduce_only]
-            
-            # ⭐ 양방향 그리드 확인
-            has_long_grid = any(o.size > 0 for o in existing_orders)
-            has_short_grid = any(o.size < 0 for o in existing_orders)
-            
-            if has_long_grid and has_short_grid:
-                return  # 양방향 모두 있으면 스킵
-        except:
-            pass
+        # ⭐⭐⭐ 기존 그리드 전체 취소 (중복 방지!)
+        cancel_grid_orders(SYMBOL)
+        time.sleep(0.3)
         
         # 현재가 조회
         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
@@ -1047,51 +1040,43 @@ def initialize_grid(entry_price, skip_check=False):
         if long_size == 0 and short_size == 0:
             return
         
-        # ⭐⭐⭐ 임계값 초과 (공격 모드) - 양방향 그리드 (비대칭)
+        # ⭐ 가격 계산 (항상 양방향!)
+        grid_price_long = current_price * (Decimal("1") - GRID_GAP_PCT)
+        grid_price_short = current_price * (Decimal("1") + GRID_GAP_PCT)
+        
+        # ⭐ 임계값 초과 (비대칭 수량)
         if long_value >= threshold or short_value >= threshold:
             is_long_main = long_value >= threshold
             main_size = long_size if is_long_main else short_size
             
-            # ⭐ 역방향 30%, 동방향 10%
             counter_qty = max(1, int(main_size * COUNTER_ENTRY_RATIO))  # 30%
             same_qty = max(1, int(main_size * Decimal("0.10")))         # 10%
             
-            # 가격 계산
-            grid_price_long = current_price * (Decimal("1") - GRID_GAP_PCT)
-            grid_price_short = current_price * (Decimal("1") + GRID_GAP_PCT)
-            
             if is_long_main:
-                # 롱 주력 → 숏 그리드 30%, 롱 그리드 10%
-                log_debug("⚡ 비대칭 그리드", f"숏:{counter_qty}@{float(grid_price_short):.4f} 롱:{same_qty}@{float(grid_price_long):.4f}")
+                log_debug("⚡ 비대칭 그리드", f"숏:{counter_qty} 롱:{same_qty}")
                 place_grid_order(SYMBOL, "short", counter_qty, float(grid_price_short))
                 time.sleep(0.1)
                 place_grid_order(SYMBOL, "long", same_qty, float(grid_price_long))
             else:
-                # 숏 주력 → 롱 그리드 30%, 숏 그리드 10%
-                log_debug("⚡ 비대칭 그리드", f"롱:{counter_qty}@{float(grid_price_long):.4f} 숏:{same_qty}@{float(grid_price_short):.4f}")
+                log_debug("⚡ 비대칭 그리드", f"롱:{counter_qty} 숏:{same_qty}")
                 place_grid_order(SYMBOL, "long", counter_qty, float(grid_price_long))
                 time.sleep(0.1)
                 place_grid_order(SYMBOL, "short", same_qty, float(grid_price_short))
+        else:
+            # ⭐ 임계값 미만 (동일 수량)
+            base_qty = calculate_base_quantity()
             
-            last_grid_time = now
-            return
-        
-        # ⭐⭐⭐ 임계값 미만 (기본 모드) - 양방향 동일 수량
-        base_qty = calculate_base_quantity()
-        
-        grid_price_long = current_price * (Decimal("1") - GRID_GAP_PCT)
-        grid_price_short = current_price * (Decimal("1") + GRID_GAP_PCT)
-        
-        log_debug("⚡ 양방향 그리드", f"{base_qty}@롱:{float(grid_price_long):.4f} 숏:{float(grid_price_short):.4f}")
-        place_grid_order(SYMBOL, "long", base_qty, float(grid_price_long))
-        time.sleep(0.1)
-        place_grid_order(SYMBOL, "short", base_qty, float(grid_price_short))
+            log_debug("⚡ 양방향 그리드", f"{base_qty}개씩")
+            place_grid_order(SYMBOL, "long", base_qty, float(grid_price_long))
+            time.sleep(0.1)
+            place_grid_order(SYMBOL, "short", base_qty, float(grid_price_short))
             
     except Exception as e:
         log_debug("❌ 그리드 오류", str(e))
     finally:
         last_grid_time = now
         grid_lock.release()
+
 
 def grid_fill_monitor():
     """⭐ 그리드 체결 감지 및 후속 헤징 실행"""
