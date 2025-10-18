@@ -192,37 +192,52 @@ def sync_position():
         log("❌", f"Position sync error: {e}")
 
 # =============================================================================
-# 주문 취소
+# 주문 취소 (수정됨)
 # =============================================================================
 def cancel_all_orders():
+    """모든 오픈 주문 취소 - 파라미터 중복 방지"""
     try:
-        orders = api.list_futures_orders(SETTLE, SYMBOL, status='open')
-        if not orders: return
+        # status를 위치 인자가 아닌 키워드 인자로 명시
+        orders = api.list_futures_orders(settle=SETTLE, contract=SYMBOL, status='open')
+        if not orders:
+            return
+        
         log("🗑️", f"Cancelling {len(orders)} open order(s)...")
         for order in orders:
             try:
-                api.cancel_futures_order(SETTLE, order.id)
+                api.cancel_futures_order(settle=SETTLE, order_id=str(order.id))
                 time.sleep(0.05)
-            except:
-                pass
+            except Exception as cancel_err:
+                log("⚠️", f"Cancel failed for {order.id}: {cancel_err}")
+        
+        # 전역 상태 초기화
         grid_orders[SYMBOL] = {"long": [], "short": []}
         average_tp_orders[SYMBOL] = {"long": None, "short": None}
+        
     except Exception as e:
         log("❌", f"Order cancellation error: {e}")
 
 def cancel_grid_only():
+    """진입 그리드만 취소 (TP 제외)"""
     try:
-        orders = api.list_futures_orders(SETTLE, SYMBOL, status='open')
+        orders = api.list_futures_orders(settle=SETTLE, contract=SYMBOL, status='open')
+        if not orders:
+            return
+        
         grid_orders_to_cancel = [o for o in orders if not o.is_reduce_only]
-        if not grid_orders_to_cancel: return
+        if not grid_orders_to_cancel:
+            return
+        
         log("🗑️", f"Cancelling {len(grid_orders_to_cancel)} grid order(s)...")
         for order in grid_orders_to_cancel:
             try:
-                api.cancel_futures_order(SETTLE, order.id)
+                api.cancel_futures_order(settle=SETTLE, order_id=str(order.id))
                 time.sleep(0.05)
-            except:
-                pass
+            except Exception as cancel_err:
+                log("⚠️", f"Grid cancel failed: {cancel_err}")
+        
         grid_orders[SYMBOL] = {"long": [], "short": []}
+        
     except Exception as e:
         log("❌", f"Grid cancellation error: {e}")
 
@@ -287,16 +302,52 @@ def is_above_threshold(side):
 # 주문 실행
 # =============================================================================
 def place_grid_order(side, price, qty):
+    """그리드 주문 생성 - 에러 처리 강화"""
     try:
-        size = qty if side == "long" else -qty
-        order = FuturesOrder(contract=SYMBOL, size=size, price=str(price), tif="gtc")
-        result = api.create_futures_order(SETTLE, order)
+        if qty <= 0:
+            log("⚠️", f"Invalid qty: {qty}")
+            return None
+        
+        if price <= 0:
+            log("⚠️", f"Invalid price: {price}")
+            return None
+        
+        # 가격을 4자리로 반올림
+        price_str = f"{float(price):.4f}"
+        size = int(qty) if side == "long" else -int(qty)
+        
+        log("📐", f"Creating grid: {side.upper()} size={size} @ {price_str}")
+        
+        order = FuturesOrder(
+            contract=SYMBOL,
+            size=size,
+            price=price_str,
+            tif="gtc"
+        )
+        
+        result = api.create_futures_order(settle=SETTLE, futures_order=order)
+        
         if result and hasattr(result, 'id'):
-            grid_orders[SYMBOL][side].append({"order_id": result.id, "price": float(price), "qty": int(qty)})
-            log("📐", f"Grid: {side.upper()} {qty} @ {price:.4f}")
+            grid_orders[SYMBOL][side].append({
+                "order_id": str(result.id),
+                "price": float(price),
+                "qty": abs(int(qty))
+            })
+            log("✅", f"Grid created: {side.upper()} {abs(int(qty))} @ {price_str}")
+        
         return result
+        
+    except GateApiException as e:
+        error_msg = str(e)
+        if "INVALID_PRICE_PRECISION" in error_msg:
+            log("❌", f"Price precision error: {price}")
+        elif "INVALID_SIZE" in error_msg:
+            log("❌", f"Size error: {qty}")
+        else:
+            log("❌", f"Grid order error ({side}): {error_msg}")
+        return None
     except Exception as e:
-        log("❌", f"Grid order error ({side}): {e}")
+        log("❌", f"Unexpected error ({side}): {e}")
         return None
 
 def initialize_grid(current_price):
@@ -413,15 +464,32 @@ def hedge_after_grid_fill(filled_side, filled_price, filled_qty):
         log("❌", f"Hedging error: {e}")
 
 def create_individual_tp(side, qty, entry_price):
+    """개별 TP 생성 - 에러 처리 강화"""
     try:
+        if qty <= 0 or entry_price <= 0:
+            log("⚠️", f"Invalid TP params: qty={qty}, price={entry_price}")
+            return None
+        
         tp_price = entry_price * (Decimal("1") + TP_GAP_PCT) if side == "long" else entry_price * (Decimal("1") - TP_GAP_PCT)
-        size = -qty if side == "long" else qty
-        order = FuturesOrder(contract=SYMBOL, size=size, price=str(tp_price), tif="gtc", reduce_only=True)
-        result = api.create_futures_order(SETTLE, order)
+        tp_price_str = f"{float(tp_price):.4f}"
+        size = -int(qty) if side == "long" else int(qty)
+        
+        order = FuturesOrder(
+            contract=SYMBOL,
+            size=size,
+            price=tp_price_str,
+            tif="gtc",
+            reduce_only=True
+        )
+        
+        result = api.create_futures_order(settle=SETTLE, futures_order=order)
+        
         if result and hasattr(result, 'id'):
-            log("🎯", f"Individual TP: {side.upper()} {qty} @ {tp_price:.4f}")
-            return result.id
+            log("🎯", f"Individual TP: {side.upper()} {abs(int(qty))} @ {tp_price_str}")
+            return str(result.id)
+        
         return None
+        
     except Exception as e:
         log("❌", f"Individual TP error: {e}")
         return None
@@ -575,17 +643,21 @@ def full_refresh(event_type):
     log("✅", f"Refresh complete: {event_type}")
 
 # =============================================================================
-# 모니터링 스레드
+# 모니터링 스레드 (수정됨)
 # =============================================================================
 def grid_fill_monitor():
+    """그리드 체결 모니터링"""
     while True:
         try:
             time.sleep(0.5)
+            
             for side in ["long", "short"]:
                 filled = []
-                for order_info in grid_orders[SYMBOL][side]:
+                
+                for order_info in list(grid_orders[SYMBOL][side]):
                     try:
-                        order = api.get_futures_order(SETTLE, order_info["order_id"])
+                        order = api.get_futures_order(settle=SETTLE, order_id=str(order_info["order_id"]))
+                        
                         if order.status == 'finished':
                             log_event_header("Grid Fill")
                             log("🎉", f"{side.upper()} {order_info['qty']} @ {order_info['price']:.4f}")
@@ -604,30 +676,41 @@ def grid_fill_monitor():
                             full_refresh("Grid_Fill")
                             filled.append(order_info)
                             break
+                            
                     except GateApiException as e:
-                        if "ORDER_NOT_FOUND" in str(e): 
+                        if "ORDER_NOT_FOUND" in str(e):
                             filled.append(order_info)
                     except Exception as e:
                         log("❌", f"Grid check error: {e}")
                 
-                grid_orders[SYMBOL][side] = [o for o in grid_orders[SYMBOL][side] if o not in filled]
+                # 체결된 주문 제거
+                grid_orders[SYMBOL][side] = [
+                    o for o in grid_orders[SYMBOL][side] 
+                    if o not in filled
+                ]
+                
         except Exception as e:
             log("❌", f"Grid monitor error: {e}")
             time.sleep(1)
 
 def tp_monitor():
+    """TP 체결 모니터링"""
     while True:
         try:
             time.sleep(3)
             
             # 개별 TP 체결 확인
             for side in ["long", "short"]:
+                entries_to_remove = []
+                
                 for entry in list(post_threshold_entries[SYMBOL][side]):
                     tp_id = entry.get("tp_order_id")
-                    if not tp_id: continue
+                    if not tp_id:
+                        continue
                     
                     try:
-                        order = api.get_futures_order(SETTLE, tp_id)
+                        order = api.get_futures_order(settle=SETTLE, order_id=str(tp_id))
+                        
                         if order.status == "finished":
                             log_event_header("Individual TP Hit")
                             log("✅", f"{side.upper()} {entry['qty']} @ entry {entry['price']:.4f}")
@@ -635,27 +718,36 @@ def tp_monitor():
                             close_counter_on_individual_tp(side)
                             time.sleep(0.5)
                             
-                            post_threshold_entries[SYMBOL][side].remove(entry)
+                            entries_to_remove.append(entry)
                             full_refresh("Individual_TP")
                             break
+                            
                     except GateApiException as e:
                         if "ORDER_NOT_FOUND" in str(e):
-                            post_threshold_entries[SYMBOL][side].remove(entry)
+                            entries_to_remove.append(entry)
                     except Exception as e:
                         log("❌", f"Individual TP check error: {e}")
+                
+                # 체결된 진입 기록 제거
+                for entry in entries_to_remove:
+                    if entry in post_threshold_entries[SYMBOL][side]:
+                        post_threshold_entries[SYMBOL][side].remove(entry)
             
             # 평단 TP 체결 확인
             for side in ["long", "short"]:
                 tp_id = average_tp_orders[SYMBOL][side]
-                if not tp_id: continue
+                if not tp_id:
+                    continue
                 
                 try:
-                    order = api.get_futures_order(SETTLE, tp_id)
+                    order = api.get_futures_order(settle=SETTLE, order_id=str(tp_id))
+                    
                     if order.status == "finished":
                         log_event_header("Average TP Hit")
                         log("✅", f"{side.upper()} position closed")
                         full_refresh("Average_TP")
                         break
+                        
                 except GateApiException as e:
                     if "ORDER_NOT_FOUND" in str(e):
                         average_tp_orders[SYMBOL][side] = None
