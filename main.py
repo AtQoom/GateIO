@@ -974,10 +974,10 @@ def refresh_tp_orders(symbol):
 # 그리드 관리 (initialize_grid 함수 - 비주력 헤징 로직 추가)
 # =============================================================================
 def initialize_grid(entry_price, skip_check=False):
-    """그리드 초기화 (현재가 기준 양방향)"""
+    """그리드 초기화 - 항상 양방향 2개"""
     global last_grid_time
     
-    # ⭐ 포지션 강제 동기화
+    # 포지션 강제 동기화
     try:
         positions = api.list_positions(SETTLE)
         if positions:
@@ -998,16 +998,21 @@ def initialize_grid(entry_price, skip_check=False):
         return
     
     try:
-        # 기존 그리드 확인
+        # ⭐⭐⭐ 기존 그리드 확인 (양방향 2개 있으면 스킵)
         try:
             existing_orders = [o for o in api.list_futures_orders(SETTLE, SYMBOL, status='open')
                                if not o.is_reduce_only]
-            if len(existing_orders) >= 2:
-                return
+            
+            # ⭐ 양방향 그리드 확인
+            has_long_grid = any(o.size > 0 for o in existing_orders)
+            has_short_grid = any(o.size < 0 for o in existing_orders)
+            
+            if has_long_grid and has_short_grid:
+                return  # 양방향 모두 있으면 스킵
         except:
             pass
         
-        # ⭐⭐⭐ 현재가 조회
+        # 현재가 조회
         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
         if not ticker:
             return
@@ -1033,47 +1038,57 @@ def initialize_grid(entry_price, skip_check=False):
         if long_value >= max_position_value or short_value >= max_position_value:
             return
         
-        # ⭐⭐⭐ 양방향 포지션 있으면 그리드 차단
+        # 양방향 포지션 있으면 그리드 차단
         if long_size > 0 and short_size > 0:
-            log_debug("⚡ 그리드 차단", f"양방향 존재 (롱:{long_size} 숏:{short_size})")
+            log_debug("⚡ 그리드 차단", "양방향 존재")
             return
         
         # 포지션 없으면 종료
         if long_size == 0 and short_size == 0:
-            log_debug("⚠️ 그리드 스킵", "포지션 없음")
             return
         
-        # ⭐ 임계값 초과 (공격 모드)
+        # ⭐⭐⭐ 임계값 초과 (공격 모드) - 양방향 그리드 (비대칭)
         if long_value >= threshold or short_value >= threshold:
-            # 주력 판단
             is_long_main = long_value >= threshold
             main_size = long_size if is_long_main else short_size
             
-            # 역방향 그리드 30%
-            counter_qty = max(1, int(main_size * COUNTER_ENTRY_RATIO))
-            counter_side = "short" if is_long_main else "long"
+            # ⭐ 역방향 30%, 동방향 10%
+            counter_qty = max(1, int(main_size * COUNTER_ENTRY_RATIO))  # 30%
+            same_qty = max(1, int(main_size * Decimal("0.10")))         # 10%
             
-            # ⭐⭐⭐ 수정: 역방향 가격
-            if counter_side == "short":
-                counter_price = current_price * (Decimal("1") + GRID_GAP_PCT)  # 위쪽
+            # 가격 계산
+            grid_price_long = current_price * (Decimal("1") - GRID_GAP_PCT)
+            grid_price_short = current_price * (Decimal("1") + GRID_GAP_PCT)
+            
+            if is_long_main:
+                # 롱 주력 → 숏 그리드 30%, 롱 그리드 10%
+                log_debug("⚡ 비대칭 그리드", f"숏:{counter_qty}@{float(grid_price_short):.4f} 롱:{same_qty}@{float(grid_price_long):.4f}")
+                place_grid_order(SYMBOL, "short", counter_qty, float(grid_price_short))
+                time.sleep(0.1)
+                place_grid_order(SYMBOL, "long", same_qty, float(grid_price_long))
             else:
-                counter_price = current_price * (Decimal("1") - GRID_GAP_PCT)  # 아래쪽
+                # 숏 주력 → 롱 그리드 30%, 숏 그리드 10%
+                log_debug("⚡ 비대칭 그리드", f"롱:{counter_qty}@{float(grid_price_long):.4f} 숏:{same_qty}@{float(grid_price_short):.4f}")
+                place_grid_order(SYMBOL, "long", counter_qty, float(grid_price_long))
+                time.sleep(0.1)
+                place_grid_order(SYMBOL, "short", same_qty, float(grid_price_short))
             
-            log_debug("⚡ 역방향 그리드", f"{counter_side.upper()} {counter_qty}개 @{float(counter_price):.4f}")
-            place_grid_order(SYMBOL, counter_side, counter_qty, float(counter_price))
+            last_grid_time = now
             return
         
-        # ⭐⭐⭐ 임계값 미만 (기본 모드) - 현재가 기준 양방향!
-        base_qty = calculate_base_quantity()  # 자산의 10%
+        # ⭐⭐⭐ 임계값 미만 (기본 모드) - 양방향 동일 수량
+        base_qty = calculate_base_quantity()
         
-        # ⭐⭐⭐ 수정: 롱은 아래쪽, 숏은 위쪽!
-        grid_price_long = current_price * (Decimal("1") - GRID_GAP_PCT)   # 현재가 - 0.12% (아래쪽)
-        grid_price_short = current_price * (Decimal("1") + GRID_GAP_PCT)  # 현재가 + 0.12% (위쪽)
+        grid_price_long = current_price * (Decimal("1") - GRID_GAP_PCT)
+        grid_price_short = current_price * (Decimal("1") + GRID_GAP_PCT)
         
-        log_debug("⚡ 양방향 그리드", f"{base_qty}개씩 (롱:{ float(grid_price_long):.4f} 숏:{float(grid_price_short):.4f})")
+        log_debug("⚡ 양방향 그리드", f"{base_qty}@롱:{float(grid_price_long):.4f} 숏:{float(grid_price_short):.4f}")
         place_grid_order(SYMBOL, "long", base_qty, float(grid_price_long))
+        time.sleep(0.1)
         place_grid_order(SYMBOL, "short", base_qty, float(grid_price_short))
             
+    except Exception as e:
+        log_debug("❌ 그리드 오류", str(e))
     finally:
         last_grid_time = now
         grid_lock.release()
