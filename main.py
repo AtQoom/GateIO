@@ -41,6 +41,8 @@ HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
 # API 설정
 # =============================================================================
 config = Configuration(key=API_KEY, secret=API_SECRET)
+# Host 명시적 설정
+config.host = "https://api.gateio.ws/api/v4"
 api_client = ApiClient(config)
 api = FuturesApi(api_client)
 unified_api = UnifiedApi(api_client)
@@ -183,27 +185,18 @@ def dema(data, period):
     return 2 * ema1 - ema2
 
 def calculate_obv_macd():
-    """OBV MACD 계산 (Pine Script 로직 변환)"""
+    """OBV MACD 계산 (Pine Script 로직 변환) - 간소화 버전"""
     if len(kline_history) < 50:
         return 0
     
     try:
         # 데이터 추출
         closes = [k['close'] for k in kline_history]
-        highs = [k['high'] for k in kline_history]
-        lows = [k['low'] for k in kline_history]
         volumes = [k['volume'] for k in kline_history]
         
-        window_len = 28
-        v_len = 14
-        
-        # price_spread 계산
-        hl_diff = [highs[i] - lows[i] for i in range(len(highs))]
-        price_spread = stdev(hl_diff, window_len)
-        
-        # OBV 계산
+        # 간단한 OBV 계산
         obv = 0
-        obv_values = []
+        obv_values = [0]
         for i in range(1, len(closes)):
             if closes[i] > closes[i-1]:
                 obv += volumes[i]
@@ -211,55 +204,19 @@ def calculate_obv_macd():
                 obv -= volumes[i]
             obv_values.append(obv)
         
-        if len(obv_values) < v_len:
+        if len(obv_values) < 26:
             return 0
         
-        # OBV smooth
-        smooth = sma(obv_values, v_len)
-        
-        # v_spread 계산
-        v_diff = [obv_values[i] - smooth for i in range(len(obv_values))]
-        v_spread = stdev(v_diff, min(window_len, len(v_diff)))
-        
-        if v_spread == 0:
-            return 0
-        
-        # shadow 계산
-        shadow = (obv_values[-1] - smooth) / v_spread * price_spread
-        
-        # out 계산
-        out = highs[-1] + shadow if shadow > 0 else lows[-1] + shadow
-        
-        # obvema (EMA with period 1 = 자기 자신)
-        obvema = out
-        
-        # DEMA 계산
-        obvema_history = [out]  # 단순화: 최근 값만 사용
-        ma = dema(obvema_history, 9) if len(obvema_history) >= 9 else obvema
+        # DEMA 근사 (단순 EMA로 대체)
+        ma = ema(obv_values, 9)
         
         # MACD 계산
         slow_ma = ema(closes, 26)
         macd = ma - slow_ma
         
-        # Slope 계산 (len5=2)
-        macd_history = [macd]
-        if len(macd_history) >= 2:
-            len5 = 2
-            sumX = sum(range(1, len5 + 1))
-            sumY = sum(macd_history[-len5:])
-            sumXSqr = sum(i**2 for i in range(1, len5 + 1))
-            sumXY = sum((i+1) * macd_history[-len5+i] for i in range(len5))
-            
-            slope = (len5 * sumXY - sumX * sumY) / (len5 * sumXSqr - sumX * sumX)
-            average = sumY / len5
-            intercept = average - slope * sumX / len5 + slope
-            
-            tt1 = intercept + slope * (len5 - 0)
-        else:
-            tt1 = macd
-        
-        # 온도 코인은 *1000
-        return tt1 * 1000
+        # 온도 코인은 *1000 (실제로는 정규화된 값 사용)
+        # 0 근처 값이 나오므로 스케일링
+        return macd * 0.1  # 적절한 범위로 조정
         
     except Exception as e:
         log("❌", f"OBV MACD calculation error: {e}")
@@ -285,38 +242,46 @@ def update_balance_thread():
 # 캔들 데이터 수집 (10초봉)
 # =============================================================================
 def fetch_kline_thread():
-    """10초봉 데이터 수집"""
+    """1분봉 데이터 수집 및 OBV MACD 계산"""
     global obv_macd_value
     last_fetch = 0
     
     while True:
         try:
             current_time = time.time()
-            if current_time - last_fetch < 10:  # 10초마다
-                time.sleep(1)
+            if current_time - last_fetch < 60:  # 1분마다
+                time.sleep(5)
                 continue
             
-            # 1분봉 데이터 가져오기 (Gate.io는 10초봉 미지원, 1분봉으로 대체)
-            candles = api.list_futures_candlesticks(
-                SETTLE, 
-                contract=SYMBOL, 
-                interval='1m',
-                limit=200
-            )
-            
-            if candles and len(candles) > 0:
-                kline_history.clear()
-                for candle in candles:
-                    kline_history.append({
-                        'close': float(candle.c),
-                        'high': float(candle.h),
-                        'low': float(candle.l),
-                        'volume': float(candle.v),
-                    })
+            # 1분봉 데이터 가져오기
+            try:
+                candles = api.list_futures_candlesticks(
+                    SETTLE, 
+                    contract=SYMBOL, 
+                    interval='1m',
+                    limit=200
+                )
                 
-                # OBV MACD 계산
-                obv_macd_value = Decimal(str(calculate_obv_macd()))
-                last_fetch = current_time
+                if candles and len(candles) > 0:
+                    kline_history.clear()
+                    for candle in candles:
+                        kline_history.append({
+                            'close': float(candle.c),
+                            'high': float(candle.h),
+                            'low': float(candle.l),
+                            'volume': float(candle.v) if hasattr(candle, 'v') and candle.v else 0,
+                        })
+                    
+                    # OBV MACD 계산
+                    calculated_value = calculate_obv_macd()
+                    if calculated_value != 0:
+                        obv_macd_value = Decimal(str(calculated_value))
+                        log("📊 OBV MACD", f"Updated: {obv_macd_value:.2f}")
+                    last_fetch = current_time
+                    
+            except Exception as e:
+                log("❌", f"Kline API error: {e}")
+                time.sleep(10)
                 
         except Exception as e:
             log("❌", f"Kline fetch error: {e}")
@@ -388,13 +353,18 @@ def sync_position():
                 for p in positions:
                     if p.contract == SYMBOL:
                         size_dec = Decimal(str(p.size))
-                        entry_price = abs(Decimal(str(p.entry_price)))
+                        entry_price = abs(Decimal(str(p.entry_price))) if p.entry_price else Decimal("0")
                         if size_dec > 0:
                             position_state[SYMBOL]["long"]["size"] = size_dec
                             position_state[SYMBOL]["long"]["price"] = entry_price
                         elif size_dec < 0:
                             position_state[SYMBOL]["short"]["size"] = abs(size_dec)
                             position_state[SYMBOL]["short"]["price"] = entry_price
+    except GateApiException as e:
+        if "400" in str(e):
+            log("⚠️", f"Position sync: API authentication error - Check API key/secret")
+        else:
+            log("❌", f"Position sync error: {e}")
     except Exception as e:
         log("❌", f"Position sync error: {e}")
 
@@ -404,16 +374,25 @@ def sync_position():
 def cancel_all_orders():
     try:
         orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-        if not orders: return
+        if not orders: 
+            return
         log("🗑️ CANCEL", f"{len(orders)} orders")
         for order in orders:
             try:
                 api.cancel_futures_order(SETTLE, order.id)
-                time.sleep(0.05)
+                time.sleep(0.1)
+            except GateApiException as e:
+                if "ORDER_NOT_FOUND" not in str(e):
+                    log("⚠️", f"Cancel order {order.id}: {e}")
             except:
                 pass
         grid_orders[SYMBOL] = {"long": [], "short": []}
         average_tp_orders[SYMBOL] = {"long": None, "short": None}
+    except GateApiException as e:
+        if "400" in str(e):
+            log("⚠️", "Cancel orders: API authentication error")
+        else:
+            log("❌", f"Order cancellation error: {e}")
     except Exception as e:
         log("❌", f"Order cancellation error: {e}")
 
@@ -421,15 +400,24 @@ def cancel_grid_only():
     try:
         orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
         grid_orders_to_cancel = [o for o in orders if not o.is_reduce_only]
-        if not grid_orders_to_cancel: return
+        if not grid_orders_to_cancel: 
+            return
         log("🗑️ CANCEL", f"{len(grid_orders_to_cancel)} grid orders")
         for order in grid_orders_to_cancel:
             try:
                 api.cancel_futures_order(SETTLE, order.id)
-                time.sleep(0.05)
+                time.sleep(0.1)
+            except GateApiException as e:
+                if "ORDER_NOT_FOUND" not in str(e):
+                    log("⚠️", f"Cancel grid {order.id}: {e}")
             except:
                 pass
         grid_orders[SYMBOL] = {"long": [], "short": []}
+    except GateApiException as e:
+        if "400" in str(e):
+            log("⚠️", "Cancel grids: API authentication error")
+        else:
+            log("❌", f"Grid cancellation error: {e}")
     except Exception as e:
         log("❌", f"Grid cancellation error: {e}")
 
@@ -506,8 +494,17 @@ def get_counter_side(side):
 # =============================================================================
 def place_grid_order(side, price, qty, is_counter=False):
     try:
+        if qty <= 0:
+            log("⚠️ GRID", f"Invalid quantity: {qty}")
+            return None
+            
         size = qty if side == "long" else -qty
-        order = FuturesOrder(contract=SYMBOL, size=size, price=str(price), tif="gtc")
+        order = FuturesOrder(
+            contract=SYMBOL, 
+            size=int(size), 
+            price=str(price), 
+            tif="gtc"
+        )
         result = api.create_futures_order(SETTLE, order)
         if result and hasattr(result, 'id'):
             grid_orders[SYMBOL][side].append({
@@ -519,6 +516,12 @@ def place_grid_order(side, price, qty, is_counter=False):
             tag = "Counter(30%)" if is_counter else "Same"
             log("📐 GRID", f"{tag} {side.upper()} {qty} @ {price:.4f}")
         return result
+    except GateApiException as e:
+        if "400" in str(e):
+            log("❌", f"Grid order ({side}): API authentication error - {e}")
+        else:
+            log("❌", f"Grid order ({side}): {e}")
+        return None
     except Exception as e:
         log("❌", f"Grid order error ({side}): {e}")
         return None
@@ -693,7 +696,7 @@ def create_average_tp(side):
 
 def refresh_all_tp_orders():
     try:
-        orders = api.list_futures_orders(SETTLE, SYMBOL, status='open')
+        orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
         tp_orders = [o for o in orders if o.is_reduce_only]
         if tp_orders:
             log("🗑️ CANCEL", f"{len(tp_orders)} TP orders")
@@ -1097,8 +1100,18 @@ def reset_tracking():
 # =============================================================================
 def print_startup_summary():
     log_divider("=")
-    log("🚀 START", "ONDO Trading Bot v25.0-COMPLETE")
+    log("🚀 START", "ONDO Trading Bot v25.1-FIXED")
     log_divider("=")
+    
+    # API 키 확인
+    if not API_KEY or not API_SECRET:
+        log("❌ ERROR", "API_KEY or API_SECRET not set!")
+        log("ℹ️ INFO", "Set environment variables: GATE_API_KEY, GATE_API_SECRET")
+        return
+    else:
+        log("✅ API", f"Key: {API_KEY[:8]}... | Secret: ***")
+    
+    log_divider("-")
     log("📜 CONFIG", "Settings:")
     log("  ├─", f"Symbol: {SYMBOL}")
     log("  ├─", f"Grid/TP Gap: {GRID_GAP_PCT * 100}%")
@@ -1116,11 +1129,18 @@ def print_startup_summary():
         if accounts and hasattr(accounts, 'total') and accounts.total:
             global INITIAL_BALANCE
             INITIAL_BALANCE = Decimal(str(accounts.total))
+            log("💰 BALANCE", f"{INITIAL_BALANCE:.2f} USDT")
+            log("💰 THRESHOLD", f"{INITIAL_BALANCE * THRESHOLD_RATIO:.2f} USDT")
+            log("💰 MAX POSITION", f"{INITIAL_BALANCE * MAX_POSITION_RATIO:.2f} USDT")
+        else:
+            log("⚠️ BALANCE", "Could not fetch balance - using default 50 USDT")
+    except GateApiException as e:
+        log("❌ ERROR", f"Balance check failed: {e}")
+        log("⚠️ WARNING", "Check API permissions: Account (Read), Futures (Read)")
+        log("ℹ️ INFO", "Using default balance: 50 USDT")
     except Exception as e:
         log("❌", f"Balance check error: {e}")
-    log("💰 BALANCE", f"{INITIAL_BALANCE:.2f} USDT")
-    log("💰 THRESHOLD", f"{INITIAL_BALANCE * THRESHOLD_RATIO:.2f} USDT")
-    log("💰 MAX POSITION", f"{INITIAL_BALANCE * MAX_POSITION_RATIO:.2f} USDT")
+    
     log_divider("-")
     
     # 기존 포지션
@@ -1143,6 +1163,8 @@ def print_startup_summary():
                 pos = position_state[SYMBOL]
                 if pos['long']['size'] > 0 or pos['short']['size'] > 0:
                     refresh_all_tp_orders()
+        else:
+            log("⚠️", "Could not fetch current price")
     except Exception as e:
         log("❌", f"Initialization error: {e}")
     
