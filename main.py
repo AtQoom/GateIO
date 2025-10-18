@@ -744,14 +744,35 @@ def position_monitor():
 # =============================================================================
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    """
+    TradingView에서 OBV MACD 값을 받아 업데이트
+    Gate.io API 호출 없이 단순 데이터 수신만 처리
+    """
     global obv_macd_value
     try:
-        data = request.get_json()
-        tt1 = data.get('tt1', 0)
+        data = request.get_json(force=True)  # force=True 추가로 Content-Type 무시
+        if not data:
+            return jsonify({"status": "error", "message": "No data received"}), 400
+        
+        tt1 = data.get('tt1')
+        if tt1 is None:
+            return jsonify({"status": "error", "message": "Missing tt1 value"}), 400
+        
         obv_macd_value = Decimal(str(tt1))
-        log("📨", f"OBV MACD: {tt1}")
-        return jsonify({"status": "success"}), 200
+        log("📨", f"OBV MACD updated: {tt1}")
+        
+        return jsonify({
+            "status": "success",
+            "tt1": float(tt1),
+            "abs_val": float(abs(obv_macd_value * 1000)),
+            "weight": float(calculate_obv_macd_weight(float(obv_macd_value * 1000)))
+        }), 200
+        
+    except ValueError as e:
+        log("❌", f"Webhook value error: {e}")
+        return jsonify({"status": "error", "message": f"Invalid tt1 value: {e}"}), 400
     except Exception as e:
+        log("❌", f"Webhook error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/status', methods=['GET'])
