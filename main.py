@@ -1038,6 +1038,11 @@ def initialize_grid(entry_price, skip_check=False):
             log_debug("⚡ 그리드 차단", f"양방향 존재 (롱:{long_size} 숏:{short_size})")
             return
         
+        # 포지션 없으면 종료
+        if long_size == 0 and short_size == 0:
+            log_debug("⚠️ 그리드 스킵", "포지션 없음")
+            return
+        
         # ⭐ 임계값 초과 (공격 모드)
         if long_value >= threshold or short_value >= threshold:
             # 주력 판단
@@ -1047,25 +1052,31 @@ def initialize_grid(entry_price, skip_check=False):
             # 역방향 그리드 30%
             counter_qty = max(1, int(main_size * COUNTER_ENTRY_RATIO))
             counter_side = "short" if is_long_main else "long"
-            counter_price = current_price * (Decimal("1") + GRID_GAP_PCT if is_long_main else Decimal("1") - GRID_GAP_PCT)
             
-            log_debug("⚡ 역방향 그리드", f"{counter_side.upper()} {counter_qty}개 (주력 {main_size})")
-            place_grid_order(SYMBOL, counter_side, counter_qty, counter_price)
+            # ⭐⭐⭐ 수정: 역방향 가격
+            if counter_side == "short":
+                counter_price = current_price * (Decimal("1") + GRID_GAP_PCT)  # 위쪽
+            else:
+                counter_price = current_price * (Decimal("1") - GRID_GAP_PCT)  # 아래쪽
+            
+            log_debug("⚡ 역방향 그리드", f"{counter_side.upper()} {counter_qty}개 @{float(counter_price):.4f}")
+            place_grid_order(SYMBOL, counter_side, counter_qty, float(counter_price))
             return
         
         # ⭐⭐⭐ 임계값 미만 (기본 모드) - 현재가 기준 양방향!
         base_qty = calculate_base_quantity()  # 자산의 10%
-        grid_price_long = current_price * (Decimal("1") - GRID_GAP_PCT)   # 현재가 - 0.12%
-        grid_price_short = current_price * (Decimal("1") + GRID_GAP_PCT)  # 현재가 + 0.12%
         
-        log_debug("⚡ 양방향 그리드", f"{base_qty}개씩 (현재가: {current_price})")
-        place_grid_order(SYMBOL, "long", base_qty, grid_price_long)
-        place_grid_order(SYMBOL, "short", base_qty, grid_price_short)
+        # ⭐⭐⭐ 수정: 롱은 아래쪽, 숏은 위쪽!
+        grid_price_long = current_price * (Decimal("1") - GRID_GAP_PCT)   # 현재가 - 0.12% (아래쪽)
+        grid_price_short = current_price * (Decimal("1") + GRID_GAP_PCT)  # 현재가 + 0.12% (위쪽)
+        
+        log_debug("⚡ 양방향 그리드", f"{base_qty}개씩 (롱:{ float(grid_price_long):.4f} 숏:{float(grid_price_short):.4f})")
+        place_grid_order(SYMBOL, "long", base_qty, float(grid_price_long))
+        place_grid_order(SYMBOL, "short", base_qty, float(grid_price_short))
             
     finally:
         last_grid_time = now
         grid_lock.release()
-
 
 def grid_fill_monitor():
     """⭐ 그리드 체결 감지 및 후속 헤징 실행"""
