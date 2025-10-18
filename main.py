@@ -1022,55 +1022,42 @@ def create_short_tp_orders(symbol, short_size, short_price, short_value, thresho
 # =============================================================================
 
 def refresh_tp_orders(symbol):
-    """TP 주문 재생성"""
+    """TP 주문 전체 재생성"""
+    # ⭐⭐⭐ 기존 TP 전체 취소!
     try:
-        # ⭐⭐⭐ 기존 TP 완전 삭제 (0.5초 대기)
-        try:
-            orders = api.list_futures_orders(SETTLE, contract=symbol, status='open')
-            tp_list = [o for o in orders if o.is_reduce_only]
-            if tp_list:
-                for tp in tp_list:
-                    try:
-                        api.cancel_futures_order(SETTLE, tp.id)
-                    except:
-                        pass
-                log_debug("🔄 TP 취소", f"{len(tp_list)}개")
-                time.sleep(0.5)  # ⭐ 0.3 → 0.5초로 증가!
-        except:
-            pass
-        
-        # TP 주문 초기화
-        tp_orders[symbol] = {"long": [], "short": []}
-        
-        # 포지션 정보
-        with balance_lock:
-            current_balance = INITIAL_BALANCE
-        
-        threshold = current_balance * THRESHOLD_RATIO
-        
-        with position_lock:
-            pos = position_state.get(symbol, {})
-            long_size = pos.get("long", {}).get("size", Decimal("0"))
-            short_size = pos.get("short", {}).get("size", Decimal("0"))
-            long_price = pos.get("long", {}).get("price", Decimal("0"))
-            short_price = pos.get("short", {}).get("price", Decimal("0"))
-        
-        # ⭐⭐⭐ 포지션 없으면 종료
-        if long_size == 0 and short_size == 0:
-            return
-        
-        long_value = long_size * long_price if long_price > 0 else Decimal("0")
-        short_value = short_size * short_price if short_price > 0 else Decimal("0")
-        
-        # 롱 TP 생성
+        orders = api.list_futures_orders(SETTLE, symbol, status='open')
+        for order in orders:
+            if order.is_reduce_only:
+                try:
+                    api.cancel_futures_order(SETTLE, order.id)
+                    time.sleep(0.05)
+                except:
+                    pass
+    except:
+        pass
+    
+    # 포지션 조회
+    with position_lock:
+        pos = position_state.get(symbol, {})
+        long_size = pos.get("long", {}).get("size", Decimal("0"))
+        short_size = pos.get("short", {}).get("size", Decimal("0"))
+        long_price = pos.get("long", {}).get("price", Decimal("0"))
+        short_price = pos.get("short", {}).get("price", Decimal("0"))
+    
+    with balance_lock:
+        current_balance = INITIAL_BALANCE
+    
+    long_value = long_price * long_size if long_price > 0 else Decimal("0")
+    short_value = short_price * short_size if short_price > 0 else Decimal("0")
+    threshold = current_balance * THRESHOLD_RATIO
+    
+    # TP 생성
+    if long_size > 0:
         create_long_tp_orders(symbol, long_size, long_price, long_value, threshold)
-        
-        # 숏 TP 생성
+    
+    if short_size > 0:
         create_short_tp_orders(symbol, short_size, short_price, short_value, threshold)
         
-    except Exception as e:
-        log_debug("❌ TP 재생성", str(e))
-
 
 # =============================================================================
 # 그리드 관리 (initialize_grid 함수 - 비주력 헤징 로직 추가)
@@ -1596,49 +1583,38 @@ def tp_monitor():
             log_debug("❌ TP 모니터 오류", str(e), exc_info=True)
 
 def close_counter_on_individual_tp(symbol, main_side, tp_qty):
-    """개별 TP 체결 시 역방향 포지션 20% 청산"""
+    """개별 TP 체결 시 역방향 20% 동반 청산"""
     try:
-        # 역방향 포지션 확인
-        counter_side = "short" if main_side == "long" else "long"
+        counter_side = 'short' if main_side == 'long' else 'long'
         
         with position_lock:
-            pos = position_state.get(symbol, {})
-            counter_size = pos.get(counter_side, {}).get("size", Decimal("0"))
+            counter_pos = position_state.get(symbol, {}).get(counter_side, {})
+            counter_size = counter_pos.get('size', Decimal("0"))
         
         if counter_size <= 0:
             return
         
-        # 임계값 확인 (공격 모드일 때만 동작)
-        with balance_lock:
-            current_balance = INITIAL_BALANCE
-        threshold = current_balance * THRESHOLD_RATIO
+        close_qty = max(1, int(counter_size * COUNTER_CLOSE_RATIO))
         
-        with position_lock:
-            main_value = pos.get(main_side, {}).get("size", 0) * pos.get(main_side, {}).get("price", 0)
+        if close_qty <= 0:
+            return
         
-        # 주력이 임계값 초과 상태일 때만 동작
-        if main_value >= threshold:
-            # 역방향 포지션의 20% 계산
-            close_qty = int(counter_size * Decimal("0.20"))
-            if close_qty < 1:
-                close_qty = 1
-            
-            log_debug("⚡ 동반 청산", f"{counter_side.upper()} {close_qty}개 (개별 TP {tp_qty}개 체결)")
-            
-            # 시장가 청산
-            order_size = close_qty if counter_side == "long" else -close_qty
-            order = FuturesOrder(
-                contract=symbol,
-                size=order_size,
-                price="0",
-                tif='ioc',
-                reduce_only=True
-            )
-            api.create_futures_order(SETTLE, order)
-            
+        # ⭐⭐⭐ 올바른 청산 방향!
+        order_size = -close_qty if counter_side == 'long' else close_qty
+        
+        close_order = FuturesOrder(
+            contract=symbol,
+            size=order_size,
+            price="0",
+            tif='ioc',
+            reduce_only=True
+        )
+        
+        api.create_futures_order(SETTLE, close_order)
+        log_debug("🔄 동반 청산", f"{counter_side.upper()} {close_qty}개 (20%)")
+        
     except Exception as e:
-        log_debug("❌ 동반 청산 오류", str(e), exc_info=True)
-
+        log_debug("❌ 동반청산 오류", str(e))
 
 
 # =============================================================================
