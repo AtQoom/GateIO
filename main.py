@@ -403,7 +403,7 @@ def sync_position():
 # =============================================================================
 def cancel_all_orders():
     try:
-        orders = api.list_futures_orders(SETTLE, SYMBOL, status='open')
+        orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
         if not orders: return
         log("🗑️ CANCEL", f"{len(orders)} orders")
         for order in orders:
@@ -419,7 +419,7 @@ def cancel_all_orders():
 
 def cancel_grid_only():
     try:
-        orders = api.list_futures_orders(SETTLE, SYMBOL, status='open')
+        orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
         grid_orders_to_cancel = [o for o in orders if not o.is_reduce_only]
         if not grid_orders_to_cancel: return
         log("🗑️ CANCEL", f"{len(grid_orders_to_cancel)} grid orders")
