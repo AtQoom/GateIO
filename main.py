@@ -1253,15 +1253,24 @@ def fill_monitor():
 def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_value, short_value, threshold):
     """헤징 처리"""
     
-    # ⭐ 임계값 미만: 그리드 취소 → 헤징 진입
+    # 현재가 조회
+    try:
+        ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+        current_price = Decimal(str(ticker[0].last))
+    except:
+        return False
+    
+    # ⭐ 임계값 미만: 그리드 취소 → 헤징 → 그리드 재생성
     if long_value < threshold and short_value < threshold:
-        # 롱 체결 → 그리드 취소 + 숏 헤징
+        # 롱 체결
         if long_size > prev_long_size:
-            cancel_grid_orders(SYMBOL)  # ⭐⭐⭐ 즉시 취소!
+            # 1. 그리드 취소
+            cancel_grid_orders(SYMBOL)
             time.sleep(0.3)
             
+            # 2. 헤징
             hedge_qty = calculate_base_quantity()
-            log_debug("🔥 기본 헤징", f"숏 {hedge_qty}개 (시장가)")
+            log_debug("🔥 기본 헤징", f"숏 {hedge_qty}개")
             try:
                 order = FuturesOrder(
                     contract=SYMBOL,
@@ -1271,18 +1280,24 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
                     reduce_only=False
                 )
                 api.create_futures_order(SETTLE, order)
+                time.sleep(0.5)
             except Exception as e:
                 log_debug("❌ 헤징 실패", str(e))
             
+            # 3. ⭐⭐⭐ 그리드 재생성 (현재가 기준!)
+            initialize_grid(current_price, skip_check=True)
+            
             return True
         
-        # 숏 체결 → 그리드 취소 + 롱 헤징
+        # 숏 체결
         if short_size > prev_short_size:
-            cancel_grid_orders(SYMBOL)  # ⭐⭐⭐ 즉시 취소!
+            # 1. 그리드 취소
+            cancel_grid_orders(SYMBOL)
             time.sleep(0.3)
             
+            # 2. 헤징
             hedge_qty = calculate_base_quantity()
-            log_debug("🔥 기본 헤징", f"롱 {hedge_qty}개 (시장가)")
+            log_debug("🔥 기본 헤징", f"롱 {hedge_qty}개")
             try:
                 order = FuturesOrder(
                     contract=SYMBOL,
@@ -1292,14 +1307,18 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
                     reduce_only=False
                 )
                 api.create_futures_order(SETTLE, order)
+                time.sleep(0.5)
             except Exception as e:
                 log_debug("❌ 헤징 실패", str(e))
+            
+            # 3. ⭐⭐⭐ 그리드 재생성 (현재가 기준!)
+            initialize_grid(current_price, skip_check=True)
             
             return True
         
         return False
     
-    # ⭐ 임계값 초과: 후속 헤징 + 동반 청산
+    # ⭐ 임계값 초과: 후속 헤징 (그리드 유지!)
     # 롱 주력
     if long_value >= threshold and short_value < threshold:
         if short_size > prev_short_size:
@@ -1314,8 +1333,6 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
                     reduce_only=False
                 )
                 api.create_futures_order(SETTLE, order)
-                time.sleep(0.5)
-                cancel_grid_orders(SYMBOL)  # ⭐ 헤징 후 취소
             except:
                 pass
         
@@ -1348,8 +1365,6 @@ def handle_hedging(long_size, short_size, prev_long_size, prev_short_size, long_
                     reduce_only=False
                 )
                 api.create_futures_order(SETTLE, order)
-                time.sleep(0.5)
-                cancel_grid_orders(SYMBOL)  # ⭐ 헤징 후 취소
             except:
                 pass
         
