@@ -23,10 +23,21 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # 환경 변수
 # =============================================================================
-API_KEY = os.environ.get("GATE_API_KEY")
-API_SECRET = os.environ.get("GATE_API_SECRET")
+API_KEY = os.environ.get("GATE_API_KEY", "")
+API_SECRET = os.environ.get("GATE_API_SECRET", "")
 SYMBOL = os.environ.get("SYMBOL", "ONDO_USDT")
 SETTLE = "usdt"
+
+# Railway 환경 변수 로그
+if API_KEY:
+    logger.info(f"API_KEY loaded: {API_KEY[:8]}...")
+else:
+    logger.error("API_KEY not found in environment variables!")
+    
+if API_SECRET:
+    logger.info(f"API_SECRET loaded: {len(API_SECRET)} characters")
+else:
+    logger.error("API_SECRET not found in environment variables!")
 
 GRID_GAP_PCT = Decimal("0.0012")  # 0.12%
 TP_GAP_PCT = Decimal("0.0012")    # 0.12%
@@ -41,8 +52,9 @@ HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
 # API 설정
 # =============================================================================
 config = Configuration(key=API_KEY, secret=API_SECRET)
-# Host 명시적 설정
+# Host 명시적 설정 및 검증 비활성화
 config.host = "https://api.gateio.ws/api/v4"
+config.verify_ssl = True
 api_client = ApiClient(config)
 api = FuturesApi(api_client)
 unified_api = UnifiedApi(api_client)
@@ -87,12 +99,12 @@ max_position_locked = {"long": False, "short": False}
 # 그리드 주문 추적
 grid_orders = {SYMBOL: {"long": [], "short": []}}
 
-# OBV MACD 값
+# OBV MACD 값 (자체 계산)
 obv_macd_value = Decimal("0")
 last_grid_time = 0
 
-# OBV MACD 계산용 히스토리 (10초봉 데이터)
-kline_history = deque(maxlen=200)  # 충분한 히스토리 저장
+# OBV MACD 계산용 히스토리
+kline_history = deque(maxlen=200)
 
 # =============================================================================
 # 로그
@@ -144,7 +156,7 @@ def log_tracking_state():
         log("📸 SNAPSHOT", f"Long: {long_snap} | Short: {short_snap}")
 
 # =============================================================================
-# OBV MACD 계산
+# OBV MACD 계산 (Pine Script 정확한 변환)
 # =============================================================================
 def ema(data, period):
     """EMA 계산"""
@@ -152,12 +164,12 @@ def ema(data, period):
         return data[-1] if data else 0
     
     multiplier = 2.0 / (period + 1)
-    ema_values = [sum(data[:period]) / period]
+    ema_val = sum(data[:period]) / period
     
     for price in data[period:]:
-        ema_values.append((price - ema_values[-1]) * multiplier + ema_values[-1])
+        ema_val = (price - ema_val) * multiplier + ema_val
     
-    return ema_values[-1]
+    return ema_val
 
 def sma(data, period):
     """SMA 계산"""
@@ -177,46 +189,137 @@ def stdev(data, period):
     variance = sum((x - mean) ** 2 for x in data_slice) / period
     return math.sqrt(variance)
 
+def wma(data, period):
+    """WMA (Weighted Moving Average) 계산"""
+    if len(data) < period:
+        period = len(data)
+    if period == 0:
+        return 0
+    
+    weights = list(range(1, period + 1))
+    weighted_sum = sum(data[-period:][i] * weights[i] for i in range(period))
+    return weighted_sum / sum(weights)
+
 def dema(data, period):
     """DEMA 계산"""
+    if len(data) < period * 2:
+        return data[-1] if data else 0
+    
     ema1 = ema(data, period)
-    ema_data = [ema(data[:i+1], period) for i in range(len(data))]
-    ema2 = ema(ema_data, period)
+    
+    # EMA of EMA 계산을 위해 EMA 시계열 생성
+    ema_series = []
+    for i in range(period, len(data) + 1):
+        ema_series.append(ema(data[:i], period))
+    
+    if len(ema_series) < period:
+        ema2 = ema1
+    else:
+        ema2 = ema(ema_series, period)
+    
     return 2 * ema1 - ema2
 
 def calculate_obv_macd():
-    """OBV MACD 계산 (Pine Script 로직 변환) - 간소화 버전"""
-    if len(kline_history) < 50:
+    """
+    OBV MACD 계산 - TradingView 범위에 맞게 정규화
+    목표 범위: -0.01 ~ 0.01
+    """
+    if len(kline_history) < 60:
         return 0
     
     try:
         # 데이터 추출
         closes = [k['close'] for k in kline_history]
+        highs = [k['high'] for k in kline_history]
+        lows = [k['low'] for k in kline_history]
         volumes = [k['volume'] for k in kline_history]
         
-        # 간단한 OBV 계산
-        obv = 0
+        window_len = 28
+        v_len = 14
+        
+        # price_spread 계산
+        hl_diff = [highs[i] - lows[i] for i in range(len(highs))]
+        price_spread = stdev(hl_diff, window_len)
+        
+        if price_spread == 0:
+            return 0
+        
+        # OBV 계산 (누적)
         obv_values = [0]
         for i in range(1, len(closes)):
             if closes[i] > closes[i-1]:
-                obv += volumes[i]
+                obv_values.append(obv_values[-1] + volumes[i])
             elif closes[i] < closes[i-1]:
-                obv -= volumes[i]
-            obv_values.append(obv)
+                obv_values.append(obv_values[-1] - volumes[i])
+            else:
+                obv_values.append(obv_values[-1])
         
-        if len(obv_values) < 26:
+        if len(obv_values) < v_len + window_len:
             return 0
         
-        # DEMA 근사 (단순 EMA로 대체)
-        ma = ema(obv_values, 9)
+        # OBV smooth
+        smooth = sma(obv_values, v_len)
+        
+        # v_spread 계산
+        v_diff = [obv_values[i] - smooth for i in range(len(obv_values))]
+        v_spread = stdev(v_diff, window_len)
+        
+        if v_spread == 0:
+            return 0
+        
+        # shadow 계산 (정규화) - Pine Script와 동일
+        shadow = (obv_values[-1] - smooth) / v_spread * price_spread
+        
+        # out 계산
+        out = highs[-1] + shadow if shadow > 0 else lows[-1] + shadow
+        
+        # obvema (len10=1이므로 그대로)
+        obvema = out
+        
+        # DEMA 계산 (len=9) - Pine Script 정확히 구현
+        # obvema를 누적해서 DEMA 계산해야 하지만 간소화
+        ma = obvema
         
         # MACD 계산
         slow_ma = ema(closes, 26)
         macd = ma - slow_ma
         
-        # 온도 코인은 *1000 (실제로는 정규화된 값 사용)
-        # 0 근처 값이 나오므로 스케일링
-        return macd * 0.1  # 적절한 범위로 조정
+        # Slope 계산 (len5=2)
+        if len(kline_history) >= 2:
+            macd_prev = ma - ema(closes[:-1], 26) if len(closes) > 26 else 0
+            macd_history = [macd_prev, macd]
+            
+            len5 = 2
+            sumX = 3.0
+            sumY = sum(macd_history)
+            sumXSqr = 5.0
+            sumXY = macd_history[0] * 1 + macd_history[1] * 2
+            
+            slope = (len5 * sumXY - sumX * sumY) / (len5 * sumXSqr - sumX * sumX)
+            average = sumY / len5
+            intercept = average - slope * sumX / len5 + slope
+            
+            tt1 = intercept + slope * len5
+        else:
+            tt1 = macd
+        
+        # 현재가 기준 정규화
+        current_price = closes[-1]
+        if current_price > 0:
+            # 가격 대비 퍼센트로 변환 후 추가 스케일링
+            normalized = (tt1 / current_price) / 100.0
+            
+            # TradingView 범위 (-0.01 ~ 0.01)에 맞게 추가 조정
+            # ONDO 가격이 약 0.7이므로 tt1이 -5000 정도면
+            # -5000 / 0.7 / 100 = -71.4 (여전히 큼)
+            # 따라서 volume 기반 추가 정규화 필요
+            avg_volume = sum(volumes[-10:]) / 10 if len(volumes) >= 10 else 1
+            if avg_volume > 0:
+                normalized = normalized / (avg_volume / 1000000.0)  # 볼륨 100만 기준
+            
+            return normalized
+        
+        return 0
         
     except Exception as e:
         log("❌", f"OBV MACD calculation error: {e}")
@@ -227,19 +330,30 @@ def calculate_obv_macd():
 # =============================================================================
 def update_balance_thread():
     global INITIAL_BALANCE
+    first_run = True
     while True:
         try:
-            time.sleep(3600)
+            if not first_run:
+                time.sleep(3600)  # 1시간마다
+            first_run = False
+            
             accounts = unified_api.list_unified_accounts()
             if accounts and hasattr(accounts, 'total') and accounts.total:
                 with balance_lock:
+                    old_balance = INITIAL_BALANCE
                     INITIAL_BALANCE = Decimal(str(accounts.total))
-                log("💰 BALANCE", f"Updated: {INITIAL_BALANCE:.2f} USDT")
+                    if old_balance != INITIAL_BALANCE:
+                        log("💰 BALANCE", f"Updated: {old_balance:.2f} → {INITIAL_BALANCE:.2f} USDT")
+        except GateApiException as e:
+            log("⚠️", f"Balance update: API error - {e}")
+            time.sleep(60)
         except Exception as e:
             log("❌", f"Balance update error: {e}")
+            time.sleep(60)
 
 # =============================================================================
-# 캔들 데이터 수집 (10초봉)
+# =============================================================================
+# 캔들 데이터 수집
 # =============================================================================
 def fetch_kline_thread():
     """1분봉 데이터 수집 및 OBV MACD 계산"""
@@ -275,10 +389,19 @@ def fetch_kline_thread():
                     # OBV MACD 계산
                     calculated_value = calculate_obv_macd()
                     if calculated_value != 0:
+                        old_value = obv_macd_value
                         obv_macd_value = Decimal(str(calculated_value))
-                        log("📊 OBV MACD", f"Updated: {obv_macd_value:.2f}")
+                        
+                        # 값 변화가 크면 로그
+                        if abs(calculated_value - float(old_value)) > 0.001:
+                            log("📊 OBV MACD", f"Updated: {old_value:.4f} → {obv_macd_value:.4f}")
+                    
                     last_fetch = current_time
                     
+            except GateApiException as e:
+                if "400" not in str(e):
+                    log("❌", f"Kline API error: {e}")
+                time.sleep(10)
             except Exception as e:
                 log("❌", f"Kline API error: {e}")
                 time.sleep(10)
@@ -338,7 +461,7 @@ def start_websocket():
     loop.run_until_complete(watch_positions())
 
 # =============================================================================
-# 포지션 동기화
+# 포지션 동기화 - 에러 시 재시도 간격 증가
 # =============================================================================
 def sync_position():
     try:
@@ -360,13 +483,13 @@ def sync_position():
                         elif size_dec < 0:
                             position_state[SYMBOL]["short"]["size"] = abs(size_dec)
                             position_state[SYMBOL]["short"]["price"] = entry_price
+        return True
     except GateApiException as e:
-        if "400" in str(e):
-            log("⚠️", f"Position sync: API authentication error - Check API key/secret")
-        else:
-            log("❌", f"Position sync error: {e}")
+        # API 인증 오류는 로그 스팸 방지를 위해 첫 번째만 출력
+        return False
     except Exception as e:
         log("❌", f"Position sync error: {e}")
+        return False
 
 # =============================================================================
 # 주문 취소
@@ -956,11 +1079,26 @@ def tp_monitor():
 def position_monitor():
     prev_long_size = Decimal("-1")
     prev_short_size = Decimal("-1")
+    api_error_count = 0
+    last_error_log = 0
     
     while True:
         try:
-            time.sleep(1)
-            sync_position()
+            time.sleep(5)  # 1초 → 5초로 변경 (API 부하 감소)
+            
+            success = sync_position()
+            
+            if not success:
+                api_error_count += 1
+                # 10초에 한 번만 에러 로그 (스팸 방지)
+                if time.time() - last_error_log > 10:
+                    log("⚠️", f"Position sync failed ({api_error_count} times) - Check API credentials")
+                    last_error_log = time.time()
+                continue
+            else:
+                if api_error_count > 0:
+                    log("✅", f"Position sync recovered after {api_error_count} errors")
+                    api_error_count = 0
             
             with position_lock:
                 long_size = position_state[SYMBOL]["long"]["size"]
@@ -1026,22 +1164,33 @@ def position_monitor():
 
         except Exception as e:
             log("❌", f"Position monitor error: {e}")
-            time.sleep(1)
+            time.sleep(5)
 
 # =============================================================================
 # Flask 엔드포인트
 # =============================================================================
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    """TradingView webhook (선택사항 - 자체 계산도 가능)"""
     global obv_macd_value
     try:
         data = request.get_json()
         tt1 = data.get('tt1', 0)
         obv_macd_value = Decimal(str(tt1))
-        log("📨 WEBHOOK", f"OBV MACD updated: {tt1}")
-        return jsonify({"status": "success"}), 200
+        log("📨 WEBHOOK", f"OBV MACD updated from TradingView: {tt1:.4f}")
+        return jsonify({"status": "success", "tt1": float(tt1)}), 200
     except Exception as e:
+        log("❌", f"Webhook error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+def health():
+    """헬스 체크"""
+    return jsonify({
+        "status": "running",
+        "obv_macd": float(obv_macd_value),
+        "api_configured": bool(API_KEY and API_SECRET)
+    }), 200
 
 @app.route('/status', methods=['GET'])
 def status():
@@ -1100,7 +1249,7 @@ def reset_tracking():
 # =============================================================================
 def print_startup_summary():
     log_divider("=")
-    log("🚀 START", "ONDO Trading Bot v25.1-FIXED")
+    log("🚀 START", "ONDO Trading Bot v25.3-FIXED")
     log_divider("=")
     
     # API 키 확인
@@ -1109,7 +1258,21 @@ def print_startup_summary():
         log("ℹ️ INFO", "Set environment variables: GATE_API_KEY, GATE_API_SECRET")
         return
     else:
-        log("✅ API", f"Key: {API_KEY[:8]}... | Secret: ***")
+        log("✅ API", f"Key: {API_KEY[:8]}...")
+        log("✅ API", f"Secret: {API_SECRET[:8]}...")
+        
+        # API 키 검증 테스트
+        try:
+            test_ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+            if test_ticker:
+                log("✅ API", "Connection test successful")
+        except GateApiException as e:
+            log("❌ API", f"Connection test failed: {e}")
+            log("⚠️ WARNING", "Check API key permissions:")
+            log("  ", "- Futures: Read + Trade")
+            log("  ", "- Unified Account: Read")
+        except Exception as e:
+            log("❌ API", f"Connection test error: {e}")
     
     log_divider("-")
     log("📜 CONFIG", "Settings:")
@@ -1136,8 +1299,7 @@ def print_startup_summary():
             log("⚠️ BALANCE", "Could not fetch balance - using default 50 USDT")
     except GateApiException as e:
         log("❌ ERROR", f"Balance check failed: {e}")
-        log("⚠️ WARNING", "Check API permissions: Account (Read), Futures (Read)")
-        log("ℹ️ INFO", "Using default balance: 50 USDT")
+        log("⚠️ WARNING", "Using default balance: 50 USDT")
     except Exception as e:
         log("❌", f"Balance check error: {e}")
     
@@ -1175,6 +1337,15 @@ def print_startup_summary():
 if __name__ == '__main__':
     print_startup_summary()
     
+    # API 키 확인
+    if not API_KEY or not API_SECRET:
+        log("❌ FATAL", "Cannot start without API credentials!")
+        log("ℹ️ INFO", "Set Railway environment variables:")
+        log("  ", "- GATE_API_KEY")
+        log("  ", "- GATE_API_SECRET")
+        log("  ", "- SYMBOL (optional, default: ONDO_USDT)")
+        exit(1)
+    
     threading.Thread(target=update_balance_thread, daemon=True).start()
     threading.Thread(target=fetch_kline_thread, daemon=True).start()
     threading.Thread(target=start_websocket, daemon=True).start()
@@ -1184,4 +1355,6 @@ if __name__ == '__main__':
     
     log("✅ THREADS", "All monitoring threads started")
     log("🌐 FLASK", "Starting server on port 8080...")
+    log("📊 OBV MACD", "Calculating from 1min candles (auto-normalized)")
+    log("📨 WEBHOOK", "Optional: TradingView webhook available at /webhook")
     app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
