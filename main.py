@@ -645,6 +645,10 @@ def get_main_side():
     elif short_size > long_size: return "short"
     else: return "none"
 
+def get_counter_side(side):
+    """반대 방향 포지션 가져오기"""
+    return "short" if side == "long" else "long"
+    
 def is_above_threshold(side):
     """포지션이 임계값을 초과했는지 확인"""
     with position_lock:
@@ -823,14 +827,21 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter):
         
         log("✅ HEDGE", f"{hedge_side.upper()} {hedge_qty} @ market")
         
+        # 포지션 동기화 대기
+        time.sleep(0.5)
+        sync_position()
+        
         # 임계값 이후 주력 포지션은 개별 TP 생성
         if is_above_threshold(hedge_side) and hedge_side == get_main_side():
             tp_id = create_individual_tp(hedge_side, hedge_qty, current_price)
             if tp_id:
                 track_entry(hedge_side, hedge_qty, current_price, "hedge", tp_id)
         
+        # 그리드 재생성 및 TP 갱신 (취소 없이)
         time.sleep(0.3)
-        full_refresh("Hedge")
+        current_price = get_current_price()
+        if current_price > 0:
+            initialize_grid(current_price)
         
     except GateApiException as e:
         log("❌", f"Hedge order API error: {e}")
