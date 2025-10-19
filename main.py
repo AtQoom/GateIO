@@ -847,6 +847,7 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter):
 def create_individual_tp(side, qty, entry_price):
     try:
         tp_price = entry_price * (Decimal("1") + TP_GAP_PCT) if side == "long" else entry_price * (Decimal("1") - TP_GAP_PCT)
+        tp_price = tp_price.quantize(Decimal('0.0001'), rounding=ROUND_DOWN)  # ← 추가
         size = -qty if side == "long" else qty
         order = FuturesOrder(contract=SYMBOL, size=size, price=str(tp_price), tif="gtc", reduce_only=True)
         result = api.create_futures_order(SETTLE, order)
@@ -932,7 +933,6 @@ def refresh_all_tp_orders():
         if long_size > 0:
             if is_above_threshold("long"):
                 log("📊 LONG TP", "Above threshold → Individual + Average TPs")
-                # 개별 TP 생성
                 individual_total = 0
                 for entry in post_threshold_entries[SYMBOL]["long"]:
                     tp_id = create_individual_tp("long", entry["qty"], Decimal(str(entry["price"])))
@@ -940,20 +940,19 @@ def refresh_all_tp_orders():
                         entry["tp_order_id"] = tp_id
                         individual_total += entry["qty"]
                 
-                # 나머지는 평단 TP
                 remaining = int(long_size) - individual_total
                 if remaining > 0:
                     tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
                     tp_price = tp_price.quantize(Decimal('0.0001'), rounding=ROUND_DOWN)  # ← 추가
-                    order = FuturesOrder(contract=SYMBOL, size=-int(long_size), price=str(tp_price), tif="gtc", reduce_only=True)
+                    order = FuturesOrder(contract=SYMBOL, size=-remaining, price=str(tp_price), tif="gtc", reduce_only=True)
                     result = api.create_futures_order(SETTLE, order)
                     if result and hasattr(result, 'id'):
                         average_tp_orders[SYMBOL]["long"] = result.id
                         log("🎯 AVERAGE TP", f"LONG {remaining} @ {tp_price:.4f}")
             else:
-                # 임계값 미만: 전체 평단 TP
                 log("📊 LONG TP", "Below threshold → Full average TP")
                 tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
+                tp_price = tp_price.quantize(Decimal('0.0001'), rounding=ROUND_DOWN)  # ← 추가
                 order = FuturesOrder(contract=SYMBOL, size=-int(long_size), price=str(tp_price), tif="gtc", reduce_only=True)
                 result = api.create_futures_order(SETTLE, order)
                 if result and hasattr(result, 'id'):
@@ -975,7 +974,7 @@ def refresh_all_tp_orders():
                 if remaining > 0:
                     tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
                     tp_price = tp_price.quantize(Decimal('0.0001'), rounding=ROUND_DOWN)  # ← 추가
-                    order = FuturesOrder(contract=SYMBOL, size=int(short_size), price=str(tp_price), tif="gtc", reduce_only=True)
+                    order = FuturesOrder(contract=SYMBOL, size=remaining, price=str(tp_price), tif="gtc", reduce_only=True)
                     result = api.create_futures_order(SETTLE, order)
                     if result and hasattr(result, 'id'):
                         average_tp_orders[SYMBOL]["short"] = result.id
@@ -983,6 +982,7 @@ def refresh_all_tp_orders():
             else:
                 log("📊 SHORT TP", "Below threshold → Full average TP")
                 tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
+                tp_price = tp_price.quantize(Decimal('0.0001'), rounding=ROUND_DOWN)  # ← 추가
                 order = FuturesOrder(contract=SYMBOL, size=int(short_size), price=str(tp_price), tif="gtc", reduce_only=True)
                 result = api.create_futures_order(SETTLE, order)
                 if result and hasattr(result, 'id'):
