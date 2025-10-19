@@ -709,8 +709,22 @@ def initialize_grid(current_price):
         
         # 롱/숏 모두 있으면 그리드 생성 안 함, TP만 생성
         if long_size > 0 and short_size > 0:
-            log("ℹ️ GRID", "Both positions exist → Skip grid creation, creating TPs only")
-            refresh_all_tp_orders()
+            log("ℹ️ GRID", "Both positions exist → Skip grid creation")
+            
+            # 기존 TP 주문이 있는지 확인
+            try:
+                orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
+                tp_orders = [o for o in orders if o.is_reduce_only]
+                
+                if len(tp_orders) > 0:
+                    log("ℹ️ TP", f"{len(tp_orders)} TP orders already exist")
+                    return  # 이미 TP가 있으면 재생성하지 않음
+                else:
+                    log("📈 TP", "No TP orders found, creating...")
+                    refresh_all_tp_orders()
+            except Exception as e:
+                log("❌", f"TP check error: {e}")
+            
             return
         
         cancel_grid_only()
