@@ -1482,15 +1482,20 @@ def print_startup_summary():
             log("💹 PRICE", f"{current_price:.4f}")
             cancel_all_orders()
             time.sleep(0.5)
+            
+            # 그리드 생성 (내부에서 롱/숏 모두 있으면 TP 생성)
             initialize_grid(current_price)
             
-            # TP 생성 전 1초 대기 (주문 시스템 안정화)
-            time.sleep(1)  # ← 추가
-            
+            # initialize_grid에서 TP를 생성하지 않은 경우에만 추가 생성
+            # (롱/숏 중 하나만 있거나 없는 경우)
             with position_lock:
-                pos = position_state[SYMBOL]
-                if pos['long']['size'] > 0 or pos['short']['size'] > 0:
-                    refresh_all_tp_orders()
+                long_size = position_state[SYMBOL]["long"]["size"]
+                short_size = position_state[SYMBOL]["short"]["size"]
+            
+            # 롱/숏 중 하나만 있으면 TP 생성 (initialize_grid에서 이미 처리되지 않은 경우)
+            if (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0):
+                time.sleep(1)
+                refresh_all_tp_orders()
         else:
             log("⚠️", "Could not fetch current price")
     except Exception as e:
