@@ -711,6 +711,37 @@ def initialize_grid(current_price):
             long_price = position_state[SYMBOL]["long"]["price"]
             short_price = position_state[SYMBOL]["short"]["price"]
         
+        # ★ 최대 포지션 한도 체크 (추가)
+        with balance_lock:
+            max_value = account_balance * MAX_POSITION_RATIO
+        
+        long_value = long_price * long_size
+        short_value = short_price * short_size
+        
+        # 롱 최대 한도 초과 시 롱 그리드 생성 금지
+        if max_position_locked["long"] or long_value >= max_value:
+            log("🚫 GRID", f"LONG max limit reached (${long_value:.2f} >= ${max_value:.2f})")
+            if long_value >= max_value:
+                max_position_locked["long"] = True
+            # 숏 그리드만 생성 (있다면)
+            if short_size > 0 and short_value < max_value and not max_position_locked["short"]:
+                short_grid_price = current_price * (Decimal("1") + GRID_GAP_PCT)
+                qty = calculate_grid_qty(is_above_threshold=is_above_threshold("short"))
+                place_grid_order("short", short_grid_price, qty, is_counter=False)
+            return
+        
+        # 숏 최대 한도 초과 시 숏 그리드 생성 금지
+        if max_position_locked["short"] or short_value >= max_value:
+            log("🚫 GRID", f"SHORT max limit reached (${short_value:.2f} >= ${max_value:.2f})")
+            if short_value >= max_value:
+                max_position_locked["short"] = True
+            # 롱 그리드만 생성 (있다면)
+            if long_size > 0 and long_value < max_value and not max_position_locked["long"]:
+                long_grid_price = current_price * (Decimal("1") - GRID_GAP_PCT)
+                qty = calculate_grid_qty(is_above_threshold=is_above_threshold("long"))
+                place_grid_order("long", long_grid_price, qty, is_counter=False)
+            return
+        
         # 롱/숏 모두 있으면 그리드 생성 안 함, TP 확인 후 없으면 생성
         if long_size > 0 and short_size > 0:
             log("ℹ️ GRID", "Both positions exist → Skip grid creation")
@@ -801,11 +832,10 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter):
         if was_counter:
             hedge_qty = max(base_qty, int(main_size * 0.1))
             hedge_side = side
-            log("🔄 HEDGE", f"Counter grid filled → Main hedge: {hedge_side.UPPER()} {hedge_qty}")
+            log("🔄 HEDGE", f"Counter grid filled → Main hedge: {hedge_side.upper()} {hedge_qty}")
         else:
             hedge_qty = base_qty
             hedge_side = counter_side
-            log("🔄 HEDGE", f"Main grid filled → Counter hedge: {hedge_side.upper()} {hedge_qty}")
         
         # 시장가 주문 (IOC)
         hedge_order_data = {
