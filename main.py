@@ -1447,7 +1447,6 @@ def print_startup_summary():
             else:
                 log("⚠️ BALANCE", "Could not fetch - using default 50 USDT")
         
-        # account_balance 기준으로 계산
         log("💰 THRESHOLD", f"{account_balance * THRESHOLD_RATIO:.2f} USDT")
         log("💰 MAX POSITION", f"{account_balance * MAX_POSITION_RATIO:.2f} USDT")
     except Exception as e:
@@ -1470,6 +1469,9 @@ def print_startup_summary():
             cancel_all_orders()
             time.sleep(0.5)
             initialize_grid(current_price)
+            
+            # TP 생성 전 1초 대기 (주문 시스템 안정화)
+            time.sleep(1)  # ← 추가
             
             with position_lock:
                 pos = position_state[SYMBOL]
