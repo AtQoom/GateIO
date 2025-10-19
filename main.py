@@ -143,17 +143,21 @@ def log_position_state():
     if main != "none":
         log("📊 MAIN", f"{main.upper()} (더 큰 포지션)")
 
-def log_tracking_state():
-    """추적 상태 로그"""
-    long_tracked = len(post_threshold_entries[SYMBOL]["long"])
-    short_tracked = len(post_threshold_entries[SYMBOL]["short"])
-    long_snap = counter_position_snapshot[SYMBOL]["long"]
-    short_snap = counter_position_snapshot[SYMBOL]["short"]
+def log_threshold_info():
+    """임계값 정보 로그"""
+    with balance_lock:
+        balance = INITIAL_BALANCE
+    with position_lock:
+        long_size = position_state[SYMBOL]["long"]["size"]
+        long_price = position_state[SYMBOL]["long"]["price"]
+        short_size = position_state[SYMBOL]["short"]["size"]
+        short_price = position_state[SYMBOL]["short"]["price"]
     
-    if long_tracked > 0 or short_tracked > 0:
-        log("📝 TRACKING", f"Long: {long_tracked}개 | Short: {short_tracked}개")
-    if long_snap > 0 or short_snap > 0:
-        log("📸 SNAPSHOT", f"Long: {long_snap} | Short: {short_snap}")
+    threshold = balance * THRESHOLD_RATIO
+    long_value = long_price * long_size
+    short_value = short_price * short_size
+    
+    log("💰 THRESHOLD", f"${threshold:.2f} | Long: ${long_value:.2f} {'✅' if long_value >= threshold else '❌'} | Short: ${short_value:.2f} {'✅' if short_value >= threshold else '❌'}")
 
 # =============================================================================
 # OBV MACD 계산 (Pine Script 정확한 변환)
@@ -222,7 +226,7 @@ def dema(data, period):
 def calculate_obv_macd():
     """
     OBV MACD 계산 - TradingView 범위에 맞게 정규화
-    목표 범위: -0.01 ~ 0.01
+    반환값: -0.01 ~ 0.01 범위 (로그 표시 시 *1000)
     """
     if len(kline_history) < 60:
         return 0
@@ -277,7 +281,6 @@ def calculate_obv_macd():
         obvema = out
         
         # DEMA 계산 (len=9) - Pine Script 정확히 구현
-        # obvema를 누적해서 DEMA 계산해야 하지만 간소화
         ma = obvema
         
         # MACD 계산
@@ -309,14 +312,13 @@ def calculate_obv_macd():
             # 가격 대비 퍼센트로 변환 후 추가 스케일링
             normalized = (tt1 / current_price) / 100.0
             
-            # TradingView 범위 (-0.01 ~ 0.01)에 맞게 추가 조정
-            # ONDO 가격이 약 0.7이므로 tt1이 -5000 정도면
-            # -5000 / 0.7 / 100 = -71.4 (여전히 큼)
-            # 따라서 volume 기반 추가 정규화 필요
+            # 볼륨 기반 추가 정규화
             avg_volume = sum(volumes[-10:]) / 10 if len(volumes) >= 10 else 1
             if avg_volume > 0:
-                normalized = normalized / (avg_volume / 1000000.0)  # 볼륨 100만 기준
+                normalized = normalized / (avg_volume / 1000000.0)
             
+            # -0.01 ~ 0.01 범위로 반환 (내부 저장용)
+            # 로그 표시 및 수량 계산 시 *1000 적용
             return normalized
         
         return 0
@@ -337,13 +339,27 @@ def update_balance_thread():
                 time.sleep(3600)  # 1시간마다
             first_run = False
             
-            accounts = unified_api.list_unified_accounts()
-            if accounts and hasattr(accounts, 'total') and accounts.total:
-                with balance_lock:
-                    old_balance = INITIAL_BALANCE
-                    INITIAL_BALANCE = Decimal(str(accounts.total))
-                    if old_balance != INITIAL_BALANCE:
-                        log("💰 BALANCE", f"Updated: {old_balance:.2f} → {INITIAL_BALANCE:.2f} USDT")
+            # Unified Account 잔고 조회
+            try:
+                accounts = unified_api.list_unified_accounts()
+                if accounts and hasattr(accounts, 'total') and accounts.total:
+                    with balance_lock:
+                        old_balance = INITIAL_BALANCE
+                        INITIAL_BALANCE = Decimal(str(accounts.total))
+                        if old_balance != INITIAL_BALANCE:
+                            log("💰 BALANCE", f"Updated: {old_balance:.2f} → {INITIAL_BALANCE:.2f} USDT")
+                else:
+                    # Futures 계좌 잔고로 대체
+                    futures_accounts = api.list_futures_accounts(SETTLE)
+                    if futures_accounts and hasattr(futures_accounts, 'total') and futures_accounts.total:
+                        with balance_lock:
+                            old_balance = INITIAL_BALANCE
+                            INITIAL_BALANCE = Decimal(str(futures_accounts.total))
+                            if old_balance != INITIAL_BALANCE:
+                                log("💰 BALANCE", f"Futures account: {old_balance:.2f} → {INITIAL_BALANCE:.2f} USDT")
+            except Exception as e:
+                log("⚠️", f"Balance fetch error: {e}")
+                
         except GateApiException as e:
             log("⚠️", f"Balance update: API error - {e}")
             time.sleep(60)
@@ -386,15 +402,10 @@ def fetch_kline_thread():
                             'volume': float(candle.v) if hasattr(candle, 'v') and candle.v else 0,
                         })
                     
-                    # OBV MACD 계산
+                    # OBV MACD 계산 (로그는 그리드 생성 시에만 출력)
                     calculated_value = calculate_obv_macd()
-                    if calculated_value != 0:
-                        old_value = obv_macd_value
+                    if calculated_value != 0 or obv_macd_value != 0:
                         obv_macd_value = Decimal(str(calculated_value))
-                        
-                        # 값 변화가 크면 로그
-                        if abs(calculated_value - float(old_value)) > 0.001:
-                            log("📊 OBV MACD", f"Updated: {old_value:.4f} → {obv_macd_value:.4f}")
                     
                     last_fetch = current_time
                     
@@ -548,7 +559,7 @@ def cancel_grid_only():
 # 수량 계산
 # =============================================================================
 def calculate_obv_macd_weight(tt1_value):
-    """OBV MACD 값에 따른 동적 배수"""
+    """OBV MACD 값에 따른 동적 배수 (*1000 적용된 값 기준)"""
     abs_val = abs(tt1_value)
     if abs_val < 5: return Decimal("0.10")
     elif abs_val < 10: return Decimal("0.11")
@@ -578,7 +589,9 @@ def calculate_grid_qty(is_above_threshold=False):
         price = get_current_price()
         if price <= 0: return 0
         
-        weight = BASE_RATIO if is_above_threshold else calculate_obv_macd_weight(float(obv_macd_value))
+        # OBV MACD 값에 *1000 적용하여 수량 계산
+        obv_macd_display = float(obv_macd_value) * 1000
+        weight = BASE_RATIO if is_above_threshold else calculate_obv_macd_weight(obv_macd_display)
         
         qty = round(float((balance * weight) / price))
         return max(1, qty)
@@ -679,7 +692,9 @@ def initialize_grid(current_price):
         short_above = (short_price * short_size >= threshold and short_size > 0)
         
         log("📈 GRID INIT", f"Price: {current_price:.4f}")
-        log("📊 OBV MACD", f"Value: {obv_macd_value:.2f}")
+        # OBV MACD 로그는 *1000으로 표시
+        obv_display = float(obv_macd_value) * 1000
+        log("📊 OBV MACD", f"Value: {obv_display:.2f}")
         
         if long_above:
             # 롱이 주력
@@ -704,9 +719,9 @@ def initialize_grid(current_price):
         else:
             # 대칭 그리드 (임계값 이전)
             qty = calculate_grid_qty(is_above_threshold=False)
-            weight = calculate_obv_macd_weight(float(obv_macd_value))
+            weight = calculate_obv_macd_weight(obv_display)
             log("⚖️ SYMMETRIC", "Below threshold - OBV MACD based")
-            log("📊 QUANTITY", f"Both sides: {qty} | OBV MACD: {obv_macd_value:.2f} | Weight: {weight*100}%")
+            log("📊 QUANTITY", f"Both sides: {qty} | OBV MACD: {obv_display:.2f} | Weight: {weight*100}%")
             place_grid_order("long", long_grid_price, qty, is_counter=False)
             place_grid_order("short", short_grid_price, qty, is_counter=False)
             
@@ -835,26 +850,37 @@ def refresh_all_tp_orders():
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
+            long_price = position_state[SYMBOL]["long"]["price"]
+            short_price = position_state[SYMBOL]["short"]["price"]
         
         log("📈 TP REFRESH", "Creating TP orders...")
+        log_threshold_info()
         
         # 롱 TP
         if long_size > 0:
             if is_above_threshold("long"):
                 log("📊 LONG TP", "Above threshold → Individual + Average TPs")
                 # 개별 TP 생성
+                individual_total = 0
                 for entry in post_threshold_entries[SYMBOL]["long"]:
                     tp_id = create_individual_tp("long", entry["qty"], Decimal(str(entry["price"])))
                     if tp_id:
                         entry["tp_order_id"] = tp_id
+                        individual_total += entry["qty"]
+                
                 # 나머지는 평단 TP
-                create_average_tp("long")
+                remaining = int(long_size) - individual_total
+                if remaining > 0:
+                    tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
+                    order = FuturesOrder(contract=SYMBOL, size=-remaining, price=str(tp_price), tif="gtc", reduce_only=True)
+                    result = api.create_futures_order(SETTLE, order)
+                    if result and hasattr(result, 'id'):
+                        average_tp_orders[SYMBOL]["long"] = result.id
+                        log("🎯 AVERAGE TP", f"LONG {remaining} @ {tp_price:.4f}")
             else:
                 # 임계값 미만: 전체 평단 TP
                 log("📊 LONG TP", "Below threshold → Full average TP")
-                with position_lock:
-                    avg_price = position_state[SYMBOL]["long"]["price"]
-                tp_price = avg_price * (Decimal("1") + TP_GAP_PCT)
+                tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
                 order = FuturesOrder(contract=SYMBOL, size=-int(long_size), price=str(tp_price), tif="gtc", reduce_only=True)
                 result = api.create_futures_order(SETTLE, order)
                 if result and hasattr(result, 'id'):
@@ -865,16 +891,24 @@ def refresh_all_tp_orders():
         if short_size > 0:
             if is_above_threshold("short"):
                 log("📊 SHORT TP", "Above threshold → Individual + Average TPs")
+                individual_total = 0
                 for entry in post_threshold_entries[SYMBOL]["short"]:
                     tp_id = create_individual_tp("short", entry["qty"], Decimal(str(entry["price"])))
                     if tp_id:
                         entry["tp_order_id"] = tp_id
-                create_average_tp("short")
+                        individual_total += entry["qty"]
+                
+                remaining = int(short_size) - individual_total
+                if remaining > 0:
+                    tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
+                    order = FuturesOrder(contract=SYMBOL, size=remaining, price=str(tp_price), tif="gtc", reduce_only=True)
+                    result = api.create_futures_order(SETTLE, order)
+                    if result and hasattr(result, 'id'):
+                        average_tp_orders[SYMBOL]["short"] = result.id
+                        log("🎯 AVERAGE TP", f"SHORT {remaining} @ {tp_price:.4f}")
             else:
                 log("📊 SHORT TP", "Below threshold → Full average TP")
-                with position_lock:
-                    avg_price = position_state[SYMBOL]["short"]["price"]
-                tp_price = avg_price * (Decimal("1") - TP_GAP_PCT)
+                tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
                 order = FuturesOrder(contract=SYMBOL, size=int(short_size), price=str(tp_price), tif="gtc", reduce_only=True)
                 result = api.create_futures_order(SETTLE, order)
                 if result and hasattr(result, 'id'):
@@ -945,6 +979,7 @@ def full_refresh(event_type):
     log("🔄 SYNC", "Syncing position...")
     sync_position()
     log_position_state()
+    log_threshold_info()
 
     cancel_all_orders()
     time.sleep(0.5)
@@ -957,7 +992,6 @@ def full_refresh(event_type):
     
     sync_position()
     log_position_state()
-    log_tracking_state()
     log("✅ REFRESH", f"Complete: {event_type}")
 
 # =============================================================================
@@ -1176,14 +1210,59 @@ def webhook():
     try:
         data = request.get_json()
         tt1 = data.get('tt1', 0)
-        obv_macd_value = Decimal(str(tt1))
-        log("📨 WEBHOOK", f"OBV MACD updated from TradingView: {tt1:.4f}")
-        return jsonify({"status": "success", "tt1": float(tt1)}), 200
+        # TradingView에서 온 값은 이미 -10 ~ 10 범위라고 가정
+        # 내부적으로 /1000 저장 (-0.01 ~ 0.01)
+        obv_macd_value = Decimal(str(tt1 / 1000.0))
+        log("📨 WEBHOOK", f"OBV MACD updated from TradingView: {tt1:.2f} (stored as {float(obv_macd_value):.6f})")
+        return jsonify({"status": "success", "tt1": float(tt1), "stored": float(obv_macd_value)}), 200
     except Exception as e:
         log("❌", f"Webhook error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
+def health():
+    """헬스 체크"""
+    obv_display = float(obv_macd_value) * 1000
+    return jsonify({
+        "status": "running",
+        "obv_macd_display": obv_display,
+        "obv_macd_internal": float(obv_macd_value),
+        "api_configured": bool(API_KEY and API_SECRET)
+    }), 200
+
+@app.route('/status', methods=['GET'])
+def status():
+    with position_lock:
+        pos = position_state[SYMBOL]
+    with balance_lock:
+        bal = float(INITIAL_BALANCE)
+    
+    obv_display = float(obv_macd_value) * 1000
+    
+    return jsonify({
+        "balance": bal,
+        "obv_macd_display": obv_display,
+        "obv_macd_internal": float(obv_macd_value),
+        "position": {
+            "long": {"size": float(pos["long"]["size"]), "price": float(pos["long"]["price"])},
+            "short": {"size": float(pos["short"]["size"]), "price": float(pos["short"]["price"])}
+        },
+        "post_threshold_entries": {
+            "long": [{"qty": e["qty"], "price": e["price"], "type": e["entry_type"]} 
+                     for e in post_threshold_entries[SYMBOL]["long"]],
+            "short": [{"qty": e["qty"], "price": e["price"], "type": e["entry_type"]} 
+                      for e in post_threshold_entries[SYMBOL]["short"]]
+        },
+        "counter_snapshot": {
+            "long": float(counter_position_snapshot[SYMBOL]["long"]),
+            "short": float(counter_position_snapshot[SYMBOL]["short"])
+        },
+        "max_locked": max_position_locked,
+        "threshold_status": {
+            "long": is_above_threshold("long"),
+            "short": is_above_threshold("short")
+        }
+    }), 200route('/health', methods=['GET'])
 def health():
     """헬스 체크"""
     return jsonify({
@@ -1249,13 +1328,13 @@ def reset_tracking():
 # =============================================================================
 def print_startup_summary():
     log_divider("=")
-    log("🚀 START", "ONDO Trading Bot v25.3-FIXED")
+    log("🚀 START", "ONDO Trading Bot v26.0-COMPLETE")
     log_divider("=")
     
     # API 키 확인
     if not API_KEY or not API_SECRET:
         log("❌ ERROR", "API_KEY or API_SECRET not set!")
-        log("ℹ️ INFO", "Set environment variables: GATE_API_KEY, GATE_API_SECRET")
+        log("ℹ️ INFO", "Set environment variables: API_KEY, API_SECRET")
         return
     else:
         log("✅ API", f"Key: {API_KEY[:8]}...")
@@ -1288,26 +1367,35 @@ def print_startup_summary():
     
     # 초기 잔고
     try:
-        accounts = unified_api.list_unified_accounts()
-        if accounts and hasattr(accounts, 'total') and accounts.total:
-            global INITIAL_BALANCE
-            INITIAL_BALANCE = Decimal(str(accounts.total))
-            log("💰 BALANCE", f"{INITIAL_BALANCE:.2f} USDT")
-            log("💰 THRESHOLD", f"{INITIAL_BALANCE * THRESHOLD_RATIO:.2f} USDT")
-            log("💰 MAX POSITION", f"{INITIAL_BALANCE * MAX_POSITION_RATIO:.2f} USDT")
-        else:
-            log("⚠️ BALANCE", "Could not fetch balance - using default 50 USDT")
-    except GateApiException as e:
+        # Unified Account 시도
+        try:
+            accounts = unified_api.list_unified_accounts()
+            if accounts and hasattr(accounts, 'total') and accounts.total:
+                global INITIAL_BALANCE
+                INITIAL_BALANCE = Decimal(str(accounts.total))
+                log("💰 BALANCE", f"{INITIAL_BALANCE:.2f} USDT (Unified)")
+        except:
+            # Futures 계좌로 대체
+            futures_accounts = api.list_futures_accounts(SETTLE)
+            if futures_accounts and hasattr(futures_accounts, 'total') and futures_accounts.total:
+                global INITIAL_BALANCE
+                INITIAL_BALANCE = Decimal(str(futures_accounts.total))
+                log("💰 BALANCE", f"{INITIAL_BALANCE:.2f} USDT (Futures)")
+            else:
+                log("⚠️ BALANCE", "Could not fetch - using default 50 USDT")
+        
+        log("💰 THRESHOLD", f"{INITIAL_BALANCE * THRESHOLD_RATIO:.2f} USDT")
+        log("💰 MAX POSITION", f"{INITIAL_BALANCE * MAX_POSITION_RATIO:.2f} USDT")
+    except Exception as e:
         log("❌ ERROR", f"Balance check failed: {e}")
         log("⚠️ WARNING", "Using default balance: 50 USDT")
-    except Exception as e:
-        log("❌", f"Balance check error: {e}")
     
     log_divider("-")
     
     # 기존 포지션
     sync_position()
     log_position_state()
+    log_threshold_info()
     log_divider("-")
     
     # 초기화
