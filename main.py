@@ -608,7 +608,7 @@ def calculate_grid_qty(is_above_threshold):
         return base_qty
     
     # OBV MACD (tt1) 값 기준 동적 수량 조절
-    obv_value = float(obv_macd_value) * 1000  # tt1 값 스케일링
+    obv_value = abs(float(obv_macd_value) * 1000)  # 절댓값 추가
     if obv_value <= 5:
         multiplier = 0.1
     elif obv_value <= 10:
@@ -758,69 +758,66 @@ def initialize_grid(current_price):
     except Exception as e:
         log("❌", f"Grid init error: {e}")
 
-def hedge_after_grid_fill(filled_side, filled_price, filled_qty, was_counter_grid):
-    """그리드 체결 후 헤징"""
+def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter):
+    """
+    그리드 체결 후 헤징 진입
+    - 비주력 포지션(30%) 그리드 체결시: 주력 포지션을 기본수량 또는 주력 포지션 수량의 10% 중 큰 값으로 헷징
+    - 주력 포지션 그리드 체결시: 비주력 포지션을 기본수량으로 헷징
+    """
+    if not ENABLE_AUTO_HEDGE:
+        return
+    
     try:
-        main_side = get_main_side()
-        hedge_side = get_counter_side(filled_side)
+        current_price = get_current_price()
+        if current_price <= 0:
+            return
         
+        counter_side = get_counter_side(side)
         with position_lock:
-            main_size = position_state[SYMBOL][main_side]["size"] if main_side != "none" else Decimal("0")
-            main_price = position_state[SYMBOL][main_side]["price"] if main_side != "none" else Decimal("0")
+            main_size = position_state[SYMBOL][side]["size"]
+            counter_size = position_state[SYMBOL][counter_side]["size"]
         
         with balance_lock:
-            balance = INITIAL_BALANCE
+            base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
         
-        current_price = get_current_price()
-        if current_price <= 0: return
-        
-        threshold = balance * THRESHOLD_RATIO
-        main_value = main_price * main_size
-        above_threshold = (main_value >= threshold and main_size > 0)
-        
-        # 헤징 전 임계값 상태 저장
-        hedge_will_be_above_threshold = is_above_threshold(hedge_side)
-        
-        # 헤징 수량 계산
-        if above_threshold:
-            if was_counter_grid:  # 비주력(30%) 그리드 체결
-                qty_10pct = int(main_size * HEDGE_RATIO_MAIN)
-                base_qty = round(float((balance * BASE_RATIO) / current_price))
-                hedge_qty = max(qty_10pct, base_qty, 1)
-                log("🛡️ HEDGE", f"Counter grid filled → Hedge: max(10%={qty_10pct}, base={base_qty}) = {hedge_qty}")
-            else:  # 주력 그리드 체결
-                hedge_qty = max(1, round(float((balance * BASE_RATIO) / current_price)))
-                log("🛡️ HEDGE", f"Main grid filled → Hedge: base={hedge_qty}")
+        # 헤징 수량 결정
+        if was_counter:
+            # 비주력 포지션(30%) 그리드 체결 → 주력 포지션 헷징
+            hedge_qty = max(base_qty, int(main_size * 0.1))
+            hedge_side = side  # 주력 방향으로 헷징
+            log("🔄 HEDGE", f"Counter grid filled → Main hedge: {hedge_side.upper()} {hedge_qty}")
         else:
-            hedge_qty = max(1, round(float((balance * BASE_RATIO) / current_price)))
-            log("🛡️ HEDGE", f"Below threshold → Hedge: base={hedge_qty}")
+            # 주력 포지션 그리드 체결 → 비주력 포지션 헷징
+            hedge_qty = base_qty
+            hedge_side = counter_side  # 반대 방향으로 헷징
+            log("🔄 HEDGE", f"Main grid filled → Counter hedge: {hedge_side.upper()} {hedge_qty}")
         
-        size = hedge_qty if hedge_side == "long" else -hedge_qty
+        # 시장가 주문 (IOC)
+        hedge_order_data = {
+            "contract": SYMBOL,
+            "size": int(hedge_qty * (1 if hedge_side == "long" else -1)),
+            "price": "0",  # 시장가
+            "tif": "ioc"
+        }
         
-        log("🛡️ HEDGING", f"{hedge_side.upper()} {hedge_qty} @ market")
-        order = FuturesOrder(contract=SYMBOL, size=size, price="0", tif='ioc')
-        created_order = api.create_futures_order(SETTLE, order)
+        order = api.create_futures_order(SETTLE, FuturesOrder(**hedge_order_data))
+        order_id = order.id
         
-        # 헤징 체결 확인 및 추적
-        if created_order and hasattr(created_order, 'id'):
-            time.sleep(1)
-            try:
-                trades = api.list_my_trades(settle=SETTLE, contract=SYMBOL, limit=10)
-                for trade in trades:
-                    if str(trade.order_id) == str(created_order.id):
-                        trade_qty = abs(Decimal(str(trade.size)))
-                        trade_price = Decimal(str(trade.price))
-                        log("✅ HEDGE", f"{hedge_side.upper()} {trade_qty} @ {trade_price:.4f}")
-                        
-                        # 임계값 초과 후 헤징만 추적
-                        if hedge_will_be_above_threshold:
-                            track_entry(hedge_side, trade_qty, trade_price, "hedge", was_counter=False)
-                        break
-            except Exception as e:
-                log("❌", f"Trade fetch error: {e}")
-                    
+        log("✅ HEDGE", f"{hedge_side.upper()} {hedge_qty} @ market")
+        
+        # 임계값 이후 주력 포지션은 개별 TP 생성
+        if is_above_threshold(hedge_side) and hedge_side == get_main_side():
+            tp_id = create_individual_tp(hedge_side, hedge_qty, current_price)
+            if tp_id:
+                track_entry(hedge_side, hedge_qty, current_price, "hedge", tp_id)
+        
+        time.sleep(0.3)
+        full_refresh("Hedge")
+        
+    except GateApiException as e:
+        log("❌", f"Hedge order API error: {e}")
     except Exception as e:
-        log("❌", f"Hedging error: {e}")
+        log("❌", f"Hedge order error: {e}")
 
 def create_individual_tp(side, qty, entry_price):
     try:
@@ -836,31 +833,51 @@ def create_individual_tp(side, qty, entry_price):
         log("❌", f"Individual TP error: {e}")
         return None
 
-def create_average_tp(side):
+def create_average_tp(side, size, avg_price):
+    """
+    평단 TP 주문 생성 (임계값 이전 진입 물량)
+    - 개별 TP가 있는 경우, 해당 물량을 제외한 나머지만 평단 TP
+    """
     try:
-        with position_lock:
-            size = position_state[SYMBOL][side]["size"]
-            avg_price = position_state[SYMBOL][side]["price"]
-        
-        if size <= 0 or avg_price <= 0: return
-        
-        # 개별 TP가 있는 수량 계산
+        # 개별 TP로 관리 중인 수량 제외
         individual_total = sum(entry["qty"] for entry in post_threshold_entries[SYMBOL][side])
-        remaining_qty = int(size - individual_total)
+        remaining_qty = int(size) - individual_total
         
-        if remaining_qty <= 0: return
+        if remaining_qty <= 0:
+            log("ℹ️ TP", f"{side.upper()} all managed by individual TPs")
+            return None
         
-        tp_price = avg_price * (Decimal("1") + TP_GAP_PCT) if side == "long" else avg_price * (Decimal("1") - TP_GAP_PCT)
-        order_size = -remaining_qty if side == "long" else remaining_qty
+        # TP 가격 계산
+        if side == "long":
+            tp_price = avg_price * (Decimal("1") + TP_GAP_PCT)
+        else:
+            tp_price = avg_price * (Decimal("1") - TP_GAP_PCT)
         
-        order = FuturesOrder(contract=SYMBOL, size=order_size, price=str(tp_price), tif="gtc", reduce_only=True)
-        result = api.create_futures_order(SETTLE, order)
-        if result and hasattr(result, 'id'):
-            average_tp_orders[SYMBOL][side] = result.id
-            log("🎯 AVERAGE TP", f"{side.upper()} {remaining_qty} @ {tp_price:.4f} (remaining from pre-threshold)")
-            
+        # TP 주문 생성
+        tp_order_data = {
+            "contract": SYMBOL,
+            "size": int(remaining_qty * (-1 if side == "long" else 1)),  # 청산 방향
+            "price": str(tp_price.quantize(Decimal('0.0001'), rounding=ROUND_DOWN)),
+            "tif": "gtc",
+            "reduce_only": True
+        }
+        
+        order = api.create_futures_order(SETTLE, FuturesOrder(**tp_order_data))
+        order_id = order.id
+        
+        log("📌 AVG TP", f"{side.upper()} {remaining_qty} @ {tp_price:.4f}")
+        
+        # 평단 TP ID 저장
+        average_tp_orders[SYMBOL][side] = order_id
+        
+        return order_id
+        
+    except GateApiException as e:
+        log("❌", f"Average TP creation error: {e}")
+        return None
     except Exception as e:
         log("❌", f"Average TP error: {e}")
+        return None
 
 def refresh_all_tp_orders():
     try:
@@ -985,7 +1002,7 @@ def close_counter_on_individual_tp(main_side):
 # =============================================================================
 # 상태 추적
 # =============================================================================
-def track_entry(side, qty, price, entry_type, was_counter):
+def track_entry(side, qty, price, entry_type, tp_id=None):
     """임계값 초과 후 진입 추적"""
     if not is_above_threshold(side):
         return
@@ -994,11 +1011,10 @@ def track_entry(side, qty, price, entry_type, was_counter):
         "qty": int(qty),
         "price": float(price),
         "entry_type": entry_type,
-        "was_counter": was_counter,
-        "tp_order_id": None
+        "tp_order_id": tp_id
     }
     post_threshold_entries[SYMBOL][side].append(entry_data)
-    log("📝 TRACKED", f"{side.upper()} {qty} @ {price:.4f} ({entry_type}, counter={was_counter})")
+    log("📝 TRACKED", f"{side.upper()} {qty} @ {price:.4f} ({entry_type}, tp_id={tp_id})")
 
 # =============================================================================
 # 시스템 새로고침
@@ -1072,7 +1088,8 @@ def place_hedge_order(side):
                 post_threshold_entries[SYMBOL][side].append({
                     "price": float(current_price),
                     "qty": int(size),
-                    "tp_order_id": tp_id
+                    "tp_order_id": tp_id,
+                    "entry_type": "hedge"
                 })
         
         full_refresh("Hedge")
@@ -1114,7 +1131,8 @@ def grid_fill_monitor():
                             log("✅ FILL", f"{side.upper()} @ {order.price}")
                             
                             # 주문 확인 후 헷징 주문 실행
-                            place_hedge_order(side)
+                            was_counter = order_info.get("is_counter", False)
+                            hedge_after_grid_fill(side, float(order.price), order_info["qty"], was_counter)
                             
                             # 모든 그리드 및 TP 주문 취소
                             cancel_grid_only()
@@ -1319,10 +1337,11 @@ def health():
 
 @app.route('/status', methods=['GET'])
 def status():
+    """상세 상태 조회"""
     with position_lock:
         pos = position_state[SYMBOL]
     with balance_lock:
-        bal = float(INITIAL_BALANCE)
+        bal = float(account_balance)
     
     obv_display = float(obv_macd_value) * 1000
     
@@ -1353,69 +1372,7 @@ def status():
 
 @app.route('/refresh', methods=['POST'])
 def manual_refresh():
-    try:
-        full_refresh("Manual")
-        return jsonify({"status": "success"}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route('/reset', methods=['POST'])
-def reset_tracking():
-    """임계값 추적 데이터 강제 초기화"""
-    try:
-        post_threshold_entries[SYMBOL]["long"].clear()
-        post_threshold_entries[SYMBOL]["short"].clear()
-        counter_position_snapshot[SYMBOL]["long"] = Decimal("0")
-        counter_position_snapshot[SYMBOL]["short"] = Decimal("0")
-        log("🔄 RESET", "All tracking data cleared")
-        return jsonify({"status": "success"}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-# =============================================================================
-# 메인 실행
-# =============================================================================route('/health', methods=['GET'])
-def health():
-    """헬스 체크"""
-    return jsonify({
-        "status": "running",
-        "obv_macd": float(obv_macd_value),
-        "api_configured": bool(API_KEY and API_SECRET)
-    }), 200
-
-@app.route('/status', methods=['GET'])
-def status():
-    with position_lock:
-        pos = position_state[SYMBOL]
-    with balance_lock:
-        bal = float(INITIAL_BALANCE)
-    
-    return jsonify({
-        "balance": bal,
-        "obv_macd": float(obv_macd_value),
-        "position": {
-            "long": {"size": float(pos["long"]["size"]), "price": float(pos["long"]["price"])},
-            "short": {"size": float(pos["short"]["size"]), "price": float(pos["short"]["price"])}
-        },
-        "post_threshold_entries": {
-            "long": [{"qty": e["qty"], "price": e["price"], "type": e["entry_type"]} 
-                     for e in post_threshold_entries[SYMBOL]["long"]],
-            "short": [{"qty": e["qty"], "price": e["price"], "type": e["entry_type"]} 
-                      for e in post_threshold_entries[SYMBOL]["short"]]
-        },
-        "counter_snapshot": {
-            "long": float(counter_position_snapshot[SYMBOL]["long"]),
-            "short": float(counter_position_snapshot[SYMBOL]["short"])
-        },
-        "max_locked": max_position_locked,
-        "threshold_status": {
-            "long": is_above_threshold("long"),
-            "short": is_above_threshold("short")
-        }
-    }), 200
-
-@app.route('/refresh', methods=['POST'])
-def manual_refresh():
+    """수동 새로고침"""
     try:
         full_refresh("Manual")
         return jsonify({"status": "success"}), 200
@@ -1439,10 +1396,10 @@ def reset_tracking():
 # 메인 실행
 # =============================================================================
 def print_startup_summary():
-    global INITIAL_BALANCE  # 함수 최상단으로 이동
+    global account_balance
     
     log_divider("=")
-    log("🚀 START", "ONDO Trading Bot v26.0-COMPLETE")
+    log("🚀 START", "ONDO Trading Bot v26.0")
     log_divider("=")
     
     # API 키 확인
@@ -1450,22 +1407,22 @@ def print_startup_summary():
         log("❌ ERROR", "API_KEY or API_SECRET not set!")
         log("ℹ️ INFO", "Set environment variables: API_KEY, API_SECRET")
         return
-    else:
-        log("✅ API", f"Key: {API_KEY[:8]}...")
-        log("✅ API", f"Secret: {API_SECRET[:8]}...")
-        
-        # API 키 검증 테스트
-        try:
-            test_ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
-            if test_ticker:
-                log("✅ API", "Connection test successful")
-        except GateApiException as e:
-            log("❌ API", f"Connection test failed: {e}")
-            log("⚠️ WARNING", "Check API key permissions:")
-            log("  ", "- Futures: Read + Trade")
-            log("  ", "- Unified Account: Read")
-        except Exception as e:
-            log("❌ API", f"Connection test error: {e}")
+    
+    log("✅ API", f"Key: {API_KEY[:8]}...")
+    log("✅ API", f"Secret: {API_SECRET[:8]}...")
+    
+    # API 연결 테스트
+    try:
+        test_ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
+        if test_ticker:
+            log("✅ API", "Connection test successful")
+    except GateApiException as e:
+        log("❌ API", f"Connection test failed: {e}")
+        log("⚠️ WARNING", "Check API key permissions:")
+        log("  ", "- Futures: Read + Trade")
+        log("  ", "- Unified Account: Read")
+    except Exception as e:
+        log("❌ API", f"Connection test error: {e}")
     
     log_divider("-")
     log("📜 CONFIG", "Settings:")
@@ -1479,20 +1436,17 @@ def print_startup_summary():
     log("  └─", f"Hedge Main: {HEDGE_RATIO_MAIN * 100}%")
     log_divider("-")
     
-    # 초기 잔고 - Unified Account 전체 잔고
+    # 초기 잔고 조회
     try:
-        # Unified Account total 조회
         accounts = unified_api.list_unified_accounts()
         if accounts and hasattr(accounts, 'total') and accounts.total:
-            INITIAL_BALANCE = Decimal(str(accounts.total))
-            log("💰 BALANCE", f"{INITIAL_BALANCE:.2f} USDT (Unified Total)")
+            account_balance = Decimal(str(accounts.total))
+            log("💰 BALANCE", f"{account_balance:.2f} USDT (Unified Total)")
         else:
-            log("⚠️ BALANCE", "Unified account not found, trying futures account...")
-            # Futures 계좌 available 조회
             futures_accounts = api.list_futures_accounts(SETTLE)
             if futures_accounts and hasattr(futures_accounts, 'available') and futures_accounts.available:
-                INITIAL_BALANCE = Decimal(str(futures_accounts.available))
-                log("💰 BALANCE", f"{INITIAL_BALANCE:.2f} USDT (Futures Available)")
+                account_balance = Decimal(str(futures_accounts.available))
+                log("💰 BALANCE", f"{account_balance:.2f} USDT (Futures Available)")
             else:
                 log("⚠️ BALANCE", "Could not fetch - using default 50 USDT")
         
@@ -1504,7 +1458,7 @@ def print_startup_summary():
     
     log_divider("-")
     
-    # 기존 포지션
+    # 기존 포지션 확인
     sync_position()
     log_position_state()
     log_threshold_info()
@@ -1515,10 +1469,8 @@ def print_startup_summary():
         current_price = get_current_price()
         if current_price > 0:
             log("💹 PRICE", f"{current_price:.4f}")
-            
             cancel_all_orders()
             time.sleep(0.5)
-            
             initialize_grid(current_price)
             
             with position_lock:
@@ -1537,15 +1489,16 @@ def print_startup_summary():
 if __name__ == '__main__':
     print_startup_summary()
     
-    # API 키 확인
+    # API 키 최종 확인
     if not API_KEY or not API_SECRET:
         log("❌ FATAL", "Cannot start without API credentials!")
         log("ℹ️ INFO", "Set Railway environment variables:")
-        log("  ", "- GATE_API_KEY")
-        log("  ", "- GATE_API_SECRET")
+        log("  ", "- API_KEY")
+        log("  ", "- API_SECRET")
         log("  ", "- SYMBOL (optional, default: ONDO_USDT)")
         exit(1)
     
+    # 모든 모니터링 스레드 시작
     threading.Thread(target=update_balance_thread, daemon=True).start()
     threading.Thread(target=fetch_kline_thread, daemon=True).start()
     threading.Thread(target=start_websocket, daemon=True).start()
@@ -1555,6 +1508,7 @@ if __name__ == '__main__':
     
     log("✅ THREADS", "All monitoring threads started")
     log("🌐 FLASK", "Starting server on port 8080...")
-    log("📊 OBV MACD", "Calculating from 1min candles (auto-normalized)")
-    log("📨 WEBHOOK", "Optional: TradingView webhook available at /webhook")
+    log("📊 OBV MACD", "Self-calculating from 1min candles")
+    log("📨 WEBHOOK", "Optional: TradingView webhook at /webhook")
+    
     app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
