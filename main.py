@@ -781,11 +781,6 @@ def initialize_grid(current_price):
         log("❌", f"Grid init error: {e}")
 
 def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter):
-    """
-    그리드 체결 후 헤징 진입
-    - 비주력 포지션(30%) 그리드 체결시: 주력 포지션을 기본수량 또는 주력 포지션 수량의 10% 중 큰 값으로 헷징
-    - 주력 포지션 그리드 체결시: 비주력 포지션을 기본수량으로 헷징
-    """
     if not ENABLE_AUTO_HEDGE:
         return
     
@@ -804,49 +799,44 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter):
         
         # 헤징 수량 결정
         if was_counter:
-            # 비주력 포지션(30%) 그리드 체결 → 주력 포지션 헷징
             hedge_qty = max(base_qty, int(main_size * 0.1))
-            hedge_side = side  # 주력 방향으로 헷징
-            log("🔄 HEDGE", f"Counter grid filled → Main hedge: {hedge_side.upper()} {hedge_qty}")
+            hedge_side = side
+            log("🔄 HEDGE", f"Counter grid filled → Main hedge: {hedge_side.UPPER()} {hedge_qty}")
         else:
-            # 주력 포지션 그리드 체결 → 비주력 포지션 헷징
             hedge_qty = base_qty
-            hedge_side = counter_side  # 반대 방향으로 헷징
+            hedge_side = counter_side
             log("🔄 HEDGE", f"Main grid filled → Counter hedge: {hedge_side.upper()} {hedge_qty}")
         
         # 시장가 주문 (IOC)
         hedge_order_data = {
             "contract": SYMBOL,
             "size": int(hedge_qty * (1 if hedge_side == "long" else -1)),
-            "price": "0",  # 시장가
+            "price": "0",
             "tif": "ioc"
         }
         
         order = api.create_futures_order(SETTLE, FuturesOrder(**hedge_order_data))
         order_id = order.id
         
-        log("✅ HEDGE", f"{hedge_side.upper()} {hedge_qty} @ market")
+        log("🔄 HEDGE", f"Counter grid filled → Main hedge: {hedge_side.upper()} {hedge_qty}")
         
         # 포지션 동기화 대기
         time.sleep(0.5)
         sync_position()
         
-        # 임계값 이후 주력 포지션은 개별 TP 생성
-        if is_above_threshold(hedge_side) and hedge_side == get_main_side():
-            tp_id = create_individual_tp(hedge_side, hedge_qty, current_price)
-            if tp_id:
-                track_entry(hedge_side, hedge_qty, current_price, "hedge", tp_id)
-        
-        # TP 재생성 (그리드는 skip)
+        # 헤징 후 기존 그리드 주문 모두 취소 (중요!)
+        cancel_grid_only()  # ← 추가
         time.sleep(0.3)
-        refresh_all_tp_orders()  # ← TP 재생성
         
-        # 그리드 재생성
+        # TP 재생성
+        refresh_all_tp_orders()
+        
+        # 그리드 재생성 (롱/숏 모두 있으면 Skip됨)
         time.sleep(0.3)
         current_price = get_current_price()
         if current_price > 0:
             global last_grid_time
-            last_grid_time = 0  # 강제 실행
+            last_grid_time = 0
             initialize_grid(current_price)
         
     except GateApiException as e:
@@ -954,7 +944,8 @@ def refresh_all_tp_orders():
                 remaining = int(long_size) - individual_total
                 if remaining > 0:
                     tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
-                    order = FuturesOrder(contract=SYMBOL, size=-remaining, price=str(tp_price), tif="gtc", reduce_only=True)
+                    tp_price = tp_price.quantize(Decimal('0.0001'), rounding=ROUND_DOWN)  # ← 추가
+                    order = FuturesOrder(contract=SYMBOL, size=-int(long_size), price=str(tp_price), tif="gtc", reduce_only=True)
                     result = api.create_futures_order(SETTLE, order)
                     if result and hasattr(result, 'id'):
                         average_tp_orders[SYMBOL]["long"] = result.id
@@ -983,7 +974,8 @@ def refresh_all_tp_orders():
                 remaining = int(short_size) - individual_total
                 if remaining > 0:
                     tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
-                    order = FuturesOrder(contract=SYMBOL, size=remaining, price=str(tp_price), tif="gtc", reduce_only=True)
+                    tp_price = tp_price.quantize(Decimal('0.0001'), rounding=ROUND_DOWN)  # ← 추가
+                    order = FuturesOrder(contract=SYMBOL, size=int(short_size), price=str(tp_price), tif="gtc", reduce_only=True)
                     result = api.create_futures_order(SETTLE, order)
                     if result and hasattr(result, 'id'):
                         average_tp_orders[SYMBOL]["short"] = result.id
