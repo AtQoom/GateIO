@@ -149,18 +149,19 @@ def log_position_state():
 def log_threshold_info():
     """임계값 정보 로그"""
     with balance_lock:
-        balance = INITIAL_BALANCE
+        balance = account_balance  # INITIAL_BALANCE → account_balance
     with position_lock:
         long_size = position_state[SYMBOL]["long"]["size"]
         long_price = position_state[SYMBOL]["long"]["price"]
         short_size = position_state[SYMBOL]["short"]["size"]
         short_price = position_state[SYMBOL]["short"]["price"]
     
-    threshold = balance * THRESHOLD_RATIO
+    threshold = INITIAL_BALANCE * THRESHOLD_RATIO  # 임계값은 INITIAL_BALANCE 기준 유지
     long_value = long_price * long_size
     short_value = short_price * short_size
     
-    log("💰 THRESHOLD", f"${threshold:.2f} | Long: ${long_value:.2f} {'✅' if long_value >= threshold else '❌'} | Short: ${short_value:.2f} {'✅' if short_value >= threshold else '❌'}")
+    log("💰 THRESHOLD", f"${threshold:.2f} | Long: ${long_value:.2f} {'✅' if long_value >= threshold else '❌'} | Short: ${short_value:.2f} {'✅' if short_value >= threshold else '❌'}"))
+    log("💰 BALANCE", f"Current: ${balance:.2f} USDT")
 
 # =============================================================================
 # OBV MACD 계산 (Pine Script 정확한 변환)
@@ -733,8 +734,8 @@ def initialize_grid(current_price):
             counter_qty = max(1, int(long_size * COUNTER_RATIO))
             same_qty = calculate_grid_qty(is_above_threshold=True)
             weight = BASE_RATIO
-            log("⚖️ ASYMMETRIC", f"Long is MAIN (above threshold)")
-            log("📊 QUANTITY", f"Counter(Short): {counter_qty} | Same(Long): {same_qty} | Weight: {weight*100}%")
+            log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
+            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {int(account_balance * BASE_RATIO)}")
             place_grid_order("short", short_grid_price, counter_qty, is_counter=True)
             place_grid_order("long", long_grid_price, same_qty, is_counter=False)
             
@@ -742,16 +743,16 @@ def initialize_grid(current_price):
             counter_qty = max(1, int(short_size * COUNTER_RATIO))
             same_qty = calculate_grid_qty(is_above_threshold=True)
             weight = BASE_RATIO
-            log("⚖️ ASYMMETRIC", f"Short is MAIN (above threshold)")
-            log("📊 QUANTITY", f"Counter(Long): {counter_qty} | Same(Short): {same_qty} | Weight: {weight*100}%")
+            log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
+            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {int(account_balance * BASE_RATIO)}")
             place_grid_order("long", long_grid_price, counter_qty, is_counter=True)
             place_grid_order("short", short_grid_price, same_qty, is_counter=False)
             
         else:
             qty = calculate_grid_qty(is_above_threshold=False)
             weight = calculate_obv_macd_weight(obv_display)
-            log("⚖️ SYMMETRIC", "Below threshold - OBV MACD based")
-            log("📊 QUANTITY", f"Both sides: {qty} | OBV MACD: {obv_display:.2f} | Weight: {weight*100}%")
+            log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
+            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {int(account_balance * BASE_RATIO)}")
             place_grid_order("long", long_grid_price, qty, is_counter=False)
             place_grid_order("short", short_grid_price, qty, is_counter=False)
             
@@ -1106,41 +1107,35 @@ def grid_fill_monitor():
     last_check_time = 0
     while True:
         try:
-            time.sleep(0.5)
+            time.sleep(1)  # 0.5초 → 1초로 변경 (너무 짧으면 API 부하)
             current_time = time.time()
-            if current_time - last_check_time < 3:
+            if current_time - last_check_time < 2:  # 3초 → 2초로 단축
                 continue
             last_check_time = current_time
 
-            current_price = get_current_price()
-            if current_price <= 0:
-                continue
-
-            # 그리드 주문 확인 및 체결 처리
             for side in ["long", "short"]:
-                target_orders = grid_orders[SYMBOL][side]  # 수정
+                target_orders = grid_orders[SYMBOL][side]
                 filled_orders = []
                 for order_info in list(target_orders):
                     try:
-                        order_id = order_info["order_id"]  # dict 키로 접근
+                        order_id = order_info["order_id"]
                         order = api.get_futures_order(SETTLE, str(order_id))
                         if not order:
                             continue
-                        if hasattr(order, 'status') and order.status == "finished":
+                        
+                        # 체결 상태 확인 (finished 또는 closed)
+                        if hasattr(order, 'status') and order.status in ["finished", "closed"]:
                             log_event_header("GRID FILLED")
-                            log("✅ FILL", f"{side.upper()} @ {order.price}")
+                            log("✅ FILL", f"{side.upper()} {order_info['qty']} @ {order_info['price']:.4f}")
                             
-                            # 주문 확인 후 헷징 주문 실행
+                            # 헷징 실행
                             was_counter = order_info.get("is_counter", False)
-                            hedge_after_grid_fill(side, float(order.price), order_info["qty"], was_counter)
+                            hedge_after_grid_fill(side, order_info['price'], order_info["qty"], was_counter)
                             
-                            # 모든 그리드 및 TP 주문 취소
-                            cancel_grid_only()
-                            full_refresh("Grid_Fill")
                             time.sleep(0.5)
-                            
                             filled_orders.append(order_info)
                             break
+                            
                     except GateApiException as e:
                         if "ORDER_NOT_FOUND" in str(e):
                             filled_orders.append(order_info)
