@@ -149,18 +149,18 @@ def log_position_state():
 def log_threshold_info():
     """임계값 정보 로그"""
     with balance_lock:
-        balance = account_balance  # INITIAL_BALANCE → account_balance
+        balance = account_balance  # 실시간 잔고
     with position_lock:
         long_size = position_state[SYMBOL]["long"]["size"]
         long_price = position_state[SYMBOL]["long"]["price"]
         short_size = position_state[SYMBOL]["short"]["size"]
         short_price = position_state[SYMBOL]["short"]["price"]
     
-    threshold = INITIAL_BALANCE * THRESHOLD_RATIO  # 임계값은 INITIAL_BALANCE 기준 유지
+    threshold = balance * THRESHOLD_RATIO  # account_balance 기준
     long_value = long_price * long_size
     short_value = short_price * short_size
     
-    log("💰 THRESHOLD", f"${threshold:.2f} | Long: ${long_value:.2f} {'✅' if long_value >= threshold else '❌'} | Short: ${short_value:.2f} {'✅' if short_value >= threshold else '❌'}")  # 괄호 1개로 수정
+    log("💰 THRESHOLD", f"${threshold:.2f} | Long: ${long_value:.2f} {'✅' if long_value >= threshold else '❌'} | Short: ${short_value:.2f} {'✅' if short_value >= threshold else '❌'}")
     log("💰 BALANCE", f"Current: ${balance:.2f} USDT")
 
 # =============================================================================
@@ -646,18 +646,16 @@ def get_main_side():
     else: return "none"
 
 def is_above_threshold(side):
-    """특정 포지션이 임계값 초과인지 확인"""
+    """포지션이 임계값을 초과했는지 확인"""
     with position_lock:
         size = position_state[SYMBOL][side]["size"]
         price = position_state[SYMBOL][side]["price"]
     
     with balance_lock:
-        threshold = INITIAL_BALANCE * THRESHOLD_RATIO
+        threshold = account_balance * THRESHOLD_RATIO  # account_balance 기준
     
-    return (price * size >= threshold and size > 0)
-
-def get_counter_side(side):
-    return "short" if side == "long" else "long"
+    value = price * size
+    return value >= threshold
 
 # =============================================================================
 # 주문 실행
@@ -709,9 +707,10 @@ def initialize_grid(current_price):
             long_price = position_state[SYMBOL]["long"]["price"]
             short_price = position_state[SYMBOL]["short"]["price"]
         
-        # 롱/숏 모두 있으면 그리드 생성 안 함
+        # 롱/숏 모두 있으면 그리드 생성 안 함, TP만 생성
         if long_size > 0 and short_size > 0:
-            log("ℹ️ GRID", "Both positions exist → Skip grid creation")
+            log("ℹ️ GRID", "Both positions exist → Skip grid creation, creating TPs only")
+            refresh_all_tp_orders()
             return
         
         cancel_grid_only()
@@ -720,8 +719,8 @@ def initialize_grid(current_price):
         short_grid_price = current_price * (Decimal("1") + GRID_GAP_PCT)
         
         with balance_lock:
-            threshold = INITIAL_BALANCE * THRESHOLD_RATIO
-            balance = INITIAL_BALANCE
+            threshold = account_balance * THRESHOLD_RATIO  # account_balance 기준
+            balance = account_balance
         
         long_above = (long_price * long_size >= threshold and long_size > 0)
         short_above = (short_price * short_size >= threshold and short_size > 0)
@@ -736,6 +735,7 @@ def initialize_grid(current_price):
             weight = BASE_RATIO
             log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
             log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {int(account_balance * BASE_RATIO)}")
+            log("⚗️ ASYMMETRIC", f"Above threshold | Counter: {counter_qty} ({COUNTER_RATIO * 100:.0f}%) | Main: {same_qty}")
             place_grid_order("short", short_grid_price, counter_qty, is_counter=True)
             place_grid_order("long", long_grid_price, same_qty, is_counter=False)
             
@@ -745,6 +745,7 @@ def initialize_grid(current_price):
             weight = BASE_RATIO
             log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
             log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {int(account_balance * BASE_RATIO)}")
+            log("⚗️ ASYMMETRIC", f"Above threshold | Counter: {counter_qty} ({COUNTER_RATIO * 100:.0f}%) | Main: {same_qty}")
             place_grid_order("long", long_grid_price, counter_qty, is_counter=True)
             place_grid_order("short", short_grid_price, same_qty, is_counter=False)
             
@@ -753,6 +754,8 @@ def initialize_grid(current_price):
             weight = calculate_obv_macd_weight(obv_display)
             log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
             log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {int(account_balance * BASE_RATIO)}")
+            log("⚗️ SYMMETRIC", f"Below threshold - OBV MACD based | Weight: {weight}")
+            log("📊 QUANTITY", f"Both sides: {qty} | OBV MACD: {obv_display:.2f} | Weight: {weight * 100:.0f}%")
             place_grid_order("long", long_grid_price, qty, is_counter=False)
             place_grid_order("short", short_grid_price, qty, is_counter=False)
             
@@ -1218,13 +1221,12 @@ def position_monitor():
     
     while True:
         try:
-            time.sleep(5)  # 1초 → 5초로 변경 (API 부하 감소)
+            time.sleep(5)
             
             success = sync_position()
             
             if not success:
                 api_error_count += 1
-                # 10초에 한 번만 에러 로그 (스팸 방지)
                 if time.time() - last_error_log > 10:
                     log("⚠️", f"Position sync failed ({api_error_count} times) - Check API credentials")
                     last_error_log = time.time()
@@ -1248,10 +1250,10 @@ def position_monitor():
                 prev_short_size = short_size
             
             with balance_lock:
-                balance = INITIAL_BALANCE
+                balance = account_balance  # ← INITIAL_BALANCE → account_balance로 수정
             
-            threshold = balance * THRESHOLD_RATIO
-            max_value = balance * MAX_POSITION_RATIO
+            threshold = balance * THRESHOLD_RATIO  # account_balance 기준
+            max_value = balance * MAX_POSITION_RATIO  # account_balance 기준
             long_value = long_price * long_size
             short_value = short_price * short_size
             
@@ -1445,8 +1447,9 @@ def print_startup_summary():
             else:
                 log("⚠️ BALANCE", "Could not fetch - using default 50 USDT")
         
-        log("💰 THRESHOLD", f"{INITIAL_BALANCE * THRESHOLD_RATIO:.2f} USDT")
-        log("💰 MAX POSITION", f"{INITIAL_BALANCE * MAX_POSITION_RATIO:.2f} USDT")
+        # account_balance 기준으로 계산
+        log("💰 THRESHOLD", f"{account_balance * THRESHOLD_RATIO:.2f} USDT")
+        log("💰 MAX POSITION", f"{account_balance * MAX_POSITION_RATIO:.2f} USDT")
     except Exception as e:
         log("❌ ERROR", f"Balance check failed: {e}")
         log("⚠️ WARNING", "Using default balance: 50 USDT")
