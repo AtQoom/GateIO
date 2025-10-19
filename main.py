@@ -106,6 +106,9 @@ last_grid_time = 0
 # OBV MACD 계산용 히스토리
 kline_history = deque(maxlen=200)
 
+account_balance = INITIAL_BALANCE  # 추가
+ENABLE_AUTO_HEDGE = True
+
 # =============================================================================
 # 로그
 # =============================================================================
@@ -335,7 +338,7 @@ def calculate_obv_macd():
 # 잔고 업데이트
 # =============================================================================
 def update_balance_thread():
-    global INITIAL_BALANCE  # 함수 최상단으로 이동
+    global account_balance  # INITIAL_BALANCE 대신 account_balance 사용
     first_run = True
     
     while True:
@@ -348,18 +351,18 @@ def update_balance_thread():
             try:
                 accounts = unified_api.list_unified_accounts()
                 if accounts and hasattr(accounts, 'total') and accounts.total:
-                    old_balance = INITIAL_BALANCE
-                    INITIAL_BALANCE = Decimal(str(accounts.total))
-                    if old_balance != INITIAL_BALANCE:
-                        log("💰 BALANCE", f"Updated: {old_balance:.2f} → {INITIAL_BALANCE:.2f} USDT (Unified Total)")
+                    old_balance = account_balance
+                    account_balance = Decimal(str(accounts.total))
+                    if old_balance != account_balance:
+                        log("💰 BALANCE", f"Updated: {old_balance:.2f} → {account_balance:.2f} USDT (Unified Total)")
                 else:
                     # Futures 계좌 available로 대체
                     futures_accounts = api.list_futures_accounts(SETTLE)
                     if futures_accounts and hasattr(futures_accounts, 'available') and futures_accounts.available:
-                        old_balance = INITIAL_BALANCE
-                        INITIAL_BALANCE = Decimal(str(futures_accounts.available))
-                        if old_balance != INITIAL_BALANCE:
-                            log("💰 BALANCE", f"Futures: {old_balance:.2f} → {INITIAL_BALANCE:.2f} USDT")
+                        old_balance = account_balance
+                        account_balance = Decimal(str(futures_accounts.available))
+                        if old_balance != account_balance:
+                            log("💰 BALANCE", f"Futures: {old_balance:.2f} → {account_balance:.2f} USDT")
             except Exception as e:
                 log("⚠️", f"Balance fetch error: {e}")
                 
@@ -564,16 +567,26 @@ def cancel_grid_only():
 def calculate_obv_macd_weight(tt1_value):
     """OBV MACD 값에 따른 동적 배수 (*1000 적용된 값 기준)"""
     abs_val = abs(tt1_value)
-    if abs_val < 5: return Decimal("0.10")
-    elif abs_val < 10: return Decimal("0.11")
-    elif abs_val < 15: return Decimal("0.12")
-    elif abs_val < 20: return Decimal("0.13")
-    elif abs_val < 30: return Decimal("0.15")
-    elif abs_val < 40: return Decimal("0.16")
-    elif abs_val < 50: return Decimal("0.17")
-    elif abs_val < 70: return Decimal("0.18")
-    elif abs_val < 100: return Decimal("0.19")
-    else: return Decimal("0.20")
+    if abs_val < 5:
+        return Decimal("0.10")
+    elif abs_val < 10:
+        return Decimal("0.11")
+    elif abs_val < 15:
+        return Decimal("0.12")
+    elif abs_val < 20:
+        return Decimal("0.13")
+    elif abs_val < 30:
+        return Decimal("0.15")
+    elif abs_val < 40:
+        return Decimal("0.16")
+    elif abs_val < 50:
+        return Decimal("0.17")
+    elif abs_val < 70:
+        return Decimal("0.18")
+    elif abs_val < 100:
+        return Decimal("0.19")
+    else:
+        return Decimal("0.20")
 
 def get_current_price():
     try:
@@ -682,7 +695,8 @@ def place_grid_order(side, price, qty, is_counter=False):
         log("❌", f"Grid order error ({side}): {e}")
         return None
 
-def initialize_grid(current_price, side):
+def initialize_grid(current_price):
+    side = get_main_side()
     global last_grid_time
     if time.time() - last_grid_time < 5: return
     last_grid_time = time.time()
@@ -1041,24 +1055,24 @@ def place_hedge_order(side):
         hedge_order_data = {
             "contract": SYMBOL,
             "size": int(size * (1 if side == "long" else -1)),
-            "price": str(current_price),
+            "price": "0",  # 시장가는 "0"
             "tif": "ioc"
         }
         
-        order = api.submit_futures_order(SETTLE, FuturesOrder(**hedge_order_data))
+        order = api.create_futures_order(SETTLE, FuturesOrder(**hedge_order_data))
         order_id = order.id
         
         log_event_header("AUTO HEDGE")
-        log("✅ HEDGE", f"{side.upper()} {size} @ {current_price:.4f}")
+        log("✅ HEDGE", f"{side.upper()} {size} @ market")
         
         # 주력 포지션은 개별 TP 주문 설정
-        order_new_id = get_individual_tp(side)
-        if order_new_id:
+        tp_id = create_individual_tp(side, size, current_price)
+        if tp_id:
             with position_lock:
                 post_threshold_entries[SYMBOL][side].append({
-                    "price": current_price,
-                    "qty": size,
-                    "tp_order_id": order_new_id
+                    "price": float(current_price),
+                    "qty": int(size),
+                    "tp_order_id": tp_id
                 })
         
         full_refresh("Hedge")
@@ -1072,55 +1086,55 @@ def place_hedge_order(side):
         return None
 
 def grid_fill_monitor():
+    last_check_time = 0
     while True:
         try:
             time.sleep(0.5)
+            current_time = time.time()
+            if current_time - last_check_time < 3:
+                continue
+            last_check_time = current_time
+
+            current_price = get_current_price()
+            if current_price <= 0:
+                continue
+
+            # 그리드 주문 확인 및 체결 처리
             for side in ["long", "short"]:
-                filled = []
-                for order_info in grid_orders[SYMBOL][side]:
+                target_orders = grid_orders[SYMBOL][side]  # 수정
+                filled_orders = []
+                for order_info in list(target_orders):
                     try:
-                        order = api.get_futures_order(SETTLE, order_info["order_id"])
-                        if order.status == 'finished':
-                            log_event_header("GRID FILL")
-                            counter_tag = "(Counter 30%)" if order_info['is_counter'] else "(Main)"
-                            log("🎉 FILLED", f"{side.upper()} {order_info['qty']} @ {order_info['price']:.4f} {counter_tag}")
+                        order_id = order_info["order_id"]  # dict 키로 접근
+                        order = api.get_futures_order(SETTLE, str(order_id))
+                        if not order:
+                            continue
+                        if hasattr(order, 'status') and order.status == "finished":
+                            log_event_header("GRID FILLED")
+                            log("✅ FILL", f"{side.upper()} @ {order.price}")
                             
-                            # 포지션 동기화
-                            sync_position()
-                            log_position_state()
+                            # 주문 확인 후 헷징 주문 실행
+                            place_hedge_order(side)
                             
-                            # 체결 후 임계값 확인 및 추적
-                            is_now_above = is_above_threshold(side)
-                            if is_now_above:
-                                track_entry(side, order_info['qty'], order_info['price'], "grid", order_info['is_counter'])
-                                
-                                # 비주력(30%) 그리드: 평단 TP만
-                                # 주력 그리드: 개별 TP 생성
-                                if not order_info['is_counter']:
-                                    tp_id = create_individual_tp(side, order_info['qty'], Decimal(str(order_info['price'])))
-                                    if tp_id and post_threshold_entries[SYMBOL][side]:
-                                        post_threshold_entries[SYMBOL][side][-1]["tp_order_id"] = tp_id
-                                else:
-                                    log("ℹ️ TP", "Counter grid → No individual TP (only average TP)")
-                            
-                            # 헤징 실행
-                            hedge_after_grid_fill(side, order_info['price'], order_info['qty'], order_info['is_counter'])
-                            
-                            time.sleep(0.5)
+                            # 모든 그리드 및 TP 주문 취소
+                            cancel_grid_only()
                             full_refresh("Grid_Fill")
-                            filled.append(order_info)
-                            break
+                            time.sleep(0.5)
                             
+                            filled_orders.append(order_info)
+                            break
                     except GateApiException as e:
                         if "ORDER_NOT_FOUND" in str(e):
-                            filled.append(order_info)
+                            filled_orders.append(order_info)
                     except Exception as e:
-                        log("❌", f"Grid check error: {e}")
+                        log("❌", f"Grid fill check error: {e}")
                 
-                grid_orders[SYMBOL][side] = [o for o in grid_orders[SYMBOL][side] if o not in filled]
-                
+                for order_info in filled_orders:
+                    if order_info in target_orders:
+                        target_orders.remove(order_info)
+
         except Exception as e:
-            log("❌", f"Grid monitor error: {e}")
+            log("❌", f"Grid fill monitor error: {e}")
             time.sleep(1)
 
 def tp_monitor():
@@ -1128,7 +1142,7 @@ def tp_monitor():
         try:
             time.sleep(3)
             
-            # 개별 TP 체결 확인
+            # 개별 TP 체결 확인 (임계값 이후 진입 주력 포지션)
             for side in ["long", "short"]:
                 filled_entries = []
                 for entry in list(post_threshold_entries[SYMBOL][side]):
@@ -1159,7 +1173,7 @@ def tp_monitor():
                     if entry in post_threshold_entries[SYMBOL][side]:
                         post_threshold_entries[SYMBOL][side].remove(entry)
             
-            # 평단 TP 체결 확인
+            # 평단 TP 체결 확인 (임계값 이전 진입 물량)
             for side in ["long", "short"]:
                 tp_id = average_tp_orders[SYMBOL][side]
                 if not tp_id:
