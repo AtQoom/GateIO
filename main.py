@@ -160,7 +160,7 @@ def log_threshold_info():
     long_value = long_price * long_size
     short_value = short_price * short_size
     
-    log("💰 THRESHOLD", f"${threshold:.2f} | Long: ${long_value:.2f} {'✅' if long_value >= threshold else '❌'} | Short: ${short_value:.2f} {'✅' if short_value >= threshold else '❌'}"))
+    log("💰 THRESHOLD", f"${threshold:.2f} | Long: ${long_value:.2f} {'✅' if long_value >= threshold else '❌'} | Short: ${short_value:.2f} {'✅' if short_value >= threshold else '❌'}")  # 괄호 1개로 수정
     log("💰 BALANCE", f"Current: ${balance:.2f} USDT")
 
 # =============================================================================
