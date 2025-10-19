@@ -1048,7 +1048,11 @@ def track_entry(side, qty, price, entry_type, tp_id=None):
 # =============================================================================
 # 시스템 새로고침
 # =============================================================================
-def full_refresh(event_type):
+def full_refresh(event_type, skip_grid=False):
+    """
+    시스템 새로고침
+    skip_grid=True: TP만 생성하고 그리드는 skip (TP 체결 시 사용)
+    """
     log_event_header(f"FULL REFRESH: {event_type}")
     
     log("🔄 SYNC", "Syncing position...")
@@ -1059,9 +1063,10 @@ def full_refresh(event_type):
     cancel_all_orders()
     time.sleep(0.5)
     
-    current_price = get_current_price()
-    if current_price > 0:
-        initialize_grid(current_price)
+    if not skip_grid:
+        current_price = get_current_price()
+        if current_price > 0:
+            initialize_grid(current_price)
     
     refresh_all_tp_orders()
     
@@ -1202,7 +1207,7 @@ def tp_monitor():
                             
                             # 비주력 포지션 20% 청산
                             counter_side = get_counter_side(side)
-                            close_counter_partial(counter_side)
+                            close_counter_on_individual_tp(side)
                             
                             time.sleep(0.5)
                             full_refresh("Individual_TP")
@@ -1227,13 +1232,19 @@ def tp_monitor():
                         average_tp_orders[SYMBOL][side] = None
                         
                         time.sleep(0.5)
-                        full_refresh("Average_TP")
+                        sync_position()  # 포지션 동기화
                         
-                        # TP 체결 후 그리드 재생성 추가
+                        # TP만 생성 (그리드는 skip)
+                        full_refresh("Average_TP", skip_grid=True)
+                        
+                        # 그리드 재생성
                         time.sleep(0.5)
                         current_price = get_current_price()
                         if current_price > 0:
-                            initialize_grid(current_price)  # ← 추가
+                            # last_grid_time 초기화하여 강제 실행
+                            global last_grid_time
+                            last_grid_time = 0
+                            initialize_grid(current_price)
                         
                         break
                 except:
