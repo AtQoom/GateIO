@@ -585,23 +585,39 @@ def get_current_price():
         log("❌", f"Price fetch error: {e}")
         return Decimal("0")
 
-def calculate_grid_qty(is_above_threshold=False):
-    try:
-        with balance_lock:
-            balance = INITIAL_BALANCE
-        
-        price = get_current_price()
-        if price <= 0: return 0
-        
-        # OBV MACD 값에 *1000 적용하여 수량 계산
-        obv_macd_display = float(obv_macd_value) * 1000
-        weight = BASE_RATIO if is_above_threshold else calculate_obv_macd_weight(obv_macd_display)
-        
-        qty = round(float((balance * weight) / price))
-        return max(1, qty)
-    except Exception as e:
-        log("❌", f"Quantity calculation error: {e}")
-        return 0
+def calculate_grid_qty(is_above_threshold):
+    with balance_lock:
+        base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
+        if base_qty <= 0:
+            base_qty = 1
+    
+    if is_above_threshold:
+        return base_qty
+    
+    # OBV MACD (tt1) 값 기준 동적 수량 조절
+    obv_value = float(obv_macd_value) * 1000  # tt1 값 스케일링
+    if obv_value <= 5:
+        multiplier = 0.1
+    elif obv_value <= 10:
+        multiplier = 0.11
+    elif obv_value <= 15:
+        multiplier = 0.12
+    elif obv_value <= 20:
+        multiplier = 0.13
+    elif obv_value <= 30:
+        multiplier = 0.15
+    elif obv_value <= 40:
+        multiplier = 0.16
+    elif obv_value <= 50:
+        multiplier = 0.17
+    elif obv_value <= 70:
+        multiplier = 0.18
+    elif obv_value <= 100:
+        multiplier = 0.19
+    else:
+        multiplier = 0.2
+    
+    return max(1, int(base_qty * multiplier))
 
 # =============================================================================
 # 포지션 상태
@@ -997,6 +1013,64 @@ def full_refresh(event_type):
 # =============================================================================
 # 모니터링 스레드
 # =============================================================================
+def place_hedge_order(side):
+    if not ENABLE_AUTO_HEDGE:
+        return None
+    
+    try:
+        current_price = get_current_price()
+        if current_price <= 0:
+            return None
+        
+        counter_side = get_counter_side(side)
+        with position_lock:
+            main_size = position_state[SYMBOL][side]["size"]
+            counter_size = position_state[SYMBOL][counter_side]["size"]
+        
+        # 비주력 포지션이 체결된 경우, 주력 포지션은 기본수량 또는 10% 중 큰 값으로 헷징
+        if counter_size > 0 and main_size > 0:
+            with balance_lock:
+                base_size = int(Decimal(str(account_balance)) * BASE_RATIO)
+            hedge_size = max(base_size, int(main_size * 0.1))
+            size = hedge_size
+        else:
+            with balance_lock:
+                base_size = int(Decimal(str(account_balance)) * BASE_RATIO)
+            size = base_size
+        
+        hedge_order_data = {
+            "contract": SYMBOL,
+            "size": int(size * (1 if side == "long" else -1)),
+            "price": str(current_price),
+            "tif": "ioc"
+        }
+        
+        order = api.submit_futures_order(SETTLE, FuturesOrder(**hedge_order_data))
+        order_id = order.id
+        
+        log_event_header("AUTO HEDGE")
+        log("✅ HEDGE", f"{side.upper()} {size} @ {current_price:.4f}")
+        
+        # 주력 포지션은 개별 TP 주문 설정
+        order_new_id = get_individual_tp(side)
+        if order_new_id:
+            with position_lock:
+                post_threshold_entries[SYMBOL][side].append({
+                    "price": current_price,
+                    "qty": size,
+                    "tp_order_id": order_new_id
+                })
+        
+        full_refresh("Hedge")
+        return order_id
+        
+    except GateApiException as e:
+        log("❌", f"Hedge submission error: {e}")
+        return None
+    except Exception as e:
+        log("❌", f"Hedge order error: {e}")
+        return None
+
 def grid_fill_monitor():
     while True:
         try:
