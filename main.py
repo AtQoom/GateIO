@@ -837,10 +837,16 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter):
             if tp_id:
                 track_entry(hedge_side, hedge_qty, current_price, "hedge", tp_id)
         
-        # 그리드 재생성 및 TP 갱신 (취소 없이)
+        # TP 재생성 (그리드는 skip)
+        time.sleep(0.3)
+        refresh_all_tp_orders()  # ← TP 재생성
+        
+        # 그리드 재생성
         time.sleep(0.3)
         current_price = get_current_price()
         if current_price > 0:
+            global last_grid_time
+            last_grid_time = 0  # 강제 실행
             initialize_grid(current_price)
         
     except GateApiException as e:
