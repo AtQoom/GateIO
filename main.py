@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # 환경 변수
 # =============================================================================
-API_KEY = os.environ.get("GATE_API_KEY", "")
-API_SECRET = os.environ.get("GATE_API_SECRET", "")
+API_KEY = os.environ.get("API_KEY", "")
+API_SECRET = os.environ.get("API_SECRET", "")
 SYMBOL = os.environ.get("SYMBOL", "ONDO_USDT")
 SETTLE = "usdt"
 
