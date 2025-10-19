@@ -1262,7 +1262,28 @@ def status():
             "long": is_above_threshold("long"),
             "short": is_above_threshold("short")
         }
-    }), 200route('/health', methods=['GET'])
+    }), 200
+
+@app.route('/refresh', methods=['POST'])
+def manual_refresh():
+    try:
+        full_refresh("Manual")
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/reset', methods=['POST'])
+def reset_tracking():
+    """임계값 추적 데이터 강제 초기화"""
+    try:
+        post_threshold_entries[SYMBOL]["long"].clear()
+        post_threshold_entries[SYMBOL]["short"].clear()
+        counter_position_snapshot[SYMBOL]["long"] = Decimal("0")
+        counter_position_snapshot[SYMBOL]["short"] = Decimal("0")
+        log("🔄 RESET", "All tracking data cleared")
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500route('/health', methods=['GET'])
 def health():
     """헬스 체크"""
     return jsonify({
