@@ -1283,7 +1283,11 @@ def reset_tracking():
         log("🔄 RESET", "All tracking data cleared")
         return jsonify({"status": "success"}), 200
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500route('/health', methods=['GET'])
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# =============================================================================
+# 메인 실행
+# =============================================================================route('/health', methods=['GET'])
 def health():
     """헬스 체크"""
     return jsonify({
