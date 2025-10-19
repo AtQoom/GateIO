@@ -331,32 +331,31 @@ def calculate_obv_macd():
 # 잔고 업데이트
 # =============================================================================
 def update_balance_thread():
-    global INITIAL_BALANCE
+    global INITIAL_BALANCE  # 함수 최상단으로 이동
     first_run = True
+    
     while True:
         try:
             if not first_run:
                 time.sleep(3600)  # 1시간마다
             first_run = False
             
-            # Unified Account 잔고 조회
+            # Unified Account total 잔고 조회
             try:
                 accounts = unified_api.list_unified_accounts()
                 if accounts and hasattr(accounts, 'total') and accounts.total:
-                    with balance_lock:
-                        old_balance = INITIAL_BALANCE
-                        INITIAL_BALANCE = Decimal(str(accounts.total))
-                        if old_balance != INITIAL_BALANCE:
-                            log("💰 BALANCE", f"Updated: {old_balance:.2f} → {INITIAL_BALANCE:.2f} USDT")
+                    old_balance = INITIAL_BALANCE
+                    INITIAL_BALANCE = Decimal(str(accounts.total))
+                    if old_balance != INITIAL_BALANCE:
+                        log("💰 BALANCE", f"Updated: {old_balance:.2f} → {INITIAL_BALANCE:.2f} USDT (Unified Total)")
                 else:
-                    # Futures 계좌 잔고로 대체
+                    # Futures 계좌 available로 대체
                     futures_accounts = api.list_futures_accounts(SETTLE)
-                    if futures_accounts and hasattr(futures_accounts, 'total') and futures_accounts.total:
-                        with balance_lock:
-                            old_balance = INITIAL_BALANCE
-                            INITIAL_BALANCE = Decimal(str(futures_accounts.total))
-                            if old_balance != INITIAL_BALANCE:
-                                log("💰 BALANCE", f"Futures account: {old_balance:.2f} → {INITIAL_BALANCE:.2f} USDT")
+                    if futures_accounts and hasattr(futures_accounts, 'available') and futures_accounts.available:
+                        old_balance = INITIAL_BALANCE
+                        INITIAL_BALANCE = Decimal(str(futures_accounts.available))
+                        if old_balance != INITIAL_BALANCE:
+                            log("💰 BALANCE", f"Futures: {old_balance:.2f} → {INITIAL_BALANCE:.2f} USDT")
             except Exception as e:
                 log("⚠️", f"Balance fetch error: {e}")
                 
@@ -1352,6 +1351,8 @@ def reset_tracking():
 # 메인 실행
 # =============================================================================
 def print_startup_summary():
+    global INITIAL_BALANCE  # 함수 최상단으로 이동
+    
     log_divider("=")
     log("🚀 START", "ONDO Trading Bot v26.0-COMPLETE")
     log_divider("=")
@@ -1390,22 +1391,20 @@ def print_startup_summary():
     log("  └─", f"Hedge Main: {HEDGE_RATIO_MAIN * 100}%")
     log_divider("-")
     
-    # 초기 잔고
+    # 초기 잔고 - Unified Account 전체 잔고
     try:
-        # Unified Account 시도
-        try:
-            accounts = unified_api.list_unified_accounts()
-            if accounts and hasattr(accounts, 'total') and accounts.total:
-                global INITIAL_BALANCE
-                INITIAL_BALANCE = Decimal(str(accounts.total))
-                log("💰 BALANCE", f"{INITIAL_BALANCE:.2f} USDT (Unified)")
-        except:
-            # Futures 계좌로 대체
+        # Unified Account total 조회
+        accounts = unified_api.list_unified_accounts()
+        if accounts and hasattr(accounts, 'total') and accounts.total:
+            INITIAL_BALANCE = Decimal(str(accounts.total))
+            log("💰 BALANCE", f"{INITIAL_BALANCE:.2f} USDT (Unified Total)")
+        else:
+            log("⚠️ BALANCE", "Unified account not found, trying futures account...")
+            # Futures 계좌 available 조회
             futures_accounts = api.list_futures_accounts(SETTLE)
-            if futures_accounts and hasattr(futures_accounts, 'total') and futures_accounts.total:
-                global INITIAL_BALANCE
-                INITIAL_BALANCE = Decimal(str(futures_accounts.total))
-                log("💰 BALANCE", f"{INITIAL_BALANCE:.2f} USDT (Futures)")
+            if futures_accounts and hasattr(futures_accounts, 'available') and futures_accounts.available:
+                INITIAL_BALANCE = Decimal(str(futures_accounts.available))
+                log("💰 BALANCE", f"{INITIAL_BALANCE:.2f} USDT (Futures Available)")
             else:
                 log("⚠️ BALANCE", "Could not fetch - using default 50 USDT")
         
