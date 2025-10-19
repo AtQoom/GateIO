@@ -272,6 +272,8 @@ def calculate_obv_macd():
             return 0
         
         # shadow 계산 (정규화) - Pine Script와 동일
+        if len(obv_values) == 0 or len(obv_values) <= smooth:
+            return 0
         shadow = (obv_values[-1] - smooth) / v_spread * price_spread
         
         # out 계산
@@ -298,7 +300,10 @@ def calculate_obv_macd():
             sumXSqr = 5.0
             sumXY = macd_history[0] * 1 + macd_history[1] * 2
             
-            slope = (len5 * sumXY - sumX * sumY) / (len5 * sumXSqr - sumX * sumX)
+            try:
+                slope = (len5 * sumXY - sumX * sumY) / (len5 * sumXSqr - sumX * sumX)
+            except ZeroDivisionError:
+                slope = 0
             average = sumY / len5
             intercept = average - slope * sumX / len5 + slope
             
@@ -308,20 +313,19 @@ def calculate_obv_macd():
         
         # 현재가 기준 정규화
         current_price = closes[-1]
-        if current_price > 0:
-            # 가격 대비 퍼센트로 변환 후 추가 스케일링
-            normalized = (tt1 / current_price) / 100.0
-            
-            # 볼륨 기반 추가 정규화
-            avg_volume = sum(volumes[-10:]) / 10 if len(volumes) >= 10 else 1
-            if avg_volume > 0:
-                normalized = normalized / (avg_volume / 1000000.0)
-            
-            # -0.01 ~ 0.01 범위로 반환 (내부 저장용)
-            # 로그 표시 및 수량 계산 시 *1000 적용
-            return normalized
+        if current_price <= 0:
+            return 0
         
-        return 0
+        # 가격 대비 퍼센트로 변환 후 추가 스케일링
+        normalized = (tt1 / current_price) / 100.0
+        
+        # 볼륨 기반 추가 정규화
+        avg_volume = sum(volumes[-10:]) / 10 if len(volumes) >= 10 else 1
+        if avg_volume > 0:
+            normalized = normalized / (avg_volume / 1000000.0)
+        
+        # -0.01 ~ 0.01 범위로 반환 (내부 저장용)
+        return normalized
         
     except Exception as e:
         log("❌", f"OBV MACD calculation error: {e}")
@@ -574,10 +578,11 @@ def calculate_obv_macd_weight(tt1_value):
 def get_current_price():
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
-        if ticker:
+        if ticker and len(ticker) > 0 and ticker[0] and hasattr(ticker[0], 'last') and ticker[0].last:
             return Decimal(str(ticker[0].last))
         return Decimal("0")
-    except:
+    except (GateApiException, IndexError, AttributeError, ValueError) as e:
+        log("❌", f"Price fetch error: {e}")
         return Decimal("0")
 
 def calculate_grid_qty(is_above_threshold=False):
@@ -661,7 +666,7 @@ def place_grid_order(side, price, qty, is_counter=False):
         log("❌", f"Grid order error ({side}): {e}")
         return None
 
-def initialize_grid(current_price):
+def initialize_grid(current_price, side):
     global last_grid_time
     if time.time() - last_grid_time < 5: return
     last_grid_time = time.time()
@@ -691,12 +696,10 @@ def initialize_grid(current_price):
         short_above = (short_price * short_size >= threshold and short_size > 0)
         
         log("📈 GRID INIT", f"Price: {current_price:.4f}")
-        # OBV MACD 로그는 *1000으로 표시
         obv_display = float(obv_macd_value) * 1000
         log("📊 OBV MACD", f"Value: {obv_display:.2f}")
         
         if long_above:
-            # 롱이 주력
             counter_qty = max(1, int(long_size * COUNTER_RATIO))
             same_qty = calculate_grid_qty(is_above_threshold=True)
             weight = BASE_RATIO
@@ -706,7 +709,6 @@ def initialize_grid(current_price):
             place_grid_order("long", long_grid_price, same_qty, is_counter=False)
             
         elif short_above:
-            # 숏이 주력
             counter_qty = max(1, int(short_size * COUNTER_RATIO))
             same_qty = calculate_grid_qty(is_above_threshold=True)
             weight = BASE_RATIO
@@ -716,7 +718,6 @@ def initialize_grid(current_price):
             place_grid_order("short", short_grid_price, same_qty, is_counter=False)
             
         else:
-            # 대칭 그리드 (임계값 이전)
             qty = calculate_grid_qty(is_above_threshold=False)
             weight = calculate_obv_macd_weight(obv_display)
             log("⚖️ SYMMETRIC", "Below threshold - OBV MACD based")
@@ -1062,12 +1063,11 @@ def tp_monitor():
                         continue
                     
                     try:
-                        order = api.get_futures_order(SETTLE, tp_id)
-                        if order.status == "finished":
+                        order = api.get_futures_order(SETTLE, str(tp_id))
+                        if order and hasattr(order, 'status') and order.status == "finished":
                             log_event_header("INDIVIDUAL TP HIT")
                             log("✅ TP", f"{side.upper()} {entry['qty']} @ entry {entry['price']:.4f}")
                             
-                            # 비주력 20% 청산
                             close_counter_on_individual_tp(side)
                             time.sleep(0.5)
                             
@@ -1081,7 +1081,6 @@ def tp_monitor():
                     except Exception as e:
                         log("❌", f"Individual TP check error: {e}")
                 
-                # 체결된 항목 제거
                 for entry in filled_entries:
                     if entry in post_threshold_entries[SYMBOL][side]:
                         post_threshold_entries[SYMBOL][side].remove(entry)
@@ -1093,10 +1092,11 @@ def tp_monitor():
                     continue
                 
                 try:
-                    order = api.get_futures_order(SETTLE, tp_id)
-                    if order.status == "finished":
+                    order = api.get_futures_order(SETTLE, str(tp_id))
+                    if order and hasattr(order, 'status') and order.status == "finished":
                         log_event_header("AVERAGE TP HIT")
                         log("✅ TP", f"{side.upper()} average position closed")
+                        average_tp_orders[SYMBOL][side] = None
                         full_refresh("Average_TP")
                         break
                 except GateApiException as e:
