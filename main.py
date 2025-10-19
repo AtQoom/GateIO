@@ -711,7 +711,7 @@ def initialize_grid(current_price):
             long_price = position_state[SYMBOL]["long"]["price"]
             short_price = position_state[SYMBOL]["short"]["price"]
         
-        # 롱/숏 모두 있으면 그리드 생성 안 함, TP만 생성
+        # 롱/숏 모두 있으면 그리드 생성 안 함, TP 확인 후 없으면 생성
         if long_size > 0 and short_size > 0:
             log("ℹ️ GRID", "Both positions exist → Skip grid creation")
             
@@ -720,12 +720,12 @@ def initialize_grid(current_price):
                 orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
                 tp_orders = [o for o in orders if o.is_reduce_only]
                 
-                if len(tp_orders) > 0:
-                    log("ℹ️ TP", f"{len(tp_orders)} TP orders already exist")
-                    return  # 이미 TP가 있으면 재생성하지 않음
-                else:
+                if len(tp_orders) == 0:  # TP가 없으면 생성
                     log("📈 TP", "No TP orders found, creating...")
+                    time.sleep(0.5)  # ← 추가: 안정화 대기
                     refresh_all_tp_orders()
+                else:
+                    log("ℹ️ TP", f"{len(tp_orders)} TP orders already exist")
             except Exception as e:
                 log("❌", f"TP check error: {e}")
             
@@ -1183,57 +1183,62 @@ def tp_monitor():
         try:
             time.sleep(3)
             
-            # 개별 TP 체결 확인 (임계값 이후 진입 주력 포지션)
+            # 개별 TP 체결 확인
             for side in ["long", "short"]:
-                filled_entries = []
                 for entry in list(post_threshold_entries[SYMBOL][side]):
-                    tp_id = entry.get("tp_order_id")
-                    if not tp_id:
-                        continue
-                    
                     try:
+                        tp_id = entry.get("tp_order_id")
+                        if not tp_id:
+                            continue
+                        
                         order = api.get_futures_order(SETTLE, str(tp_id))
-                        if order and hasattr(order, 'status') and order.status == "finished":
+                        if not order:
+                            continue
+                        
+                        if hasattr(order, 'status') and order.status in ["finished", "closed"]:
                             log_event_header("INDIVIDUAL TP HIT")
-                            log("✅ TP", f"{side.upper()} {entry['qty']} @ entry {entry['price']:.4f}")
+                            log("🎯 TP", f"{side.upper()} {entry['qty']} closed")
+                            post_threshold_entries[SYMBOL][side].remove(entry)
                             
-                            close_counter_on_individual_tp(side)
+                            # 비주력 포지션 20% 청산
+                            counter_side = get_counter_side(side)
+                            close_counter_partial(counter_side)
+                            
                             time.sleep(0.5)
-                            
-                            filled_entries.append(entry)
                             full_refresh("Individual_TP")
                             break
-                            
-                    except GateApiException as e:
-                        if "ORDER_NOT_FOUND" in str(e):
-                            filled_entries.append(entry)
-                    except Exception as e:
-                        log("❌", f"Individual TP check error: {e}")
-                
-                for entry in filled_entries:
-                    if entry in post_threshold_entries[SYMBOL][side]:
-                        post_threshold_entries[SYMBOL][side].remove(entry)
+                    except:
+                        pass
             
-            # 평단 TP 체결 확인 (임계값 이전 진입 물량)
+            # 평단 TP 체결 확인
             for side in ["long", "short"]:
-                tp_id = average_tp_orders[SYMBOL][side]
+                tp_id = average_tp_orders[SYMBOL].get(side)
                 if not tp_id:
                     continue
                 
                 try:
                     order = api.get_futures_order(SETTLE, str(tp_id))
-                    if order and hasattr(order, 'status') and order.status == "finished":
-                        log_event_header("AVERAGE TP HIT")
-                        log("✅ TP", f"{side.upper()} average position closed")
-                        average_tp_orders[SYMBOL][side] = None
-                        full_refresh("Average_TP")
-                        break
-                except GateApiException as e:
-                    if "ORDER_NOT_FOUND" in str(e):
-                        average_tp_orders[SYMBOL][side] = None
-                except Exception as e:
-                    log("❌", f"Average TP check error: {e}")
+                    if not order:
+                        continue
                     
+                    if hasattr(order, 'status') and order.status in ["finished", "closed"]:
+                        log_event_header("AVERAGE TP HIT")
+                        log("🎯 TP", f"{side.upper()} average position closed")
+                        average_tp_orders[SYMBOL][side] = None
+                        
+                        time.sleep(0.5)
+                        full_refresh("Average_TP")
+                        
+                        # TP 체결 후 그리드 재생성 추가
+                        time.sleep(0.5)
+                        current_price = get_current_price()
+                        if current_price > 0:
+                            initialize_grid(current_price)  # ← 추가
+                        
+                        break
+                except:
+                    pass
+        
         except Exception as e:
             log("❌", f"TP monitor error: {e}")
             time.sleep(1)
