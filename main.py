@@ -134,7 +134,7 @@ def log_position_state():
         short_price = position_state[SYMBOL]["short"]["price"]
     
     with balance_lock:
-        balance = INITIAL_BALANCE
+        balance = account_balance
     
     threshold = balance * THRESHOLD_RATIO
     long_value = long_price * long_size
