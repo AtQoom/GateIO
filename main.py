@@ -108,6 +108,8 @@ kline_history = deque(maxlen=200)
 
 account_balance = INITIAL_BALANCE  # 추가
 ENABLE_AUTO_HEDGE = True
+last_event_time = 0  # 마지막 이벤트 시간 (그리드 체결 또는 TP 체결)
+IDLE_TIMEOUT = 1800  # 30분 (초 단위)
 
 # =============================================================================
 # 로그
@@ -648,6 +650,11 @@ def get_main_side():
 def get_counter_side(side):
     """반대 방향 포지션 가져오기"""
     return "short" if side == "long" else "long"
+
+def update_event_time():
+    """마지막 이벤트 시간 갱신"""
+    global last_event_time
+    last_event_time = time.time()
     
 def is_above_threshold(side):
     """포지션이 임계값을 초과했는지 확인"""
@@ -1022,6 +1029,79 @@ def refresh_all_tp_orders():
     except Exception as e:
         log("❌", f"TP refresh error: {e}")
 
+def check_idle_and_enter():
+    """30분 무이벤트 시 주력 포지션 시장가 진입"""
+    global last_event_time
+    
+    try:
+        # 마지막 이벤트로부터 경과 시간 확인
+        if time.time() - last_event_time < IDLE_TIMEOUT:
+            return
+        
+        with position_lock:
+            long_size = position_state[SYMBOL]["long"]["size"]
+            short_size = position_state[SYMBOL]["short"]["size"]
+            long_price = position_state[SYMBOL]["long"]["price"]
+            short_price = position_state[SYMBOL]["short"]["price"]
+        
+        # 조건 1: 롱/숏 모두 보유
+        if long_size == 0 or short_size == 0:
+            return
+        
+        # 조건 2: 최대 5배 미만
+        with balance_lock:
+            max_value = account_balance * MAX_POSITION_RATIO
+        
+        main_side = get_main_side()
+        main_size = long_size if main_side == "long" else short_size
+        main_price = long_price if main_side == "long" else short_price
+        main_value = main_price * main_size
+        
+        if main_value >= max_value:
+            log("🚫 IDLE", f"Max position reached: ${main_value:.2f} >= ${max_value:.2f}")
+            return
+        
+        # 진입 수량 계산 (OBV MACD 가중치)
+        with balance_lock:
+            base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
+        
+        entry_qty = calculate_grid_qty(is_above_threshold=is_above_threshold(main_side))
+        
+        log_event_header("IDLE ENTRY")
+        log("⏱️ IDLE", f"30min no event → {main_side.upper()} entry")
+        log("📊 OBV MACD", f"Value: {obv_macd_value:.2f}")
+        
+        # 시장가 진입 (IOC)
+        current_price = get_current_price()
+        if current_price <= 0:
+            return
+        
+        order_data = {
+            "contract": SYMBOL,
+            "size": int(entry_qty * (1 if main_side == "long" else -1)),
+            "price": "0",  # 시장가
+            "tif": "ioc"
+        }
+        
+        order = api.create_futures_order(SETTLE, FuturesOrder(**order_data))
+        log("✅ IDLE ENTRY", f"{main_side.upper()} {entry_qty} @ market")
+        
+        # 포지션 동기화 대기
+        time.sleep(0.5)
+        sync_position()
+        
+        # TP 갱신 (그리드는 재생성하지 않음 - 롱/숏 모두 보유 중)
+        time.sleep(0.3)
+        refresh_all_tp_orders()
+        
+        # 타이머 리셋
+        update_event_time()
+        
+    except GateApiException as e:
+        log("❌", f"Idle entry API error: {e}")
+    except Exception as e:
+        log("❌", f"Idle entry error: {e}")
+
 def close_counter_on_individual_tp(main_side):
     """개별 TP 체결 시 비주력 20% 청산"""
     try:
@@ -1188,6 +1268,8 @@ def grid_fill_monitor():
                         if hasattr(order, 'status') and order.status in ["finished", "closed"]:
                             log_event_header("GRID FILLED")
                             log("✅ FILL", f"{side.upper()} {order_info['qty']} @ {order_info['price']:.4f}")
+
+                            update_event_time()  # ← 추가
                             
                             # 헷징 실행
                             was_counter = order_info.get("is_counter", False)
@@ -1232,6 +1314,8 @@ def tp_monitor():
                             log_event_header("INDIVIDUAL TP HIT")
                             log("🎯 TP", f"{side.upper()} {entry['qty']} closed")
                             post_threshold_entries[SYMBOL][side].remove(entry)
+
+                            update_event_time()  # ← 추가
                             
                             # 비주력 포지션 20% 청산
                             counter_side = get_counter_side(side)
@@ -1264,6 +1348,8 @@ def tp_monitor():
                         
                         # TP만 생성 (그리드는 skip)
                         full_refresh("Average_TP", skip_grid=True)
+
+                        update_event_time()  # ← 추가
                         
                         # 그리드 재생성
                         time.sleep(0.5)
@@ -1370,6 +1456,17 @@ def position_monitor():
         except Exception as e:
             log("❌", f"Position monitor error: {e}")
             time.sleep(5)
+
+def idle_monitor():
+    """30분 무이벤트 모니터링"""
+    while True:
+        try:
+            time.sleep(60)  # 1분마다 체크
+            check_idle_and_enter()
+        except Exception as e:
+            log("❌", f"Idle monitor error: {e}")
+            time.sleep(10)
+
 
 # =============================================================================
 # Flask 엔드포인트
@@ -1571,6 +1668,8 @@ if __name__ == '__main__':
         log("  ", "- API_SECRET")
         log("  ", "- SYMBOL (optional, default: ONDO_USDT)")
         exit(1)
+
+    update_event_time()  # ← 추가
     
     # 모든 모니터링 스레드 시작
     threading.Thread(target=update_balance_thread, daemon=True).start()
@@ -1579,6 +1678,7 @@ if __name__ == '__main__':
     threading.Thread(target=position_monitor, daemon=True).start()
     threading.Thread(target=grid_fill_monitor, daemon=True).start()
     threading.Thread(target=tp_monitor, daemon=True).start()
+    threading.Thread(target=idle_monitor, daemon=True).start()  # ← 추가 필요
     
     log("✅ THREADS", "All monitoring threads started")
     log("🌐 FLASK", "Starting server on port 8080...")
