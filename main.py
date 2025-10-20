@@ -1030,7 +1030,7 @@ def refresh_all_tp_orders():
         log("❌", f"TP refresh error: {e}")
 
 def check_idle_and_enter():
-    """30분 무이벤트 시 주력 포지션 시장가 진입"""
+    """30분 무이벤트 시 주력/비주력 모두 시장가 진입"""
     global last_event_time
     
     try:
@@ -1048,49 +1048,79 @@ def check_idle_and_enter():
         if long_size == 0 or short_size == 0:
             return
         
-        # 조건 2: 최대 5배 미만
+        # 조건 2: 최대 5배 미만 (주력/비주력 각각 체크)
         with balance_lock:
             max_value = account_balance * MAX_POSITION_RATIO
-        
-        main_side = get_main_side()
-        main_size = long_size if main_side == "long" else short_size
-        main_price = long_price if main_side == "long" else short_price
-        main_value = main_price * main_size
-        
-        if main_value >= max_value:
-            log("🚫 IDLE", f"Max position reached: ${main_value:.2f} >= ${max_value:.2f}")
-            return
-        
-        # 진입 수량 계산 (OBV MACD 가중치)
-        with balance_lock:
             base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
         
-        entry_qty = calculate_grid_qty(is_above_threshold=is_above_threshold(main_side))
+        main_side = get_main_side()
+        counter_side = get_counter_side(main_side)
+        
+        main_size = long_size if main_side == "long" else short_size
+        main_price = long_price if main_side == "long" else short_price
+        counter_size = short_size if main_side == "long" else long_size
+        counter_price = short_price if main_side == "long" else long_price
+        
+        main_value = main_price * main_size
+        counter_value = counter_price * counter_size
+        
+        # 주력 또는 비주력이 최대 5배 도달 시 진입 금지
+        if main_value >= max_value:
+            log("🚫 IDLE", f"Main position max reached: ${main_value:.2f} >= ${max_value:.2f}")
+            return
+        
+        if counter_value >= max_value:
+            log("🚫 IDLE", f"Counter position max reached: ${counter_value:.2f} >= ${max_value:.2f}")
+            return
+        
+        # 진입 수량 계산
+        # 주력: OBV MACD 가중치
+        main_qty = calculate_grid_qty(is_above_threshold=is_above_threshold(main_side))
+        # 비주력: 기본 수량
+        counter_qty = base_qty
         
         log_event_header("IDLE ENTRY")
-        log("⏱️ IDLE", f"30min no event → {main_side.upper()} entry")
-        log("📊 OBV MACD", f"Value: {obv_macd_value:.2f}")
+        log("⏱️ IDLE", f"30min no event → BOTH sides entry")
+        obv_display = float(obv_macd_value) * 1000
+        log("📊 OBV MACD", f"Value: {obv_display:.2f}")
+        log("📊 QUANTITY", f"Main ({main_side.upper()}): {main_qty} | Counter ({counter_side.upper()}): {counter_qty}")
         
         # 시장가 진입 (IOC)
         current_price = get_current_price()
         if current_price <= 0:
             return
         
-        order_data = {
+        # 주력 포지션 진입
+        main_order_data = {
             "contract": SYMBOL,
-            "size": int(entry_qty * (1 if main_side == "long" else -1)),
+            "size": int(main_qty * (1 if main_side == "long" else -1)),
             "price": "0",  # 시장가
             "tif": "ioc"
         }
         
-        order = api.create_futures_order(SETTLE, FuturesOrder(**order_data))
-        log("✅ IDLE ENTRY", f"{main_side.upper()} {entry_qty} @ market")
+        # 비주력 포지션 진입
+        counter_order_data = {
+            "contract": SYMBOL,
+            "size": int(counter_qty * (1 if counter_side == "long" else -1)),
+            "price": "0",  # 시장가
+            "tif": "ioc"
+        }
+        
+        # 주력 진입
+        main_order = api.create_futures_order(SETTLE, FuturesOrder(**main_order_data))
+        log("✅ IDLE ENTRY", f"Main {main_side.upper()} {main_qty} @ market")
+        
+        time.sleep(0.2)  # 약간의 간격
+        
+        # 비주력 진입
+        counter_order = api.create_futures_order(SETTLE, FuturesOrder(**counter_order_data))
+        log("✅ IDLE ENTRY", f"Counter {counter_side.upper()} {counter_qty} @ market")
         
         # 포지션 동기화 대기
         time.sleep(0.5)
         sync_position()
         
-        # TP 갱신 (그리드는 재생성하지 않음 - 롱/숏 모두 보유 중)
+        # TP 갱신 (롱/숏 모두)
         time.sleep(0.3)
         refresh_all_tp_orders()
         
