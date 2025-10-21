@@ -673,7 +673,7 @@ def is_above_threshold(side):
 # =============================================================================
 # 주문 실행
 # =============================================================================
-def place_grid_order(side, price, qty, is_counter=False):
+def place_grid_order(side, price, qty, is_counter=False, base_qty=2):  # ✅ 파라미터 추가
     try:
         if qty <= 0:
             log("⚠️ GRID", f"Invalid quantity: {qty}")
@@ -692,7 +692,8 @@ def place_grid_order(side, price, qty, is_counter=False):
                 "order_id": result.id,
                 "price": float(price),
                 "qty": int(qty),
-                "is_counter": is_counter
+                "is_counter": is_counter,
+                "base_qty": int(base_qty)  # ✅ 추가
             })
             tag = "Counter(30%)" if is_counter else "Same"
             log("📐 GRID", f"{tag} {side.upper()} {qty} @ {price:.4f}")
@@ -715,7 +716,7 @@ def initialize_grid(current_price):
     
     try:
         with position_lock:
-            long_size = position_state[SYMBOL]["long"]["size"]
+            long_size = position_state[SYMBOL][" long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
             long_price = position_state[SYMBOL]["long"]["price"]
             short_price = position_state[SYMBOL]["short"]["price"]
@@ -723,6 +724,7 @@ def initialize_grid(current_price):
         # 최대 포지션 한도 체크
         with balance_lock:
             max_value = account_balance * MAX_POSITION_RATIO
+            base_qty_snapshot = int(Decimal(str(account_balance)) * BASE_RATIO)  # ✅ 추가
         
         long_value = long_price * long_size
         short_value = short_price * short_size
@@ -735,7 +737,7 @@ def initialize_grid(current_price):
             if short_size > 0 and short_value < max_value and not max_position_locked["short"]:
                 short_grid_price = current_price * (Decimal("1") + GRID_GAP_PCT)
                 qty = calculate_grid_qty(is_above_threshold=is_above_threshold("short"))
-                place_grid_order("short", short_grid_price, qty, is_counter=False)
+                place_grid_order("short", short_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)  # ✅ 수정
             return
         
         # 숏 최대 한도 초과 시 숏 그리드 생성 금지
@@ -746,7 +748,7 @@ def initialize_grid(current_price):
             if long_size > 0 and long_value < max_value and not max_position_locked["long"]:
                 long_grid_price = current_price * (Decimal("1") - GRID_GAP_PCT)
                 qty = calculate_grid_qty(is_above_threshold=is_above_threshold("long"))
-                place_grid_order("long", long_grid_price, qty, is_counter=False)
+                place_grid_order("long", long_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)  # ✅ 수정
             return
         
         # 롱/숏 모두 있으면 그리드 생성 안 함, TP 확인 후 없으면 생성
@@ -791,35 +793,35 @@ def initialize_grid(current_price):
             same_qty = calculate_grid_qty(is_above_threshold=True)
             weight = BASE_RATIO
             log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
-            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {int(account_balance * BASE_RATIO)}")
+            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {base_qty_snapshot}")  # ✅ 수정
             log("⚗️ ASYMMETRIC", f"Above threshold | Counter: {counter_qty} ({COUNTER_RATIO * 100:.0f}%) | Main: {same_qty}")
-            place_grid_order("short", short_grid_price, counter_qty, is_counter=True)
-            place_grid_order("long", long_grid_price, same_qty, is_counter=False)
+            place_grid_order("short", short_grid_price, counter_qty, is_counter=True, base_qty=base_qty_snapshot)  # ✅ 수정
+            place_grid_order("long", long_grid_price, same_qty, is_counter=False, base_qty=base_qty_snapshot)  # ✅ 수정
             
         elif short_above:
             counter_qty = max(1, int(short_size * COUNTER_RATIO))
             same_qty = calculate_grid_qty(is_above_threshold=True)
             weight = BASE_RATIO
             log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
-            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {int(account_balance * BASE_RATIO)}")
+            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {base_qty_snapshot}")  # ✅ 수정
             log("⚗️ ASYMMETRIC", f"Above threshold | Counter: {counter_qty} ({COUNTER_RATIO * 100:.0f}%) | Main: {same_qty}")
-            place_grid_order("long", long_grid_price, counter_qty, is_counter=True)
-            place_grid_order("short", short_grid_price, same_qty, is_counter=False)
+            place_grid_order("long", long_grid_price, counter_qty, is_counter=True, base_qty=base_qty_snapshot)  # ✅ 수정
+            place_grid_order("short", short_grid_price, same_qty, is_counter=False, base_qty=base_qty_snapshot)  # ✅ 수정
             
         else:
             qty = calculate_grid_qty(is_above_threshold=False)
             weight = calculate_obv_macd_weight(obv_display)
             log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
-            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {int(account_balance * BASE_RATIO)}")
+            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {base_qty_snapshot}")  # ✅ 수정
             log("⚗️ SYMMETRIC", f"Below threshold - OBV MACD based | Weight: {weight}")
             log("📊 QUANTITY", f"Both sides: {qty} (OBV:{obv_display:.1f}) | Weight: {weight * 100:.0f}%")
-            place_grid_order("long", long_grid_price, qty, is_counter=False)
-            place_grid_order("short", short_grid_price, qty, is_counter=False)
+            place_grid_order("long", long_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)  # ✅ 수정
+            place_grid_order("short", short_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)  # ✅ 수정
             
     except Exception as e:
         log("❌", f"Grid init error: {e}")
 
-def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter):
+def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):  # ✅ 파라미터 추가
     """그리드 체결 후 헤징 + 임계값 이후 진입 추적"""
     if not ENABLE_AUTO_HEDGE:
         return
@@ -834,8 +836,9 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter):
             main_size = position_state[SYMBOL][side]["size"]
             counter_size = position_state[SYMBOL][counter_side]["size"]
         
-        with balance_lock:
-            base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
+        # ❌ 삭제: 잔고 재조회 안 함!
+        # with balance_lock:
+        #     base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
         
         # OBV MACD 값 가져오기
         obv_display = float(obv_macd_value) * 1000
@@ -851,15 +854,15 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter):
             })
             log("📝 TRACKED", f"{side.upper()} grid {grid_qty} @ {grid_price:.4f} (MAIN, above threshold)")
         
-        # 헤징 수량 결정
+        # ✅ 수정: 전달받은 base_qty 사용
         if was_counter:
             hedge_qty = max(base_qty, int(main_size * 0.1))
             hedge_side = side
             log("🔄 HEDGE", f"Counter grid filled → Main hedge: {hedge_side.upper()} {hedge_qty} (OBV:{obv_display:.1f})")
         else:
-            hedge_qty = base_qty
+            hedge_qty = base_qty  # ← 전달받은 base_qty 사용!
             hedge_side = counter_side
-            log("🔄 HEDGE", f"Main grid filled → Counter hedge: {hedge_side.upper()} {hedge_qty} (base)")
+            log("🔄 HEDGE", f"Main grid filled → Counter hedge: {hedge_side.upper()} {hedge_qty} (base={base_qty})")
         
         # 시장가 주문 (IOC)
         hedge_order_data = {
@@ -1338,9 +1341,9 @@ def grid_fill_monitor():
     last_check_time = 0
     while True:
         try:
-            time.sleep(1)  # 0.5초 → 1초로 변경 (너무 짧으면 API 부하)
+            time.sleep(1)
             current_time = time.time()
-            if current_time - last_check_time < 2:  # 3초 → 2초로 단축
+            if current_time - last_check_time < 2:
                 continue
             last_check_time = current_time
 
@@ -1354,16 +1357,16 @@ def grid_fill_monitor():
                         if not order:
                             continue
                         
-                        # 체결 상태 확인 (finished 또는 closed)
                         if hasattr(order, 'status') and order.status in ["finished", "closed"]:
                             log_event_header("GRID FILLED")
-                            log("✅ FILL", f"{side.upper()} {order_info['qty']} @ {order_info['price']:.4f}")
+                            log("✅ FILL", f"{side.UPPER()} {order_info['qty']} @ {order_info['price']:.4f}")
 
-                            update_event_time()  # ← 추가
+                            update_event_time()
                             
-                            # 헷징 실행
+                            # ✅ 수정: base_qty 전달
                             was_counter = order_info.get("is_counter", False)
-                            hedge_after_grid_fill(side, order_info['price'], order_info["qty"], was_counter)
+                            base_qty = order_info.get("base_qty", 2)  # ← 꺼내기
+                            hedge_after_grid_fill(side, order_info['price'], order_info["qty"], was_counter, base_qty)  # ← 전달
                             
                             time.sleep(0.5)
                             filled_orders.append(order_info)
