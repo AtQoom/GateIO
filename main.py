@@ -870,9 +870,13 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter):
         }
         
         order = api.create_futures_order(SETTLE, FuturesOrder(**hedge_order_data))
-        order_id = order.id
         
-        log("✅ HEDGE", f"{hedge_side.upper()} {hedge_qty} @ market")
+        # ✅ 수정: order가 None일 수 있음
+        if order and hasattr(order, 'id'):
+            order_id = order.id
+            log("✅ HEDGE", f"{hedge_side.upper()} {hedge_qty} @ market (ID: {order_id})")
+        else:
+            log("✅ HEDGE", f"{hedge_side.upper()} {hedge_qty} @ market (IOC filled immediately)")
         
         # 포지션 동기화 대기
         time.sleep(0.5)
