@@ -720,14 +720,26 @@ def place_grid_order(side, price, qty, is_counter=False, base_qty=2):
         return None
 
 def initialize_grid(current_price):
-    side = get_main_side()
+    """그리드 초기화 (안전한 버전)"""
     global last_grid_time
-    if time.time() - last_grid_time < 5: return
+    
+    # 쿨다운 체크
+    if time.time() - last_grid_time < 5:
+        return
     last_grid_time = time.time()
     
     try:
+        # ✅ 추가: position_state 초기화 확인
+        if SYMBOL not in position_state:
+            log("⚠️ GRID", f"Position state not initialized for {SYMBOL}")
+            return
+        
+        if "long" not in position_state[SYMBOL] or "short" not in position_state[SYMBOL]:
+            log("⚠️ GRID", f"Position state incomplete for {SYMBOL}")
+            return
+        
         with position_lock:
-            long_size = position_state[SYMBOL][" long"]["size"]
+            long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
             long_price = position_state[SYMBOL]["long"]["price"]
             short_price = position_state[SYMBOL]["short"]["price"]
@@ -735,7 +747,9 @@ def initialize_grid(current_price):
         # 최대 포지션 한도 체크
         with balance_lock:
             max_value = account_balance * MAX_POSITION_RATIO
-            base_qty_snapshot = int(Decimal(str(account_balance)) * BASE_RATIO)  # ✅ 추가
+            base_qty_snapshot = int(Decimal(str(account_balance)) * BASE_RATIO)
+            if base_qty_snapshot <= 0:
+                base_qty_snapshot = 1
         
         long_value = long_price * long_size
         short_value = short_price * short_size
@@ -748,7 +762,7 @@ def initialize_grid(current_price):
             if short_size > 0 and short_value < max_value and not max_position_locked["short"]:
                 short_grid_price = current_price * (Decimal("1") + GRID_GAP_PCT)
                 qty = calculate_grid_qty(is_above_threshold=is_above_threshold("short"))
-                place_grid_order("short", short_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)  # ✅ 수정
+                place_grid_order("short", short_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)
             return
         
         # 숏 최대 한도 초과 시 숏 그리드 생성 금지
@@ -759,7 +773,7 @@ def initialize_grid(current_price):
             if long_size > 0 and long_value < max_value and not max_position_locked["long"]:
                 long_grid_price = current_price * (Decimal("1") - GRID_GAP_PCT)
                 qty = calculate_grid_qty(is_above_threshold=is_above_threshold("long"))
-                place_grid_order("long", long_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)  # ✅ 수정
+                place_grid_order("long", long_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)
             return
         
         # 롱/숏 모두 있으면 그리드 생성 안 함, TP 확인 후 없으면 생성
@@ -804,33 +818,37 @@ def initialize_grid(current_price):
             same_qty = calculate_grid_qty(is_above_threshold=True)
             weight = BASE_RATIO
             log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
-            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {base_qty_snapshot}")  # ✅ 수정
+            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {base_qty_snapshot}")
             log("⚗️ ASYMMETRIC", f"Above threshold | Counter: {counter_qty} ({COUNTER_RATIO * 100:.0f}%) | Main: {same_qty}")
-            place_grid_order("short", short_grid_price, counter_qty, is_counter=True, base_qty=base_qty_snapshot)  # ✅ 수정
-            place_grid_order("long", long_grid_price, same_qty, is_counter=False, base_qty=base_qty_snapshot)  # ✅ 수정
+            place_grid_order("short", short_grid_price, counter_qty, is_counter=True, base_qty=base_qty_snapshot)
+            place_grid_order("long", long_grid_price, same_qty, is_counter=False, base_qty=base_qty_snapshot)
             
         elif short_above:
             counter_qty = max(1, int(short_size * COUNTER_RATIO))
             same_qty = calculate_grid_qty(is_above_threshold=True)
             weight = BASE_RATIO
             log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
-            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {base_qty_snapshot}")  # ✅ 수정
+            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {base_qty_snapshot}")
             log("⚗️ ASYMMETRIC", f"Above threshold | Counter: {counter_qty} ({COUNTER_RATIO * 100:.0f}%) | Main: {same_qty}")
-            place_grid_order("long", long_grid_price, counter_qty, is_counter=True, base_qty=base_qty_snapshot)  # ✅ 수정
-            place_grid_order("short", short_grid_price, same_qty, is_counter=False, base_qty=base_qty_snapshot)  # ✅ 수정
+            place_grid_order("long", long_grid_price, counter_qty, is_counter=True, base_qty=base_qty_snapshot)
+            place_grid_order("short", short_grid_price, same_qty, is_counter=False, base_qty=base_qty_snapshot)
             
         else:
             qty = calculate_grid_qty(is_above_threshold=False)
             weight = calculate_obv_macd_weight(obv_display)
             log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
-            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {base_qty_snapshot}")  # ✅ 수정
+            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {base_qty_snapshot}")
             log("⚗️ SYMMETRIC", f"Below threshold - OBV MACD based | Weight: {weight}")
             log("📊 QUANTITY", f"Both sides: {qty} (OBV:{obv_display:.1f}) | Weight: {weight * 100:.0f}%")
-            place_grid_order("long", long_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)  # ✅ 수정
-            place_grid_order("short", short_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)  # ✅ 수정
+            place_grid_order("long", long_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)
+            place_grid_order("short", short_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)
             
+    except KeyError as e:
+        log("❌", f"Grid init KeyError: {e} - position_state={position_state}")
     except Exception as e:
         log("❌", f"Grid init error: {e}")
+        import traceback
+        log("❌", f"Traceback: {traceback.format_exc()}")
 
 def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):  # ✅ 파라미터 추가
     """그리드 체결 후 헤징 + 임계값 이후 진입 추적"""
@@ -931,9 +949,9 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):  #
         log("❌", f"Hedge order error: {e}")
 
 def refresh_all_tp_orders():
-    """TP 주문 재생성 (개별 TP + 평단 TP)"""
+    """TP 주문 새로 생성 (TP 주문 전부 취소 → TP 주문)"""
     try:
-        # 기존 TP 취소
+        # 기존 TP 주문 취소
         orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
         tp_orders = [o for o in orders if o.is_reduce_only]
         if tp_orders:
@@ -953,26 +971,27 @@ def refresh_all_tp_orders():
             long_price = position_state[SYMBOL]["long"]["price"]
             short_price = position_state[SYMBOL]["short"]["price"]
         
-        log("📈 TP REFRESH", "Creating TP orders...")
+        log("🎯 TP REFRESH", "Creating TP orders...")
         log_threshold_info()
         
-        # 주력 포지션 판단
+        # 주력 사이드 확인
         main_side = get_main_side()
+        log("🔍 DEBUG", f"main_side={main_side}, long_size={long_size}, short_size={short_size}")  # ← 추가
         
-        # ===== 롱 TP 생성 =====
+        # === 롱 TP 생성 ===
         if long_size > 0:
             long_above = is_above_threshold("long")
+            log("🔍 DEBUG", f"long_above={long_above}, main_side==long: {main_side == 'long'}")  # ← 추가
             
             if long_above and main_side == "long":
-                # 임계값 초과 + 주력 포지션
-                log("📊 LONG TP", "Above threshold (MAIN) → Individual + Average TPs")
+                # Individual TP 로직
+                log("📈 LONG TP", "Above threshold & MAIN → Individual + Average TPs")
                 
-                # 개별 TP (임계값 이후 진입분)
+                # 임계값 초과 후 진입 건들만 Individual TP
                 individual_total = 0
                 for entry in post_threshold_entries[SYMBOL]["long"]:
                     tp_price = Decimal(str(entry["price"])) * (Decimal("1") + TP_GAP_PCT)
-                    tp_price = tp_price.quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
-                    
+                    tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
                     order = FuturesOrder(
                         contract=SYMBOL,
                         size=-entry["qty"],
@@ -984,14 +1003,13 @@ def refresh_all_tp_orders():
                     if result and hasattr(result, 'id'):
                         entry["tp_order_id"] = result.id
                         individual_total += entry["qty"]
-                        log("✅ INDIVIDUAL TP", f"LONG {entry['qty']} @ {tp_price:.4f}")
+                        log("🎯 INDIVIDUAL TP", f"LONG {entry['qty']} @ {tp_price:.4f}")
                 
-                # 평단 TP (임계값 이전 진입분)
-                remaining = int(long_size) - individual_total
+                # 나머지는 평단 TP
+                remaining = int(long_size - individual_total)
                 if remaining > 0:
                     tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
-                    tp_price = tp_price.quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
-                    
+                    tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
                     order = FuturesOrder(
                         contract=SYMBOL,
                         size=-remaining,
@@ -1002,13 +1020,13 @@ def refresh_all_tp_orders():
                     result = api.create_futures_order(SETTLE, order)
                     if result and hasattr(result, 'id'):
                         average_tp_orders[SYMBOL]["long"] = result.id
-                        log("✅ AVERAGE TP", f"LONG {remaining} @ {tp_price:.4f}")
+                        log("🎯 AVERAGE TP", f"LONG {remaining} @ {tp_price:.4f}")
             else:
-                # 임계값 미만 또는 비주력 포지션
-                log("📊 LONG TP", "Below threshold or COUNTER → Full average TP")
+                # Full average TP
+                log("📈 LONG TP", "Below threshold or COUNTER → Full average TP")
                 tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
-                tp_price = tp_price.quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
-                
+                tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+                log("🔍 DEBUG", f"Creating LONG TP: size={-int(long_size)}, price={tp_price}")  # ← 추가
                 order = FuturesOrder(
                     contract=SYMBOL,
                     size=-int(long_size),
@@ -1019,22 +1037,24 @@ def refresh_all_tp_orders():
                 result = api.create_futures_order(SETTLE, order)
                 if result and hasattr(result, 'id'):
                     average_tp_orders[SYMBOL]["long"] = result.id
-                    log("✅ FULL TP", f"LONG {int(long_size)} @ {tp_price:.4f}")
+                    log("🎯 FULL TP", f"LONG {int(long_size)} @ {tp_price:.4f}")
+                else:
+                    log("❌ TP", f"LONG TP creation failed: result={result}")  # ← 추가
         
-        # ===== 숏 TP 생성 =====
+        # === 숏 TP 생성 ===
         if short_size > 0:
             short_above = is_above_threshold("short")
+            log("🔍 DEBUG", f"short_above={short_above}, main_side==short: {main_side == 'short'}")  # ← 추가
             
             if short_above and main_side == "short":
-                # 임계값 초과 + 주력 포지션
-                log("📊 SHORT TP", "Above threshold (MAIN) → Individual + Average TPs")
+                # Individual TP 로직
+                log("📉 SHORT TP", "Above threshold & MAIN → Individual + Average TPs")
                 
-                # 개별 TP (임계값 이후 진입분)
+                # 임계값 초과 후 진입 건들만 Individual TP
                 individual_total = 0
                 for entry in post_threshold_entries[SYMBOL]["short"]:
                     tp_price = Decimal(str(entry["price"])) * (Decimal("1") - TP_GAP_PCT)
-                    tp_price = tp_price.quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
-                    
+                    tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
                     order = FuturesOrder(
                         contract=SYMBOL,
                         size=entry["qty"],
@@ -1046,14 +1066,13 @@ def refresh_all_tp_orders():
                     if result and hasattr(result, 'id'):
                         entry["tp_order_id"] = result.id
                         individual_total += entry["qty"]
-                        log("✅ INDIVIDUAL TP", f"SHORT {entry['qty']} @ {tp_price:.4f}")
+                        log("🎯 INDIVIDUAL TP", f"SHORT {entry['qty']} @ {tp_price:.4f}")
                 
-                # 평단 TP (임계값 이전 진입분)
-                remaining = int(short_size) - individual_total
+                # 나머지는 평단 TP
+                remaining = int(short_size - individual_total)
                 if remaining > 0:
                     tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
-                    tp_price = tp_price.quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
-                    
+                    tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
                     order = FuturesOrder(
                         contract=SYMBOL,
                         size=remaining,
@@ -1064,13 +1083,13 @@ def refresh_all_tp_orders():
                     result = api.create_futures_order(SETTLE, order)
                     if result and hasattr(result, 'id'):
                         average_tp_orders[SYMBOL]["short"] = result.id
-                        log("✅ AVERAGE TP", f"SHORT {remaining} @ {tp_price:.4f}")
+                        log("🎯 AVERAGE TP", f"SHORT {remaining} @ {tp_price:.4f}")
             else:
-                # 임계값 미만 또는 비주력 포지션
-                log("📊 SHORT TP", "Below threshold or COUNTER → Full average TP")
+                # Full average TP
+                log("📉 SHORT TP", "Below threshold or COUNTER → Full average TP")
                 tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
-                tp_price = tp_price.quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
-                
+                tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+                log("🔍 DEBUG", f"Creating SHORT TP: size={int(short_size)}, price={tp_price}")  # ← 추가
                 order = FuturesOrder(
                     contract=SYMBOL,
                     size=int(short_size),
@@ -1081,10 +1100,14 @@ def refresh_all_tp_orders():
                 result = api.create_futures_order(SETTLE, order)
                 if result and hasattr(result, 'id'):
                     average_tp_orders[SYMBOL]["short"] = result.id
-                    log("✅ FULL TP", f"SHORT {int(short_size)} @ {tp_price:.4f}")
-                    
+                    log("🎯 FULL TP", f"SHORT {int(short_size)} @ {tp_price:.4f}")
+                else:
+                    log("❌ TP", f"SHORT TP creation failed: result={result}")  # ← 추가
+    
     except Exception as e:
         log("❌", f"TP refresh error: {e}")
+        import traceback
+        log("❌", f"Traceback: {traceback.format_exc()}")  # ← 추가
 
 def check_idle_and_enter():
     """30분 무이벤트 시 주력/비주력 모두 시장가 진입 (점진적 배수 증가)"""
