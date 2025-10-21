@@ -720,7 +720,7 @@ def initialize_grid(current_price):
             long_price = position_state[SYMBOL]["long"]["price"]
             short_price = position_state[SYMBOL]["short"]["price"]
         
-        # ★ 최대 포지션 한도 체크 (추가)
+        # 최대 포지션 한도 체크
         with balance_lock:
             max_value = account_balance * MAX_POSITION_RATIO
         
@@ -732,7 +732,6 @@ def initialize_grid(current_price):
             log("🚫 GRID", f"LONG max limit reached (${long_value:.2f} >= ${max_value:.2f})")
             if long_value >= max_value:
                 max_position_locked["long"] = True
-            # 숏 그리드만 생성 (있다면)
             if short_size > 0 and short_value < max_value and not max_position_locked["short"]:
                 short_grid_price = current_price * (Decimal("1") + GRID_GAP_PCT)
                 qty = calculate_grid_qty(is_above_threshold=is_above_threshold("short"))
@@ -744,7 +743,6 @@ def initialize_grid(current_price):
             log("🚫 GRID", f"SHORT max limit reached (${short_value:.2f} >= ${max_value:.2f})")
             if short_value >= max_value:
                 max_position_locked["short"] = True
-            # 롱 그리드만 생성 (있다면)
             if long_size > 0 and long_value < max_value and not max_position_locked["long"]:
                 long_grid_price = current_price * (Decimal("1") - GRID_GAP_PCT)
                 qty = calculate_grid_qty(is_above_threshold=is_above_threshold("long"))
@@ -755,14 +753,13 @@ def initialize_grid(current_price):
         if long_size > 0 and short_size > 0:
             log("ℹ️ GRID", "Both positions exist → Skip grid creation")
             
-            # 기존 TP 주문이 있는지 확인
             try:
                 orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
                 tp_orders = [o for o in orders if o.is_reduce_only]
                 
-                if len(tp_orders) == 0:  # TP가 없으면 생성
+                if len(tp_orders) == 0:
                     log("📈 TP", "No TP orders found, creating...")
-                    time.sleep(0.5)  # ← 추가: 안정화 대기
+                    time.sleep(0.5)
                     refresh_all_tp_orders()
                 else:
                     log("ℹ️ TP", f"{len(tp_orders)} TP orders already exist")
@@ -777,14 +774,16 @@ def initialize_grid(current_price):
         short_grid_price = current_price * (Decimal("1") + GRID_GAP_PCT)
         
         with balance_lock:
-            threshold = account_balance * THRESHOLD_RATIO  # account_balance 기준
+            threshold = account_balance * THRESHOLD_RATIO
             balance = account_balance
         
         long_above = (long_price * long_size >= threshold and long_size > 0)
         short_above = (short_price * short_size >= threshold and short_size > 0)
         
-        log("📈 GRID INIT", f"Price: {current_price:.4f}")
+        # OBV MACD 값 가져오기
         obv_display = float(obv_macd_value) * 1000
+        
+        log("📈 GRID INIT", f"Price: {current_price:.4f}")
         log("📊 OBV MACD", f"Value: {obv_display:.2f}")
         
         if long_above:
@@ -813,7 +812,7 @@ def initialize_grid(current_price):
             log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
             log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {int(account_balance * BASE_RATIO)}")
             log("⚗️ SYMMETRIC", f"Below threshold - OBV MACD based | Weight: {weight}")
-            log("📊 QUANTITY", f"Both sides: {qty} | OBV MACD: {obv_display:.2f} | Weight: {weight * 100:.0f}%")
+            log("📊 QUANTITY", f"Both sides: {qty} (OBV:{obv_display:.1f}) | Weight: {weight * 100:.0f}%")
             place_grid_order("long", long_grid_price, qty, is_counter=False)
             place_grid_order("short", short_grid_price, qty, is_counter=False)
             
@@ -837,14 +836,18 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter):
         with balance_lock:
             base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
         
+        # OBV MACD 값 가져오기
+        obv_display = float(obv_macd_value) * 1000
+        
         # 헤징 수량 결정
         if was_counter:
             hedge_qty = max(base_qty, int(main_size * 0.1))
             hedge_side = side
-            log("🔄 HEDGE", f"Counter grid filled → Main hedge: {hedge_side.upper()} {hedge_qty}")
+            log("🔄 HEDGE", f"Counter grid filled → Main hedge: {hedge_side.upper()} {hedge_qty} (OBV:{obv_display:.1f})")
         else:
             hedge_qty = base_qty
             hedge_side = counter_side
+            log("🔄 HEDGE", f"Main grid filled → Counter hedge: {hedge_side.upper()} {hedge_qty} (base)")
         
         # 시장가 주문 (IOC)
         hedge_order_data = {
@@ -857,20 +860,20 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter):
         order = api.create_futures_order(SETTLE, FuturesOrder(**hedge_order_data))
         order_id = order.id
         
-        log("🔄 HEDGE", f"Counter grid filled → Main hedge: {hedge_side.upper()} {hedge_qty}")
+        log("✅ HEDGE", f"{hedge_side.upper()} {hedge_qty} @ market")
         
         # 포지션 동기화 대기
         time.sleep(0.5)
         sync_position()
         
-        # 헤징 후 기존 그리드 주문 모두 취소 (중요!)
-        cancel_grid_only()  # ← 추가
+        # 헤징 후 기존 그리드 주문 모두 취소
+        cancel_grid_only()
         time.sleep(0.3)
         
         # TP 재생성
         refresh_all_tp_orders()
         
-        # 그리드 재생성 (롱/숏 모두 있으면 Skip됨)
+        # 그리드 재생성
         time.sleep(0.3)
         current_price = get_current_price()
         if current_price > 0:
@@ -1075,24 +1078,21 @@ def check_idle_and_enter():
             log("🚫 IDLE", f"Counter position max reached: ${counter_value:.2f} >= ${max_value:.2f}")
             return
         
-        # ← 변경 시작: 점진적 배수 증가
-        idle_entry_count += 1  # 진입 횟수 증가
-        multiplier = idle_entry_count  # 1, 2, 3, 4, ...
+        # 점진적 배수 증가
+        idle_entry_count += 1
+        multiplier = idle_entry_count
         
         # 진입 수량 계산 (배수 적용)
-        # 주력: OBV MACD 가중치 * 배수
         base_main_qty = calculate_grid_qty(is_above_threshold=is_above_threshold(main_side))
         main_qty = base_main_qty * multiplier
-        
-        # 비주력: 기본 수량 * 배수
         counter_qty = base_qty * multiplier
-        # ← 변경 끝
+        
+        # OBV MACD 값 가져오기
+        obv_display = float(obv_macd_value) * 1000
         
         log_event_header("IDLE ENTRY")
-        log("⏱️ IDLE", f"Entry #{idle_entry_count} (x{multiplier}) → BOTH sides")  # ← 수정
-        obv_display = float(obv_macd_value) * 1000
-        log("📊 OBV MACD", f"Value: {obv_display:.2f}")
-        log("📊 QUANTITY", f"Main ({main_side.upper()}): {main_qty} (x{multiplier}) | Counter ({counter_side.upper()}): {counter_qty} (x{multiplier})")  # ← 수정
+        log("⏱️ IDLE", f"Entry #{idle_entry_count} (x{multiplier}) → BOTH sides")
+        log("📊 IDLE QTY", f"Main {main_side.upper()} {main_qty} (OBV:{obv_display:.1f}, x{multiplier}) | Counter {counter_side.upper()} {counter_qty} (base, x{multiplier})")
         
         # 시장가 진입 (IOC)
         current_price = get_current_price()
@@ -1103,7 +1103,7 @@ def check_idle_and_enter():
         main_order_data = {
             "contract": SYMBOL,
             "size": int(main_qty * (1 if main_side == "long" else -1)),
-            "price": "0",  # 시장가
+            "price": "0",
             "tif": "ioc"
         }
         
@@ -1111,25 +1111,25 @@ def check_idle_and_enter():
         counter_order_data = {
             "contract": SYMBOL,
             "size": int(counter_qty * (1 if counter_side == "long" else -1)),
-            "price": "0",  # 시장가
+            "price": "0",
             "tif": "ioc"
         }
         
         # 주력 진입
         main_order = api.create_futures_order(SETTLE, FuturesOrder(**main_order_data))
-        log("✅ IDLE ENTRY", f"Main {main_side.upper()} {main_qty} @ market (x{multiplier})")  # ← 수정
+        log("✅ IDLE ENTRY", f"Main {main_side.upper()} {main_qty} @ market (x{multiplier})")
         
-        time.sleep(0.2)  # 약간의 간격
+        time.sleep(0.2)
         
         # 비주력 진입
         counter_order = api.create_futures_order(SETTLE, FuturesOrder(**counter_order_data))
-        log("✅ IDLE ENTRY", f"Counter {counter_side.upper()} {counter_qty} @ market (x{multiplier})")  # ← 수정
+        log("✅ IDLE ENTRY", f"Counter {counter_side.upper()} {counter_qty} @ market (x{multiplier})")
         
         # 포지션 동기화 대기
         time.sleep(0.5)
         sync_position()
         
-        # TP 갱신 (롱/숏 모두)
+        # TP 갱신
         time.sleep(0.3)
         refresh_all_tp_orders()
         
