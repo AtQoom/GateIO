@@ -673,10 +673,15 @@ def is_above_threshold(side):
 # =============================================================================
 # 주문 실행
 # =============================================================================
-def place_grid_order(side, price, qty, is_counter=False, base_qty=2):  # ✅ 파라미터 추가
+def place_grid_order(side, price, qty, is_counter=False, base_qty=2):
     try:
         if qty <= 0:
             log("⚠️ GRID", f"Invalid quantity: {qty}")
+            return None
+        
+        # ✅ 추가: side 검증
+        if side not in ["long", "short"]:
+            log("❌ GRID", f"Invalid side: {side}")
             return None
             
         size = qty if side == "long" else -qty
@@ -688,12 +693,18 @@ def place_grid_order(side, price, qty, is_counter=False, base_qty=2):  # ✅ 파
         )
         result = api.create_futures_order(SETTLE, order)
         if result and hasattr(result, 'id'):
+            # ✅ 추가: 안전한 접근
+            if SYMBOL not in grid_orders:
+                grid_orders[SYMBOL] = {"long": [], "short": []}
+            if side not in grid_orders[SYMBOL]:
+                grid_orders[SYMBOL][side] = []
+            
             grid_orders[SYMBOL][side].append({
                 "order_id": result.id,
                 "price": float(price),
                 "qty": int(qty),
                 "is_counter": is_counter,
-                "base_qty": int(base_qty)  # ✅ 추가
+                "base_qty": int(base_qty)
             })
             tag = "Counter(30%)" if is_counter else "Same"
             log("📐 GRID", f"{tag} {side.upper()} {qty} @ {price:.4f}")
