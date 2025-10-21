@@ -39,8 +39,8 @@ if API_SECRET:
 else:
     logger.error("API_SECRET not found in environment variables!")
 
-GRID_GAP_PCT = Decimal("0.0012")  # 0.12%
-TP_GAP_PCT = Decimal("0.0012")    # 0.12%
+GRID_GAP_PCT = Decimal("0.0015")  # 0.15%
+TP_GAP_PCT = Decimal("0.0015")    # 0.15%
 BASE_RATIO = Decimal("0.1")       # 기본 수량 비율
 THRESHOLD_RATIO = Decimal("0.8")  # 임계값
 COUNTER_RATIO = Decimal("0.30")   # 비주력 30%
@@ -110,6 +110,7 @@ account_balance = INITIAL_BALANCE  # 추가
 ENABLE_AUTO_HEDGE = True
 last_event_time = 0  # 마지막 이벤트 시간 (그리드 체결 또는 TP 체결)
 IDLE_TIMEOUT = 1800  # 30분 (초 단위)
+idle_entry_count = 0  # 아이들 진입 횟수 ← 추가
 
 # =============================================================================
 # 로그
@@ -652,9 +653,10 @@ def get_counter_side(side):
     return "short" if side == "long" else "long"
 
 def update_event_time():
-    """마지막 이벤트 시간 갱신"""
-    global last_event_time
+    """마지막 이벤트 시간 갱신 + 아이들 카운트 리셋"""
+    global last_event_time, idle_entry_count
     last_event_time = time.time()
+    idle_entry_count = 0  # ← 추가: 이벤트 발생 시 카운트 리셋
     
 def is_above_threshold(side):
     """포지션이 임계값을 초과했는지 확인"""
@@ -1030,8 +1032,8 @@ def refresh_all_tp_orders():
         log("❌", f"TP refresh error: {e}")
 
 def check_idle_and_enter():
-    """30분 무이벤트 시 주력/비주력 모두 시장가 진입"""
-    global last_event_time
+    """30분 무이벤트 시 주력/비주력 모두 시장가 진입 (점진적 배수 증가)"""
+    global last_event_time, idle_entry_count
     
     try:
         # 마지막 이벤트로부터 경과 시간 확인
@@ -1073,17 +1075,24 @@ def check_idle_and_enter():
             log("🚫 IDLE", f"Counter position max reached: ${counter_value:.2f} >= ${max_value:.2f}")
             return
         
-        # 진입 수량 계산
-        # 주력: OBV MACD 가중치
-        main_qty = calculate_grid_qty(is_above_threshold=is_above_threshold(main_side))
-        # 비주력: 기본 수량
-        counter_qty = base_qty
+        # ← 변경 시작: 점진적 배수 증가
+        idle_entry_count += 1  # 진입 횟수 증가
+        multiplier = idle_entry_count  # 1, 2, 3, 4, ...
+        
+        # 진입 수량 계산 (배수 적용)
+        # 주력: OBV MACD 가중치 * 배수
+        base_main_qty = calculate_grid_qty(is_above_threshold=is_above_threshold(main_side))
+        main_qty = base_main_qty * multiplier
+        
+        # 비주력: 기본 수량 * 배수
+        counter_qty = base_qty * multiplier
+        # ← 변경 끝
         
         log_event_header("IDLE ENTRY")
-        log("⏱️ IDLE", f"30min no event → BOTH sides entry")
+        log("⏱️ IDLE", f"Entry #{idle_entry_count} (x{multiplier}) → BOTH sides")  # ← 수정
         obv_display = float(obv_macd_value) * 1000
         log("📊 OBV MACD", f"Value: {obv_display:.2f}")
-        log("📊 QUANTITY", f"Main ({main_side.upper()}): {main_qty} | Counter ({counter_side.upper()}): {counter_qty}")
+        log("📊 QUANTITY", f"Main ({main_side.upper()}): {main_qty} (x{multiplier}) | Counter ({counter_side.upper()}): {counter_qty} (x{multiplier})")  # ← 수정
         
         # 시장가 진입 (IOC)
         current_price = get_current_price()
@@ -1108,13 +1117,13 @@ def check_idle_and_enter():
         
         # 주력 진입
         main_order = api.create_futures_order(SETTLE, FuturesOrder(**main_order_data))
-        log("✅ IDLE ENTRY", f"Main {main_side.upper()} {main_qty} @ market")
+        log("✅ IDLE ENTRY", f"Main {main_side.upper()} {main_qty} @ market (x{multiplier})")  # ← 수정
         
         time.sleep(0.2)  # 약간의 간격
         
         # 비주력 진입
         counter_order = api.create_futures_order(SETTLE, FuturesOrder(**counter_order_data))
-        log("✅ IDLE ENTRY", f"Counter {counter_side.upper()} {counter_qty} @ market")
+        log("✅ IDLE ENTRY", f"Counter {counter_side.upper()} {counter_qty} @ market (x{multiplier})")  # ← 수정
         
         # 포지션 동기화 대기
         time.sleep(0.5)
@@ -1124,8 +1133,8 @@ def check_idle_and_enter():
         time.sleep(0.3)
         refresh_all_tp_orders()
         
-        # 타이머 리셋
-        update_event_time()
+        # 타이머 리셋 (카운트는 유지)
+        last_event_time = time.time()
         
     except GateApiException as e:
         log("❌", f"Idle entry API error: {e}")
