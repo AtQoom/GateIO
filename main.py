@@ -1609,7 +1609,7 @@ def place_hedge_order(side):
         return None
 
 async def grid_fill_monitor():
-    """WebSocket으로 그리드 체결 및 TP 체결 모니터링 (안정성 개선)"""
+    """WebSocket으로 그리드 체결 및 TP 체결 모니터링 (체결 감지 강화)"""
     global last_grid_time, idle_entry_count
     
     uri = f"wss://fx-ws.gateio.ws/v4/ws/{SETTLE}"
@@ -1617,11 +1617,10 @@ async def grid_fill_monitor():
     
     while True:
         try:
-            # ✅ 수정: ping_timeout 120으로 증가
             async with websockets.connect(
                 uri, 
                 ping_interval=60,
-                ping_timeout=120,  # 90 → 120
+                ping_timeout=120,
                 close_timeout=10
             ) as ws:
                 auth_msg = {
@@ -1637,8 +1636,7 @@ async def grid_fill_monitor():
                 
                 while True:
                     try:
-                        # ✅ 수정: timeout 150으로 증가
-                        msg = await asyncio.wait_for(ws.recv(), timeout=150)  # 120 → 150
+                        msg = await asyncio.wait_for(ws.recv(), timeout=150)
                         data = json.loads(msg)
                         
                         if data.get("event") == "update" and data.get("channel") == "futures.orders":
@@ -1649,9 +1647,22 @@ async def grid_fill_monitor():
                                 if contract != SYMBOL:
                                     continue
                                 
-                                finish_as = order_data.get("finish_as")
-                                if finish_as != "filled":
+                                # ✅ 수정: finish_as 체크 강화
+                                finish_as = order_data.get("finish_as", "")
+                                status = order_data.get("status", "")
+                                
+                                # ✅ 체결 조건: finish_as가 "filled", "ioc", "cancelled" 등이 아니고
+                                # status가 "finished"인 경우도 포함
+                                is_filled = (
+                                    finish_as in ["filled", "ioc"] or 
+                                    status in ["finished", "closed"]
+                                )
+                                
+                                if not is_filled:
                                     continue
+                                
+                                # ✅ 추가: 체결 확인 로그
+                                log("🔍 DEBUG", f"Order filled detected: id={order_data.get('id')}, finish_as={finish_as}, status={status}")
                                 
                                 is_reduce_only = order_data.get("is_reduce_only", False)
                                 order_id = order_data.get("id")
@@ -1708,6 +1719,8 @@ async def grid_fill_monitor():
                                             was_counter = grid_info.get("is_counter", False)
                                             base_qty = grid_info.get("base_qty", 1)
                                             
+                                            log("🔍 DEBUG", f"Grid info found: price={grid_price}, qty={grid_qty}, counter={was_counter}")
+                                            
                                             threading.Thread(
                                                 target=hedge_after_grid_fill, 
                                                 args=(side, grid_price, grid_qty, was_counter, base_qty), 
@@ -1728,10 +1741,11 @@ async def grid_fill_monitor():
                                     
                                     except Exception as e:
                                         log("❌", f"Grid fill processing error: {e}")
+                                        import traceback
+                                        log("❌", traceback.format_exc())
                     
                     except asyncio.TimeoutError:
                         ping_count += 1
-                        # ✅ 수정: 로그 빈도 감소 (20번마다 → 40번마다)
                         if ping_count % 40 == 1:
                             log("⚠️ WS", f"No order update for {ping_count * 150}s")
                         continue
@@ -1941,10 +1955,10 @@ def idle_monitor():
             time.sleep(10)
 
 def periodic_health_check():
-    """2분마다 포지션/주문 상태 검증 및 복구 (WebSocket 독립적)"""
+    """1분마다 포지션/주문 상태 검증 및 복구 (WebSocket 독립적)"""
     while True:
         try:
-            time.sleep(120)  # ✅ 5분(300초) → 2분(120초)
+            time.sleep(60)  # ✅ 2분(120초) → 1분(60초)
             
             log("🔍 HEALTH", "Starting periodic health check...")
             
