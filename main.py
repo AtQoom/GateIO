@@ -1137,11 +1137,11 @@ def refresh_all_tp_orders():
         log("❌", f"Traceback: {traceback.format_exc()}")
 
 def check_idle_and_enter():
-    """30분 무이벤트 시 주력/비주력 모두 시장가 진입 (점진적 배수 증가)"""
+    """30분 무이벤트 진입"""
     global last_event_time, idle_entry_count
     
     try:
-        # 마지막 이벤트로부터 경과 시간 확인
+        # 30분 체크
         if time.time() - last_event_time < IDLE_TIMEOUT:
             return
         
@@ -1151,87 +1151,95 @@ def check_idle_and_enter():
             long_price = position_state[SYMBOL]["long"]["price"]
             short_price = position_state[SYMBOL]["short"]["price"]
         
-        # 조건 1: 롱/숏 모두 보유
+        # 롱/숏 모두 없으면 진입 안 함
         if long_size == 0 or short_size == 0:
             return
         
-        # 조건 2: 최대 5배 미만 (주력/비주력 각각 체크)
+        # 주력/비주력 판단
+        main_side = get_main_side()
+        if main_side == "none":
+            log("⚠️ IDLE", "No main position - skipping idle entry")
+            return
+        
+        counter_side = get_counter_side(main_side)
+        
+        # 최대 한도 체크
         with balance_lock:
             max_value = account_balance * MAX_POSITION_RATIO
             base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
+            if base_qty <= 0:
+                base_qty = 1
         
-        main_side = get_main_side()
-        counter_side = get_counter_side(main_side)
+        main_value = (long_price * long_size) if main_side == "long" else (short_price * short_size)
+        counter_value = (short_price * short_size) if main_side == "long" else (long_price * long_size)
         
-        main_size = long_size if main_side == "long" else short_size
-        main_price = long_price if main_side == "long" else short_price
-        counter_size = short_size if main_side == "long" else long_size
-        counter_price = short_price if main_side == "long" else long_price
-        
-        main_value = main_price * main_size
-        counter_value = counter_price * counter_size
-        
-        # 주력 또는 비주력이 최대 5배 도달 시 진입 금지
-        if main_value >= max_value:
-            log("🚫 IDLE", f"Main position max reached: ${main_value:.2f} >= ${max_value:.2f}")
+        if main_value >= max_value or counter_value >= max_value:
+            log("⚠️ IDLE", f"Max position reached")
             return
         
-        if counter_value >= max_value:
-            log("🚫 IDLE", f"Counter position max reached: ${counter_value:.2f} >= ${max_value:.2f}")
-            return
+        # OBV MACD 값
+        obv_display = float(obv_macd_value) * 1000
         
-        # 점진적 배수 증가
+        # ✅ 수정: 기존 함수 호출!
+        obv_multiplier = calculate_obv_macd_weight(obv_display)
+        
+        # 진입 카운트 증가
         idle_entry_count += 1
         multiplier = idle_entry_count
         
-        # 진입 수량 계산 (배수 적용)
-        base_main_qty = calculate_grid_qty(is_above_threshold=is_above_threshold(main_side))
-        main_qty = base_main_qty * multiplier
-        counter_qty = base_qty * multiplier
+        # Main 수량 (OBV MACD 적용)
+        main_qty = max(1, int(base_qty * obv_multiplier * multiplier))
         
-        # OBV MACD 값 가져오기
-        obv_display = float(obv_macd_value) * 1000
+        # ✅ 수정: Counter 수량 (최소 1개 보장!)
+        counter_qty = max(1, int(base_qty * multiplier))
         
         log_event_header("IDLE ENTRY")
         log("⏱️ IDLE", f"Entry #{idle_entry_count} (x{multiplier}) → BOTH sides")
         log("📊 IDLE QTY", f"Main {main_side.upper()} {main_qty} (OBV:{obv_display:.1f}, x{multiplier}) | Counter {counter_side.upper()} {counter_qty} (base, x{multiplier})")
         
-        # 시장가 진입 (IOC)
-        current_price = get_current_price()
-        if current_price <= 0:
-            return
-        
-        # 주력 포지션 진입
+        # Main 진입
         main_order_data = {
             "contract": SYMBOL,
             "size": int(main_qty * (1 if main_side == "long" else -1)),
             "price": "0",
-            "tif": "ioc"
+            "tif": "ioc",
+            "close": False  # ✅ 추가
         }
         
-        # 비주력 포지션 진입
+        try:
+            main_order = api.create_futures_order(SETTLE, FuturesOrder(**main_order_data))
+            if main_order and hasattr(main_order, 'id'):
+                log("✅ IDLE ENTRY", f"Main {main_side.upper()} {main_qty} @ market (x{multiplier})")
+            else:
+                log("❌ IDLE", f"Main entry failed: result={main_order}")
+        except GateApiException as e:
+            log("❌", f"Idle entry API error (Main): {e}")
+            return
+        
+        time.sleep(0.2)
+        
+        # Counter 진입
         counter_order_data = {
             "contract": SYMBOL,
             "size": int(counter_qty * (1 if counter_side == "long" else -1)),
             "price": "0",
-            "tif": "ioc"
+            "tif": "ioc",
+            "close": False  # ✅ 추가
         }
         
-        # 주력 진입
-        main_order = api.create_futures_order(SETTLE, FuturesOrder(**main_order_data))
-        log("✅ IDLE ENTRY", f"Main {main_side.upper()} {main_qty} @ market (x{multiplier})")
+        try:
+            counter_order = api.create_futures_order(SETTLE, FuturesOrder(**counter_order_data))
+            if counter_order and hasattr(counter_order, 'id'):
+                log("✅ IDLE ENTRY", f"Counter {counter_side.upper()} {counter_qty} @ market (x{multiplier})")
+            else:
+                log("❌ IDLE", f"Counter entry failed: result={counter_order}")
+        except GateApiException as e:
+            log("❌", f"Idle entry API error (Counter): {e}")
         
-        time.sleep(0.2)
-        
-        # 비주력 진입
-        counter_order = api.create_futures_order(SETTLE, FuturesOrder(**counter_order_data))
-        log("✅ IDLE ENTRY", f"Counter {counter_side.upper()} {counter_qty} @ market (x{multiplier})")
-        
-        # 포지션 동기화 대기
         time.sleep(0.5)
         sync_position()
         
-        # ===== 아이들 진입 추적 (임계값 초과 + 주력 포지션) =====
+        # 임계값 초과 시 진입 추적
         if is_above_threshold(main_side):
             with position_lock:
                 main_entry_price = position_state[SYMBOL][main_side]["price"]
@@ -1244,17 +1252,16 @@ def check_idle_and_enter():
             })
             log("📝 TRACKED", f"{main_side.upper()} idle {main_qty} @ {main_entry_price:.4f} (MAIN, above threshold)")
         
-        # TP 갱신
-        time.sleep(0.3)
-        refresh_all_tp_orders()
-        
-        # 타이머 리셋 (카운트는 유지)
+        # 타이머 리셋 (배수는 유지)
         last_event_time = time.time()
         
-    except GateApiException as e:
-        log("❌", f"Idle entry API error: {e}")
+        # TP 재생성
+        refresh_all_tp_orders()
+        
     except Exception as e:
         log("❌", f"Idle entry error: {e}")
+        import traceback
+        log("❌", f"Traceback: {traceback.format_exc()}")
 
 def close_counter_on_individual_tp(main_side):
     """개별 TP 체결 시 비주력 20% 청산"""
