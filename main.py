@@ -447,11 +447,11 @@ async def watch_positions():
             try:
                 url = f"wss://fx-ws.gateio.ws/v4/ws/usdt"
                 
-                # ✅ 수정: ping_timeout=60, timeout=120
+                # ✅ 수정: ping_timeout=90
                 async with websockets.connect(
                     url, 
                     ping_interval=60,
-                    ping_timeout=60  # ← 20초에서 60초로 변경!
+                    ping_timeout=90  # ← 60초에서 90초로 변경!
                 ) as ws:
                     subscribe_msg = {
                         "time": int(time.time()),
@@ -480,8 +480,8 @@ async def watch_positions():
                         
                         except asyncio.TimeoutError:
                             ping_count += 1
-                            # ✅ 수정: 10번마다 1번
-                            if ping_count % 10 == 1:
+                            # ✅ 수정: 20번마다 1번
+                            if ping_count % 20 == 1:
                                 log("⚠️ WS", f"No price update for {ping_count * 120}s")
                             continue
                             
@@ -855,7 +855,7 @@ def initialize_grid(current_price):
                 place_grid_order("long", long_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)
             return
         
-        # ✅ 수정: 롱/숏 모두 있으면 그리드 강제 취소 + TP 확인
+        # ✅ 핵심 수정: 롱/숏 모두 있으면 그리드 강제 취소 + TP 확인
         if long_size > 0 and short_size > 0:
             log("ℹ️ GRID", "Both positions exist → Skip grid creation")
             
@@ -875,8 +875,9 @@ def initialize_grid(current_price):
             except Exception as e:
                 log("❌", f"TP check error: {e}")
             
-            return
+            return  # ✅ 여기서 함수 종료!
         
+        # ✅ 이 아래는 롱 또는 숏 1개만 있을 때 실행됨!
         cancel_grid_only()
         
         long_grid_price = current_price * (Decimal("1") - GRID_GAP_PCT)
@@ -1526,11 +1527,11 @@ async def grid_fill_monitor():
     
     while True:
         try:
-            # ✅ 수정: ping_timeout=60, timeout=120
+            # ✅ 수정: ping_timeout=90
             async with websockets.connect(
                 uri, 
                 ping_interval=60,
-                ping_timeout=60  # ← 20초에서 60초로 변경!
+                ping_timeout=90  # ← 60초에서 90초로 변경!
             ) as ws:
                 auth_msg = {
                     "time": int(time.time()),
@@ -1573,7 +1574,6 @@ async def grid_fill_monitor():
                                     
                                     update_event_time()
                                     
-                                    # ✅ 수정: 파라미터 2개 전달
                                     threading.Thread(
                                         target=on_individual_tp_filled, 
                                         args=(side, order_id), 
@@ -1582,17 +1582,14 @@ async def grid_fill_monitor():
                                     
                                     time.sleep(0.5)
                                     
-                                    # Average TP 체결 확인
                                     with position_lock:
                                         long_size = position_state[SYMBOL]["long"]["size"]
                                         short_size = position_state[SYMBOL]["short"]["size"]
                                     
-                                    # 양방향 청산 완료 시
                                     if long_size == 0 and short_size == 0:
                                         log("🎯 AVG TP", "Both sides closed → Full refresh")
                                         update_event_time()
                                         
-                                        # ✅ 수정: event_type 파라미터 추가
                                         threading.Thread(
                                             target=full_refresh, 
                                             args=("Average_TP",), 
@@ -1602,13 +1599,11 @@ async def grid_fill_monitor():
                                 # 그리드 체결 시
                                 elif not is_reduce_only:
                                     side = "long" if size > 0 else "short"
-                                    log("🔥 GRID FILLED", f"{side.upper()} @ {price:.4f}")  # ← 수정
+                                    log("🔥 GRID FILLED", f"{side.UPPER()} @ {price:.4f}")
                                     
                                     update_event_time()
                                     
-                                    # ✅ 수정: 그리드 정보 조회 후 헤징 처리
                                     try:
-                                        # 체결된 그리드 찾기
                                         grid_info = None
                                         if SYMBOL in grid_orders and side in grid_orders[SYMBOL]:
                                             for grid in grid_orders[SYMBOL][side]:
@@ -1617,7 +1612,6 @@ async def grid_fill_monitor():
                                                     break
                                         
                                         if grid_info:
-                                            # 그리드 정보가 있는 경우
                                             grid_price = grid_info.get("price", price)
                                             grid_qty = grid_info.get("qty", abs(size))
                                             was_counter = grid_info.get("is_counter", False)
@@ -1629,7 +1623,6 @@ async def grid_fill_monitor():
                                                 daemon=True
                                             ).start()
                                         else:
-                                            # 그리드 정보가 없는 경우 기본값 사용
                                             log("⚠️ GRID", "Grid info not found, using defaults")
                                             with balance_lock:
                                                 base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
@@ -1647,8 +1640,8 @@ async def grid_fill_monitor():
                     
                     except asyncio.TimeoutError:
                         ping_count += 1
-                        # ✅ 수정: 10번마다 1번
-                        if ping_count % 10 == 1:
+                        # ✅ 수정: 20번마다 1번
+                        if ping_count % 20 == 1:
                             log("⚠️ WS", f"No order update for {ping_count * 120}s")
                         continue
         
