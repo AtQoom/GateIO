@@ -504,10 +504,10 @@ def start_websocket():
 # 포지션 동기화 - 에러 시 재시도 간격 증가
 # =============================================================================
 def sync_position(max_retries=3, retry_delay=2):
-    """포지션 동기화 (재시도 로직 포함)"""
+    """포지션 동기화 (재시도 로직 포함) - WebSocket 독립적"""
     for attempt in range(max_retries):
         try:
-            # ✅ 수정: list_positions (s 붙음!)
+            # ✅ REST API는 WebSocket과 독립적으로 작동!
             positions = api.list_positions(SETTLE)
             
             with position_lock:
@@ -531,24 +531,24 @@ def sync_position(max_retries=3, retry_delay=2):
                                 position_state[SYMBOL]["short"]["size"] = abs(size_dec)
                                 position_state[SYMBOL]["short"]["price"] = entry_price
             
-            return True
+            return True  # ✅ 성공
             
         except GateApiException as e:
             if attempt < max_retries - 1:
                 log("⚠️ RETRY", f"Position sync attempt {attempt + 1}/{max_retries} failed, retrying in {retry_delay}s...")
                 time.sleep(retry_delay)
             else:
-                log("❌", f"Position sync error after {max_retries} attempts: {e}")
-                return False
+                log("❌ SYNC", f"Position sync error after {max_retries} attempts: {e}")
+                return False  # ✅ 실패
         except Exception as e:
             if attempt < max_retries - 1:
                 log("⚠️ RETRY", f"Position sync attempt {attempt + 1}/{max_retries} failed, retrying in {retry_delay}s...")
                 time.sleep(retry_delay)
             else:
-                log("❌", f"Position sync error after {max_retries} attempts: {e}")
-                return False
+                log("❌ SYNC", f"Position sync error after {max_retries} attempts: {e}")
+                return False  # ✅ 실패
     
-    return False
+    return False  # ✅ 기본 실패
 
 
 # =============================================================================
@@ -1852,17 +1852,20 @@ def idle_monitor():
             time.sleep(10)
 
 def periodic_health_check():
-    """5분마다 포지션/주문 상태 검증 및 복구"""
+    """2분마다 포지션/주문 상태 검증 및 복구 (WebSocket 독립적)"""
     while True:
         try:
-            time.sleep(300)  # 5분마다 실행
+            time.sleep(120)  # ✅ 5분(300초) → 2분(120초)
             
             log("🔍 HEALTH", "Starting periodic health check...")
             
-            # 1. 포지션 동기화
-            sync_position()
+            # 1. 포지션 동기화 (WebSocket과 무관하게 REST API 사용)
+            success = sync_position()
+            if not success:
+                log("❌ HEALTH", "Position sync failed - skipping this cycle")
+                continue  # ✅ 실패 시 다음 사이클로
             
-            # 2. 현재 주문 확인
+            # 2. 현재 주문 확인 (REST API)
             try:
                 orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
                 grid_count = len([o for o in orders if not o.is_reduce_only])
@@ -1877,11 +1880,13 @@ def periodic_health_check():
                 # 3. 포지션은 있는데 TP가 없는 경우
                 if (long_size > 0 or short_size > 0) and tp_count == 0:
                     log("⚠️ HEALTH", "Position exists but no TP orders → Creating TP")
+                    time.sleep(0.5)  # ✅ 추가: API 호출 간격 확보
                     refresh_all_tp_orders()
                 
                 # 4. 롱/숏 모두 있는데 그리드가 있는 경우
                 if long_size > 0 and short_size > 0 and grid_count > 0:
                     log("⚠️ HEALTH", "Both positions exist but grid orders found → Cancelling grid")
+                    time.sleep(0.5)  # ✅ 추가
                     cancel_grid_only()
                 
                 # 5. 롱/숏 중 하나만 있는데 그리드가 없는 경우
@@ -1891,16 +1896,19 @@ def periodic_health_check():
                     if current_price > 0:
                         global last_grid_time
                         last_grid_time = 0
+                        time.sleep(0.5)  # ✅ 추가
                         initialize_grid(current_price)
                 
                 log("✅ HEALTH", "Health check complete")
                 
+            except GateApiException as e:
+                log("❌ HEALTH", f"Order check error: {e}")
             except Exception as e:
                 log("❌ HEALTH", f"Health check error: {e}")
                 
         except Exception as e:
             log("❌ HEALTH", f"Health check thread error: {e}")
-            time.sleep(60)
+            time.sleep(60)  # ✅ 오류 시 1분 대기
 
 
 # =============================================================================
