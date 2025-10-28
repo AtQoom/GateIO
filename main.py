@@ -1672,6 +1672,9 @@ async def grid_fill_monitor():
                                 contract = order_data.get("contract")
                                 if contract != SYMBOL:
                                     continue
+
+                                # ✅ 추가: 모든 주문 이벤트 로그 (디버깅용)
+                                log("🔍 WS RAW", f"id={order_data.get('id')}, status={order_data.get('status')}, finish_as={order_data.get('finish_as')}, size={order_data.get('size')}")
                                 
                                 # ✅ 수정: finish_as 체크 강화
                                 finish_as = order_data.get("finish_as", "")
@@ -2009,11 +2012,22 @@ def periodic_health_check():
                     long_size = position_state[SYMBOL]["long"]["size"]
                     short_size = position_state[SYMBOL]["short"]["size"]
                 
-                # 3. 포지션 있는데 TP 없음
-                if (long_size > 0 or short_size > 0) and tp_count == 0:
-                    log("⚠️ HEALTH", "Position exists but no TP → Creating TP")
-                    time.sleep(0.5)
-                    refresh_all_tp_orders()
+                # 3. 포지션 있는데 TP 없음 또는 TP 수량 불일치
+                if long_size > 0 or short_size > 0:
+                    tp_long_qty = sum(o.size for o in tp_orders_list if o.size < 0)  # TP는 음수
+                    tp_short_qty = sum(o.size for o in tp_orders_list if o.size > 0)  # TP는 양수
+
+                    # TP 수량 불일치 체크
+                    needs_tp_refresh = (
+                        tp_count == 0 or  # TP 없음
+                        (long_size > 0 and abs(tp_long_qty) != long_size) or  # 롱 TP 수량 불일치
+                        (short_size > 0 and tp_short_qty != short_size)  # 숏 TP 수량 불일치
+                    )
+
+                    if needs_tp_refresh:                  
+                        log("⚠️ HEALTH", f"TP mismatch (Long: {long_size} vs TP {abs(tp_long_qty)}, Short: {short_size} vs TP {tp_short_qty}) → Refreshing TP")
+                        time.sleep(0.5)
+                        refresh_all_tp_orders()
                 
                 # 4. 롱/숏 모두 있는데 그리드 2개 이상
                 if long_size > 0 and short_size > 0 and grid_count >= 2:
