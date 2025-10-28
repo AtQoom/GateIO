@@ -493,8 +493,8 @@ def sync_position(max_retries=3, retry_delay=2):
     """포지션 동기화 (재시도 로직 포함)"""
     for attempt in range(max_retries):
         try:
-            # ✅ 수정: list_futures_positions → list_position
-            positions = api.list_position(SETTLE)
+            # ✅ 수정: list_positions (s 붙음!)
+            positions = api.list_positions(SETTLE)
             
             with position_lock:
                 position_state[SYMBOL]["long"]["size"] = Decimal("0")
@@ -890,12 +890,11 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
             main_size = position_state[SYMBOL][side]["size"]
             counter_size = position_state[SYMBOL][counter_side]["size"]
         
-        # OBV MACD 값 가져오기
         obv_display = float(obv_macd_value) * 1000
         
-        # ===== 그리드 체결 진입 추적 (임계값 초과 + 주력 포지션) =====
+        # ✅ 수정: main_side가 "none"인지 체크!
         main_side = get_main_side()
-        if is_above_threshold(main_side) and side == main_side:
+        if main_side != "none" and is_above_threshold(main_side) and side == main_side:
             post_threshold_entries[SYMBOL][side].append({
                 "qty": int(grid_qty),
                 "price": float(grid_price),
@@ -914,13 +913,12 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
             hedge_side = counter_side
             log("🔄 HEDGE", f"Main grid filled → Counter hedge: {hedge_side.upper()} {hedge_qty} (base={base_qty})")
         
-        # ✅ 수정: close=False 추가!
         hedge_order_data = {
             "contract": SYMBOL,
             "size": int(hedge_qty * (1 if hedge_side == "long" else -1)),
             "price": "0",
             "tif": "ioc",
-            "close": False  # ← 추가!
+            "close": False
         }
         
         try:
@@ -935,13 +933,12 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
             log("❌", f"Hedge order API error: {e}")
             return
         
-        # 포지션 동기화 대기
         time.sleep(0.5)
         sync_position()
         
-        # ===== 헤징 진입 추적 (임계값 초과 + 주력 포지션) =====
+        # ✅ 수정: main_side가 "none"인지 체크!
         main_side_after = get_main_side()
-        if is_above_threshold(main_side_after) and hedge_side == main_side_after:
+        if main_side_after != "none" and is_above_threshold(main_side_after) and hedge_side == main_side_after:
             with position_lock:
                 entry_price = position_state[SYMBOL][hedge_side]["price"]
             
@@ -953,14 +950,11 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
             })
             log("📝 TRACKED", f"{hedge_side.upper()} hedge {hedge_qty} @ {entry_price:.4f} (MAIN, above threshold)")
         
-        # 헤징 후 기존 그리드 주문 모두 취소
         cancel_grid_only()
         time.sleep(0.3)
         
-        # TP 재생성
         refresh_all_tp_orders()
         
-        # 그리드 재생성
         time.sleep(0.3)
         current_price = get_current_price()
         if current_price > 0:
