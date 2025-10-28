@@ -850,7 +850,7 @@ def initialize_grid(current_price):
         import traceback
         log("❌", f"Traceback: {traceback.format_exc()}")
 
-def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):  # ✅ 파라미터 추가
+def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
     """그리드 체결 후 헤징 + 임계값 이후 진입 추적"""
     if not ENABLE_AUTO_HEDGE:
         return
@@ -864,10 +864,6 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):  #
         with position_lock:
             main_size = position_state[SYMBOL][side]["size"]
             counter_size = position_state[SYMBOL][counter_side]["size"]
-        
-        # ❌ 삭제: 잔고 재조회 안 함!
-        # with balance_lock:
-        #     base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
         
         # OBV MACD 값 가져오기
         obv_display = float(obv_macd_value) * 1000
@@ -883,32 +879,36 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):  #
             })
             log("📝 TRACKED", f"{side.upper()} grid {grid_qty} @ {grid_price:.4f} (MAIN, above threshold)")
         
-        # ✅ 수정: 전달받은 base_qty 사용
+        # 헤징 수량 계산
         if was_counter:
             hedge_qty = max(base_qty, int(main_size * 0.1))
             hedge_side = side
             log("🔄 HEDGE", f"Counter grid filled → Main hedge: {hedge_side.upper()} {hedge_qty} (OBV:{obv_display:.1f})")
         else:
-            hedge_qty = base_qty  # ← 전달받은 base_qty 사용!
+            hedge_qty = base_qty
             hedge_side = counter_side
             log("🔄 HEDGE", f"Main grid filled → Counter hedge: {hedge_side.upper()} {hedge_qty} (base={base_qty})")
         
-        # 시장가 주문 (IOC)
+        # ✅ 수정: close=False 추가!
         hedge_order_data = {
             "contract": SYMBOL,
             "size": int(hedge_qty * (1 if hedge_side == "long" else -1)),
             "price": "0",
-            "tif": "ioc"
+            "tif": "ioc",
+            "close": False  # ← 추가!
         }
         
-        order = api.create_futures_order(SETTLE, FuturesOrder(**hedge_order_data))
-        
-        # ✅ 수정: order가 None일 수 있음
-        if order and hasattr(order, 'id'):
-            order_id = order.id
-            log("✅ HEDGE", f"{hedge_side.upper()} {hedge_qty} @ market (ID: {order_id})")
-        else:
-            log("✅ HEDGE", f"{hedge_side.upper()} {hedge_qty} @ market (IOC filled immediately)")
+        try:
+            order = api.create_futures_order(SETTLE, FuturesOrder(**hedge_order_data))
+            
+            if order and hasattr(order, 'id'):
+                order_id = order.id
+                log("✅ HEDGE", f"{hedge_side.upper()} {hedge_qty} @ market (ID: {order_id})")
+            else:
+                log("✅ HEDGE", f"{hedge_side.upper()} {hedge_qty} @ market (IOC filled immediately)")
+        except GateApiException as e:
+            log("❌", f"Hedge order API error: {e}")
+            return
         
         # 포지션 동기화 대기
         time.sleep(0.5)
@@ -943,10 +943,10 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):  #
             last_grid_time = 0
             initialize_grid(current_price)
         
-    except GateApiException as e:
-        log("❌", f"Hedge order API error: {e}")
     except Exception as e:
         log("❌", f"Hedge order error: {e}")
+        import traceback
+        log("❌", f"Traceback: {traceback.format_exc()}")
 
 def refresh_all_tp_orders():
     """TP 주문 새로 생성"""
