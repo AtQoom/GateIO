@@ -435,20 +435,24 @@ def fetch_kline_thread():
 # WebSocket 포지션 모니터링
 # =============================================================================
 async def watch_positions():
-    """WebSocket으로 실시간 가격 수신 (재연결 로직 포함)"""
+    """WebSocket으로 가격 모니터링"""
     global last_price
     
     max_reconnect_attempts = 5
     reconnect_delay = 5
-    ping_count = 0  # ← 추가: Ping 카운터
+    ping_count = 0
     
     while True:
         for attempt in range(max_reconnect_attempts):
             try:
                 url = f"wss://fx-ws.gateio.ws/v4/ws/usdt"
                 
-                # ✅ 수정: ping_interval을 60초로 증가
-                async with websockets.connect(url, ping_interval=60, ping_timeout=20) as ws:
+                # ✅ 수정: ping_timeout=60, timeout=120
+                async with websockets.connect(
+                    url, 
+                    ping_interval=60,
+                    ping_timeout=60  # ← 20초에서 60초로 변경!
+                ) as ws:
                     subscribe_msg = {
                         "time": int(time.time()),
                         "channel": "futures.tickers",
@@ -456,13 +460,14 @@ async def watch_positions():
                         "payload": [SYMBOL]
                     }
                     await ws.send(json.dumps(subscribe_msg))
-                    log("🔌 WS", f"Connected to WebSocket (attempt {attempt + 1})")
-                    ping_count = 0  # ← 리셋
+                    log("✅ WS", f"Connected to WebSocket (attempt {attempt + 1})")
+                    
+                    ping_count = 0
                     
                     while True:
                         try:
-                            # ✅ 수정: timeout을 90초로 증가
-                            msg = await asyncio.wait_for(ws.recv(), timeout=90)
+                            # ✅ 수정: timeout=120
+                            msg = await asyncio.wait_for(ws.recv(), timeout=120)
                             data = json.loads(msg)
                             
                             if data.get("event") == "update" and data.get("channel") == "futures.tickers":
@@ -471,14 +476,13 @@ async def watch_positions():
                                     price = float(result.get("last", 0))
                                     if price > 0:
                                         last_price = price
-                                        ping_count = 0  # ← 데이터 수신 시 리셋
+                                        ping_count = 0
                         
                         except asyncio.TimeoutError:
                             ping_count += 1
-                            # ✅ 수정: 3번마다 한 번만 로그 출력
-                            if ping_count % 3 == 1:
-                                log("⚠️ WS", f"No price update for 90s (#{ping_count})")
-                            # Ping은 websockets 라이브러리가 자동으로 처리 (ping_interval=60)
+                            # ✅ 수정: 10번마다 1번
+                            if ping_count % 10 == 1:
+                                log("⚠️ WS", f"No price update for {ping_count * 120}s")
                             continue
                             
             except Exception as e:
@@ -1514,7 +1518,7 @@ def place_hedge_order(side):
         return None
 
 async def grid_fill_monitor():
-    """그리드/TP 체결 모니터링 (WebSocket)"""
+    """WebSocket으로 그리드 체결 및 TP 체결 모니터링"""
     global last_grid_time, idle_entry_count
     
     uri = f"wss://fx-ws.gateio.ws/v4/ws/{SETTLE}"
@@ -1522,8 +1526,12 @@ async def grid_fill_monitor():
     
     while True:
         try:
-            # ✅ ping_interval을 60초로 증가
-            async with websockets.connect(uri, ping_interval=60, ping_timeout=20) as ws:
+            # ✅ 수정: ping_timeout=60, timeout=120
+            async with websockets.connect(
+                uri, 
+                ping_interval=60,
+                ping_timeout=60  # ← 20초에서 60초로 변경!
+            ) as ws:
                 auth_msg = {
                     "time": int(time.time()),
                     "channel": "futures.orders",
@@ -1531,13 +1539,14 @@ async def grid_fill_monitor():
                     "payload": [API_KEY, API_SECRET, SYMBOL]
                 }
                 await ws.send(json.dumps(auth_msg))
-                log("⚡ WS", "Connected to WebSocket (attempt 1)")
+                log("✅ WS", "Connected to WebSocket (attempt 1)")
+                
                 ping_count = 0
                 
                 while True:
                     try:
-                        # ✅ timeout을 90초로 증가
-                        msg = await asyncio.wait_for(ws.recv(), timeout=90)
+                        # ✅ 수정: timeout=120
+                        msg = await asyncio.wait_for(ws.recv(), timeout=120)
                         data = json.loads(msg)
                         
                         if data.get("event") == "update" and data.get("channel") == "futures.orders":
@@ -1638,9 +1647,9 @@ async def grid_fill_monitor():
                     
                     except asyncio.TimeoutError:
                         ping_count += 1
-                        # ✅ 5번마다 한 번만 로그 출력
-                        if ping_count % 5 == 1:
-                            log("⚠️ WS", f"No order update for {ping_count * 90}s")
+                        # ✅ 수정: 10번마다 1번
+                        if ping_count % 10 == 1:
+                            log("⚠️ WS", f"No order update for {ping_count * 120}s")
                         continue
         
         except Exception as e:
