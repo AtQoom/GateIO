@@ -39,8 +39,8 @@ if API_SECRET:
 else:
     logger.error("API_SECRET not found in environment variables!")
 
-GRID_GAP_PCT = Decimal("0.0021")  # 0.21%
-TP_GAP_PCT = Decimal("0.0021")    # 0.21%
+GRID_GAP_PCT = Decimal("0.0019")  # 0.19%
+TP_GAP_PCT = Decimal("0.0019")    # 0.19%
 BASE_RATIO = Decimal("0.1")       # 기본 수량 비율
 THRESHOLD_RATIO = Decimal("0.8")  # 임계값
 COUNTER_RATIO = Decimal("0.30")   # 비주력 30%
