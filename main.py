@@ -39,8 +39,8 @@ if API_SECRET:
 else:
     logger.error("API_SECRET not found in environment variables!")
 
-GRID_GAP_PCT = Decimal("0.0016")  # 0.16%
-TP_GAP_PCT = Decimal("0.0016")    # 0.16%
+GRID_GAP_PCT = Decimal("0.0019")  # 0.19%
+TP_GAP_PCT = Decimal("0.0019")    # 0.19%
 BASE_RATIO = Decimal("0.1")       # 기본 수량 비율
 THRESHOLD_RATIO = Decimal("0.8")  # 임계값
 COUNTER_RATIO = Decimal("0.30")   # 비주력 30%
@@ -1155,6 +1155,50 @@ def refresh_all_tp_orders():
         import traceback
         log("❌", f"Traceback: {traceback.format_exc()}")
 
+def on_individual_tp_filled(main_side, filled_order_id):
+    """개별 TP 체결 시 비주력 포지션 20% 청산"""
+    counter_side = get_counter_side(main_side)
+    
+    with position_lock:
+        counter_size = position_state[SYMBOL][counter_side]["size"]
+    
+    if counter_size <= 0:
+        log("ℹ️", f"No {counter_side} position to partially close")
+        return
+    
+    # 비주력 포지션 20% 청산
+    close_qty = max(1, int(counter_size * Decimal("0.2")))
+    
+    log("✂️ PARTIAL", f"Individual TP filled → Close {counter_side.upper()} {close_qty} (20%)")
+    
+    close_order_data = {
+        "contract": SYMBOL,
+        "size": int(close_qty * (1 if counter_side == "long" else -1)),
+        "price": "0",
+        "tif": "ioc",
+        "close": True
+    }
+    
+    try:
+        order = api.create_futures_order(SETTLE, FuturesOrder(**close_order_data))
+        if order and hasattr(order, 'id'):
+            log("✅ CLOSED", f"{counter_side.upper()} {close_qty} @ market (ID: {order.id})")
+        else:
+            log("✅ CLOSED", f"{counter_side.upper()} {close_qty} @ market (IOC filled)")
+        
+        # 포지션 동기화
+        time.sleep(0.5)
+        sync_position()
+        
+        # 남은 물량에 대해 TP 재생성
+        time.sleep(0.3)
+        refresh_all_tp_orders()
+        
+    except GateApiException as e:
+        log("❌", f"Partial close API error: {e}")
+    except Exception as e:
+        log("❌", f"Partial close error: {e}")
+
 def check_idle_and_enter():
     """30분 무이벤트 진입"""
     global last_event_time, idle_entry_count
@@ -1424,56 +1468,121 @@ def place_hedge_order(side):
         log("❌", f"Hedge order error: {e}")
         return None
 
-def grid_fill_monitor():
-    """그리드 체결 모니터링"""
-    last_check_time = 0
+async def grid_fill_monitor():
+    """그리드/TP 체결 모니터링 (WebSocket)"""
+    global last_grid_time, idle_entry_count
+    
+    uri = f"wss://fx-ws.gateio.ws/v4/ws/{SETTLE}"
+    
     while True:
         try:
-            time.sleep(1)
-            current_time = time.time()
-            if current_time - last_check_time < 2:
-                continue
-            last_check_time = current_time
-
-            for side in ["long", "short"]:
-                target_orders = grid_orders[SYMBOL][side]
-                filled_orders = []
+            async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
+                auth_msg = {
+                    "time": int(time.time()),
+                    "channel": "futures.orders",
+                    "event": "subscribe",
+                    "payload": [API_KEY, SECRET_KEY, SYMBOL]
+                }
+                await ws.send(json.dumps(auth_msg))
+                log("⚡ WS", "Connected to WebSocket (attempt 1)")
                 
-                for order_info in list(target_orders):
+                while True:
                     try:
-                        order_id = order_info["order_id"]
-                        order = api.get_futures_order(SETTLE, str(order_id))
-                        if not order:
-                            continue
+                        msg = await asyncio.wait_for(ws.recv(), timeout=30)
+                        data = json.loads(msg)
                         
-                        if hasattr(order, 'status') and order.status in ["finished", "closed"]:
-                            log_event_header("GRID FILLED")
-                            log("✅ FILL", f"{side.upper()} {order_info['qty']} @ {order_info['price']:.4f}")  # ← 수정
-                            
-                            update_event_time()
-                            
-                            # 헤징 실행
-                            was_counter = order_info.get("is_counter", False)
-                            base_qty = order_info.get("base_qty", 2)
-                            hedge_after_grid_fill(side, order_info['price'], order_info["qty"], was_counter, base_qty)
-                            
-                            time.sleep(0.5)
-                            filled_orders.append(order_info)
-                            break
-                            
-                    except GateApiException as e:
-                        if "ORDER_NOT_FOUND" in str(e):
-                            filled_orders.append(order_info)
-                    except Exception as e:
-                        log("❌", f"Grid fill check error: {e}")
-                
-                for order_info in filled_orders:
-                    if order_info in target_orders:
-                        target_orders.remove(order_info)
-
+                        if data.get("event") == "update" and data.get("channel") == "futures.orders":
+                            for order_data in data.get("result", []):
+                                status = order_data.get("status")
+                                order_id = order_data.get("id")
+                                
+                                if status == "finished":
+                                    # TP 체결 감지
+                                    if "reduce_only" in order_data and order_data["reduce_only"] == True:
+                                        side_text = order_data.get("text", "")
+                                        filled_size = abs(int(order_data.get("size", 0)))
+                                        filled_price = float(order_data.get("fill_price", 0))
+                                        
+                                        # 개별 TP인지 확인
+                                        is_individual_tp = False
+                                        main_side_for_tp = None
+                                        
+                                        if order_id:
+                                            for side in ["long", "short"]:
+                                                for entry in post_threshold_entries[SYMBOL][side]:
+                                                    if entry.get("tp_order_id") == order_id:
+                                                        is_individual_tp = True
+                                                        main_side_for_tp = side
+                                                        # 체결된 진입 기록 제거
+                                                        post_threshold_entries[SYMBOL][side].remove(entry)
+                                                        break
+                                                if is_individual_tp:
+                                                    break
+                                        
+                                        if is_individual_tp:
+                                            log("💎 INDIVIDUAL TP", f"{main_side_for_tp.upper()} {filled_size} @ {filled_price:.4f}")
+                                            
+                                            # 비주력 포지션 20% 청산
+                                            on_individual_tp_filled(main_side_for_tp, order_id)
+                                        else:
+                                            # 평단 TP 또는 전체 TP
+                                            log("💜 TP FILLED", f"{side_text} {filled_size} @ {filled_price:.4f}")
+                                        
+                                        # 타이머 리셋
+                                        last_grid_time = time.time()
+                                        idle_entry_count = 0
+                                        
+                                        # 포지션 동기화
+                                        time.sleep(0.5)
+                                        sync_position()
+                                        
+                                        # 그리드 재생성
+                                        cancel_grid_only()
+                                        time.sleep(0.3)
+                                        
+                                        current_price = get_current_price()
+                                        if current_price > 0:
+                                            initialize_grid(current_price)
+                                    
+                                    # 그리드 체결 감지
+                                    elif "api" in order_data.get("text", "").lower():
+                                        filled_size = abs(int(order_data.get("size", 0)))
+                                        filled_price = float(order_data.get("fill_price", 0))
+                                        
+                                        side = "long" if int(order_data.get("size", 0)) > 0 else "short"
+                                        
+                                        log("📊 GRID", f"{side.upper()} {filled_size} @ {filled_price:.4f}")
+                                        
+                                        # 타이머 리셋
+                                        last_grid_time = time.time()
+                                        idle_entry_count = 0
+                                        
+                                        # 그리드 체결 후 헤징
+                                        time.sleep(0.5)
+                                        sync_position()
+                                        
+                                        # 체결된 그리드가 counter인지 확인
+                                        main_side = get_main_side()
+                                        was_counter = (main_side != "none" and side != main_side)
+                                        
+                                        # base_qty 계산 (OBV는 이미 그리드 생성 시 적용됨)
+                                        with balance_lock:
+                                            base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
+                                            if base_qty <= 0:
+                                                base_qty = 1
+                                        
+                                        # 헤징 진입
+                                        hedge_after_grid_fill(side, filled_price, filled_size, was_counter, base_qty)
+                    
+                    except asyncio.TimeoutError:
+                        log("⚠️ WS", "No data received for 30s, sending ping...")
+                        await ws.ping()
+                        continue
+        
         except Exception as e:
-            log("❌", f"Grid fill monitor error: {e}")
-            time.sleep(1)
+            log("❌", f"WebSocket error: {e}")
+            log("⚠️ WS", "Reconnecting in 5s (attempt 2/5)...")
+            await asyncio.sleep(5)
 
 def tp_monitor():
     """TP 체결 모니터링 (개별 TP + 평단 TP)"""
