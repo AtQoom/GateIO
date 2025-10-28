@@ -377,7 +377,7 @@ def update_balance_thread():
             log("❌", f"Balance update error: {e}")
             time.sleep(60)
 
-# =============================================================================
+
 # =============================================================================
 # 캔들 데이터 수집
 # =============================================================================
@@ -547,6 +547,14 @@ def sync_position(max_retries=3, retry_delay=2):
 
 
 # =============================================================================
+# API 접근
+# =============================================================================
+def get_api():
+    """API 인스턴스 반환"""
+    return api
+
+
+# =============================================================================
 # 주문 취소
 # =============================================================================
 def cancel_all_orders():
@@ -598,6 +606,39 @@ def cancel_grid_only():
             log("❌", f"Grid cancellation error: {e}")
     except Exception as e:
         log("❌", f"Grid cancellation error: {e}")
+
+
+def cancel_tp_only():
+    """TP 주문만 취소 (그리드는 유지)"""
+    try:
+        orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
+        
+        tp_orders = [o for o in orders if o.is_reduce_only]
+        
+        if len(tp_orders) == 0:
+            log("ℹ️ TP", "No TP orders to cancel")
+            return
+        
+        log("🗑️ TP", f"Cancelling {len(tp_orders)} TP orders")
+        
+        for order in tp_orders:
+            try:
+                api.cancel_futures_order(SETTLE, order.id)
+                time.sleep(0.1)
+            except GateApiException as e:
+                if "ORDER_NOT_FOUND" not in str(e):
+                    log("⚠️", f"TP cancel error: {e}")
+            except:
+                pass
+    
+    except GateApiException as e:
+        if "400" in str(e):
+            log("⚠️", "Cancel TP: API authentication error")
+        else:
+            log("❌", f"TP cancel error: {e}")
+    except Exception as e:
+        log("❌", f"TP cancel error: {e}")
+
 
 # =============================================================================
 # 수량 계산
@@ -981,22 +1022,11 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
 
 def refresh_all_tp_orders():
     """TP 주문 새로 생성"""
-    # ✅ 추가: 기존 TP 먼저 취소!
+    # ✅ 기존 TP 먼저 취소!
     cancel_tp_only()
     
     try:
-        # 기존 TP 취소
-        orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-        tp_orders = [o for o in orders if o.is_reduce_only]
-        if tp_orders:
-            log("🗑️ CANCEL", f"{len(tp_orders)} TP orders")
-            for order in tp_orders:
-                try:
-                    api.cancel_futures_order(SETTLE, order.id)
-                    time.sleep(0.05)
-                except:
-                    pass
-        
+        # ✅ 중복 제거: cancel_tp_only()에서 이미 처리
         average_tp_orders[SYMBOL] = {"long": None, "short": None}
         
         with position_lock:
