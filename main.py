@@ -1986,22 +1986,28 @@ def periodic_health_check():
                     time.sleep(0.5)
                     refresh_all_tp_orders()
                 
-                # ✅ 수정: 조건 4번 - 그리드가 2개 이상일 때만 취소
-                # (정상 상태: 그리드 0개 또는 1~2개)
+                # 4. 롱/숏 모두 있는데 그리드가 2개 이상일 때만 취소
                 if long_size > 0 and short_size > 0 and grid_count >= 2:
-                    log("⚠️ HEALTH", f"Both positions exist with {grid_count} grids (should be 0) → Cancelling")
+                    log("⚠️ HEALTH", f"Both positions exist with {grid_count} grids → Cancelling")
                     time.sleep(0.5)
                     cancel_grid_only()
                 
-                # 5. 롱/숏 중 하나만 있는데 그리드가 없는 경우
-                if (long_size > 0) != (short_size > 0) and grid_count == 0:
-                    log("⚠️ HEALTH", "Single position but no grid → Creating grid")
-                    current_price = get_current_price()
-                    if current_price > 0:
-                        global last_grid_time
-                        last_grid_time = 0
-                        time.sleep(0.5)
-                        initialize_grid(current_price)
+                # ✅ 수정: 조건 5번 - 롱/숏 중 하나만 있을 때
+                # 그리드가 없거나 너무 많으면 재생성
+                single_position = (long_size > 0) != (short_size > 0)
+                if single_position:
+                    # 정상: 그리드 1~2개 (롱 1개 + 숏 1개)
+                    # 비정상: 그리드 0개 또는 3개 이상
+                    if grid_count == 0 or grid_count >= 3:
+                        log("⚠️ HEALTH", f"Single position with {grid_count} grids (should be 1-2) → Re-creating grid")
+                        current_price = get_current_price()
+                        if current_price > 0:
+                            global last_grid_time
+                            last_grid_time = 0
+                            time.sleep(0.5)
+                            cancel_grid_only()  # ✅ 추가: 기존 그리드 먼저 취소!
+                            time.sleep(0.3)
+                            initialize_grid(current_price)
                 
                 log("✅ HEALTH", "Health check complete")
                 
