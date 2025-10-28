@@ -1399,6 +1399,7 @@ def place_hedge_order(side):
         return None
 
 def grid_fill_monitor():
+    """그리드 체결 모니터링"""
     last_check_time = 0
     while True:
         try:
@@ -1411,6 +1412,7 @@ def grid_fill_monitor():
             for side in ["long", "short"]:
                 target_orders = grid_orders[SYMBOL][side]
                 filled_orders = []
+                
                 for order_info in list(target_orders):
                     try:
                         order_id = order_info["order_id"]
@@ -1420,14 +1422,14 @@ def grid_fill_monitor():
                         
                         if hasattr(order, 'status') and order.status in ["finished", "closed"]:
                             log_event_header("GRID FILLED")
-                            log("✅ FILL", f"{side.UPPER()} {order_info['qty']} @ {order_info['price']:.4f}")
-
+                            log("✅ FILL", f"{side.upper()} {order_info['qty']} @ {order_info['price']:.4f}")  # ← 수정
+                            
                             update_event_time()
                             
-                            # ✅ 수정: base_qty 전달
+                            # 헤징 실행
                             was_counter = order_info.get("is_counter", False)
-                            base_qty = order_info.get("base_qty", 2)  # ← 꺼내기
-                            hedge_after_grid_fill(side, order_info['price'], order_info["qty"], was_counter, base_qty)  # ← 전달
+                            base_qty = order_info.get("base_qty", 2)
+                            hedge_after_grid_fill(side, order_info['price'], order_info["qty"], was_counter, base_qty)
                             
                             time.sleep(0.5)
                             filled_orders.append(order_info)
