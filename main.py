@@ -493,36 +493,29 @@ def sync_position(max_retries=3, retry_delay=2):
     """포지션 동기화 (재시도 로직 포함)"""
     for attempt in range(max_retries):
         try:
-            positions = api.list_futures_positions(SETTLE)
+            # ✅ 수정: list_futures_positions → list_position
+            positions = api.list_position(SETTLE)
             
-            found = False
-            for pos in positions:
-                if pos.contract == SYMBOL:
-                    found = True
-                    with position_lock:
-                        if pos.size > 0:
-                            position_state[SYMBOL]["long"]["size"] = int(pos.size)
-                            position_state[SYMBOL]["long"]["price"] = float(pos.entry_price or 0)
-                            position_state[SYMBOL]["short"]["size"] = 0
-                            position_state[SYMBOL]["short"]["price"] = 0.0
-                        elif pos.size < 0:
-                            position_state[SYMBOL]["short"]["size"] = abs(int(pos.size))
-                            position_state[SYMBOL]["short"]["price"] = float(pos.entry_price or 0)
-                            position_state[SYMBOL]["long"]["size"] = 0
-                            position_state[SYMBOL]["long"]["price"] = 0.0
-                        else:
-                            position_state[SYMBOL]["long"]["size"] = 0
-                            position_state[SYMBOL]["long"]["price"] = 0.0
-                            position_state[SYMBOL]["short"]["size"] = 0
-                            position_state[SYMBOL]["short"]["price"] = 0.0
-                    break
+            with position_lock:
+                position_state[SYMBOL]["long"]["size"] = Decimal("0")
+                position_state[SYMBOL]["long"]["price"] = Decimal("0")
+                position_state[SYMBOL]["short"]["size"] = Decimal("0")
+                position_state[SYMBOL]["short"]["price"] = Decimal("0")
             
-            if not found:
-                with position_lock:
-                    position_state[SYMBOL]["long"]["size"] = 0
-                    position_state[SYMBOL]["long"]["price"] = 0.0
-                    position_state[SYMBOL]["short"]["size"] = 0
-                    position_state[SYMBOL]["short"]["price"] = 0.0
+            if positions:
+                for p in positions:
+                    if p.contract == SYMBOL:
+                        size_dec = Decimal(str(p.size))
+                        entry_price = abs(Decimal(str(p.entry_price))) if p.entry_price else Decimal("0")
+                        
+                        if size_dec > 0:
+                            with position_lock:
+                                position_state[SYMBOL]["long"]["size"] = size_dec
+                                position_state[SYMBOL]["long"]["price"] = entry_price
+                        elif size_dec < 0:
+                            with position_lock:
+                                position_state[SYMBOL]["short"]["size"] = abs(size_dec)
+                                position_state[SYMBOL]["short"]["price"] = entry_price
             
             return True
             
@@ -542,6 +535,7 @@ def sync_position(max_retries=3, retry_delay=2):
                 return False
     
     return False
+
 
 # =============================================================================
 # 주문 취소
