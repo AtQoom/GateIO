@@ -435,46 +435,51 @@ def fetch_kline_thread():
 # WebSocket 포지션 모니터링
 # =============================================================================
 async def watch_positions():
-    uri = f"wss://fx-ws.gateio.ws/v4/ws/{SETTLE}"
+    """WebSocket으로 실시간 가격 수신 (재연결 로직 포함)"""
+    global last_price
+    
+    max_reconnect_attempts = 5
+    reconnect_delay = 5
+    
     while True:
-        try:
-            async with websockets.connect(uri) as ws:
-                auth_msg = {
-                    "time": int(time.time()),
-                    "channel": "futures.positions",
-                    "event": "subscribe",
-                    "payload": [SYMBOL]
-                }
-                await ws.send(json.dumps(auth_msg))
-                log("🔌 WS", "Connected")
+        for attempt in range(max_reconnect_attempts):
+            try:
+                url = f"wss://fx-ws.gateio.ws/v4/ws/usdt"
                 
-                async for message in ws:
-                    data = json.loads(message)
-                    if data.get("event") == "update" and data.get("channel") == "futures.positions":
-                        for pos in data.get("result", []):
-                            if pos.get("contract") == SYMBOL:
-                                size_dec = Decimal(str(pos.get("size", "0")))
-                                entry_price = abs(Decimal(str(pos.get("entry_price", "0"))))
-                                
-                                with position_lock:
-                                    if size_dec > 0:
-                                        position_state[SYMBOL]["long"]["size"] = size_dec
-                                        position_state[SYMBOL]["long"]["price"] = entry_price
-                                        position_state[SYMBOL]["short"]["size"] = Decimal("0")
-                                        position_state[SYMBOL]["short"]["price"] = Decimal("0")
-                                    elif size_dec < 0:
-                                        position_state[SYMBOL]["short"]["size"] = abs(size_dec)
-                                        position_state[SYMBOL]["short"]["price"] = entry_price
-                                        position_state[SYMBOL]["long"]["size"] = Decimal("0")
-                                        position_state[SYMBOL]["long"]["price"] = Decimal("0")
-                                    else:
-                                        position_state[SYMBOL]["long"]["size"] = Decimal("0")
-                                        position_state[SYMBOL]["long"]["price"] = Decimal("0")
-                                        position_state[SYMBOL]["short"]["size"] = Decimal("0")
-                                        position_state[SYMBOL]["short"]["price"] = Decimal("0")
-        except Exception as e:
-            log("❌", f"WebSocket error: {e}")
-            await asyncio.sleep(5)
+                async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
+                    subscribe_msg = {
+                        "time": int(time.time()),
+                        "channel": "futures.tickers",
+                        "event": "subscribe",
+                        "payload": [SYMBOL]
+                    }
+                    await ws.send(json.dumps(subscribe_msg))
+                    log("🔌 WS", f"Connected to WebSocket (attempt {attempt + 1})")
+                    
+                    while True:
+                        try:
+                            msg = await asyncio.wait_for(ws.recv(), timeout=30)
+                            data = json.loads(msg)
+                            
+                            if data.get("event") == "update" and data.get("channel") == "futures.tickers":
+                                result = data.get("result")
+                                if result and isinstance(result, dict):
+                                    price = float(result.get("last", 0))
+                                    if price > 0:
+                                        last_price = price
+                        
+                        except asyncio.TimeoutError:
+                            log("⚠️ WS", "No data received for 30s, sending ping...")
+                            await ws.ping()
+                            
+            except Exception as e:
+                if attempt < max_reconnect_attempts - 1:
+                    log("⚠️ WS", f"Reconnecting in {reconnect_delay}s (attempt {attempt + 1}/{max_reconnect_attempts})...")
+                    await asyncio.sleep(reconnect_delay)
+                else:
+                    log("❌", f"WebSocket error after {max_reconnect_attempts} attempts: {e}")
+                    await asyncio.sleep(30)
+                    break
 
 def start_websocket():
     loop = asyncio.new_event_loop()
@@ -484,33 +489,59 @@ def start_websocket():
 # =============================================================================
 # 포지션 동기화 - 에러 시 재시도 간격 증가
 # =============================================================================
-def sync_position():
-    try:
-        positions = api.list_positions(SETTLE)
-        with position_lock:
-            position_state[SYMBOL]["long"]["size"] = Decimal("0")
-            position_state[SYMBOL]["long"]["price"] = Decimal("0")
-            position_state[SYMBOL]["short"]["size"] = Decimal("0")
-            position_state[SYMBOL]["short"]["price"] = Decimal("0")
+def sync_position(max_retries=3, retry_delay=2):
+    """포지션 동기화 (재시도 로직 포함)"""
+    for attempt in range(max_retries):
+        try:
+            positions = api.list_futures_positions(SETTLE)
             
-            if positions:
-                for p in positions:
-                    if p.contract == SYMBOL:
-                        size_dec = Decimal(str(p.size))
-                        entry_price = abs(Decimal(str(p.entry_price))) if p.entry_price else Decimal("0")
-                        if size_dec > 0:
-                            position_state[SYMBOL]["long"]["size"] = size_dec
-                            position_state[SYMBOL]["long"]["price"] = entry_price
-                        elif size_dec < 0:
-                            position_state[SYMBOL]["short"]["size"] = abs(size_dec)
-                            position_state[SYMBOL]["short"]["price"] = entry_price
-        return True
-    except GateApiException as e:
-        # API 인증 오류는 로그 스팸 방지를 위해 첫 번째만 출력
-        return False
-    except Exception as e:
-        log("❌", f"Position sync error: {e}")
-        return False
+            found = False
+            for pos in positions:
+                if pos.contract == SYMBOL:
+                    found = True
+                    with position_lock:
+                        if pos.size > 0:
+                            position_state[SYMBOL]["long"]["size"] = int(pos.size)
+                            position_state[SYMBOL]["long"]["price"] = float(pos.entry_price or 0)
+                            position_state[SYMBOL]["short"]["size"] = 0
+                            position_state[SYMBOL]["short"]["price"] = 0.0
+                        elif pos.size < 0:
+                            position_state[SYMBOL]["short"]["size"] = abs(int(pos.size))
+                            position_state[SYMBOL]["short"]["price"] = float(pos.entry_price or 0)
+                            position_state[SYMBOL]["long"]["size"] = 0
+                            position_state[SYMBOL]["long"]["price"] = 0.0
+                        else:
+                            position_state[SYMBOL]["long"]["size"] = 0
+                            position_state[SYMBOL]["long"]["price"] = 0.0
+                            position_state[SYMBOL]["short"]["size"] = 0
+                            position_state[SYMBOL]["short"]["price"] = 0.0
+                    break
+            
+            if not found:
+                with position_lock:
+                    position_state[SYMBOL]["long"]["size"] = 0
+                    position_state[SYMBOL]["long"]["price"] = 0.0
+                    position_state[SYMBOL]["short"]["size"] = 0
+                    position_state[SYMBOL]["short"]["price"] = 0.0
+            
+            return True
+            
+        except GateApiException as e:
+            if attempt < max_retries - 1:
+                log("⚠️ RETRY", f"Position sync attempt {attempt + 1}/{max_retries} failed, retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+            else:
+                log("❌", f"Position sync error after {max_retries} attempts: {e}")
+                return False
+        except Exception as e:
+            if attempt < max_retries - 1:
+                log("⚠️ RETRY", f"Position sync attempt {attempt + 1}/{max_retries} failed, retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+            else:
+                log("❌", f"Position sync error after {max_retries} attempts: {e}")
+                return False
+    
+    return False
 
 # =============================================================================
 # 주문 취소
