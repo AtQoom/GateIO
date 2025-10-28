@@ -935,11 +935,19 @@ def initialize_grid(current_price):
         log("❌", f"Traceback: {traceback.format_exc()}")
 
 def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
-    """그리드 체결 후 헤징 + 임계값 이후 진입 추적"""
+    """그리드 체결 후 헤징 + 후속 처리 (포지션 동기화 개선)"""
     if not ENABLE_AUTO_HEDGE:
         return
     
     try:
+        # 1. 모든 주문 취소
+        cancel_all_orders()
+        time.sleep(0.5)
+        
+        # 2. 포지션 동기화
+        sync_position()
+        time.sleep(0.3)
+        
         current_price = get_current_price()
         if current_price <= 0:
             return
@@ -951,7 +959,7 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
         
         obv_display = float(obv_macd_value) * 1000
         
-        # ✅ 수정: main_side가 "none"인지 체크!
+        # ✅ main_side가 "none"인지 체크!
         main_side = get_main_side()
         if main_side != "none" and is_above_threshold(main_side) and side == main_side:
             post_threshold_entries[SYMBOL][side].append({
@@ -962,7 +970,7 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
             })
             log("📝 TRACKED", f"{side.upper()} grid {grid_qty} @ {grid_price:.4f} (MAIN, above threshold)")
         
-        # 헤징 수량 계산
+        # 3. 헤징 수량 계산
         if was_counter:
             hedge_qty = max(base_qty, int(main_size * 0.1))
             hedge_side = side
@@ -972,6 +980,7 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
             hedge_side = counter_side
             log("🔄 HEDGE", f"Main grid filled → Counter hedge: {hedge_side.upper()} {hedge_qty} (base={base_qty})")
         
+        # 4. 헤징 주문 실행
         hedge_order_data = {
             "contract": SYMBOL,
             "size": int(hedge_qty * (1 if hedge_side == "long" else -1)),
@@ -992,10 +1001,12 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
             log("❌", f"Hedge order API error: {e}")
             return
         
-        time.sleep(0.5)
-        sync_position()
+        # ✅ 5. 헤징 후 포지션 재동기화 (중요!)
+        time.sleep(0.5)  # Gate.io API 반영 대기
+        sync_position()  # 재동기화
+        time.sleep(0.3)
         
-        # ✅ 수정: main_side가 "none"인지 체크!
+        # ✅ 6. 헤징 후 main_side 재확인 및 추적
         main_side_after = get_main_side()
         if main_side_after != "none" and is_above_threshold(main_side_after) and hedge_side == main_side_after:
             with position_lock:
@@ -1009,17 +1020,32 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
             })
             log("📝 TRACKED", f"{hedge_side.upper()} hedge {hedge_qty} @ {entry_price:.4f} (MAIN, above threshold)")
         
+        # 7. 그리드 취소
         cancel_grid_only()
         time.sleep(0.3)
         
+        # 8. TP 생성
         refresh_all_tp_orders()
         
+        # 9. 포지션 재확인 후 그리드 재생성
         time.sleep(0.3)
-        current_price = get_current_price()
-        if current_price > 0:
-            global last_grid_time
-            last_grid_time = 0
-            initialize_grid(current_price)
+        with position_lock:
+            long_size = position_state[SYMBOL]["long"]["size"]
+            short_size = position_state[SYMBOL]["short"]["size"]
+        
+        log("🔍 DEBUG", f"After hedging: long={long_size}, short={short_size}")
+        
+        # ✅ 10. 그리드 재생성 (롱/숏 하나만 있을 때)
+        if long_size == 0 or short_size == 0:
+            log("📊 GRID", "Single position after hedge → Creating grid")
+            current_price = get_current_price()
+            if current_price > 0:
+                global last_grid_time
+                last_grid_time = 0
+                time.sleep(0.3)
+                initialize_grid(current_price)
+        else:
+            log("ℹ️ GRID", "Both positions exist → No grid creation")
         
     except Exception as e:
         log("❌", f"Hedge order error: {e}")
@@ -1955,7 +1981,7 @@ def idle_monitor():
             time.sleep(10)
 
 def periodic_health_check():
-    """1분마다 포지션/주문 상태 검증 및 복구 (WebSocket 독립적)"""
+    """1분마다 포지션/주문 상태 검증 및 복구"""
     while True:
         try:
             time.sleep(60)
@@ -1965,14 +1991,17 @@ def periodic_health_check():
             # 1. 포지션 동기화
             success = sync_position()
             if not success:
-                log("❌ HEALTH", "Position sync failed - skipping this cycle")
+                log("❌ HEALTH", "Position sync failed - skipping")
                 continue
             
             # 2. 현재 주문 확인
             try:
                 orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-                grid_count = len([o for o in orders if not o.is_reduce_only])
-                tp_count = len([o for o in orders if o.is_reduce_only])
+                grid_orders_list = [o for o in orders if not o.is_reduce_only]
+                tp_orders_list = [o for o in orders if o.is_reduce_only]
+                
+                grid_count = len(grid_orders_list)
+                tp_count = len(tp_orders_list)
                 
                 log("🔍 ORDERS", f"Grid: {grid_count}, TP: {tp_count}")
                 
@@ -1980,32 +2009,42 @@ def periodic_health_check():
                     long_size = position_state[SYMBOL]["long"]["size"]
                     short_size = position_state[SYMBOL]["short"]["size"]
                 
-                # 3. 포지션은 있는데 TP가 없는 경우
+                # 3. 포지션 있는데 TP 없음
                 if (long_size > 0 or short_size > 0) and tp_count == 0:
-                    log("⚠️ HEALTH", "Position exists but no TP orders → Creating TP")
+                    log("⚠️ HEALTH", "Position exists but no TP → Creating TP")
                     time.sleep(0.5)
                     refresh_all_tp_orders()
                 
-                # 4. 롱/숏 모두 있는데 그리드가 2개 이상일 때만 취소
+                # 4. 롱/숏 모두 있는데 그리드 2개 이상
                 if long_size > 0 and short_size > 0 and grid_count >= 2:
-                    log("⚠️ HEALTH", f"Both positions exist with {grid_count} grids → Cancelling")
+                    log("⚠️ HEALTH", f"Both positions with {grid_count} grids → Cancelling")
                     time.sleep(0.5)
                     cancel_grid_only()
                 
-                # ✅ 수정: 조건 5번 - 롱/숏 중 하나만 있을 때
-                # 그리드가 없거나 너무 많으면 재생성
+                # ✅ 수정: 5. 단일 포지션 그리드 복구 (더 적극적)
                 single_position = (long_size > 0) != (short_size > 0)
                 if single_position:
-                    # 정상: 그리드 1~2개 (롱 1개 + 숏 1개)
-                    # 비정상: 그리드 0개 또는 3개 이상
-                    if grid_count == 0 or grid_count >= 3:
-                        log("⚠️ HEALTH", f"Single position with {grid_count} grids (should be 1-2) → Re-creating grid")
+                    # 그리드 주문의 방향 확인
+                    has_long_grid = any(o.size > 0 for o in grid_orders_list)
+                    has_short_grid = any(o.size < 0 for o in grid_orders_list)
+                    
+                    # 정상: 롱 그리드 1개 + 숏 그리드 1개
+                    # 비정상: 그리드 0개, 한쪽만 있음, 3개 이상
+                    needs_recreation = (
+                        grid_count == 0 or  # 그리드 없음
+                        grid_count >= 3 or  # 그리드 너무 많음
+                        (grid_count == 1) or  # 그리드 1개만 (정상은 2개)
+                        (not has_long_grid or not has_short_grid)  # 한쪽만 있음
+                    )
+                    
+                    if needs_recreation:
+                        log("⚠️ HEALTH", f"Single position with abnormal grids (count={grid_count}, long={has_long_grid}, short={has_short_grid}) → Re-creating")
                         current_price = get_current_price()
                         if current_price > 0:
                             global last_grid_time
                             last_grid_time = 0
                             time.sleep(0.5)
-                            cancel_grid_only()  # ✅ 추가: 기존 그리드 먼저 취소!
+                            cancel_grid_only()
                             time.sleep(0.3)
                             initialize_grid(current_price)
                 
