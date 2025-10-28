@@ -1027,13 +1027,13 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
         log("❌", f"Traceback: {traceback.format_exc()}")
 
 def refresh_all_tp_orders():
-    """TP 주문 새로 생성"""
+    """TP 주문 새로 생성 (즉시 체결 감지 + 중복 방지)"""
     # ✅ 기존 TP 먼저 취소!
     cancel_tp_only()
     
     try:
-        # ✅ 중복 제거: cancel_tp_only()에서 이미 처리
         average_tp_orders[SYMBOL] = {"long": None, "short": None}
+        instant_tp_triggered = False  # ✅ 추가: 중복 full_refresh 방지
         
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
@@ -1047,20 +1047,23 @@ def refresh_all_tp_orders():
         main_side = get_main_side()
         log("🔍 DEBUG", f"main_side={main_side}, long={long_size}, short={short_size}")
         
+        # ========================================================================
         # === 롱 TP 생성 ===
+        # ========================================================================
         if long_size > 0:
             long_above = is_above_threshold("long")
             log("🔍 DEBUG", f"LONG: above={long_above}, is_main={main_side == 'long'}")
             
             try:
                 if long_above and main_side == "long":
+                    # ===== Individual TP 로직 =====
                     log("📈 LONG TP", "Above threshold & MAIN → Individual + Average TPs")
                     
-                    # Individual TP
                     individual_total = 0
                     for entry in post_threshold_entries[SYMBOL]["long"]:
                         tp_price = Decimal(str(entry["price"])) * (Decimal("1") + TP_GAP_PCT)
                         tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+                        
                         order = FuturesOrder(
                             contract=SYMBOL,
                             size=-entry["qty"],
@@ -1068,19 +1071,29 @@ def refresh_all_tp_orders():
                             tif="gtc",
                             reduce_only=True
                         )
+                        
+                        log("🔍 DEBUG", f"Creating LONG individual TP: qty={entry['qty']}, price={tp_price}")
                         result = api.create_futures_order(SETTLE, order)
+                        log("🔍 DEBUG", f"LONG individual TP result: {result}")
+                        
+                        # ✅ 즉시 체결 확인
                         if result and hasattr(result, 'id'):
-                            entry["tp_order_id"] = result.id
-                            individual_total += entry["qty"]
-                            log("🎯 INDIVIDUAL TP", f"LONG {entry['qty']} @ {tp_price:.4f}")
+                            if hasattr(result, 'status') and result.status in ["finished", "closed"]:
+                                log("⚡ INSTANT TP", f"LONG individual TP filled immediately @ {tp_price:.4f}")
+                                instant_tp_triggered = True  # ✅ 플래그 설정
+                            else:
+                                entry["tp_order_id"] = result.id
+                                individual_total += entry["qty"]
+                                log("🎯 INDIVIDUAL TP", f"LONG {entry['qty']} @ {tp_price:.4f}")
                         else:
-                            log("❌ TP", f"LONG individual TP failed: result={result}")
+                            log("❌ TP", f"LONG individual TP creation failed: result={result}")
                     
-                    # Average TP
+                    # ===== Average TP =====
                     remaining = int(long_size - individual_total)
                     if remaining > 0:
                         tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
                         tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+                        
                         order = FuturesOrder(
                             contract=SYMBOL,
                             size=-remaining,
@@ -1088,18 +1101,27 @@ def refresh_all_tp_orders():
                             tif="gtc",
                             reduce_only=True
                         )
+                        
+                        log("🔍 DEBUG", f"Creating LONG average TP: size={remaining}, price={tp_price}")
                         result = api.create_futures_order(SETTLE, order)
+                        log("🔍 DEBUG", f"LONG average TP result: {result}")
+                        
+                        # ✅ 즉시 체결 확인
                         if result and hasattr(result, 'id'):
-                            average_tp_orders[SYMBOL]["long"] = result.id
-                            log("🎯 AVERAGE TP", f"LONG {remaining} @ {tp_price:.4f}")
+                            if hasattr(result, 'status') and result.status in ["finished", "closed"]:
+                                log("⚡ INSTANT TP", f"LONG average TP filled immediately @ {tp_price:.4f}")
+                                instant_tp_triggered = True  # ✅ 플래그 설정
+                            else:
+                                average_tp_orders[SYMBOL]["long"] = result.id
+                                log("🎯 AVERAGE TP", f"LONG {remaining} @ {tp_price:.4f}")
                         else:
-                            log("❌ TP", f"LONG average TP failed: result={result}")
+                            log("❌ TP", f"LONG average TP creation failed: result={result}")
+                
                 else:
-                    # Full average TP
+                    # ===== Full average TP =====
                     log("📈 LONG TP", "Below threshold or COUNTER → Full average TP")
                     tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
                     tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-                    log("🔍 DEBUG", f"Creating LONG TP: size={-int(long_size)}, price={tp_price:.4f}")
                     
                     order = FuturesOrder(
                         contract=SYMBOL,
@@ -1109,35 +1131,49 @@ def refresh_all_tp_orders():
                         reduce_only=True
                     )
                     
-                    log("🔍 DEBUG", f"LONG TP order data: {order}")
+                    log("🔍 DEBUG", f"Creating LONG full TP: size={int(long_size)}, price={tp_price}")
                     result = api.create_futures_order(SETTLE, order)
-                    log("🔍 DEBUG", f"LONG TP result: {result}")
+                    log("🔍 DEBUG", f"LONG full TP result: {result}")
                     
+                    # ✅ 즉시 체결 확인
                     if result and hasattr(result, 'id'):
-                        average_tp_orders[SYMBOL]["long"] = result.id
-                        log("🎯 FULL TP", f"LONG {int(long_size)} @ {tp_price:.4f}")
+                        if hasattr(result, 'status') and result.status in ["finished", "closed"]:
+                            log("⚡ INSTANT TP", f"LONG full TP filled immediately @ {tp_price:.4f}")
+                            instant_tp_triggered = True  # ✅ 플래그 설정
+                            # 즉시 새로고침 트리거
+                            threading.Thread(
+                                target=full_refresh,
+                                args=("Instant_TP_Long",),
+                                daemon=True
+                            ).start()
+                        else:
+                            average_tp_orders[SYMBOL]["long"] = result.id
+                            log("🎯 FULL TP", f"LONG {int(long_size)} @ {tp_price:.4f}")
                     else:
-                        log("❌ TP", f"LONG TP creation failed: result={result}, hasattr={hasattr(result, 'id') if result else 'None'}")
+                        log("❌ TP", f"LONG full TP creation failed: result={result}")
             
             except Exception as e:
                 log("❌ TP", f"LONG TP exception: {e}")
                 import traceback
                 log("❌", traceback.format_exc())
         
+        # ========================================================================
         # === 숏 TP 생성 ===
+        # ========================================================================
         if short_size > 0:
             short_above = is_above_threshold("short")
             log("🔍 DEBUG", f"SHORT: above={short_above}, is_main={main_side == 'short'}")
             
             try:
                 if short_above and main_side == "short":
+                    # ===== Individual TP 로직 =====
                     log("📉 SHORT TP", "Above threshold & MAIN → Individual + Average TPs")
                     
-                    # Individual TP
                     individual_total = 0
                     for entry in post_threshold_entries[SYMBOL]["short"]:
                         tp_price = Decimal(str(entry["price"])) * (Decimal("1") - TP_GAP_PCT)
                         tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+                        
                         order = FuturesOrder(
                             contract=SYMBOL,
                             size=entry["qty"],
@@ -1145,19 +1181,29 @@ def refresh_all_tp_orders():
                             tif="gtc",
                             reduce_only=True
                         )
+                        
+                        log("🔍 DEBUG", f"Creating SHORT individual TP: qty={entry['qty']}, price={tp_price}")
                         result = api.create_futures_order(SETTLE, order)
+                        log("🔍 DEBUG", f"SHORT individual TP result: {result}")
+                        
+                        # ✅ 즉시 체결 확인
                         if result and hasattr(result, 'id'):
-                            entry["tp_order_id"] = result.id
-                            individual_total += entry["qty"]
-                            log("🎯 INDIVIDUAL TP", f"SHORT {entry['qty']} @ {tp_price:.4f}")
+                            if hasattr(result, 'status') and result.status in ["finished", "closed"]:
+                                log("⚡ INSTANT TP", f"SHORT individual TP filled immediately @ {tp_price:.4f}")
+                                instant_tp_triggered = True  # ✅ 플래그 설정
+                            else:
+                                entry["tp_order_id"] = result.id
+                                individual_total += entry["qty"]
+                                log("🎯 INDIVIDUAL TP", f"SHORT {entry['qty']} @ {tp_price:.4f}")
                         else:
-                            log("❌ TP", f"SHORT individual TP failed: result={result}")
+                            log("❌ TP", f"SHORT individual TP creation failed: result={result}")
                     
-                    # Average TP
+                    # ===== Average TP =====
                     remaining = int(short_size - individual_total)
                     if remaining > 0:
                         tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
                         tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+                        
                         order = FuturesOrder(
                             contract=SYMBOL,
                             size=remaining,
@@ -1165,18 +1211,27 @@ def refresh_all_tp_orders():
                             tif="gtc",
                             reduce_only=True
                         )
+                        
+                        log("🔍 DEBUG", f"Creating SHORT average TP: size={remaining}, price={tp_price}")
                         result = api.create_futures_order(SETTLE, order)
+                        log("🔍 DEBUG", f"SHORT average TP result: {result}")
+                        
+                        # ✅ 즉시 체결 확인
                         if result and hasattr(result, 'id'):
-                            average_tp_orders[SYMBOL]["short"] = result.id
-                            log("🎯 AVERAGE TP", f"SHORT {remaining} @ {tp_price:.4f}")
+                            if hasattr(result, 'status') and result.status in ["finished", "closed"]:
+                                log("⚡ INSTANT TP", f"SHORT average TP filled immediately @ {tp_price:.4f}")
+                                instant_tp_triggered = True  # ✅ 플래그 설정
+                            else:
+                                average_tp_orders[SYMBOL]["short"] = result.id
+                                log("🎯 AVERAGE TP", f"SHORT {remaining} @ {tp_price:.4f}")
                         else:
-                            log("❌ TP", f"SHORT average TP failed: result={result}")
+                            log("❌ TP", f"SHORT average TP creation failed: result={result}")
+                
                 else:
-                    # Full average TP
+                    # ===== Full average TP =====
                     log("📉 SHORT TP", "Below threshold or COUNTER → Full average TP")
                     tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
                     tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-                    log("🔍 DEBUG", f"Creating SHORT TP: size={int(short_size)}, price={tp_price:.4f}")
                     
                     order = FuturesOrder(
                         contract=SYMBOL,
@@ -1186,20 +1241,54 @@ def refresh_all_tp_orders():
                         reduce_only=True
                     )
                     
-                    log("🔍 DEBUG", f"SHORT TP order data: {order}")
+                    log("🔍 DEBUG", f"Creating SHORT full TP: size={int(short_size)}, price={tp_price}")
                     result = api.create_futures_order(SETTLE, order)
-                    log("🔍 DEBUG", f"SHORT TP result: {result}")
+                    log("🔍 DEBUG", f"SHORT full TP result: {result}")
                     
+                    # ✅ 즉시 체결 확인
                     if result and hasattr(result, 'id'):
-                        average_tp_orders[SYMBOL]["short"] = result.id
-                        log("🎯 FULL TP", f"SHORT {int(short_size)} @ {tp_price:.4f}")
+                        if hasattr(result, 'status') and result.status in ["finished", "closed"]:
+                            log("⚡ INSTANT TP", f"SHORT full TP filled immediately @ {tp_price:.4f}")
+                            instant_tp_triggered = True  # ✅ 플래그 설정
+                            # 즉시 새로고침 트리거
+                            threading.Thread(
+                                target=full_refresh,
+                                args=("Instant_TP_Short",),
+                                daemon=True
+                            ).start()
+                        else:
+                            average_tp_orders[SYMBOL]["short"] = result.id
+                            log("🎯 FULL TP", f"SHORT {int(short_size)} @ {tp_price:.4f}")
                     else:
-                        log("❌ TP", f"SHORT TP creation failed: result={result}, hasattr={hasattr(result, 'id') if result else 'None'}")
+                        log("❌ TP", f"SHORT full TP creation failed: result={result}")
             
             except Exception as e:
                 log("❌ TP", f"SHORT TP exception: {e}")
                 import traceback
                 log("❌", traceback.format_exc())
+        
+        # ========================================================================
+        # === TP 생성 후 포지션 재확인 (중복 방지) ===
+        # ========================================================================
+        time.sleep(0.5)
+        sync_position()
+        
+        with position_lock:
+            long_size_after = position_state[SYMBOL]["long"]["size"]
+            short_size_after = position_state[SYMBOL]["short"]["size"]
+        
+        # ✅ instant_tp_triggered가 False일 때만 실행 (중복 방지)
+        if not instant_tp_triggered:
+            # TP가 즉시 체결되어 포지션이 사라진 경우
+            if (long_size > 0 and long_size_after == 0) or (short_size > 0 and short_size_after == 0):
+                log("⚡ INSTANT TP", "Position closed after TP creation → Triggering refresh")
+                threading.Thread(
+                    target=full_refresh,
+                    args=("Instant_TP_Detected",),
+                    daemon=True
+                ).start()
+        else:
+            log("ℹ️ TP", "Instant TP already triggered, skipping duplicate refresh")
     
     except Exception as e:
         log("❌", f"TP refresh error: {e}")
@@ -2133,7 +2222,7 @@ if __name__ == '__main__':
     log("🌐 FLASK", "Starting server on port 8080...")
     log("📊 OBV MACD", "Self-calculating from 1min candles")
     log("📨 WEBHOOK", "Optional: TradingView webhook at /webhook")
-    log("🔍 HEALTH", "Health check every 5 minutes")  # ✅ 추가
+    log("🔍 HEALTH", "Health check every 2 minutes")  # ✅ 추가
     
     app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
 
