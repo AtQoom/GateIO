@@ -1958,17 +1958,17 @@ def periodic_health_check():
     """1분마다 포지션/주문 상태 검증 및 복구 (WebSocket 독립적)"""
     while True:
         try:
-            time.sleep(60)  # ✅ 2분(120초) → 1분(60초)
+            time.sleep(60)
             
             log("🔍 HEALTH", "Starting periodic health check...")
             
-            # 1. 포지션 동기화 (WebSocket과 무관하게 REST API 사용)
+            # 1. 포지션 동기화
             success = sync_position()
             if not success:
                 log("❌ HEALTH", "Position sync failed - skipping this cycle")
-                continue  # ✅ 실패 시 다음 사이클로
+                continue
             
-            # 2. 현재 주문 확인 (REST API)
+            # 2. 현재 주문 확인
             try:
                 orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
                 grid_count = len([o for o in orders if not o.is_reduce_only])
@@ -1983,13 +1983,14 @@ def periodic_health_check():
                 # 3. 포지션은 있는데 TP가 없는 경우
                 if (long_size > 0 or short_size > 0) and tp_count == 0:
                     log("⚠️ HEALTH", "Position exists but no TP orders → Creating TP")
-                    time.sleep(0.5)  # ✅ 추가: API 호출 간격 확보
+                    time.sleep(0.5)
                     refresh_all_tp_orders()
                 
-                # 4. 롱/숏 모두 있는데 그리드가 있는 경우
-                if long_size > 0 and short_size > 0 and grid_count > 0:
-                    log("⚠️ HEALTH", "Both positions exist but grid orders found → Cancelling grid")
-                    time.sleep(0.5)  # ✅ 추가
+                # ✅ 수정: 조건 4번 - 그리드가 2개 이상일 때만 취소
+                # (정상 상태: 그리드 0개 또는 1~2개)
+                if long_size > 0 and short_size > 0 and grid_count >= 2:
+                    log("⚠️ HEALTH", f"Both positions exist with {grid_count} grids (should be 0) → Cancelling")
+                    time.sleep(0.5)
                     cancel_grid_only()
                 
                 # 5. 롱/숏 중 하나만 있는데 그리드가 없는 경우
@@ -1999,7 +2000,7 @@ def periodic_health_check():
                     if current_price > 0:
                         global last_grid_time
                         last_grid_time = 0
-                        time.sleep(0.5)  # ✅ 추가
+                        time.sleep(0.5)
                         initialize_grid(current_price)
                 
                 log("✅ HEALTH", "Health check complete")
@@ -2011,7 +2012,7 @@ def periodic_health_check():
                 
         except Exception as e:
             log("❌ HEALTH", f"Health check thread error: {e}")
-            time.sleep(60)  # ✅ 오류 시 1분 대기
+            time.sleep(60)
 
 
 # =============================================================================
