@@ -1786,11 +1786,7 @@ def idle_monitor():
             log("❌", f"Idle monitor error: {e}")
             time.sleep(10)
 
-def start_grid_monitor():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(grid_fill_monitor())
-    
+
 # =============================================================================
 # Flask 엔드포인트
 # =============================================================================
@@ -1980,6 +1976,11 @@ def print_startup_summary():
     log("✅ INIT", "Complete. Starting threads...")
     log_divider("=")
 
+def start_grid_monitor():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(grid_fill_monitor())
+    
 if __name__ == '__main__':
     print_startup_summary()
     
@@ -1999,7 +2000,7 @@ if __name__ == '__main__':
     threading.Thread(target=fetch_kline_thread, daemon=True).start()
     threading.Thread(target=start_websocket, daemon=True).start()
     threading.Thread(target=position_monitor, daemon=True).start()
-     threading.Thread(target=start_grid_monitor, daemon=True).start()
+    threading.Thread(target=start_grid_monitor, daemon=True).start()
     threading.Thread(target=tp_monitor, daemon=True).start()
     threading.Thread(target=idle_monitor, daemon=True).start()  # ← 추가 필요
     
