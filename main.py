@@ -435,7 +435,7 @@ def fetch_kline_thread():
 # WebSocket 포지션 모니터링
 # =============================================================================
 async def watch_positions():
-    """WebSocket으로 가격 모니터링"""
+    """WebSocket으로 가격 모니터링 (안정성 개선)"""
     global last_price
     
     max_reconnect_attempts = 5
@@ -447,11 +447,12 @@ async def watch_positions():
             try:
                 url = f"wss://fx-ws.gateio.ws/v4/ws/usdt"
                 
-                # ✅ 수정: ping_timeout=90
+                # ✅ 수정: ping_timeout 120으로 증가
                 async with websockets.connect(
                     url, 
                     ping_interval=60,
-                    ping_timeout=90  # ← 60초에서 90초로 변경!
+                    ping_timeout=120,  # 90 → 120
+                    close_timeout=10
                 ) as ws:
                     subscribe_msg = {
                         "time": int(time.time()),
@@ -466,8 +467,8 @@ async def watch_positions():
                     
                     while True:
                         try:
-                            # ✅ 수정: timeout=120
-                            msg = await asyncio.wait_for(ws.recv(), timeout=120)
+                            # ✅ 수정: timeout 150으로 증가
+                            msg = await asyncio.wait_for(ws.recv(), timeout=150)  # 120 → 150
                             data = json.loads(msg)
                             
                             if data.get("event") == "update" and data.get("channel") == "futures.tickers":
@@ -480,9 +481,9 @@ async def watch_positions():
                         
                         except asyncio.TimeoutError:
                             ping_count += 1
-                            # ✅ 수정: 20번마다 1번
-                            if ping_count % 20 == 1:
-                                log("⚠️ WS", f"No price update for {ping_count * 120}s")
+                            # ✅ 수정: 로그 빈도 감소 (20번마다 → 40번마다)
+                            if ping_count % 40 == 1:
+                                log("⚠️ WS", f"No price update for {ping_count * 150}s")
                             continue
                             
             except Exception as e:
@@ -1519,7 +1520,7 @@ def place_hedge_order(side):
         return None
 
 async def grid_fill_monitor():
-    """WebSocket으로 그리드 체결 및 TP 체결 모니터링"""
+    """WebSocket으로 그리드 체결 및 TP 체결 모니터링 (안정성 개선)"""
     global last_grid_time, idle_entry_count
     
     uri = f"wss://fx-ws.gateio.ws/v4/ws/{SETTLE}"
@@ -1527,11 +1528,12 @@ async def grid_fill_monitor():
     
     while True:
         try:
-            # ✅ 수정: ping_timeout=90
+            # ✅ 수정: ping_timeout 120으로 증가
             async with websockets.connect(
                 uri, 
                 ping_interval=60,
-                ping_timeout=90  # ← 60초에서 90초로 변경!
+                ping_timeout=120,  # 90 → 120
+                close_timeout=10
             ) as ws:
                 auth_msg = {
                     "time": int(time.time()),
@@ -1546,8 +1548,8 @@ async def grid_fill_monitor():
                 
                 while True:
                     try:
-                        # ✅ 수정: timeout=120
-                        msg = await asyncio.wait_for(ws.recv(), timeout=120)
+                        # ✅ 수정: timeout 150으로 증가
+                        msg = await asyncio.wait_for(ws.recv(), timeout=150)  # 120 → 150
                         data = json.loads(msg)
                         
                         if data.get("event") == "update" and data.get("channel") == "futures.orders":
@@ -1599,7 +1601,7 @@ async def grid_fill_monitor():
                                 # 그리드 체결 시
                                 elif not is_reduce_only:
                                     side = "long" if size > 0 else "short"
-                                    log("🔥 GRID FILLED", f"{side.UPPER()} @ {price:.4f}")
+                                    log("🔥 GRID FILLED", f"{side.upper()} @ {price:.4f}")
                                     
                                     update_event_time()
                                     
@@ -1640,9 +1642,9 @@ async def grid_fill_monitor():
                     
                     except asyncio.TimeoutError:
                         ping_count += 1
-                        # ✅ 수정: 20번마다 1번
-                        if ping_count % 20 == 1:
-                            log("⚠️ WS", f"No order update for {ping_count * 120}s")
+                        # ✅ 수정: 로그 빈도 감소 (20번마다 → 40번마다)
+                        if ping_count % 40 == 1:
+                            log("⚠️ WS", f"No order update for {ping_count * 150}s")
                         continue
         
         except Exception as e:
@@ -1848,6 +1850,57 @@ def idle_monitor():
         except Exception as e:
             log("❌", f"Idle monitor error: {e}")
             time.sleep(10)
+
+def periodic_health_check():
+    """5분마다 포지션/주문 상태 검증 및 복구"""
+    while True:
+        try:
+            time.sleep(300)  # 5분마다 실행
+            
+            log("🔍 HEALTH", "Starting periodic health check...")
+            
+            # 1. 포지션 동기화
+            sync_position()
+            
+            # 2. 현재 주문 확인
+            try:
+                orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
+                grid_count = len([o for o in orders if not o.is_reduce_only])
+                tp_count = len([o for o in orders if o.is_reduce_only])
+                
+                log("🔍 ORDERS", f"Grid: {grid_count}, TP: {tp_count}")
+                
+                with position_lock:
+                    long_size = position_state[SYMBOL]["long"]["size"]
+                    short_size = position_state[SYMBOL]["short"]["size"]
+                
+                # 3. 포지션은 있는데 TP가 없는 경우
+                if (long_size > 0 or short_size > 0) and tp_count == 0:
+                    log("⚠️ HEALTH", "Position exists but no TP orders → Creating TP")
+                    refresh_all_tp_orders()
+                
+                # 4. 롱/숏 모두 있는데 그리드가 있는 경우
+                if long_size > 0 and short_size > 0 and grid_count > 0:
+                    log("⚠️ HEALTH", "Both positions exist but grid orders found → Cancelling grid")
+                    cancel_grid_only()
+                
+                # 5. 롱/숏 중 하나만 있는데 그리드가 없는 경우
+                if (long_size > 0) != (short_size > 0) and grid_count == 0:
+                    log("⚠️ HEALTH", "Single position but no grid → Creating grid")
+                    current_price = get_current_price()
+                    if current_price > 0:
+                        global last_grid_time
+                        last_grid_time = 0
+                        initialize_grid(current_price)
+                
+                log("✅ HEALTH", "Health check complete")
+                
+            except Exception as e:
+                log("❌ HEALTH", f"Health check error: {e}")
+                
+        except Exception as e:
+            log("❌ HEALTH", f"Health check thread error: {e}")
+            time.sleep(60)
 
 
 # =============================================================================
@@ -2055,8 +2108,8 @@ if __name__ == '__main__':
         log("  ", "- API_SECRET")
         log("  ", "- SYMBOL (optional, default: ONDO_USDT)")
         exit(1)
-
-    update_event_time()  # ← 추가
+    
+    update_event_time()  # ← 기존
     
     # 모든 모니터링 스레드 시작
     threading.Thread(target=update_balance_thread, daemon=True).start()
@@ -2065,11 +2118,14 @@ if __name__ == '__main__':
     threading.Thread(target=position_monitor, daemon=True).start()
     threading.Thread(target=start_grid_monitor, daemon=True).start()
     threading.Thread(target=tp_monitor, daemon=True).start()
-    threading.Thread(target=idle_monitor, daemon=True).start()  # ← 추가 필요
+    threading.Thread(target=idle_monitor, daemon=True).start()
+    threading.Thread(target=periodic_health_check, daemon=True).start()  # ✅ 추가
     
     log("✅ THREADS", "All monitoring threads started")
     log("🌐 FLASK", "Starting server on port 8080...")
     log("📊 OBV MACD", "Self-calculating from 1min candles")
     log("📨 WEBHOOK", "Optional: TradingView webhook at /webhook")
+    log("🔍 HEALTH", "Health check every 5 minutes")  # ✅ 추가
     
     app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
+
