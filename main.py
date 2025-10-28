@@ -981,6 +981,9 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
 
 def refresh_all_tp_orders():
     """TP 주문 새로 생성"""
+    # ✅ 추가: 기존 TP 먼저 취소!
+    cancel_tp_only()
+    
     try:
         # 기존 TP 취소
         orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
