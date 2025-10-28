@@ -801,9 +801,12 @@ def initialize_grid(current_price):
                 place_grid_order("long", long_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)
             return
         
-        # 롱/숏 모두 있으면 그리드 생성 안 함, TP 확인 후 없으면 생성
+        # ✅ 수정: 롱/숏 모두 있으면 그리드 강제 취소 + TP 확인
         if long_size > 0 and short_size > 0:
             log("ℹ️ GRID", "Both positions exist → Skip grid creation")
+            
+            # ✅ 추가: 남아있는 그리드 강제 취소!
+            cancel_grid_only()
             
             try:
                 orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
@@ -1481,7 +1484,7 @@ async def grid_fill_monitor():
                     "time": int(time.time()),
                     "channel": "futures.orders",
                     "event": "subscribe",
-                    "payload": [API_KEY, SECRET_KEY, SYMBOL]
+                    "payload": [API_KEY, API_SECRET, SYMBOL]  # ← API_SECRET으로 수정
                 }
                 await ws.send(json.dumps(auth_msg))
                 log("⚡ WS", "Connected to WebSocket (attempt 1)")
@@ -1783,7 +1786,11 @@ def idle_monitor():
             log("❌", f"Idle monitor error: {e}")
             time.sleep(10)
 
-
+def start_grid_monitor():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(grid_fill_monitor())
+    
 # =============================================================================
 # Flask 엔드포인트
 # =============================================================================
@@ -1992,7 +1999,7 @@ if __name__ == '__main__':
     threading.Thread(target=fetch_kline_thread, daemon=True).start()
     threading.Thread(target=start_websocket, daemon=True).start()
     threading.Thread(target=position_monitor, daemon=True).start()
-    threading.Thread(target=grid_fill_monitor, daemon=True).start()
+     threading.Thread(target=start_grid_monitor, daemon=True).start()
     threading.Thread(target=tp_monitor, daemon=True).start()
     threading.Thread(target=idle_monitor, daemon=True).start()  # ← 추가 필요
     
