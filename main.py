@@ -1770,7 +1770,7 @@ def track_entry(side, qty, price, entry_type, tp_id=None):
 def full_refresh(event_type, skip_grid=False):
     """
     시스템 새로고침
-    skip_grid=True: TP만 생성하고 그리드는 skip (TP 체결 시 사용)
+    skip_grid=False
     """
     log_event_header(f"FULL REFRESH: {event_type}")
     
