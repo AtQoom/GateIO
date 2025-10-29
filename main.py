@@ -948,156 +948,99 @@ def cancel_stale_orders():
     except Exception as e:
         log("❌", f"Cancel stale orders error: {e}")
 
-def initialize_grid(current_price):
-    """그리드 주문 생성 (중복 방지 강화)"""
+def initialize_grid(current_price=None):
+    """그리드 주문 생성 (양방향 동시)"""
+    
     global last_grid_time
     
-    # ✅ Lock으로 동시 실행 방지
+    # 1. Lock 체크
     if not initialize_grid_lock.acquire(blocking=False):
         log("⏸️ GRID", "Already running → Skipping")
         return
     
     try:
-        # ✅ 디버깅 로그
-        log("🔍 DEBUG", f"initialize_grid called at {current_price:.4f}")
-        
-        # ✅ 현재 그리드 상태 로그
-        if SYMBOL in grid_orders:
-            long_grids = len(grid_orders[SYMBOL].get("long", []))
-            short_grids = len(grid_orders[SYMBOL].get("short", []))
-            log("🔍 DEBUG", f"Current grids: Long={long_grids}, Short={short_grids}")
-        
         now = time.time()
         
-        # ✅ 시간 체크 강화 (10초 → 3초)
+        # 2. 시간 체크 (3초 이내 재호출 방지)
         if now - last_grid_time < 3:
             log("⏸️ GRID", f"Too soon ({now - last_grid_time:.1f}s) → Skipping")
             return
         
         last_grid_time = now
         
+        # 3. 가격 확인
+        if current_price is None or current_price == 0:
+            current_price = get_current_price()
+        
+        if current_price == 0:
+            log("❌", "Cannot get current price")
+            return
+        
+        log("🔸 DEBUG", f"initialize_grid called at {current_price}")
+        
+        # 4. 포지션 동기화
         sync_position()
         
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
         
-        # 양방향 포지션 체크
+        log("🔸 DEBUG", f"Current grids: Long={long_size}, Short={short_size}")
+        
+        # 5. 양방향 포지션 체크
         if long_size > 0 and short_size > 0:
             log("ℹ️ GRID", "Both positions exist → Canceling grids")
-            cancel_grid_only()  # ✅ 그리드 취소
+            cancel_grid_only()
             return
         
-        # 단일 포지션 또는 포지션 없음
-        if long_size == 0 and short_size == 0:
-            log("🔄 GRID", "No position → Creating both side grids")
-        else:
-            log("🔄 GRID", f"Single position → Creating grids (Long: {long_size}, Short: {short_size})")
+        # 6. OBV MACD 가져오기
+        obv_display = get_obv_macd_value()
         
-        # 최대 한도 체크
+        # 7. 수량 계산
         with balance_lock:
-            balance = account_balance
+            max_value = account_balance * MAX_POSITION_RATIO
         
-        max_value = Decimal(str(balance)) * MAX_POSITION_RATIO
+        base_qty_long = int(max_value * BASE_RATIO / Decimal(str(current_price)))
+        base_qty_short = int(max_value * BASE_RATIO / Decimal(str(current_price)))
         
-        long_value = Decimal(str(long_size)) * Decimal(str(current_price))
-        short_value = Decimal(str(short_size)) * Decimal(str(current_price))
+        # OBV MACD 가중치
+        obv_abs = abs(obv_display)
+        obv_multiplier = Decimal(str(obv_abs * 0.10))  # 10% 가중
         
-        if long_value >= max_value or short_value >= max_value:
-            log("🚫 GRID", f"Max position reached (Long: ${float(long_value):.2f}, Short: ${float(short_value):.2f}) → No grid")
-            return
+        if obv_display > 0:
+            base_qty_long = int(base_qty_long * (Decimal("1") + obv_multiplier))
+        elif obv_display < 0:
+            base_qty_short = int(base_qty_short * (Decimal("1") + obv_multiplier))
         
-        # 임계값 확인
-        threshold_value = Decimal(str(balance)) * THRESHOLD_RATIO
+        long_qty = max(1, base_qty_long)
+        short_qty = max(1, base_qty_short)
         
-        above_threshold_long = long_value >= threshold_value
-        above_threshold_short = short_value >= threshold_value
+        log("🔰 QUANTITY", f"Both sides: {long_qty} (OBV={obv_display}, x{float(obv_multiplier):.2f})")
         
-        # 주력 포지션 결정
-        main_side = None
-        main_side_quantity = Decimal("0")
+        # 8. 가격 계산
+        price_dec = Decimal(str(current_price))
+        long_price = price_dec * (Decimal("1") - GRID_GAP_PCT)
+        short_price = price_dec * (Decimal("1") + GRID_GAP_PCT)
         
-        if above_threshold_long or above_threshold_short:
-            with position_lock:
-                if long_size > short_size:
-                    main_side = "long"
-                    main_side_quantity = position_state[SYMBOL]["long"]["size"]
-                elif short_size > long_size:
-                    main_side = "short"
-                    main_side_quantity = position_state[SYMBOL]["short"]["size"]
-            
-            log("🚫 ASYMMETRIC", f"Above threshold | Main: {main_side.upper() if main_side else 'none'}")
-            
-            # 임계값 초과 시 수량 계산
-            with balance_lock:
-                base_qty = int(Decimal(str(balance)) * BASE_RATIO)
-            
-            if main_side == "long":
-                # 주력이 롱
-                long_qty_proportional = int(Decimal(str(main_side_quantity)) * POSITION_SCALE_RATIO)
-                long_qty = max(base_qty, long_qty_proportional)
-                
-                short_qty = int(Decimal(str(main_side_quantity)) * COUNTER_RATIO)
-                if short_qty < 1:
-                    short_qty = 1
-                
-                log("📊 POSITION SCALE", f"Main qty: {long_qty} (base: {base_qty}, scale 20%: {long_qty_proportional})")
-                log("📊 POSITION SCALE", f"Counter qty: {short_qty} (30% of {main_side_quantity})")
-                
-            elif main_side == "short":
-                # 주력이 숏
-                long_qty = int(Decimal(str(main_side_quantity)) * COUNTER_RATIO)
-                if long_qty < 1:
-                    long_qty = 1
-                
-                short_qty_proportional = int(Decimal(str(main_side_quantity)) * POSITION_SCALE_RATIO)
-                short_qty = max(base_qty, short_qty_proportional)
-                
-                log("📊 POSITION SCALE", f"Counter qty: {long_qty} (30% of {main_side_quantity})")
-                log("📊 POSITION SCALE", f"Main qty: {short_qty} (base: {base_qty}, scale 20%: {short_qty_proportional})")
-            else:
-                # 주력 없음
-                long_qty = base_qty
-                short_qty = base_qty
-        else:
-            # 임계값 이전: OBV MACD 기반 수량
-            obv_macd_value = get_obv_macd_value()
-            obv_weight = calculate_obv_macd_weight(float(obv_macd_value) * 1000)
-            
-            with balance_lock:
-                base_size = int(Decimal(str(balance)) * BASE_RATIO)
-            
-            weighted_qty = int(Decimal(str(base_size)) * Decimal(str(obv_weight)))
-            long_qty = max(1, weighted_qty)
-            short_qty = max(1, weighted_qty)
-            
-            log("🔄 SYMMETRIC", f"Below threshold | Weight: {int(obv_weight*100)}%")
-            log("📊 QUANTITY", f"Both sides: {long_qty} (OBV:{obv_macd_value:.1f}, x{obv_weight:.2f})")
+        long_price = float(long_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN))
+        short_price = float(short_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN))
         
-        # 그리드 가격 계산
-        gap = GRID_GAP_PCT
-        
-        long_price = current_price * (Decimal("1") - gap)
-        short_price = current_price * (Decimal("1") + gap)
-        
-        # 정밀도 조정
-        long_price = adjust_price_precision(long_price)
-        short_price = adjust_price_precision(short_price)
-        
-        log("🔄 GRID INIT", f"Price: {current_price:.4f}")
-        log("🔄 OBV MACD", f"Value: {get_obv_macd_value():.2f}")
-        
-        # 포지션 잠금 확인
+        # 9. Lock 상태 확인
         long_locked = long_size > 0
         short_locked = short_size > 0
         
-        # 그리드 주문 생성
-        grid_orders[SYMBOL] = {"long": [], "short": []}
+        # 10. 그리드 생성 (양방향 동시!)
+        log("📊 GRID", f"Single position → Creating grids (Long: {long_qty}, Short: {short_qty})")
+        log("🔰 SYMMETRIC", f"Below threshold | Weight: 10%")
+        log("🔰 QUANTITY", f"Both sides: {long_qty} (OBV={obv_display:.1f}, x{float(obv_multiplier):.2f})")
         
+        # ✅ 변수 초기화
+        gridorders[SYMBOL]["long"] = []
+        gridorders[SYMBOL]["short"] = []
         created_long = False
         created_short = False
         
-        # 롱 그리드
+        # 롱 그리드 생성
         if not long_locked:
             try:
                 order = FuturesOrder(
@@ -1108,7 +1051,7 @@ def initialize_grid(current_price):
                 )
                 result = api.create_futures_order(SETTLE, order)
                 
-                grid_orders[SYMBOL]["long"].append({
+                gridorders[SYMBOL]["long"].append({
                     "id": result.id,
                     "price": long_price,
                     "size": long_qty
@@ -1120,7 +1063,7 @@ def initialize_grid(current_price):
             except GateApiException as e:
                 log("❌", f"LONG grid order error: {e}")
         
-        # 숏 그리드
+        # 숏 그리드 생성
         if not short_locked:
             try:
                 order = FuturesOrder(
@@ -1131,7 +1074,7 @@ def initialize_grid(current_price):
                 )
                 result = api.create_futures_order(SETTLE, order)
                 
-                grid_orders[SYMBOL]["short"].append({
+                gridorders[SYMBOL]["short"].append({
                     "id": result.id,
                     "price": short_price,
                     "size": short_qty
@@ -1144,9 +1087,9 @@ def initialize_grid(current_price):
                 log("❌", f"SHORT grid order error: {e}")
         
         if created_long or created_short:
-            log("✅ GRID", f"Grid created (Long: {created_long}, Short: {created_short})")
+            log("✅ GRID", f"Grid created! (Long: {created_long}, Short: {created_short})")
         else:
-            log("⚪ GRID", "No grids created (positions locked or errors)")
+            log("⚠️ GRID", "No grids created (positions locked or errors)")
             
     finally:
         initialize_grid_lock.release()
