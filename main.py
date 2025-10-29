@@ -1129,7 +1129,7 @@ def initialize_grid(current_price=None):
         created_long = False
         created_short = False
         
-        # 롱 그리드 생성
+        # ✅ 롱 그리드 생성
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
@@ -1140,21 +1140,24 @@ def initialize_grid(current_price=None):
             )
             result = api.create_futures_order(SETTLE, order)
             
+            # ✅ grid_orders에 저장 (is_counter 포함!)
+            is_counter_long = short_size > long_size  # 숏이 더 크면 롱은 비주력
+            
             grid_orders[SYMBOL]["long"].append({
                 "order_id": result.id,
                 "price": long_price,
                 "qty": long_qty,
-                "is_counter": False,
-                "base_qty": base_qty_long
+                "is_counter": is_counter_long,
+                "base_qty": int(base_value / current_price_dec)
             })
             
-            log("[✅ GRID]", f"LONG {long_qty} @ {long_price:.4f} (ID: {result.id})")
+            log("[✅ GRID]", f"LONG {long_qty} @ {long_price:.4f} (ID: {result.id}, Counter: {is_counter_long})")
             created_long = True
             
         except GateApiException as e:
             log("[❌]", f"LONG grid error: {e}")
         
-        # 숏 그리드 생성
+        # ✅ 숏 그리드 생성
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
@@ -1165,15 +1168,18 @@ def initialize_grid(current_price=None):
             )
             result = api.create_futures_order(SETTLE, order)
             
+            # ✅ grid_orders에 저장 (is_counter 포함!)
+            is_counter_short = long_size > short_size  # 롱이 더 크면 숏은 비주력
+            
             grid_orders[SYMBOL]["short"].append({
                 "order_id": result.id,
                 "price": short_price,
                 "qty": short_qty,
-                "is_counter": False,
-                "base_qty": base_qty_short
+                "is_counter": is_counter_short,
+                "base_qty": int(base_value / current_price_dec)
             })
             
-            log("[✅ GRID]", f"SHORT {short_qty} @ {short_price:.4f} (ID: {result.id})")
+            log("[✅ GRID]", f"SHORT {short_qty} @ {short_price:.4f} (ID: {result.id}, Counter: {is_counter_short})")
             created_short = True
             
         except GateApiException as e:
@@ -1229,16 +1235,20 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
             })
             log("[📝 TRACKED]", f"{side.upper()} grid {grid_qty} @ {grid_price:.4f} (MAIN, above threshold)")
         
-        # 3. 헷징 수량 계산
+        # ✅ 3. 헷징 수량 계산 (수정됨!)
         if was_counter:
             # 비주력 그리드 체결 시: max(기본 수량, 주력 × 10%)
-            hedge_qty = max(base_qty, int(main_size * 0.1))
-            hedge_side = side
+            other_side = get_counter_side(counter_side)
+            with position_lock:
+                other_size = position_state[SYMBOL][other_side]["size"]
+            
+            hedge_qty = max(base_qty, int(other_size * 0.1))
+            hedge_side = side  # ✅ 비주력 그리드 체결 → 비주력에 헷징!
             log("[🔄 HEDGE]", f"Counter grid filled → Main hedge: {hedge_side.upper()} {hedge_qty} (OBV:{obv_display:.1f})")
         else:
-            # 주력 그리드 체결 시: 기본 수량으로 헷징
+            # 주력 그리드 체결 시: 기본 수량으로 반대 방향 헷징
             hedge_qty = base_qty
-            hedge_side = counter_side
+            hedge_side = counter_side  # ✅ 주력 그리드 체결 → 비주력으로 헷징!
             log("[🔄 HEDGE]", f"Main grid filled → Counter hedge: {hedge_side.upper()} {hedge_qty} (base={base_qty})")
         
         # 4. 헷징 주문 실행
