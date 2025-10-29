@@ -2183,18 +2183,84 @@ def position_monitor():
                 long_price = position_state[SYMBOL]["long"]["price"]
                 short_price = position_state[SYMBOL]["short"]["price"]
             
-            # 포지션 변경 감지
+            # ✅ 포지션 변경 감지 + 그리드 체결 처리
             if long_size != prev_long_size or short_size != prev_short_size:
                 if prev_long_size != Decimal("-1"):
                     log("🔄 CHANGE", f"Long {prev_long_size}→{long_size} | Short {prev_short_size}→{short_size}")
+                    
+                    # ✅ 그리드 체결 감지 (포지션 증가)
+                    long_increased = long_size > prev_long_size
+                    short_increased = short_size > prev_short_size
+                    
+                    if long_increased or short_increased:
+                        side = "long" if long_increased else "short"
+                        increased_qty = int(abs(long_size - prev_long_size)) if long_increased else int(abs(short_size - prev_short_size))
+                        
+                        log("[🔸 DEBUG]", f"{side.upper()} increased by {increased_qty}")
+                        
+                        # grid_orders에서 정보 찾기
+                        grid_info = None
+                        if SYMBOL in grid_orders and side in grid_orders[SYMBOL]:
+                            for grid in grid_orders[SYMBOL][side]:
+                                if grid.get("qty") == increased_qty:
+                                    grid_info = grid
+                                    log("[🔸 DEBUG]", f"Found matching grid: {grid}")
+                                    break
+                        
+                        if grid_info:
+                            # 그리드 정보 있음 → 헷징 호출
+                            grid_price = grid_info.get("price", 0)
+                            grid_qty = grid_info.get("qty", increased_qty)
+                            was_counter = grid_info.get("is_counter", False)
+                            base_qty = grid_info.get("base_qty", 1)
+                            
+                            log("[⚫ GRID FILLED]", f"{side.upper()} {grid_qty} @ {grid_price:.4f}")
+                            
+                            # 헷징 스레드 시작
+                            threading.Thread(
+                                target=hedge_after_grid_fill,
+                                args=(side, grid_price, grid_qty, was_counter, base_qty),
+                                daemon=True
+                            ).start()
+                        else:
+                            # grid_info 없음 → 기본값으로 처리
+                            log("[⚠️ GRID]", f"{side.upper()} increased but no grid info → Using defaults")
+                            
+                            # 주력/비주력 판단
+                            if side == "long":
+                                was_counter = short_size > long_size
+                            else:
+                                was_counter = long_size > short_size
+                            
+                            with balance_lock:
+                                current_price = get_current_price()
+                                if current_price > 0:
+                                    base_qty = int(account_balance * BASE_RATIO / Decimal(str(current_price)))
+                                else:
+                                    base_qty = 1
+                            
+                            base_qty = max(1, base_qty)
+                            
+                            with position_lock:
+                                grid_price = position_state[SYMBOL][side]["price"]
+                            
+                            log("[🔸 DEBUG]", f"Defaults: counter={was_counter}, base={base_qty}, price={grid_price:.4f}")
+                            
+                            # 헷징 스레드 시작
+                            threading.Thread(
+                                target=hedge_after_grid_fill,
+                                args=(side, float(grid_price), increased_qty, was_counter, base_qty),
+                                daemon=True
+                            ).start()
+                
                 prev_long_size = long_size
                 prev_short_size = short_size
             
             with balance_lock:
-                balance = account_balance  # ← INITIAL_BALANCE → account_balance로 수정
+                balance = account_balance
             
-            threshold = balance * THRESHOLD_RATIO  # account_balance 기준
-            max_value = balance * MAX_POSITION_RATIO  # account_balance 기준
+            threshold = balance * THRESHOLD_RATIO
+            max_value = balance * MAX_POSITION_RATIO
             long_value = long_price * long_size
             short_value = short_price * short_size
             
@@ -2238,7 +2304,7 @@ def position_monitor():
                     counter_position_snapshot[SYMBOL]["short"] = Decimal("0")
                     post_threshold_entries[SYMBOL]["short"].clear()
                     log("✅ CLEARED", "Short tracking data reset")
-
+        
         except Exception as e:
             log("❌", f"Position monitor error: {e}")
             time.sleep(5)
