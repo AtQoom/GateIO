@@ -801,21 +801,30 @@ def place_grid_order(side, price, qty, is_counter=False, base_qty=2):
         return None
 
 def initialize_grid(current_price):
-    """현재가 기준 그리드 생성 (포지션 비례 진입 적용)"""
     global last_grid_time
+    
+    # ✅ 추가
+    log("🔍 DEBUG", f"initialize_grid called at {current_price:.4f}")
+    
+    # ✅ 추가: 현재 그리드 상태 로그
+    if SYMBOL in grid_orders:
+        long_grids = len(grid_orders[SYMBOL].get("long", []))
+        short_grids = len(grid_orders[SYMBOL].get("short", []))
+        log("🔍 DEBUG", f"Current grids: Long={long_grids}, Short={short_grids}")
     
     now = time.time()
     if now - last_grid_time < 10:
         return
     last_grid_time = now
     
-    # 양방향 포지션 체크 강화
+    # 양방향 포지션 체크
     with position_lock:
         long_size = position_state[SYMBOL]["long"]["size"]
         short_size = position_state[SYMBOL]["short"]["size"]
     
     if long_size > 0 and short_size > 0:
-        log("ℹ️ GRID", "Both positions exist → Skipping grid creation")
+        log("ℹ️ GRID", "Both positions exist → Canceling grids")
+        cancel_grid_only()  # ✅ 추가!
         return
     
     log("🔍 GRID INIT", f"Price: {current_price:.4f}")
