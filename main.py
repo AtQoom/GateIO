@@ -835,10 +835,10 @@ def validate_strategy_consistency():
         grid_count = 0
         
         try:
-            # ✅ 수정: status 파라미터 제거 (기본값 'open' 사용)
-            orders = api.list_futures_orders(SETTLE, SYMBOL)
+            # ✅ 수정: 명시적 키워드 인자
+            orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
             for o in orders:
-                if o.status == 'open' and o.reduce_only == False:
+                if o.reduce_only == False:
                     grid_count += 1
         except Exception as e:
             log("❌", f"List orders error: {e}")
@@ -871,9 +871,9 @@ def validate_strategy_consistency():
         # ✅ 검증 4: TP 수량 불일치
         tp_orders_list = []
         try:
-            # ✅ 수정: status 파라미터 제거
-            orders = api.list_futures_orders(SETTLE, SYMBOL)
-            tp_orders_list = [o for o in orders if o.status == 'open' and o.reduce_only == True]
+            # ✅ 수정: 명시적 키워드 인자
+            orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
+            tp_orders_list = [o for o in orders if o.reduce_only == True]
         except:
             pass
         
@@ -921,9 +921,8 @@ def emergency_close(side, size):
 def remove_duplicate_orders():
     """중복 주문 제거 (동일 가격/수량)"""
     try:
-        # ✅ 수정: status 파라미터 제거
-        orders = api.list_futures_orders(SETTLE, SYMBOL)
-        orders = [o for o in orders if o.status == 'open']
+        # ✅ 수정: 명시적 키워드 인자
+        orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
         
         seen_orders = {}
         duplicates = []
@@ -952,9 +951,8 @@ def remove_duplicate_orders():
 def cancel_stale_orders():
     """24시간 이상 오래된 주문 취소"""
     try:
-        # ✅ 수정: status 파라미터 제거
-        orders = api.list_futures_orders(SETTLE, SYMBOL)
-        orders = [o for o in orders if o.status == 'open']
+        # ✅ 수정: 명시적 키워드 인자
+        orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
         now = time.time()
         
         for o in orders:
@@ -2231,7 +2229,7 @@ def periodic_health_check():
             time.sleep(30)
             log("🔍 HEALTH", "Starting comprehensive health check...")
             
-            # 1. 기존: 포지션 동기화
+            # 1. 포지션 동기화
             sync_position()
             
             with position_lock:
@@ -2242,11 +2240,10 @@ def periodic_health_check():
                 log("🔍 HEALTH", "No position")
                 continue
             
-            # 2. 기존: 주문 상태 확인
+            # 2. 주문 상태 확인
             try:
-                # ✅ 수정: status 파라미터 제거
-                orders = api.list_futures_orders(SETTLE, SYMBOL)
-                orders = [o for o in orders if o.status == 'open']
+                # ✅ 수정: 명시적 키워드 인자
+                orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
                 
                 grid_count = sum(1 for o in orders if not o.reduce_only)
                 tp_count = sum(1 for o in orders if o.reduce_only)
@@ -2257,7 +2254,7 @@ def periodic_health_check():
                 log("❌", f"List orders error: {e}")
                 continue
             
-            # 3. 기존: TP 확인 및 보완
+            # 3. TP 확인 및 보완
             if long_size > 0 or short_size > 0:
                 tp_orders_list = [o for o in orders if o.reduce_only]
                 
@@ -2275,7 +2272,7 @@ def periodic_health_check():
                     time.sleep(0.5)
                     refresh_all_tp_orders()
             
-            # 4. 기존: 양방향 포지션 + 그리드 존재 체크
+            # 4. 양방향 포지션 + 그리드 존재 체크
             if long_size > 0 and short_size > 0 and grid_count >= 2:
                 log("🔧 HEALTH", f"Both positions with {grid_count} grids (should be 0) → Cancelling")
                 time.sleep(0.5)
