@@ -800,139 +800,163 @@ def place_grid_order(side, price, qty, is_counter=False, base_qty=2):
         return None
 
 def initialize_grid(current_price):
-    """그리드 초기화 (안전한 버전)"""
+    """현재가 기준 그리드 생성 (양방향 포지션 체크 강화)"""
     global last_grid_time
     
-    # 쿨다운 체크
-    if time.time() - last_grid_time < 5:
+    now = time.time()
+    if now - last_grid_time < 10:
         return
-    last_grid_time = time.time()
+    last_grid_time = now
     
-    try:
-        # ✅ 추가: position_state 초기화 확인
-        if SYMBOL not in position_state:
-            log("⚠️ GRID", f"Position state not initialized for {SYMBOL}")
-            return
+    # ✅ 추가: 양방향 포지션 체크 강화
+    with position_lock:
+        long_size = position_state[SYMBOL]["long"]["size"]
+        short_size = position_state[SYMBOL]["short"]["size"]
+    
+    if long_size > 0 and short_size > 0:
+        log("ℹ️ GRID", "Both positions exist → Skipping grid creation")
+        return
+    
+    log("🔍 GRID INIT", f"Price: {current_price:.4f}")
+    
+    with balance_lock:
+        bal = account_balance
+    
+    with position_lock:
+        long_value = Decimal(str(position_state[SYMBOL]["long"]["size"])) * Decimal(str(current_price))
+        short_value = Decimal(str(position_state[SYMBOL]["short"]["size"])) * Decimal(str(current_price))
+    
+    max_value = Decimal(str(bal)) * MAX_POSITION_RATIO
+    
+    long_locked = max_position_locked.get("long", False)
+    short_locked = max_position_locked.get("short", False)
+    
+    if long_value >= max_value and short_value >= max_value:
+        log("⚠️ LIMIT", f"Both sides max limit reached")
+        return
+    
+    if long_value >= max_value and not long_locked:
+        log("⚠️ EVENT", "MAX POSITION LIMIT")
+        log("⚠️ LIMIT", f"LONG {float(long_value):.2f} >= {float(max_value):.2f}")
+        max_position_locked["long"] = True
+    
+    if short_value >= max_value and not short_locked:
+        log("⚠️ EVENT", "MAX POSITION LIMIT")
+        log("⚠️ LIMIT", f"SHORT {float(short_value):.2f} >= {float(max_value):.2f}")
+        max_position_locked["short"] = True
+    
+    if long_value < max_value and long_locked:
+        log("🔓 UNLOCK", f"LONG {float(long_value):.2f} < {float(max_value):.2f}")
+        max_position_locked["long"] = False
+    
+    if short_value < max_value and short_locked:
+        log("🔓 UNLOCK", f"SHORT {float(short_value):.2f} < {float(max_value):.2f}")
+        max_position_locked["short"] = False
+    
+    with balance_lock:
+        base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
+        if base_qty <= 0:
+            base_qty = 1
+    
+    long_above = is_above_threshold("long")
+    short_above = is_above_threshold("short")
+    main_side = get_main_side()
+    
+    log("🔍 OBV MACD", f"Value: {float(obv_macd_value) * 1000:.2f}")
+    
+    if long_above or short_above:
+        log("🚫 ASYMMETRIC", f"Above threshold | Counter: {int(Decimal(str(main_side_quantity)) * COUNTER_RATIO)} (30%) | Main: {base_qty}")
         
-        if "long" not in position_state[SYMBOL] or "short" not in position_state[SYMBOL]:
-            log("⚠️ GRID", f"Position state incomplete for {SYMBOL}")
-            return
-        
-        with position_lock:
-            long_size = position_state[SYMBOL]["long"]["size"]
-            short_size = position_state[SYMBOL]["short"]["size"]
-            long_price = position_state[SYMBOL]["long"]["price"]
-            short_price = position_state[SYMBOL]["short"]["price"]
-        
-        # 최대 포지션 한도 체크
-        with balance_lock:
-            max_value = account_balance * MAX_POSITION_RATIO
-            base_qty_snapshot = int(Decimal(str(account_balance)) * BASE_RATIO)
-            if base_qty_snapshot <= 0:
-                base_qty_snapshot = 1
-        
-        long_value = long_price * long_size
-        short_value = short_price * short_size
-        
-        # 롱 최대 한도 초과 시 롱 그리드 생성 금지
-        if max_position_locked["long"] or long_value >= max_value:
-            log("🚫 GRID", f"LONG max limit reached (${long_value:.2f} >= ${max_value:.2f})")
-            if long_value >= max_value:
-                max_position_locked["long"] = True
-            if short_size > 0 and short_value < max_value and not max_position_locked["short"]:
-                short_grid_price = current_price * (Decimal("1") + GRID_GAP_PCT)
-                qty = calculate_grid_qty(is_above_threshold=is_above_threshold("short"))
-                place_grid_order("short", short_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)
-            return
-        
-        # 숏 최대 한도 초과 시 숏 그리드 생성 금지
-        if max_position_locked["short"] or short_value >= max_value:
-            log("🚫 GRID", f"SHORT max limit reached (${short_value:.2f} >= ${max_value:.2f})")
-            if short_value >= max_value:
-                max_position_locked["short"] = True
-            if long_size > 0 and long_value < max_value and not max_position_locked["long"]:
-                long_grid_price = current_price * (Decimal("1") - GRID_GAP_PCT)
-                qty = calculate_grid_qty(is_above_threshold=is_above_threshold("long"))
-                place_grid_order("long", long_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)
-            return
-        
-        # ✅ 핵심 수정: 롱/숏 모두 있으면 그리드 강제 취소 + TP 확인
-        if long_size > 0 and short_size > 0:
-            log("ℹ️ GRID", "Both positions exist → Skip grid creation")
-            
-            # ✅ 추가: 남아있는 그리드 강제 취소!
-            cancel_grid_only()
-            
-            try:
-                orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-                tp_orders = [o for o in orders if o.is_reduce_only]
-                
-                if len(tp_orders) == 0:
-                    log("📈 TP", "No TP orders found, creating...")
-                    time.sleep(0.5)
-                    refresh_all_tp_orders()
-                else:
-                    log("ℹ️ TP", f"{len(tp_orders)} TP orders already exist")
-            except Exception as e:
-                log("❌", f"TP check error: {e}")
-            
-            return  # ✅ 여기서 함수 종료!
-        
-        # ✅ 이 아래는 롱 또는 숏 1개만 있을 때 실행됨!
-        cancel_grid_only()
-        
-        long_grid_price = current_price * (Decimal("1") - GRID_GAP_PCT)
-        short_grid_price = current_price * (Decimal("1") + GRID_GAP_PCT)
-        
-        with balance_lock:
-            threshold = account_balance * THRESHOLD_RATIO
-            balance = account_balance
-        
-        long_above = (long_price * long_size >= threshold and long_size > 0)
-        short_above = (short_price * short_size >= threshold and short_size > 0)
-        
-        # OBV MACD 값 가져오기
-        obv_display = float(obv_macd_value) * 1000
-        
-        log("📈 GRID INIT", f"Price: {current_price:.4f}")
-        log("📊 OBV MACD", f"Value: {obv_display:.2f}")
-        
-        if long_above:
-            counter_qty = max(1, int(long_size * COUNTER_RATIO))
-            same_qty = calculate_grid_qty(is_above_threshold=True)
-            weight = BASE_RATIO
-            log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
-            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {base_qty_snapshot}")
-            log("⚗️ ASYMMETRIC", f"Above threshold | Counter: {counter_qty} ({COUNTER_RATIO * 100:.0f}%) | Main: {same_qty}")
-            place_grid_order("short", short_grid_price, counter_qty, is_counter=True, base_qty=base_qty_snapshot)
-            place_grid_order("long", long_grid_price, same_qty, is_counter=False, base_qty=base_qty_snapshot)
-            
-        elif short_above:
-            counter_qty = max(1, int(short_size * COUNTER_RATIO))
-            same_qty = calculate_grid_qty(is_above_threshold=True)
-            weight = BASE_RATIO
-            log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
-            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {base_qty_snapshot}")
-            log("⚗️ ASYMMETRIC", f"Above threshold | Counter: {counter_qty} ({COUNTER_RATIO * 100:.0f}%) | Main: {same_qty}")
-            place_grid_order("long", long_grid_price, counter_qty, is_counter=True, base_qty=base_qty_snapshot)
-            place_grid_order("short", short_grid_price, same_qty, is_counter=False, base_qty=base_qty_snapshot)
-            
+        if main_side == "long":
+            long_qty = base_qty
+            short_qty = int(Decimal(str(main_side_quantity)) * COUNTER_RATIO)
+        elif main_side == "short":
+            long_qty = int(Decimal(str(main_side_quantity)) * COUNTER_RATIO)
+            short_qty = base_qty
         else:
-            qty = calculate_grid_qty(is_above_threshold=False)
-            weight = calculate_obv_macd_weight(obv_display)
-            log("💰 BALANCE", f"Using: ${account_balance:.2f} USDT")
-            log("📊 QUANTITY", f"Base qty calculation: ${account_balance:.2f} * {BASE_RATIO} = {base_qty_snapshot}")
-            log("⚗️ SYMMETRIC", f"Below threshold - OBV MACD based | Weight: {weight}")
-            log("📊 QUANTITY", f"Both sides: {qty} (OBV:{obv_display:.1f}) | Weight: {weight * 100:.0f}%")
-            place_grid_order("long", long_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)
-            place_grid_order("short", short_grid_price, qty, is_counter=False, base_qty=base_qty_snapshot)
+            long_qty = base_qty
+            short_qty = base_qty
+    else:
+        obv_weight = calculate_obv_macd_weight()
+        log("🔄 SYMMETRIC", f"Below threshold | Weight: {int(obv_weight * 100)}%")
+        
+        weighted_qty = int(Decimal(str(base_qty)) * Decimal(str(obv_weight)))
+        if weighted_qty < 1:
+            weighted_qty = 1
+        
+        log("📊 QUANTITY", f"Base qty calculation: {bal:.2f} * {float(BASE_RATIO)} = {base_qty}")
+        log("📊 QUANTITY", f"Both sides: {weighted_qty} (OBV:{float(obv_macd_value) * 1000:.1f}, x{obv_weight})")
+        
+        long_qty = weighted_qty
+        short_qty = weighted_qty
+    
+    grid_orders[SYMBOL] = {"long": [], "short": []}
+    
+    long_price = Decimal(str(current_price)) * (Decimal("1") - GRID_GAP_PCT)
+    long_price = long_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+    
+    short_price = Decimal(str(current_price)) * (Decimal("1") + GRID_GAP_PCT)
+    short_price = short_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+    
+    if not long_locked:
+        order = FuturesOrder(
+            contract=SYMBOL,
+            size=long_qty,
+            price=str(long_price),
+            tif="gtc",
+            close=False
+        )
+        
+        try:
+            result = api.create_futures_order(SETTLE, order)
+            order_id = result.id if (result and hasattr(result, 'id')) else None
             
-    except KeyError as e:
-        log("❌", f"Grid init KeyError: {e} - position_state={position_state}")
-    except Exception as e:
-        log("❌", f"Grid init error: {e}")
-        import traceback
-        log("❌", f"Traceback: {traceback.format_exc()}")
+            if long_above and main_side == "short":
+                is_counter = True
+                log("🚫 GRID", f"Counter(30%) LONG {long_qty} @ {long_price:.4f}")
+            else:
+                is_counter = False
+                log("🚫 GRID", f"Same LONG {long_qty} @ {long_price:.4f}")
+            
+            grid_orders[SYMBOL]["long"].append({
+                "price": float(long_price),
+                "qty": long_qty,
+                "order_id": order_id,
+                "is_counter": is_counter,
+                "base_qty": base_qty
+            })
+        except GateApiException as e:
+            log("❌", f"LONG grid order error: {e}")
+    
+    if not short_locked:
+        order = FuturesOrder(
+            contract=SYMBOL,
+            size=-short_qty,
+            price=str(short_price),
+            tif="gtc",
+            close=False
+        )
+        
+        try:
+            result = api.create_futures_order(SETTLE, order)
+            order_id = result.id if (result and hasattr(result, 'id')) else None
+            
+            if short_above and main_side == "long":
+                is_counter = True
+                log("🚫 GRID", f"Counter(30%) SHORT {short_qty} @ {short_price:.4f}")
+            else:
+                is_counter = False
+                log("🚫 GRID", f"Same SHORT {short_qty} @ {short_price:.4f}")
+            
+            grid_orders[SYMBOL]["short"].append({
+                "price": float(short_price),
+                "qty": short_qty,
+                "order_id": order_id,
+                "is_counter": is_counter,
+                "base_qty": base_qty
+            })
+        except GateApiException as e:
+            log("❌", f"SHORT grid order error: {e}")
 
 def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
     """그리드 체결 후 헤징 + 후속 처리 (포지션 동기화 개선)"""
@@ -1053,13 +1077,12 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
         log("❌", f"Traceback: {traceback.format_exc()}")
 
 def refresh_all_tp_orders():
-    """TP 주문 새로 생성 (즉시 체결 감지 + 중복 방지)"""
-    # ✅ 기존 TP 먼저 취소!
+    """TP 주문 새로 생성 (즉시 체결 감지 + 중복 방지 + 디버깅 강화)"""
     cancel_tp_only()
     
     try:
         average_tp_orders[SYMBOL] = {"long": None, "short": None}
-        instant_tp_triggered = False  # ✅ 추가: 중복 full_refresh 방지
+        instant_tp_triggered = False
         
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
@@ -1069,6 +1092,10 @@ def refresh_all_tp_orders():
         
         log("🎯 TP REFRESH", "Creating TP orders...")
         log_threshold_info()
+        
+        # ✅ 추가: post_threshold_entries 디버깅
+        log("🔍 DEBUG", f"post_threshold_entries LONG: {post_threshold_entries[SYMBOL]['long']}")
+        log("🔍 DEBUG", f"post_threshold_entries SHORT: {post_threshold_entries[SYMBOL]['short']}")
         
         main_side = get_main_side()
         log("🔍 DEBUG", f"main_side={main_side}, long={long_size}, short={short_size}")
@@ -1984,17 +2011,17 @@ def idle_monitor():
             time.sleep(10)
 
 def periodic_health_check():
-    """1분마다 포지션/주문 상태 검증 및 복구"""
+    """30초마다 포지션/주문 상태 검증 및 복구 (WebSocket 독립적)"""
     while True:
         try:
-            time.sleep(60)
+            time.sleep(30)  # ✅ 변경: 60 → 30초
             
             log("🔍 HEALTH", "Starting periodic health check...")
             
             # 1. 포지션 동기화
             success = sync_position()
             if not success:
-                log("❌ HEALTH", "Position sync failed - skipping")
+                log("❌ HEALTH", "Position sync failed - skipping this cycle")
                 continue
             
             # 2. 현재 주문 확인
@@ -2014,41 +2041,37 @@ def periodic_health_check():
                 
                 # 3. 포지션 있는데 TP 없음 또는 TP 수량 불일치
                 if long_size > 0 or short_size > 0:
-                    tp_long_qty = sum(o.size for o in tp_orders_list if o.size < 0)  # TP는 음수
-                    tp_short_qty = sum(o.size for o in tp_orders_list if o.size > 0)  # TP는 양수
-
-                    # TP 수량 불일치 체크
+                    tp_long_qty = sum(abs(o.size) for o in tp_orders_list if o.size < 0)
+                    tp_short_qty = sum(o.size for o in tp_orders_list if o.size > 0)
+                    
                     needs_tp_refresh = (
-                        tp_count == 0 or  # TP 없음
-                        (long_size > 0 and abs(tp_long_qty) != long_size) or  # 롱 TP 수량 불일치
-                        (short_size > 0 and tp_short_qty != short_size)  # 숏 TP 수량 불일치
+                        tp_count == 0 or
+                        (long_size > 0 and tp_long_qty != long_size) or
+                        (short_size > 0 and tp_short_qty != short_size)
                     )
-
-                    if needs_tp_refresh:                  
-                        log("⚠️ HEALTH", f"TP mismatch (Long: {long_size} vs TP {abs(tp_long_qty)}, Short: {short_size} vs TP {tp_short_qty}) → Refreshing TP")
+                    
+                    if needs_tp_refresh:
+                        log("⚠️ HEALTH", f"TP mismatch (Long: {long_size} vs TP {tp_long_qty}, Short: {short_size} vs TP {tp_short_qty}) → Refreshing TP")
                         time.sleep(0.5)
                         refresh_all_tp_orders()
                 
                 # 4. 롱/숏 모두 있는데 그리드 2개 이상
                 if long_size > 0 and short_size > 0 and grid_count >= 2:
-                    log("⚠️ HEALTH", f"Both positions with {grid_count} grids → Cancelling")
+                    log("⚠️ HEALTH", f"Both positions with {grid_count} grids (should be 0) → Cancelling")
                     time.sleep(0.5)
                     cancel_grid_only()
                 
-                # ✅ 수정: 5. 단일 포지션 그리드 복구 (더 적극적)
+                # 5. 단일 포지션 그리드 복구 (더 적극적)
                 single_position = (long_size > 0) != (short_size > 0)
                 if single_position:
-                    # 그리드 주문의 방향 확인
                     has_long_grid = any(o.size > 0 for o in grid_orders_list)
                     has_short_grid = any(o.size < 0 for o in grid_orders_list)
                     
-                    # 정상: 롱 그리드 1개 + 숏 그리드 1개
-                    # 비정상: 그리드 0개, 한쪽만 있음, 3개 이상
                     needs_recreation = (
-                        grid_count == 0 or  # 그리드 없음
-                        grid_count >= 3 or  # 그리드 너무 많음
-                        (grid_count == 1) or  # 그리드 1개만 (정상은 2개)
-                        (not has_long_grid or not has_short_grid)  # 한쪽만 있음
+                        grid_count == 0 or
+                        grid_count >= 3 or
+                        grid_count == 1 or
+                        (not has_long_grid or not has_short_grid)
                     )
                     
                     if needs_recreation:
@@ -2071,7 +2094,7 @@ def periodic_health_check():
                 
         except Exception as e:
             log("❌ HEALTH", f"Health check thread error: {e}")
-            time.sleep(60)
+            time.sleep(30)  # ✅ 변경: 60 → 30초
 
 
 # =============================================================================
