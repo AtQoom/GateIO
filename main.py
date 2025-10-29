@@ -2014,7 +2014,7 @@ def periodic_health_check():
     """30초마다 포지션/주문 상태 검증 및 복구 (WebSocket 독립적)"""
     while True:
         try:
-            time.sleep(30)  # ✅ 변경: 60 → 30초
+            time.sleep(30)
             
             log("🔍 HEALTH", "Starting periodic health check...")
             
@@ -2085,6 +2085,15 @@ def periodic_health_check():
                             time.sleep(0.3)
                             initialize_grid(current_price)
                 
+                # ✅ 추가: 6. 포지션 없고 그리드 없음 → 그리드 생성
+                if long_size == 0 and short_size == 0 and grid_count == 0:
+                    log("⚠️ HEALTH", "No position and no grid → Creating initial grid")
+                    current_price = get_current_price()
+                    if current_price > 0:
+                        last_grid_time = 0
+                        time.sleep(0.5)
+                        initialize_grid(current_price)
+                
                 log("✅ HEALTH", "Health check complete")
                 
             except GateApiException as e:
@@ -2094,7 +2103,7 @@ def periodic_health_check():
                 
         except Exception as e:
             log("❌ HEALTH", f"Health check thread error: {e}")
-            time.sleep(30)  # ✅ 변경: 60 → 30초
+            time.sleep(30)
 
 
 # =============================================================================
