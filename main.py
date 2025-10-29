@@ -864,6 +864,15 @@ def initialize_grid(current_price):
     
     log("🔍 OBV MACD", f"Value: {float(obv_macd_value) * 1000:.2f}")
     
+    # ✅ 추가: main_side_quantity 계산
+    with position_lock:
+        if main_side == "long":
+            main_side_quantity = position_state[SYMBOL]["long"]["size"]
+        elif main_side == "short":
+            main_side_quantity = position_state[SYMBOL]["short"]["size"]
+        else:
+            main_side_quantity = Decimal("0")
+    
     if long_above or short_above:
         log("🚫 ASYMMETRIC", f"Above threshold | Counter: {int(Decimal(str(main_side_quantity)) * COUNTER_RATIO)} (30%) | Main: {base_qty}")
         
@@ -877,7 +886,7 @@ def initialize_grid(current_price):
             long_qty = base_qty
             short_qty = base_qty
     else:
-        obv_weight = calculate_obv_macd_weight()
+        obv_weight = calculate_obv_macd_weight(float(obv_macd_value) * 1000)  # ✅ 수정
         log("🔄 SYMMETRIC", f"Below threshold | Weight: {int(obv_weight * 100)}%")
         
         weighted_qty = int(Decimal(str(base_qty)) * Decimal(str(obv_weight)))
