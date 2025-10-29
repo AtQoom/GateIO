@@ -835,31 +835,32 @@ def validate_strategy_consistency():
         grid_count = 0
         
         try:
-            orders = api.list_futures_orders(SETTLE, SYMBOL, status="open")
+            # ✅ 수정: status 파라미터 제거 (기본값 'open' 사용)
+            orders = api.list_futures_orders(SETTLE, SYMBOL)
             for o in orders:
-                if o.reduce_only == False:  # 그리드 (진입 주문)
+                if o.status == 'open' and o.reduce_only == False:
                     grid_count += 1
         except Exception as e:
             log("❌", f"List orders error: {e}")
             return
         
-        # ✅ 검증 1: 양방향 포지션 + 그리드 존재 (비정상!)
+        # ✅ 검증 1: 양방향 포지션 + 그리드 존재
         if long_size > 0 and short_size > 0 and grid_count > 0:
             log("🚨 INVALID", f"Both positions with {grid_count} grids → Canceling!")
             cancel_grid_only()
         
-        # ✅ 검증 2: 단일 포지션 + 그리드 없음 (비정상!)
+        # ✅ 검증 2: 단일 포지션 + 그리드 없음
         if (long_size > 0 or short_size > 0) and long_size * short_size == 0:
             if grid_count == 0:
                 log("🚨 INVALID", "Single position with no grid → Creating!")
                 time.sleep(0.5)
                 initialize_grid(current_price)
         
-        # ✅ 검증 3: 최대 한도 초과 (긴급 청산!)
+        # ✅ 검증 3: 최대 한도 초과
         with balance_lock:
             max_value = Decimal(str(account_balance)) * MAX_POSITION_RATIO
         
-        if long_value > max_value * Decimal("1.1"):  # 10% 초과
+        if long_value > max_value * Decimal("1.1"):
             log("🚨 EMERGENCY", f"LONG {float(long_value):.2f} > {float(max_value * 1.1):.2f} → Market close!")
             emergency_close("long", long_size)
         
@@ -870,8 +871,9 @@ def validate_strategy_consistency():
         # ✅ 검증 4: TP 수량 불일치
         tp_orders_list = []
         try:
-            orders = api.list_futures_orders(SETTLE, SYMBOL, status="open")
-            tp_orders_list = [o for o in orders if o.reduce_only == True]
+            # ✅ 수정: status 파라미터 제거
+            orders = api.list_futures_orders(SETTLE, SYMBOL)
+            tp_orders_list = [o for o in orders if o.status == 'open' and o.reduce_only == True]
         except:
             pass
         
@@ -919,7 +921,9 @@ def emergency_close(side, size):
 def remove_duplicate_orders():
     """중복 주문 제거 (동일 가격/수량)"""
     try:
-        orders = api.list_futures_orders(SETTLE, SYMBOL, status="open")
+        # ✅ 수정: status 파라미터 제거
+        orders = api.list_futures_orders(SETTLE, SYMBOL)
+        orders = [o for o in orders if o.status == 'open']
         
         seen_orders = {}
         duplicates = []
@@ -948,7 +952,9 @@ def remove_duplicate_orders():
 def cancel_stale_orders():
     """24시간 이상 오래된 주문 취소"""
     try:
-        orders = api.list_futures_orders(SETTLE, SYMBOL, status="open")
+        # ✅ 수정: status 파라미터 제거
+        orders = api.list_futures_orders(SETTLE, SYMBOL)
+        orders = [o for o in orders if o.status == 'open']
         now = time.time()
         
         for o in orders:
@@ -1760,6 +1766,7 @@ def close_counter_on_individual_tp(main_side):
     except Exception as e:
         log("❌", f"Counter close error: {e}")
 
+
 # =============================================================================
 # 상태 추적
 # =============================================================================
@@ -2237,7 +2244,9 @@ def periodic_health_check():
             
             # 2. 기존: 주문 상태 확인
             try:
-                orders = api.list_futures_orders(SETTLE, SYMBOL, status="open")
+                # ✅ 수정: status 파라미터 제거
+                orders = api.list_futures_orders(SETTLE, SYMBOL)
+                orders = [o for o in orders if o.status == 'open']
                 
                 grid_count = sum(1 for o in orders if not o.reduce_only)
                 tp_count = sum(1 for o in orders if o.reduce_only)
