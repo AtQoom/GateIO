@@ -2116,19 +2116,10 @@ def tp_monitor():
                         time.sleep(0.5)
                         sync_position()  # 포지션 동기화
                         
-                        # TP만 생성 (그리드는 skip)
-                        full_refresh("Average_TP", skip_grid=True)
+                        # ✅ 수정: skip_grid=False (그리드도 생성!)
+                        full_refresh("Average_TP", skip_grid=False)
 
                         update_event_time()  # 이벤트 시간 갱신
-                        
-                        # 그리드 재생성
-                        time.sleep(0.5)
-                        current_price = get_current_price()
-                        if current_price > 0:
-                            # last_grid_time 초기화하여 강제 실행
-                            global last_grid_time
-                            last_grid_time = 0
-                            initialize_grid(current_price)
                         
                         break
                 except:
