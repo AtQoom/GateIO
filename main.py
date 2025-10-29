@@ -347,6 +347,21 @@ def calculate_obv_macd():
         log("❌", f"OBV MACD calculation error: {e}")
         return 0
 
+def get_obv_macd_value():
+    """
+    현재 OBV MACD 값 반환
+    - 전역 변수 obv_macd_value 사용
+    - fetch_kline_thread에서 1분마다 자동 업데이트
+    """
+    global obv_macd_value
+    
+    # 값이 0이면 아직 계산 안 됨
+    if obv_macd_value == 0:
+        log("⚠️ OBV", "MACD not calculated yet, returning 0")
+    
+    return obv_macd_value
+
+
 # =============================================================================
 # 잔고 업데이트
 # =============================================================================
