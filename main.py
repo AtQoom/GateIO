@@ -880,6 +880,38 @@ def validate_strategy_consistency():
     except Exception as e:
         log("❌", f"Validation error: {e}")
 
+def is_above_threshold_main_side():
+    """주력 포지션이 임계값을 초과했는지 확인"""
+    try:
+        sync_position()
+        
+        with position_lock:
+            long_size = position_state[SYMBOL]["long"]["size"]
+            short_size = position_state[SYMBOL]["short"]["size"]
+        
+        current_price = get_current_price()
+        if current_price == 0:
+            return False
+        
+        with balance_lock:
+            threshold_value = account_balance * THRESHOLD_RATIO
+        
+        current_price_dec = Decimal(str(current_price))
+        long_value = Decimal(str(long_size)) * current_price_dec
+        short_value = Decimal(str(short_size)) * current_price_dec
+        
+        # 주력 포지션이 임계값 초과 여부
+        if long_value > short_value:
+            return long_value >= threshold_value
+        elif short_value > long_value:
+            return short_value >= threshold_value
+        
+        return False
+        
+    except Exception as e:
+        log("❌", f"is_above_threshold_main_side error: {e}")
+        return False
+
 def emergency_close(side, size):
     """긴급 청산 (최대 한도 초과 시)"""
     try:
@@ -1024,8 +1056,12 @@ def initialize_grid(current_price=None):
         base_qty_short = int(base_value / current_price_dec)
         
         # OBV MACD 가중치 (임계값 이전만)
-        is_above_threshold = is_above_threshold_main_side()
-        
+        try:
+            is_above_threshold = is_above_threshold_main_side()
+        except Exception as e:
+            log("⚠️", f"Threshold check error: {e}, assuming below threshold")
+            is_above_threshold = False
+            
         if not is_above_threshold:
             obv_abs = abs(obv_display)
             if obv_abs <= 5:
@@ -1065,7 +1101,7 @@ def initialize_grid(current_price=None):
         long_qty = max(1, base_qty_long)
         short_qty = max(1, base_qty_short)
         
-        log("🔰 QUANTITY", f"Long: {long_qty}, Short: {short_qty} (OBV={obv_display:.1f})")
+        log("🔰 QUANTITY", f"Long: {long_qty}, Short: {short_qty} (OBV={obv_display:.1f}, Threshold={is_above_threshold})")
         
         # 9. 가격 계산
         price_dec = Decimal(str(current_price))
