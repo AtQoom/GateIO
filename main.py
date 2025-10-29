@@ -587,29 +587,44 @@ def get_api():
 # 주문 취소
 # =============================================================================
 def cancel_all_orders():
+    """모든 오픈 주문 취소 + grid_orders 초기화"""
     try:
         orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-        if not orders: 
+        
+        if not orders:
+            log("[ℹ️]", "No open orders to cancel")
             return
-        log("🗑️ CANCEL", f"{len(orders)} orders")
+        
+        log("[❌ CANCEL]", f"Cancelling {len(orders)} orders...")
+        
+        cancelled_count = 0
         for order in orders:
             try:
                 api.cancel_futures_order(SETTLE, order.id)
-                time.sleep(0.1)
+                cancelled_count += 1
+                time.sleep(0.05)  # API 제한 고려
             except GateApiException as e:
-                if "ORDER_NOT_FOUND" not in str(e):
-                    log("⚠️", f"Cancel order {order.id}: {e}")
-            except:
-                pass
-        grid_orders[SYMBOL] = {"long": [], "short": []}
-        average_tp_orders[SYMBOL] = {"long": None, "short": None}
+                if "ORDER_NOT_FOUND" not in str(e) and "CANCEL_IN_PROGRESS" not in str(e):
+                    log("[⚠️]", f"Cancel order {order.id}: {e}")
+            except Exception as e:
+                log("[⚠️]", f"Cancel order {order.id}: {e}")
+        
+        # ✅ grid_orders 초기화
+        if SYMBOL in grid_orders:
+            grid_orders[SYMBOL] = {"long": [], "short": []}
+        
+        if SYMBOL in average_tp_orders:
+            average_tp_orders[SYMBOL] = {"long": None, "short": None}
+        
+        log("[✅ CANCEL]", f"{cancelled_count}/{len(orders)} orders cancelled")
+        
     except GateApiException as e:
         if "400" in str(e):
-            log("⚠️", "Cancel orders: API authentication error")
+            log("[❌]", "Cancel orders: API authentication error")
         else:
-            log("❌", f"Order cancellation error: {e}")
+            log("[❌]", f"Order cancellation error: {e}")
     except Exception as e:
-        log("❌", f"Order cancellation error: {e}")
+        log("[❌]", f"Order cancellation error: {e}")
 
 def cancel_grid_only():
     try:
@@ -988,52 +1003,48 @@ def cancel_stale_orders():
         log("❌", f"Cancel stale orders error: {e}")
 
 def initialize_grid(current_price=None):
-    """그리드 주문 생성 - 단일 포지션일 때 양방향 그리드"""
+    """그리드 주문 생성 - 전략에 맞게 생성"""
     
     global last_grid_time
     
-    # 1. Lock 체크
     if not initialize_grid_lock.acquire(blocking=False):
-        log("⏸️ GRID", "Already running → Skipping")
+        log("[⏸️ GRID]", "Already running → Skipping")
         return
     
     try:
         now = time.time()
         
-        # 2. 시간 체크 (3초 이내 재호출 방지)
         if now - last_grid_time < 3:
-            log("⏸️ GRID", f"Too soon ({now - last_grid_time:.1f}s) → Skipping")
+            log("[⏸️ GRID]", f"Too soon ({now - last_grid_time:.1f}s) → Skipping")
             return
         
         last_grid_time = now
         
-        # 3. 가격 확인
         if current_price is None or current_price == 0:
             current_price = get_current_price()
         
         if current_price == 0:
-            log("❌", "Cannot get current price")
+            log("[❌]", "Cannot get current price")
             return
         
-        log("🔸 DEBUG", f"initialize_grid called at {current_price}")
+        log("[🔸 DEBUG]", f"initialize_grid called at {current_price}")
         
-        # 4. 포지션 동기화
         sync_position()
         
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
         
-        log("🔸 DEBUG", f"Current positions: Long={long_size}, Short={short_size}")
+        log("[🔸 DEBUG]", f"Current positions: Long={long_size}, Short={short_size}")
         
-        # 5. 양방향 포지션 체크 - 이것만 Lock!
+        # ✅ 양방향 포지션 체크
         both_positions = long_size > 0 and short_size > 0
         
         if both_positions:
-            log("ℹ️ GRID", "Both positions exist → No grid creation")
+            log("[ℹ️ GRID]", "Both positions exist → No grid creation (TP only)")
             return
         
-        # 6. 최대 한도 체크
+        # 최대 한도 체크
         with balance_lock:
             max_value = account_balance * MAX_POSITION_RATIO
         
@@ -1042,26 +1053,23 @@ def initialize_grid(current_price=None):
         short_value = Decimal(str(short_size)) * current_price_dec
         
         if long_value >= max_value or short_value >= max_value:
-            log("⚠️ LIMIT", f"Max position reached (Long: {float(long_value):.2f}, Short: {float(short_value):.2f})")
+            log("[⚠️ LIMIT]", f"Max position reached (Long: {float(long_value):.2f}, Short: {float(short_value):.2f})")
             return
         
-        # 7. OBV MACD 가져오기
         obv_display = get_obv_macd_value()
         
-        # 8. 수량 계산
         with balance_lock:
             base_value = account_balance * BASE_RATIO
         
         base_qty_long = int(base_value / current_price_dec)
         base_qty_short = int(base_value / current_price_dec)
         
-        # OBV MACD 가중치 (임계값 이전만)
         try:
             is_above_threshold = is_above_threshold_main_side()
         except Exception as e:
-            log("⚠️", f"Threshold check error: {e}, assuming below threshold")
+            log("[⚠️]", f"Threshold check error: {e}, assuming below threshold")
             is_above_threshold = False
-            
+        
         if not is_above_threshold:
             obv_abs = abs(obv_display)
             if obv_abs <= 5:
@@ -1090,20 +1098,18 @@ def initialize_grid(current_price=None):
             elif obv_display < 0:
                 base_qty_short = int(base_qty_short * (Decimal("1") + obv_multiplier))
         else:
-            # 임계값 초과 시: 포지션 비례
-            if long_size > short_size:  # 롱이 주력
+            if long_size > short_size:
                 base_qty_long = max(base_qty_long, int(long_size * POSITION_SCALE_RATIO))
                 base_qty_short = int(long_size * COUNTER_RATIO)
-            elif short_size > long_size:  # 숏이 주력
+            elif short_size > long_size:
                 base_qty_short = max(base_qty_short, int(short_size * POSITION_SCALE_RATIO))
                 base_qty_long = int(short_size * COUNTER_RATIO)
         
         long_qty = max(1, base_qty_long)
         short_qty = max(1, base_qty_short)
         
-        log("🔰 QUANTITY", f"Long: {long_qty}, Short: {short_qty} (OBV={obv_display:.1f}, Threshold={is_above_threshold})")
+        log("[🔰 QUANTITY]", f"Long: {long_qty}, Short: {short_qty} (OBV={obv_display:.1f}, Threshold={is_above_threshold})")
         
-        # 9. 가격 계산
         price_dec = Decimal(str(current_price))
         long_price = price_dec * (Decimal("1") - GRID_GAP_PCT)
         short_price = price_dec * (Decimal("1") + GRID_GAP_PCT)
@@ -1111,11 +1117,15 @@ def initialize_grid(current_price=None):
         long_price = float(long_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN))
         short_price = float(short_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN))
         
-        # 10. 양방향 그리드 생성!
-        log("📊 GRID", f"Creating both grids (Long: {long_qty} @ {long_price:.4f}, Short: {short_qty} @ {short_price:.4f})")
+        log("[📊 GRID]", f"Creating both grids (Long: {long_qty} @ {long_price:.4f}, Short: {short_qty} @ {short_price:.4f})")
         
-        grid_orders[SYMBOL]["long"] = []
-        grid_orders[SYMBOL]["short"] = []
+        # ✅ grid_orders 초기화
+        if SYMBOL not in grid_orders:
+            grid_orders[SYMBOL] = {"long": [], "short": []}
+        else:
+            grid_orders[SYMBOL]["long"] = []
+            grid_orders[SYMBOL]["short"] = []
+        
         created_long = False
         created_short = False
         
@@ -1138,11 +1148,11 @@ def initialize_grid(current_price=None):
                 "base_qty": base_qty_long
             })
             
-            log("✅ GRID", f"LONG {long_qty} @ {long_price:.4f}")
+            log("[✅ GRID]", f"LONG {long_qty} @ {long_price:.4f} (ID: {result.id})")
             created_long = True
             
         except GateApiException as e:
-            log("❌", f"LONG grid error: {e}")
+            log("[❌]", f"LONG grid error: {e}")
         
         # 숏 그리드 생성
         try:
@@ -1163,28 +1173,30 @@ def initialize_grid(current_price=None):
                 "base_qty": base_qty_short
             })
             
-            log("✅ GRID", f"SHORT {short_qty} @ {short_price:.4f}")
+            log("[✅ GRID]", f"SHORT {short_qty} @ {short_price:.4f} (ID: {result.id})")
             created_short = True
             
         except GateApiException as e:
-            log("❌", f"SHORT grid error: {e}")
+            log("[❌]", f"SHORT grid error: {e}")
         
         if created_long and created_short:
-            log("✅ GRID", "Both grids created successfully!")
+            log("[✅ GRID]", "Both grids created successfully!")
         elif created_long or created_short:
-            log("⚠️ GRID", f"Partial grid (Long: {created_long}, Short: {created_short})")
+            log("[⚠️ GRID]", f"Partial grid (Long: {created_long}, Short: {created_short})")
         else:
-            log("❌ GRID", "No grids created (API errors)")
+            log("[❌ GRID]", "No grids created (API errors)")
             
     finally:
         initialize_grid_lock.release()
 
 def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
-    """그리드 체결 후 헤징 + 후속 처리 (포지션 동기화 개선)"""
+    """그리드 체결 후 헷징 + 후속 처리 (완전 통합)"""
     if not ENABLE_AUTO_HEDGE:
         return
     
     try:
+        log("[🔶 HEDGE]", f"Starting hedge after {side} grid fill")
+        
         # 1. 모든 주문 취소
         cancel_all_orders()
         time.sleep(0.5)
@@ -1195,16 +1207,18 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
         
         current_price = get_current_price()
         if current_price <= 0:
+            log("[❌]", "Cannot get price for hedge")
             return
         
         counter_side = get_counter_side(side)
+        
         with position_lock:
             main_size = position_state[SYMBOL][side]["size"]
             counter_size = position_state[SYMBOL][counter_side]["size"]
         
         obv_display = float(obv_macd_value) * 1000
         
-        # ✅ main_side가 "none"인지 체크!
+        # ✅ main_side 체크 (post_threshold_entries 추적)
         main_side = get_main_side()
         if main_side != "none" and is_above_threshold(main_side) and side == main_side:
             post_threshold_entries[SYMBOL][side].append({
@@ -1213,19 +1227,21 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
                 "entry_type": "grid",
                 "tp_order_id": None
             })
-            log("📝 TRACKED", f"{side.upper()} grid {grid_qty} @ {grid_price:.4f} (MAIN, above threshold)")
+            log("[📝 TRACKED]", f"{side.upper()} grid {grid_qty} @ {grid_price:.4f} (MAIN, above threshold)")
         
-        # 3. 헤징 수량 계산
+        # 3. 헷징 수량 계산
         if was_counter:
+            # 비주력 그리드 체결 시: max(기본 수량, 주력 × 10%)
             hedge_qty = max(base_qty, int(main_size * 0.1))
             hedge_side = side
-            log("🔄 HEDGE", f"Counter grid filled → Main hedge: {hedge_side.upper()} {hedge_qty} (OBV:{obv_display:.1f})")
+            log("[🔄 HEDGE]", f"Counter grid filled → Main hedge: {hedge_side.upper()} {hedge_qty} (OBV:{obv_display:.1f})")
         else:
+            # 주력 그리드 체결 시: 기본 수량으로 헷징
             hedge_qty = base_qty
             hedge_side = counter_side
-            log("🔄 HEDGE", f"Main grid filled → Counter hedge: {hedge_side.upper()} {hedge_qty} (base={base_qty})")
+            log("[🔄 HEDGE]", f"Main grid filled → Counter hedge: {hedge_side.upper()} {hedge_qty} (base={base_qty})")
         
-        # 4. 헤징 주문 실행
+        # 4. 헷징 주문 실행
         hedge_order_data = {
             "contract": SYMBOL,
             "size": int(hedge_qty * (1 if hedge_side == "long" else -1)),
@@ -1239,19 +1255,19 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
             
             if order and hasattr(order, 'id'):
                 order_id = order.id
-                log("✅ HEDGE", f"{hedge_side.upper()} {hedge_qty} @ market (ID: {order_id})")
+                log("[✅ HEDGE]", f"{hedge_side.upper()} {hedge_qty} @ market (ID: {order_id})")
             else:
-                log("✅ HEDGE", f"{hedge_side.upper()} {hedge_qty} @ market (IOC filled immediately)")
+                log("[✅ HEDGE]", f"{hedge_side.upper()} {hedge_qty} @ market (IOC filled immediately)")
         except GateApiException as e:
-            log("❌", f"Hedge order API error: {e}")
+            log("[❌]", f"Hedge order API error: {e}")
             return
         
-        # ✅ 5. 헤징 후 포지션 재동기화 (중요!)
-        time.sleep(0.5)  # Gate.io API 반영 대기
-        sync_position()  # 재동기화
+        # ✅ 5. 헷징 후 포지션 재동기화 (중요!)
+        time.sleep(0.5)
+        sync_position()
         time.sleep(0.3)
         
-        # ✅ 6. 헤징 후 main_side 재확인 및 추적
+        # ✅ 6. 헷징 후 main_side 재확인 및 추적
         main_side_after = get_main_side()
         if main_side_after != "none" and is_above_threshold(main_side_after) and hedge_side == main_side_after:
             with position_lock:
@@ -1263,39 +1279,43 @@ def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
                 "entry_type": "hedge",
                 "tp_order_id": None
             })
-            log("📝 TRACKED", f"{hedge_side.upper()} hedge {hedge_qty} @ {entry_price:.4f} (MAIN, above threshold)")
+            log("[📝 TRACKED]", f"{hedge_side.upper()} hedge {hedge_qty} @ {entry_price:.4f} (MAIN, above threshold)")
         
-        # 7. 그리드 취소
+        # 7. 그리드 취소 (중복 방지)
         cancel_grid_only()
         time.sleep(0.3)
         
-        # 8. TP 생성
-        refresh_all_tp_orders()
-        
-        # 9. 포지션 재확인 후 그리드 재생성
-        time.sleep(0.3)
+        # 8. 포지션 재확인
         with position_lock:
-            long_size = position_state[SYMBOL]["long"]["size"]
-            short_size = position_state[SYMBOL]["short"]["size"]
+            final_long = position_state[SYMBOL]["long"]["size"]
+            final_short = position_state[SYMBOL]["short"]["size"]
         
-        log("🔍 DEBUG", f"After hedging: long={long_size}, short={short_size}")
+        log("[🔍 DEBUG]", f"After hedge: Long={final_long}, Short={final_short}")
         
-        # ✅ 10. 그리드 재생성 (롱/숏 하나만 있을 때)
-        if long_size == 0 or short_size == 0:
-            log("📊 GRID", "Single position after hedge → Creating grid")
-            current_price = get_current_price()
-            if current_price > 0:
-                global last_grid_time
-                last_grid_time = 0
-                time.sleep(0.3)
-                initialize_grid(current_price)
+        # ✅ 9. 양방향 포지션 체크 → TP만 또는 그리드+TP
+        both_positions = final_long > 0 and final_short > 0
+        
+        if both_positions:
+            # 양방향 포지션 → TP만 생성
+            log("[ℹ️ GRID]", "Both positions exist → TP only")
+            refresh_all_tp_orders()
         else:
-            log("ℹ️ GRID", "Both positions exist → No grid creation")
+            # 단일 포지션 → 그리드 + TP 생성
+            log("[📊 GRID]", "Single position after hedge → Creating grids + TP")
+            global last_grid_time
+            last_grid_time = 0
+            time.sleep(0.3)
+            initialize_grid(current_price)
+            time.sleep(0.3)
+            refresh_all_tp_orders()
+        
+        # 10. 이벤트 타이머 업데이트
+        update_event_time()
         
     except Exception as e:
-        log("❌", f"Hedge order error: {e}")
+        log("[❌]", f"Hedge error: {e}")
         import traceback
-        log("❌", f"Traceback: {traceback.format_exc()}")
+        log("[❌]", f"Traceback: {traceback.format_exc()}")
 
 def refresh_all_tp_orders():
     """TP 주문 새로 생성 (즉시 체결 감지 + 중복 방지 + 디버깅 강화)"""
