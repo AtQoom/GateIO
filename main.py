@@ -828,7 +828,7 @@ def place_grid_order(side, price, qty, is_counter=False, base_qty=2):
 # =============================================================================
 
 def validate_strategy_consistency():
-    """전략 일관성 검증 (보완 기능만)"""
+    """전략 일관성 검증 + 그리드 생성"""
     
     try:
         sync_position()
@@ -844,7 +844,6 @@ def validate_strategy_consistency():
         long_value = Decimal(str(long_size)) * Decimal(str(current_price))
         short_value = Decimal(str(short_size)) * Decimal(str(current_price))
         
-        # 1. 주문 조회
         try:
             orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
             grid_count = sum(1 for o in orders if o.reduce_only == False)
@@ -852,16 +851,24 @@ def validate_strategy_consistency():
             log("❌", f"List orders error: {e}")
             return
         
-        # ✅ 검증 1: 양방향 포지션 + 그리드 존재 (이것만 유지!)
+        # ✅ 검증 1: 양방향 + 그리드 존재
         if long_size > 0 and short_size > 0 and grid_count > 0:
             log("🚨 INVALID", f"Both positions with {grid_count} grids → Canceling!")
-            cancel_grid_only()        
-     
-        # ✅ 검증 2: 최대 한도 초과 (유지!)
+            cancel_grid_only()
+            return
+        
+        # ✅ 검증 2: 단일 포지션 + 그리드 없음 → 그리드 생성!
+        if (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0):
+            if grid_count == 0:
+                log("🔧 VALIDATE", f"Single position without grids → Creating grids!")
+                initialize_grid(current_price)
+                return
+        
+        # ✅ 검증 3: 최대 한도 초과 (완화: 20%)
         with balance_lock:
             max_value = Decimal(str(account_balance)) * MAX_POSITION_RATIO
         
-        if long_value > max_value * Decimal("1.2"):  # 20% 초과 (여유 두기)
+        if long_value > max_value * Decimal("1.2"):
             log("🚨 EMERGENCY", f"LONG {float(long_value):.2f} > {float(max_value * 1.2):.2f}")
             emergency_close("long", long_size)
         
@@ -871,7 +878,6 @@ def validate_strategy_consistency():
         
     except Exception as e:
         log("❌", f"Validation error: {e}")
-
 
 def emergency_close(side, size):
     """긴급 청산 (최대 한도 초과 시)"""
@@ -2169,14 +2175,13 @@ def periodic_health_check():
                 log("❌", f"List orders error: {e}")
                 continue
             
-            # 3. TP 확인 및 보완 (조건 완화!)
+            # 3. TP 확인 및 보완
             if long_size > 0 or short_size > 0:
                 tp_orders_list = [o for o in orders if o.reduce_only]
                 
                 tp_long_qty = sum(abs(o.size) for o in tp_orders_list if o.size > 0)
                 tp_short_qty = sum(abs(o.size) for o in tp_orders_list if o.size < 0)
                 
-                # ✅ 수정: != 에서 > 1.0으로 완화
                 needs_tp_refresh = (
                     tp_count == 0 or
                     (long_size > 0 and abs(tp_long_qty - long_size) > 1.0) or
@@ -2194,13 +2199,21 @@ def periodic_health_check():
                 time.sleep(0.5)
                 cancel_grid_only()
             
-            # ✅ 5. 전략 일관성 검증 (완화 버전!)
+            # ✅ 5. 단일 포지션 + 그리드 없음 → 그리드 생성!
+            if (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0):
+                if grid_count == 0:
+                    log("🔧 HEALTH", f"Single position without grids → Creating grids!")
+                    current_price = get_current_price()
+                    if current_price > 0:
+                        initialize_grid(current_price)
+            
+            # ✅ 6. 전략 일관성 검증
             validate_strategy_consistency()
             
-            # ✅ 6. 중복 그리드 제거 (유지!)
+            # ✅ 7. 중복 그리드 제거
             remove_duplicate_orders()
             
-            # ✅ 7. 오래된 주문 취소 (유지!)
+            # ✅ 8. 오래된 주문 취소
             cancel_stale_orders()
             
             log("✅ HEALTH", "Health check complete")
