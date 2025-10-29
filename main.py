@@ -47,6 +47,7 @@ COUNTER_RATIO = Decimal("0.30")   # 비주력 30%
 COUNTER_CLOSE_RATIO = Decimal("0.20")  # 비주력 20% 청산
 MAX_POSITION_RATIO = Decimal("5.0")    # 최대 5배
 HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
+POSITION_SCALE_RATIO = Decimal("0.20")  # ✅ 새로 추가! 포지션 비례 20%
 
 # =============================================================================
 # API 설정
@@ -800,7 +801,7 @@ def place_grid_order(side, price, qty, is_counter=False, base_qty=2):
         return None
 
 def initialize_grid(current_price):
-    """현재가 기준 그리드 생성 (양방향 포지션 체크 강화)"""
+    """현재가 기준 그리드 생성 (포지션 비례 진입 적용)"""
     global last_grid_time
     
     now = time.time()
@@ -808,7 +809,7 @@ def initialize_grid(current_price):
         return
     last_grid_time = now
     
-    # ✅ 추가: 양방향 포지션 체크 강화
+    # 양방향 포지션 체크 강화
     with position_lock:
         long_size = position_state[SYMBOL]["long"]["size"]
         short_size = position_state[SYMBOL]["short"]["size"]
@@ -836,14 +837,16 @@ def initialize_grid(current_price):
         return
     
     if long_value >= max_value and not long_locked:
-        log("⚠️ EVENT", "MAX POSITION LIMIT")
+        log_event_header("MAX POSITION LIMIT")
         log("⚠️ LIMIT", f"LONG {float(long_value):.2f} >= {float(max_value):.2f}")
         max_position_locked["long"] = True
+        cancel_grid_only()
     
     if short_value >= max_value and not short_locked:
-        log("⚠️ EVENT", "MAX POSITION LIMIT")
+        log_event_header("MAX POSITION LIMIT")
         log("⚠️ LIMIT", f"SHORT {float(short_value):.2f} >= {float(max_value):.2f}")
         max_position_locked["short"] = True
+        cancel_grid_only()
     
     if long_value < max_value and long_locked:
         log("🔓 UNLOCK", f"LONG {float(long_value):.2f} < {float(max_value):.2f}")
@@ -853,18 +856,20 @@ def initialize_grid(current_price):
         log("🔓 UNLOCK", f"SHORT {float(short_value):.2f} < {float(max_value):.2f}")
         max_position_locked["short"] = False
     
+    # 기본 수량 계산
     with balance_lock:
         base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
         if base_qty <= 0:
             base_qty = 1
     
+    # 임계값 및 주력 포지션 확인
     long_above = is_above_threshold("long")
     short_above = is_above_threshold("short")
     main_side = get_main_side()
     
     log("🔍 OBV MACD", f"Value: {float(obv_macd_value) * 1000:.2f}")
     
-    # ✅ 추가: main_side_quantity 계산
+    # main_side_quantity 계산
     with position_lock:
         if main_side == "long":
             main_side_quantity = position_state[SYMBOL]["long"]["size"]
@@ -873,20 +878,48 @@ def initialize_grid(current_price):
         else:
             main_side_quantity = Decimal("0")
     
+    # 수량 결정 로직
     if long_above or short_above:
-        log("🚫 ASYMMETRIC", f"Above threshold | Counter: {int(Decimal(str(main_side_quantity)) * COUNTER_RATIO)} (30%) | Main: {base_qty}")
-        
+        # ===== 임계값 초과: 포지션 비례 진입 ===== ✅
         if main_side == "long":
-            long_qty = base_qty
+            # 주력이 롱
+            # 롱 그리드: 포지션 비례 (20%)
+            long_qty_proportional = int(Decimal(str(main_side_quantity)) * POSITION_SCALE_RATIO)
+            long_qty = max(base_qty, long_qty_proportional)  # 최소 기본 수량 보장
+            
+            # 숏 그리드: 30% (비주력)
             short_qty = int(Decimal(str(main_side_quantity)) * COUNTER_RATIO)
+            if short_qty < 1:
+                short_qty = 1
+            
+            log("🚫 ASYMMETRIC", f"Above threshold | Main: LONG")
+            log("📊 POSITION SCALE", f"Main qty: {long_qty} (base: {base_qty}, scale 20%: {long_qty_proportional})")
+            log("📊 POSITION SCALE", f"Counter qty: {short_qty} (30% of {main_side_quantity})")
+            
         elif main_side == "short":
+            # 주력이 숏
+            # 롱 그리드: 30% (비주력)
             long_qty = int(Decimal(str(main_side_quantity)) * COUNTER_RATIO)
-            short_qty = base_qty
+            if long_qty < 1:
+                long_qty = 1
+            
+            # 숏 그리드: 포지션 비례 (20%)
+            short_qty_proportional = int(Decimal(str(main_side_quantity)) * POSITION_SCALE_RATIO)
+            short_qty = max(base_qty, short_qty_proportional)  # 최소 기본 수량 보장
+            
+            log("🚫 ASYMMETRIC", f"Above threshold | Main: SHORT")
+            log("📊 POSITION SCALE", f"Counter qty: {long_qty} (30% of {main_side_quantity})")
+            log("📊 POSITION SCALE", f"Main qty: {short_qty} (base: {base_qty}, scale 20%: {short_qty_proportional})")
+            
         else:
+            # 주력 없음 (동일 포지션)
             long_qty = base_qty
             short_qty = base_qty
+            log("🚫 ASYMMETRIC", f"Above threshold | No main side | Both: {base_qty}")
+            
     else:
-        obv_weight = calculate_obv_macd_weight(float(obv_macd_value) * 1000)  # ✅ 수정
+        # ===== 임계값 이전: OBV MACD 방식 =====
+        obv_weight = calculate_obv_macd_weight(float(obv_macd_value) * 1000)
         log("🔄 SYMMETRIC", f"Below threshold | Weight: {int(obv_weight * 100)}%")
         
         weighted_qty = int(Decimal(str(base_qty)) * Decimal(str(obv_weight)))
@@ -899,14 +932,18 @@ def initialize_grid(current_price):
         long_qty = weighted_qty
         short_qty = weighted_qty
     
+    # 그리드 주문 생성
     grid_orders[SYMBOL] = {"long": [], "short": []}
     
+    # 롱 그리드 가격 계산
     long_price = Decimal(str(current_price)) * (Decimal("1") - GRID_GAP_PCT)
     long_price = long_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
     
+    # 숏 그리드 가격 계산
     short_price = Decimal(str(current_price)) * (Decimal("1") + GRID_GAP_PCT)
     short_price = short_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
     
+    # 롱 그리드 주문
     if not long_locked:
         order = FuturesOrder(
             contract=SYMBOL,
@@ -920,12 +957,16 @@ def initialize_grid(current_price):
             result = api.create_futures_order(SETTLE, order)
             order_id = result.id if (result and hasattr(result, 'id')) else None
             
+            # is_counter 플래그 설정
             if long_above and main_side == "short":
                 is_counter = True
                 log("🚫 GRID", f"Counter(30%) LONG {long_qty} @ {long_price:.4f}")
             else:
                 is_counter = False
-                log("🚫 GRID", f"Same LONG {long_qty} @ {long_price:.4f}")
+                if long_above and main_side == "long":
+                    log("🚫 GRID", f"Main(scale) LONG {long_qty} @ {long_price:.4f}")
+                else:
+                    log("🚫 GRID", f"Same LONG {long_qty} @ {long_price:.4f}")
             
             grid_orders[SYMBOL]["long"].append({
                 "price": float(long_price),
@@ -937,6 +978,7 @@ def initialize_grid(current_price):
         except GateApiException as e:
             log("❌", f"LONG grid order error: {e}")
     
+    # 숏 그리드 주문
     if not short_locked:
         order = FuturesOrder(
             contract=SYMBOL,
@@ -950,12 +992,16 @@ def initialize_grid(current_price):
             result = api.create_futures_order(SETTLE, order)
             order_id = result.id if (result and hasattr(result, 'id')) else None
             
+            # is_counter 플래그 설정
             if short_above and main_side == "long":
                 is_counter = True
                 log("🚫 GRID", f"Counter(30%) SHORT {short_qty} @ {short_price:.4f}")
             else:
                 is_counter = False
-                log("🚫 GRID", f"Same SHORT {short_qty} @ {short_price:.4f}")
+                if short_above and main_side == "short":
+                    log("🚫 GRID", f"Main(scale) SHORT {short_qty} @ {short_price:.4f}")
+                else:
+                    log("🚫 GRID", f"Same SHORT {short_qty} @ {short_price:.4f}")
             
             grid_orders[SYMBOL]["short"].append({
                 "price": float(short_price),
