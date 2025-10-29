@@ -828,11 +828,9 @@ def place_grid_order(side, price, qty, is_counter=False, base_qty=2):
 # =============================================================================
 
 def validate_strategy_consistency():
-    """전략 일관성 검증 (상태 검증)"""
+    """전략 일관성 검증 (보완 기능만)"""
     
     try:
-        log("🔍 VALIDATE", "Strategy consistency check...")
-        
         sync_position()
         
         with position_lock:
@@ -846,65 +844,34 @@ def validate_strategy_consistency():
         long_value = Decimal(str(long_size)) * Decimal(str(current_price))
         short_value = Decimal(str(short_size)) * Decimal(str(current_price))
         
-        # 1. 그리드 검증
-        grid_count = 0
-        
+        # 1. 주문 조회
         try:
-            # ✅ 수정: 명시적 키워드 인자
             orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-            for o in orders:
-                if o.reduce_only == False:
-                    grid_count += 1
+            grid_count = sum(1 for o in orders if o.reduce_only == False)
         except Exception as e:
             log("❌", f"List orders error: {e}")
             return
         
-        # ✅ 검증 1: 양방향 포지션 + 그리드 존재
+        # ✅ 검증 1: 양방향 포지션 + 그리드 존재 (이것만 유지!)
         if long_size > 0 and short_size > 0 and grid_count > 0:
             log("🚨 INVALID", f"Both positions with {grid_count} grids → Canceling!")
-            cancel_grid_only()
-        
-        # ✅ 검증 2: 단일 포지션 + 그리드 없음
-        if (long_size > 0 or short_size > 0) and long_size * short_size == 0:
-            if grid_count == 0:
-                log("🚨 INVALID", "Single position with no grid → Creating!")
-                time.sleep(0.5)
-                initialize_grid(current_price)
-        
-        # ✅ 검증 3: 최대 한도 초과
+            cancel_grid_only()        
+     
+        # ✅ 검증 2: 최대 한도 초과 (유지!)
         with balance_lock:
             max_value = Decimal(str(account_balance)) * MAX_POSITION_RATIO
         
-        if long_value > max_value * Decimal("1.1"):
-            log("🚨 EMERGENCY", f"LONG {float(long_value):.2f} > {float(max_value * 1.1):.2f} → Market close!")
+        if long_value > max_value * Decimal("1.2"):  # 20% 초과 (여유 두기)
+            log("🚨 EMERGENCY", f"LONG {float(long_value):.2f} > {float(max_value * 1.2):.2f}")
             emergency_close("long", long_size)
         
-        if short_value > max_value * Decimal("1.1"):
-            log("🚨 EMERGENCY", f"SHORT {float(short_value):.2f} > {float(max_value * 1.1):.2f} → Market close!")
+        if short_value > max_value * Decimal("1.2"):
+            log("🚨 EMERGENCY", f"SHORT {float(short_value):.2f} > {float(max_value * 1.2):.2f}")
             emergency_close("short", short_size)
-        
-        # ✅ 검증 4: TP 수량 불일치
-        tp_orders_list = []
-        try:
-            # ✅ 수정: 명시적 키워드 인자
-            orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-            tp_orders_list = [o for o in orders if o.reduce_only == True]
-        except:
-            pass
-        
-        tp_long_qty = sum(abs(o.size) for o in tp_orders_list if o.size > 0)
-        tp_short_qty = sum(abs(o.size) for o in tp_orders_list if o.size < 0)
-        
-        if (long_size > 0 and abs(tp_long_qty - long_size) > 0.1) or \
-           (short_size > 0 and abs(tp_short_qty - short_size) > 0.1):
-            log("🚨 INVALID", f"TP mismatch (L:{long_size} vs {tp_long_qty}, S:{short_size} vs {tp_short_qty}) → Refreshing!")
-            time.sleep(0.5)
-            refresh_all_tp_orders()
-        
-        log("✅ VALIDATE", "Strategy consistency OK")
         
     except Exception as e:
         log("❌", f"Validation error: {e}")
+
 
 def emergency_close(side, size):
     """긴급 청산 (최대 한도 초과 시)"""
@@ -917,7 +884,7 @@ def emergency_close(side, size):
         order = FuturesOrder(
             contract=SYMBOL,
             size=order_size,
-            price="0",  # 시장가
+            price="0",
             tif="ioc",
             close=True,
             reduce_only=True
@@ -2248,7 +2215,6 @@ def periodic_health_check():
             
             # 2. 주문 상태 확인
             try:
-                # ✅ 수정: 명시적 키워드 인자
                 orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
                 
                 grid_count = sum(1 for o in orders if not o.reduce_only)
@@ -2260,17 +2226,18 @@ def periodic_health_check():
                 log("❌", f"List orders error: {e}")
                 continue
             
-            # 3. TP 확인 및 보완
+            # 3. TP 확인 및 보완 (조건 완화!)
             if long_size > 0 or short_size > 0:
                 tp_orders_list = [o for o in orders if o.reduce_only]
                 
                 tp_long_qty = sum(abs(o.size) for o in tp_orders_list if o.size > 0)
                 tp_short_qty = sum(abs(o.size) for o in tp_orders_list if o.size < 0)
                 
+                # ✅ 수정: != 에서 > 1.0으로 완화
                 needs_tp_refresh = (
                     tp_count == 0 or
-                    (long_size > 0 and tp_long_qty != long_size) or
-                    (short_size > 0 and tp_short_qty != short_size)
+                    (long_size > 0 and abs(tp_long_qty - long_size) > 1.0) or
+                    (short_size > 0 and abs(tp_short_qty - short_size) > 1.0)
                 )
                 
                 if needs_tp_refresh:
@@ -2284,13 +2251,13 @@ def periodic_health_check():
                 time.sleep(0.5)
                 cancel_grid_only()
             
-            # ✅ 5. 신규: 전략 일관성 검증
+            # ✅ 5. 전략 일관성 검증 (완화 버전!)
             validate_strategy_consistency()
             
-            # ✅ 6. 신규: 중복 그리드 제거
+            # ✅ 6. 중복 그리드 제거 (유지!)
             remove_duplicate_orders()
             
-            # ✅ 7. 신규: 오래된 주문 취소
+            # ✅ 7. 오래된 주문 취소 (유지!)
             cancel_stale_orders()
             
             log("✅ HEALTH", "Health check complete")
