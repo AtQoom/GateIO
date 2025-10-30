@@ -9,6 +9,8 @@ from decimal import Decimal, ROUND_DOWN
 from collections import deque
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
+import hashlib
+import json
 
 try:
     from gate_api.exceptions import ApiException as GateApiException
@@ -119,6 +121,7 @@ ENABLE_AUTO_HEDGE = True
 last_event_time = 0  # 마지막 이벤트 시간 (그리드 체결 또는 TP 체결)
 IDLE_TIMEOUT = 900  # 15분 (초 단위)
 idle_entry_count = 0  # 아이들 진입 횟수 ← 추가
+tp_order_hash = {}  # {SYMBOL: hash_value}
 
 # =============================================================================
 # 로그
@@ -573,7 +576,23 @@ def sync_position(max_retries=3, retry_delay=2):
     
     return False  # ✅ 기본 실패
 
-
+def get_tp_orders_hash(tp_orders_list):
+    '''TP 주문들의 해시값 계산 (변화 감지용)'''
+    if not tp_orders_list:
+        return None
+    
+    tp_info = []
+    for o in sorted(tp_orders_list, key=lambda x: x.order_id):
+        tp_info.append({
+            'order_id': str(o.order_id),
+            'size': float(o.size),
+            'price': float(o.price),
+            'status': o.status,
+        })
+    
+    tp_str = json.dumps(tp_info, sort_keys=True)
+    return hashlib.md5(tp_str.encode()).hexdigest()
+    
 # =============================================================================
 # API 접근
 # =============================================================================
@@ -1950,7 +1969,7 @@ def idle_monitor():
             time.sleep(10)
 
 def periodic_health_check():
-    """2분마다 종합 헬스체크 (TP 불필요 취소 방지)"""
+    """2분마다 종합 헬스체크 (TP 상태 변화 감지!)"""
     while True:
         try:
             time.sleep(120)  # 2분
@@ -1980,31 +1999,45 @@ def periodic_health_check():
                 log("❌", f"List orders error: {e}")
                 continue
             
-            # ✅ 3. TP 확인 (수정: 실제 문제가 있을 때만 재생성!)
+            # ✅ 3. TP 확인 (변화 감지!)
             if long_size > 0 or short_size > 0:
                 tp_orders_list = [o for o in orders if o.reduce_only]
+                
+                # ✅ 현재 TP 해시값 계산
+                current_hash = get_tp_orders_hash(tp_orders_list)
+                previous_hash = tp_order_hash.get(SYMBOL)
                 
                 tp_long_qty = sum(abs(o.size) for o in tp_orders_list if o.size > 0)
                 tp_short_qty = sum(abs(o.size) for o in tp_orders_list if o.size < 0)
                 
-                # ✅ 수정: 오차 범위 확대 (1 → 2) + 수량 차이만 체크
                 tp_mismatch = False
                 
-                if tp_count == 0:
-                    log("🔧 HEALTH", "No TP orders → Refreshing")
+                # ✅ 심각한 문제만 감지 (수량 부족)
+                if tp_count == 0 and (long_size > 0 or short_size > 0):
+                    log("🔧 HEALTH", "❌ TP CRITICAL: No TP at all!")
                     tp_mismatch = True
-                elif long_size > 0 and abs(tp_long_qty - long_size) > 2.0:
-                    log("🔧 HEALTH", f"LONG TP mismatch: {tp_long_qty} vs {long_size} → Refreshing")
+                elif long_size > 0 and tp_long_qty < long_size * 0.3:
+                    log("🔧 HEALTH", f"❌ LONG TP critical: {tp_long_qty} < {long_size * 0.3}")
                     tp_mismatch = True
-                elif short_size > 0 and abs(tp_short_qty - short_size) > 2.0:
-                    log("🔧 HEALTH", f"SHORT TP mismatch: {tp_short_qty} vs {short_size} → Refreshing")
+                elif short_size > 0 and tp_short_qty < short_size * 0.3:
+                    log("🔧 HEALTH", f"❌ SHORT TP critical: {tp_short_qty} < {short_size * 0.3}")
                     tp_mismatch = True
                 
-                if tp_mismatch:
+                # ✅ TP 재생성: 문제 있고 + TP 변화 있을 때만!
+                if tp_mismatch and current_hash != previous_hash:
+                    log("🔧 HEALTH", "⚠️ TP changed + problem detected → Refreshing!")
                     time.sleep(0.5)
                     refresh_all_tp_orders()
+                    tp_order_hash[SYMBOL] = current_hash
+                    log("✅ HEALTH", "TP refreshed and hash updated")
+                
+                elif tp_mismatch and current_hash == previous_hash:
+                    log("⏳ HEALTH", "⏳ Problem exists but TP unchanged → Waiting...")
+                
                 else:
-                    log("✅ HEALTH", "TP orders normal")
+                    log("✅ HEALTH", "TP orders stable")
+                    # ✅ 이벤트 없으면 해시만 업데이트 (TP 유지!)
+                    tp_order_hash[SYMBOL] = current_hash
             
             # ✅ 4. 단일 포지션 + 그리드 없음 → 시장가 진입!
             single_position = (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0)
@@ -2030,7 +2063,7 @@ def periodic_health_check():
             log("❌", f"Health check error: {e}")
             import traceback
             log("❌", f"Traceback: {traceback.format_exc()}")
-
+            
 
 # =============================================================================
 # Flask 엔드포인트
