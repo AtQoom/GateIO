@@ -52,11 +52,11 @@ hedge_lock = threading.Lock()
 TP_GAP_PCT = Decimal("0.0021")    # 0.21%
 BASE_RATIO = Decimal("0.1")       # 기본 수량 비율
 THRESHOLD_RATIO = Decimal("0.8")  # 임계값
-COUNTER_RATIO = Decimal("0.20")   # 비주력 20%
 COUNTER_CLOSE_RATIO = Decimal("0.20")  # 비주력 20% 청산
 MAX_POSITION_RATIO = Decimal("10.0")    # 최대 10배
 HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
-POSITION_SCALE_RATIO = Decimal("0.10")  # ✅ 새로 추가! 포지션 비례 10%
+IDLE_TIME_SECONDS = 600  # 10분 (아이들 감지 시간)
+IDLE_MULTIPLIER = Decimal("2.0")  # 아이들 시 2배 (20%)
 
 # =============================================================================
 # API 설정
@@ -85,19 +85,6 @@ position_state = {
     }
 }
 
-# 임계값 초과 후 진입 추적
-post_threshold_entries = {
-    SYMBOL: {
-        "long": deque(maxlen=100),
-        "short": deque(maxlen=100)
-    }
-}
-
-# 비주력 포지션 스냅샷
-counter_position_snapshot = {
-    SYMBOL: {"long": Decimal("0"), "short": Decimal("0")}
-}
-
 # 평단 TP 주문 ID
 average_tp_orders = {
     SYMBOL: {"long": None, "short": None}
@@ -119,7 +106,7 @@ kline_history = deque(maxlen=200)
 account_balance = INITIAL_BALANCE  # 추가
 ENABLE_AUTO_HEDGE = True
 last_event_time = 0  # 마지막 이벤트 시간 (그리드 체결 또는 TP 체결)
-IDLE_TIMEOUT = 900  # 15분 (초 단위)
+IDLE_TIMEOUT = 600  # 10분 (초 단위)
 idle_entry_count = 0  # 아이들 진입 횟수 ← 추가
 tp_order_hash = {}  # {SYMBOL: hash_value}
 
@@ -759,28 +746,16 @@ def get_main_side():
     elif short_size > long_size: return "short"
     else: return "none"
 
-def get_counter_side(side):
-    """반대 방향 포지션 가져오기"""
-    return "short" if side == "long" else "long"
-
+def get_counter_side(main_side):
+    """주력의 반대 방향 반환"""
+    return "short" if main_side == "long" else "long"
+    
 def update_event_time():
     """마지막 이벤트 시간 갱신 + 아이들 카운트 리셋"""
     global last_event_time, idle_entry_count
     last_event_time = time.time()
     idle_entry_count = 0  # ← 추가: 이벤트 발생 시 카운트 리셋
     
-def is_above_threshold(side):
-    """포지션이 임계값을 초과했는지 확인"""
-    with position_lock:
-        size = position_state[SYMBOL][side]["size"]
-        price = position_state[SYMBOL][side]["price"]
-    
-    with balance_lock:
-        threshold = account_balance * THRESHOLD_RATIO  # account_balance 기준
-    
-    value = price * size
-    return value >= threshold
-
 
 # =============================================================================
 # TITLE 17-1. 전략 일관성 검증
@@ -834,38 +809,6 @@ def validate_strategy_consistency():
         
     except Exception as e:
         log("❌", f"Validation error: {e}")
-
-def is_above_threshold_main_side():
-    """주력 포지션이 임계값을 초과했는지 확인"""
-    try:
-        sync_position()
-        
-        with position_lock:
-            long_size = position_state[SYMBOL]["long"]["size"]
-            short_size = position_state[SYMBOL]["short"]["size"]
-        
-        current_price = get_current_price()
-        if current_price == 0:
-            return False
-        
-        with balance_lock:
-            threshold_value = account_balance * THRESHOLD_RATIO
-        
-        current_price_dec = Decimal(str(current_price))
-        long_value = Decimal(str(long_size)) * current_price_dec
-        short_value = Decimal(str(short_size)) * current_price_dec
-        
-        # 주력 포지션이 임계값 초과 여부
-        if long_value > short_value:
-            return long_value >= threshold_value
-        elif short_value > long_value:
-            return short_value >= threshold_value
-        
-        return False
-        
-    except Exception as e:
-        log("❌", f"is_above_threshold_main_side error: {e}")
-        return False
 
 def emergency_close(side, size):
     """긴급 청산 (최대 한도 초과 시)"""
@@ -942,25 +885,21 @@ def cancel_stale_orders():
     except Exception as e:
         log("❌", f"Cancel stale orders error: {e}")
 
-def initialize_grid(current_price=None):
+def initialize_grid(current_price=None, idle_multiplier=1.0):
     """
-    시장가 양방향 즉시 진입
-    - OBV MACD 기반 수량 조절 (전체 구간 적용!)
-    - 임계값 이전: BASE_RATIO × OBV MACD
-    - 임계값 이후: 포지션 비례 + OBV MACD 추가 가중
+    그리드 초기화 - 임계값 관계없이 동일한 로직
+    idle_multiplier: 아이들 상태일 때 진입 수량 배수 (기본 1.0, 아이들 시 2.0)
     """
-    
     global last_grid_time
     
     if not initialize_grid_lock.acquire(blocking=False):
-        log("[⏸️ GRID]", "Already running → Skipping")
+        log("🔵 GRID", "Already running → Skipping")
         return
     
     try:
         now = time.time()
-        
         if now - last_grid_time < 3:
-            log("[⏸️ GRID]", f"Too soon ({now - last_grid_time:.1f}s) → Skipping")
+            log("🔵 GRID", f"Too soon ({now - last_grid_time:.1f}s) → Skipping")
             return
         
         last_grid_time = now
@@ -969,10 +908,10 @@ def initialize_grid(current_price=None):
             current_price = get_current_price()
         
         if current_price == 0:
-            log("[❌]", "Cannot get current price")
+            log("❌", "Cannot get current price")
             return
         
-        log("[🔸 DEBUG]", f"initialize_grid called at {current_price}")
+        log("🔵 DEBUG", f"initialize_grid called at {current_price}")
         
         sync_position()
         
@@ -980,16 +919,15 @@ def initialize_grid(current_price=None):
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
         
-        log("[🔸 DEBUG]", f"Current positions: Long={long_size}, Short={short_size}")
+        log("🔵 DEBUG", f"Current positions: Long={long_size}, Short={short_size}")
         
-        # ✅ 양방향 포지션 체크
-        both_positions = long_size > 0 and short_size > 0
+        # ❌ 삭제: 양쪽 포지션 체크 (이제 진입 허용)
+        # both_positions = (long_size > 0 and short_size > 0)
+        # if both_positions:
+        #     log("🔵 GRID", "Both positions exist → No entry, TP only")
+        #     return
         
-        if both_positions:
-            log("[ℹ️ GRID]", "Both positions exist → No entry (TP only)")
-            return
-        
-        # 최대 한도 체크
+        # 최대 포지션 체크
         with balance_lock:
             max_value = account_balance * MAX_POSITION_RATIO
         
@@ -998,114 +936,65 @@ def initialize_grid(current_price=None):
         short_value = Decimal(str(short_size)) * current_price_dec
         
         if long_value >= max_value or short_value >= max_value:
-            log("[⚠️ LIMIT]", f"Max position reached (Long: {float(long_value):.2f}, Short: {float(short_value):.2f})")
+            log("⚠️ LIMIT", f"Max position reached (Long: {float(long_value):.2f}, Short: {float(short_value):.2f})")
             return
         
         obv_display = float(obv_macd_value) * 1000
         
+        # ✅ 핵심: 임계값 관계없이 동일한 로직!
         with balance_lock:
             base_value = account_balance * BASE_RATIO
         
-        base_qty_long = int(base_value / current_price_dec)
-        base_qty_short = int(base_value / current_price_dec)
+        base_qty_long = int(base_value / current_price_dec * Decimal(str(idle_multiplier)))
+        base_qty_short = int(base_value / current_price_dec * Decimal(str(idle_multiplier)))
         
         if base_qty_long < 1 or base_qty_short < 1:
-            log("[⚠️]", f"Insufficient quantity: long={base_qty_long}, short={base_qty_short}")
+            log("❌", f"Insufficient quantity (long={base_qty_long}, short={base_qty_short})")
             return
         
-        try:
-            is_above_threshold = is_above_threshold_main_side()
-        except Exception as e:
-            log("[⚠️]", f"Threshold check error: {e}, assuming below threshold")
-            is_above_threshold = False
-        
-        # ===== OBV MACD 수량 조절 =====
-        if not is_above_threshold:
-            # 임계값 이전: OBV MACD만 적용
-            obv_abs = abs(obv_display)
-            if obv_abs <= 5:
-                obv_multiplier = Decimal("0.10")
-            elif obv_abs <= 10:
-                obv_multiplier = Decimal("0.11")
-            elif obv_abs <= 15:
-                obv_multiplier = Decimal("0.12")
-            elif obv_abs <= 20:
-                obv_multiplier = Decimal("0.13")
-            elif obv_abs <= 30:
-                obv_multiplier = Decimal("0.15")
-            elif obv_abs <= 40:
-                obv_multiplier = Decimal("0.16")
-            elif obv_abs <= 50:
-                obv_multiplier = Decimal("0.17")
-            elif obv_abs <= 70:
-                obv_multiplier = Decimal("0.18")
-            elif obv_abs <= 100:
-                obv_multiplier = Decimal("0.19")
-            else:
-                obv_multiplier = Decimal("0.20")
-            
-            if obv_display > 0:
-                base_qty_long = int(base_qty_long * (Decimal("1") + obv_multiplier))
-            elif obv_display < 0:
-                base_qty_short = int(base_qty_short * (Decimal("1") + obv_multiplier))
-        
+        # OBV MACD 가중치 적용
+        obv_abs = abs(obv_display)
+        if obv_abs < 5:
+            obv_multiplier = Decimal("0.10")
+        elif obv_abs < 10:
+            obv_multiplier = Decimal("0.11")
+        elif obv_abs < 15:
+            obv_multiplier = Decimal("0.12")
+        elif obv_abs < 20:
+            obv_multiplier = Decimal("0.13")
+        elif obv_abs < 30:
+            obv_multiplier = Decimal("0.15")
+        elif obv_abs < 40:
+            obv_multiplier = Decimal("0.16")
+        elif obv_abs < 50:
+            obv_multiplier = Decimal("0.17")
+        elif obv_abs < 70:
+            obv_multiplier = Decimal("0.18")
+        elif obv_abs < 100:
+            obv_multiplier = Decimal("0.19")
         else:
-            # 임계값 이후: 포지션 비례 + OBV MACD 추가 가중
-            obv_abs = abs(obv_display)
-            if obv_abs <= 5:
-                obv_multiplier = Decimal("0.10")
-            elif obv_abs <= 10:
-                obv_multiplier = Decimal("0.11")
-            elif obv_abs <= 15:
-                obv_multiplier = Decimal("0.12")
-            elif obv_abs <= 20:
-                obv_multiplier = Decimal("0.13")
-            elif obv_abs <= 30:
-                obv_multiplier = Decimal("0.15")
-            elif obv_abs <= 40:
-                obv_multiplier = Decimal("0.16")
-            elif obv_abs <= 50:
-                obv_multiplier = Decimal("0.17")
-            elif obv_abs <= 70:
-                obv_multiplier = Decimal("0.18")
-            elif obv_abs <= 100:
-                obv_multiplier = Decimal("0.19")
-            else:
-                obv_multiplier = Decimal("0.20")
-            
-            if long_size > short_size:
-                # 롱이 주력
-                base_qty_long = max(base_qty_long, int(long_size * POSITION_SCALE_RATIO))
-                base_qty_short = int(long_size * COUNTER_RATIO)
-                
-                # ✅ OBV MACD 추가 가중 (주력에만)
-                if obv_display > 0:
-                    base_qty_long = int(base_qty_long * (Decimal("1") + obv_multiplier))
-            
-            elif short_size > long_size:
-                # 숏이 주력
-                base_qty_short = max(base_qty_short, int(short_size * POSITION_SCALE_RATIO))
-                base_qty_long = int(short_size * COUNTER_RATIO)
-                
-                # ✅ OBV MACD 추가 가중 (주력에만)
-                if obv_display < 0:
-                    base_qty_short = int(base_qty_short * (Decimal("1") + obv_multiplier))
+            obv_multiplier = Decimal("0.20")
+        
+        # OBV MACD 방향에 따라 가중치 적용
+        if obv_display > 0:
+            base_qty_long = int(base_qty_long * (Decimal("1") + obv_multiplier))
+        elif obv_display < 0:
+            base_qty_short = int(base_qty_short * (Decimal("1") + obv_multiplier))
         
         long_qty = max(1, base_qty_long)
         short_qty = max(1, base_qty_short)
         
-        log("[🔰 QUANTITY]", f"Long: {long_qty}, Short: {short_qty} (OBV={obv_display:.1f}, Threshold={is_above_threshold})")
+        log("📊 QUANTITY", f"Long: {long_qty}, Short: {short_qty}, OBV={obv_display:.1f}, Idle={idle_multiplier}")
+        log("✅ ENTRY", f"Market order execution: Long {long_qty}, Short {short_qty}")
         
-        log("[📊 ENTRY]", f"Market order execution (Long: {long_qty}, Short: {short_qty})")
-        
-        # ✅ grid_orders 초기화
+        # 그리드 오더 초기화
         if SYMBOL not in grid_orders:
             grid_orders[SYMBOL] = {"long": [], "short": []}
         else:
             grid_orders[SYMBOL]["long"] = []
             grid_orders[SYMBOL]["short"] = []
         
-        # ===== 롱 시장가 진입 =====
+        # 롱 진입
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
@@ -1115,13 +1004,13 @@ def initialize_grid(current_price=None):
                 reduce_only=False
             )
             result = api.create_futures_order(SETTLE, order)
-            log("[✅ ENTRY]", f"LONG {long_qty} @ market (ID: {result.id})")
+            log("✅ ENTRY", f"LONG {long_qty} market (ID: {result.id})")
         except GateApiException as e:
-            log("[❌]", f"LONG entry error: {e}")
+            log("❌", f"LONG entry error: {e}")
         
         time.sleep(0.2)
         
-        # ===== 숏 시장가 진입 =====
+        # 숏 진입
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
@@ -1131,29 +1020,24 @@ def initialize_grid(current_price=None):
                 reduce_only=False
             )
             result = api.create_futures_order(SETTLE, order)
-            log("[✅ ENTRY]", f"SHORT {short_qty} @ market (ID: {result.id})")
+            log("✅ ENTRY", f"SHORT {short_qty} market (ID: {result.id})")
         except GateApiException as e:
-            log("[❌]", f"SHORT entry error: {e}")
+            log("❌", f"SHORT entry error: {e}")
         
-        # ===== TP 재생성 =====
         time.sleep(0.5)
         sync_position()
         refresh_all_tp_orders()
         
-        log("[✅ GRID]", "Market entry complete!")
+        log("🎉 GRID", "Market entry complete!")
         
     finally:
         initialize_grid_lock.release()
 
-def refresh_all_tp_orders(cancel_first=True):  # ← False → True로 변경!
-    """TP 주문 새로 생성
-    cancel_first=True: 기존 TP 취소 후 재생성 (기본값, 안전)
-    cancel_first=False: 기존 TP 유지, 부족분만 생성 (위험)
-    """
+def refresh_all_tp_orders(cancel_first=True):
+    """TP 주문 새로 생성 - 평균 TP만 사용 (Individual TP 제거!)"""
     
-    # ✅ 기본값: 항상 기존 TP 취소 후 재생성 (안전)
     if cancel_first:
-        cancel_tp_only()  # 기존 TP 취소
+        cancel_tp_only()
     
     try:
         average_tp_orders[SYMBOL] = {"long": None, "short": None}
@@ -1168,117 +1052,43 @@ def refresh_all_tp_orders(cancel_first=True):  # ← False → True로 변경!
         log("🎯 TP REFRESH", "Creating TP orders...")
         log_threshold_info()
         
-        # ✅ 추가: post_threshold_entries 디버깅
-        log("🔍 DEBUG", f"post_threshold_entries LONG: {post_threshold_entries[SYMBOL]['long']}")
-        log("🔍 DEBUG", f"post_threshold_entries SHORT: {post_threshold_entries[SYMBOL]['short']}")
-        
-        main_side = get_main_side()
-        log("🔍 DEBUG", f"main_side={main_side}, long={long_size}, short={short_size}")
-        
         # ========================================================================
-        # === 롱 TP 생성 ===
+        # === 롱 TP 생성 (Full Average만!) ===
         # ========================================================================
         if long_size > 0:
-            long_above = is_above_threshold("long")
-            log("🔍 DEBUG", f"LONG: above={long_above}, is_main={main_side == 'long'}")
-            
             try:
-                if long_above and main_side == "long":
-                    # ===== Individual TP 로직 =====
-                    log("📈 LONG TP", "Above threshold & MAIN → Individual + Average TPs")
-                    
-                    individual_total = 0
-                    for entry in post_threshold_entries[SYMBOL]["long"]:
-                        tp_price = Decimal(str(entry["price"])) * (Decimal("1") + TP_GAP_PCT)
-                        tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-                        
-                        order = FuturesOrder(
-                            contract=SYMBOL,
-                            size=-entry["qty"],
-                            price=str(tp_price),
-                            tif="gtc",
-                            reduce_only=True
-                        )
-                        
-                        log("🔍 DEBUG", f"Creating LONG individual TP: qty={entry['qty']}, price={tp_price}")
-                        result = api.create_futures_order(SETTLE, order)
-                        log("🔍 DEBUG", f"LONG individual TP result: {result}")
-                        
-                        # ✅ 즉시 체결 확인
-                        if result and hasattr(result, 'id'):
-                            if hasattr(result, 'status') and result.status in ["finished", "closed"]:
-                                log("⚡ INSTANT TP", f"LONG individual TP filled immediately @ {tp_price:.4f}")
-                                instant_tp_triggered = True  # ✅ 플래그 설정
-                            else:
-                                entry["tp_order_id"] = result.id
-                                individual_total += entry["qty"]
-                                log("🎯 INDIVIDUAL TP", f"LONG {entry['qty']} @ {tp_price:.4f}")
-                        else:
-                            log("❌ TP", f"LONG individual TP creation failed: result={result}")
-                    
-                    # ===== Average TP =====
-                    remaining = int(long_size - individual_total)
-                    if remaining > 0:
-                        tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
-                        tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-                        
-                        order = FuturesOrder(
-                            contract=SYMBOL,
-                            size=-remaining,
-                            price=str(tp_price),
-                            tif="gtc",
-                            reduce_only=True
-                        )
-                        
-                        log("🔍 DEBUG", f"Creating LONG average TP: size={remaining}, price={tp_price}")
-                        result = api.create_futures_order(SETTLE, order)
-                        log("🔍 DEBUG", f"LONG average TP result: {result}")
-                        
-                        # ✅ 즉시 체결 확인
-                        if result and hasattr(result, 'id'):
-                            if hasattr(result, 'status') and result.status in ["finished", "closed"]:
-                                log("⚡ INSTANT TP", f"LONG average TP filled immediately @ {tp_price:.4f}")
-                                instant_tp_triggered = True  # ✅ 플래그 설정
-                            else:
-                                average_tp_orders[SYMBOL]["long"] = result.id
-                                log("🎯 AVERAGE TP", f"LONG {remaining} @ {tp_price:.4f}")
-                        else:
-                            log("❌ TP", f"LONG average TP creation failed: result={result}")
+                # ✅ Full average TP
+                log("📈 LONG TP", "Creating full average TP")
+                tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
+                tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
                 
-                else:
-                    # ===== Full average TP =====
-                    log("📈 LONG TP", "Below threshold or COUNTER → Full average TP")
-                    tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
-                    tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-                    
-                    order = FuturesOrder(
-                        contract=SYMBOL,
-                        size=-int(long_size),
-                        price=str(tp_price),
-                        tif="gtc",
-                        reduce_only=True
-                    )
-                    
-                    log("🔍 DEBUG", f"Creating LONG full TP: size={int(long_size)}, price={tp_price}")
-                    result = api.create_futures_order(SETTLE, order)
-                    log("🔍 DEBUG", f"LONG full TP result: {result}")
-                    
-                    # ✅ 즉시 체결 확인
-                    if result and hasattr(result, 'id'):
-                        if hasattr(result, 'status') and result.status in ["finished", "closed"]:
-                            log("⚡ INSTANT TP", f"LONG full TP filled immediately @ {tp_price:.4f}")
-                            instant_tp_triggered = True  # ✅ 플래그 설정
-                            # 즉시 새로고침 트리거
-                            threading.Thread(
-                                target=full_refresh,
-                                args=("Instant_TP_Long",),
-                                daemon=True
-                            ).start()
-                        else:
-                            average_tp_orders[SYMBOL]["long"] = result.id
-                            log("🎯 FULL TP", f"LONG {int(long_size)} @ {tp_price:.4f}")
+                order = FuturesOrder(
+                    contract=SYMBOL,
+                    size=-int(long_size),
+                    price=str(tp_price),
+                    tif="gtc",
+                    reduce_only=True
+                )
+                
+                log("🔍 DEBUG", f"Creating LONG full TP: size={int(long_size)}, price={tp_price}")
+                result = api.create_futures_order(SETTLE, order)
+                log("🔍 DEBUG", f"LONG full TP result: {result}")
+                
+                # ✅ 즉시 체결 확인
+                if result and hasattr(result, 'id'):
+                    if hasattr(result, 'status') and result.status in ["finished", "closed"]:
+                        log("⚡ INSTANT TP", f"LONG full TP filled immediately @ {tp_price:.4f}")
+                        instant_tp_triggered = True
+                        threading.Thread(
+                            target=full_refresh,
+                            args=("Instant_TP_Long",),
+                            daemon=True
+                        ).start()
                     else:
-                        log("❌ TP", f"LONG full TP creation failed: result={result}")
+                        average_tp_orders[SYMBOL]["long"] = result.id
+                        log("🎯 FULL TP", f"LONG {int(long_size)} @ {tp_price:.4f}")
+                else:
+                    log("❌ TP", f"LONG full TP creation failed: result={result}")
             
             except Exception as e:
                 log("❌ TP", f"LONG TP exception: {e}")
@@ -1286,109 +1096,42 @@ def refresh_all_tp_orders(cancel_first=True):  # ← False → True로 변경!
                 log("❌", traceback.format_exc())
         
         # ========================================================================
-        # === 숏 TP 생성 ===
+        # === 숏 TP 생성 (Full Average만!) ===
         # ========================================================================
         if short_size > 0:
-            short_above = is_above_threshold("short")
-            log("🔍 DEBUG", f"SHORT: above={short_above}, is_main={main_side == 'short'}")
-            
             try:
-                if short_above and main_side == "short":
-                    # ===== Individual TP 로직 =====
-                    log("📉 SHORT TP", "Above threshold & MAIN → Individual + Average TPs")
-                    
-                    individual_total = 0
-                    for entry in post_threshold_entries[SYMBOL]["short"]:
-                        tp_price = Decimal(str(entry["price"])) * (Decimal("1") - TP_GAP_PCT)
-                        tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-                        
-                        order = FuturesOrder(
-                            contract=SYMBOL,
-                            size=entry["qty"],
-                            price=str(tp_price),
-                            tif="gtc",
-                            reduce_only=True
-                        )
-                        
-                        log("🔍 DEBUG", f"Creating SHORT individual TP: qty={entry['qty']}, price={tp_price}")
-                        result = api.create_futures_order(SETTLE, order)
-                        log("🔍 DEBUG", f"SHORT individual TP result: {result}")
-                        
-                        # ✅ 즉시 체결 확인
-                        if result and hasattr(result, 'id'):
-                            if hasattr(result, 'status') and result.status in ["finished", "closed"]:
-                                log("⚡ INSTANT TP", f"SHORT individual TP filled immediately @ {tp_price:.4f}")
-                                instant_tp_triggered = True  # ✅ 플래그 설정
-                            else:
-                                entry["tp_order_id"] = result.id
-                                individual_total += entry["qty"]
-                                log("🎯 INDIVIDUAL TP", f"SHORT {entry['qty']} @ {tp_price:.4f}")
-                        else:
-                            log("❌ TP", f"SHORT individual TP creation failed: result={result}")
-                    
-                    # ===== Average TP =====
-                    remaining = int(short_size - individual_total)
-                    if remaining > 0:
-                        tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
-                        tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-                        
-                        order = FuturesOrder(
-                            contract=SYMBOL,
-                            size=remaining,
-                            price=str(tp_price),
-                            tif="gtc",
-                            reduce_only=True
-                        )
-                        
-                        log("🔍 DEBUG", f"Creating SHORT average TP: size={remaining}, price={tp_price}")
-                        result = api.create_futures_order(SETTLE, order)
-                        log("🔍 DEBUG", f"SHORT average TP result: {result}")
-                        
-                        # ✅ 즉시 체결 확인
-                        if result and hasattr(result, 'id'):
-                            if hasattr(result, 'status') and result.status in ["finished", "closed"]:
-                                log("⚡ INSTANT TP", f"SHORT average TP filled immediately @ {tp_price:.4f}")
-                                instant_tp_triggered = True  # ✅ 플래그 설정
-                            else:
-                                average_tp_orders[SYMBOL]["short"] = result.id
-                                log("🎯 AVERAGE TP", f"SHORT {remaining} @ {tp_price:.4f}")
-                        else:
-                            log("❌ TP", f"SHORT average TP creation failed: result={result}")
+                # ✅ Full average TP
+                log("📉 SHORT TP", "Creating full average TP")
+                tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
+                tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
                 
-                else:
-                    # ===== Full average TP =====
-                    log("📉 SHORT TP", "Below threshold or COUNTER → Full average TP")
-                    tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
-                    tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-                    
-                    order = FuturesOrder(
-                        contract=SYMBOL,
-                        size=int(short_size),
-                        price=str(tp_price),
-                        tif="gtc",
-                        reduce_only=True
-                    )
-                    
-                    log("🔍 DEBUG", f"Creating SHORT full TP: size={int(short_size)}, price={tp_price}")
-                    result = api.create_futures_order(SETTLE, order)
-                    log("🔍 DEBUG", f"SHORT full TP result: {result}")
-                    
-                    # ✅ 즉시 체결 확인
-                    if result and hasattr(result, 'id'):
-                        if hasattr(result, 'status') and result.status in ["finished", "closed"]:
-                            log("⚡ INSTANT TP", f"SHORT full TP filled immediately @ {tp_price:.4f}")
-                            instant_tp_triggered = True  # ✅ 플래그 설정
-                            # 즉시 새로고침 트리거
-                            threading.Thread(
-                                target=full_refresh,
-                                args=("Instant_TP_Short",),
-                                daemon=True
-                            ).start()
-                        else:
-                            average_tp_orders[SYMBOL]["short"] = result.id
-                            log("🎯 FULL TP", f"SHORT {int(short_size)} @ {tp_price:.4f}")
+                order = FuturesOrder(
+                    contract=SYMBOL,
+                    size=int(short_size),
+                    price=str(tp_price),
+                    tif="gtc",
+                    reduce_only=True
+                )
+                
+                log("🔍 DEBUG", f"Creating SHORT full TP: size={int(short_size)}, price={tp_price}")
+                result = api.create_futures_order(SETTLE, order)
+                log("🔍 DEBUG", f"SHORT full TP result: {result}")
+                
+                # ✅ 즉시 체결 확인
+                if result and hasattr(result, 'id'):
+                    if hasattr(result, 'status') and result.status in ["finished", "closed"]:
+                        log("⚡ INSTANT TP", f"SHORT full TP filled immediately @ {tp_price:.4f}")
+                        instant_tp_triggered = True
+                        threading.Thread(
+                            target=full_refresh,
+                            args=("Instant_TP_Short",),
+                            daemon=True
+                        ).start()
                     else:
-                        log("❌ TP", f"SHORT full TP creation failed: result={result}")
+                        average_tp_orders[SYMBOL]["short"] = result.id
+                        log("🎯 FULL TP", f"SHORT {int(short_size)} @ {tp_price:.4f}")
+                else:
+                    log("❌ TP", f"SHORT full TP creation failed: result={result}")
             
             except Exception as e:
                 log("❌ TP", f"SHORT TP exception: {e}")
@@ -1407,7 +1150,6 @@ def refresh_all_tp_orders(cancel_first=True):  # ← False → True로 변경!
         
         # ✅ instant_tp_triggered가 False일 때만 실행 (중복 방지)
         if not instant_tp_triggered:
-            # TP가 즉시 체결되어 포지션이 사라진 경우
             if (long_size > 0 and long_size_after == 0) or (short_size > 0 and short_size_after == 0):
                 log("⚡ INSTANT TP", "Position closed after TP creation → Triggering refresh")
                 threading.Thread(
@@ -1422,50 +1164,6 @@ def refresh_all_tp_orders(cancel_first=True):  # ← False → True로 변경!
         log("❌", f"TP refresh error: {e}")
         import traceback
         log("❌", f"Traceback: {traceback.format_exc()}")
-
-def on_individual_tp_filled(main_side, filled_order_id):
-    """개별 TP 체결 시 비주력 포지션 20% 청산"""
-    counter_side = get_counter_side(main_side)
-    
-    with position_lock:
-        counter_size = position_state[SYMBOL][counter_side]["size"]
-    
-    if counter_size <= 0:
-        log("ℹ️", f"No {counter_side} position to partially close")
-        return
-    
-    # 비주력 포지션 20% 청산
-    close_qty = max(1, int(counter_size * Decimal("0.2")))
-    
-    log("✂️ PARTIAL", f"Individual TP filled → Close {counter_side.upper()} {close_qty} (20%)")
-    
-    close_order_data = {
-        "contract": SYMBOL,
-        "size": int(close_qty * (1 if counter_side == "long" else -1)),
-        "price": "0",
-        "tif": "ioc",
-        "close": True
-    }
-    
-    try:
-        order = api.create_futures_order(SETTLE, FuturesOrder(**close_order_data))
-        if order and hasattr(order, 'id'):
-            log("✅ CLOSED", f"{counter_side.upper()} {close_qty} @ market (ID: {order.id})")
-        else:
-            log("✅ CLOSED", f"{counter_side.upper()} {close_qty} @ market (IOC filled)")
-        
-        # 포지션 동기화
-        time.sleep(0.5)
-        sync_position()
-        
-        # 남은 물량에 대해 TP 재생성
-        time.sleep(0.3)
-        refresh_all_tp_orders()
-        
-    except GateApiException as e:
-        log("❌", f"Partial close API error: {e}")
-    except Exception as e:
-        log("❌", f"Partial close error: {e}")
 
 def check_idle_and_enter():
     """30분 무이벤트 진입"""
@@ -1569,20 +1267,7 @@ def check_idle_and_enter():
         
         time.sleep(0.5)
         sync_position()
-        
-        # 임계값 초과 시 진입 추적
-        if is_above_threshold(main_side):
-            with position_lock:
-                main_entry_price = position_state[SYMBOL][main_side]["price"]
-            
-            post_threshold_entries[SYMBOL][main_side].append({
-                "qty": int(main_qty),
-                "price": float(main_entry_price),
-                "entry_type": "idle",
-                "tp_order_id": None
-            })
-            log("📝 TRACKED", f"{main_side.upper()} idle {main_qty} @ {main_entry_price:.4f} (MAIN, above threshold)")
-        
+              
         # 타이머 리셋 (배수는 유지)
         last_event_time = time.time()
         
@@ -1594,57 +1279,6 @@ def check_idle_and_enter():
         import traceback
         log("❌", f"Traceback: {traceback.format_exc()}")
 
-def close_counter_on_individual_tp(main_side):
-    """개별 TP 체결 시 비주력 20% 청산"""
-    try:
-        counter_side = get_counter_side(main_side)
-        
-        with position_lock:
-            counter_size = position_state[SYMBOL][counter_side]["size"]
-        
-        if counter_size <= 0:
-            log("ℹ️ COUNTER", "No counter position to close")
-            return
-        
-        # 스냅샷 확인
-        snapshot = counter_position_snapshot[SYMBOL][main_side]
-        if snapshot == Decimal("0"):
-            # 첫 개별 TP 체결: 스냅샷 저장
-            snapshot = counter_size
-            counter_position_snapshot[SYMBOL][main_side] = snapshot
-            log("📸 SNAPSHOT", f"{counter_side.upper()} snapshot = {snapshot}")
-        
-        # 스냅샷 기준 20% 청산
-        close_qty = max(1, int(snapshot * COUNTER_CLOSE_RATIO))
-        if close_qty > counter_size:
-            close_qty = int(counter_size)
-        
-        size = -close_qty if counter_side == "long" else close_qty
-        
-        log("🔄 COUNTER CLOSE", f"{counter_side.upper()} {close_qty} @ market (snapshot: {snapshot}, 20%)")
-        order = FuturesOrder(contract=SYMBOL, size=size, price="0", tif='ioc', reduce_only=True)
-        api.create_futures_order(SETTLE, order)
-        
-    except Exception as e:
-        log("❌", f"Counter close error: {e}")
-
-
-# =============================================================================
-# 상태 추적
-# =============================================================================
-def track_entry(side, qty, price, entry_type, tp_id=None):
-    """임계값 초과 후 진입 추적"""
-    if not is_above_threshold(side):
-        return
-    
-    entry_data = {
-        "qty": int(qty),
-        "price": float(price),
-        "entry_type": entry_type,
-        "tp_order_id": tp_id
-    }
-    post_threshold_entries[SYMBOL][side].append(entry_data)
-    log("📝 TRACKED", f"{side.upper()} {qty} @ {price:.4f} ({entry_type}, tp_id={tp_id})")
 
 # =============================================================================
 # 시스템 새로고침
@@ -1743,13 +1377,6 @@ async def grid_fill_monitor():
                                     log("🎯 TP FILLED", f"{side.upper()} @ {price:.4f}")
                                     
                                     update_event_time()
-                                    
-                                    threading.Thread(
-                                        target=on_individual_tp_filled, 
-                                        args=(side, order_id), 
-                                        daemon=True
-                                    ).start()
-                                    
                                     time.sleep(0.5)
                                     
                                     with position_lock:
@@ -1782,60 +1409,7 @@ def tp_monitor():
     while True:
         try:
             time.sleep(3)
-            
-            # ===== 개별 TP 체결 확인 =====
-            for side in ["long", "short"]:
-                for entry in list(post_threshold_entries[SYMBOL][side]):
-                    try:
-                        tp_id = entry.get("tp_order_id")
-                        if not tp_id:
-                            continue
-                        
-                        order = api.get_futures_order(SETTLE, str(tp_id))
-                        if not order:
-                            continue
-                        
-                        if hasattr(order, 'status') and order.status in ["finished", "closed"]:
-                            log_event_header("INDIVIDUAL TP HIT")
-                            log("🎯 TP", f"{side.upper()} {entry['qty']} closed @ {entry['price']:.4f}")
-                            
-                            # 추적 리스트에서 제거
-                            post_threshold_entries[SYMBOL][side].remove(entry)
-
-                            update_event_time()  # 이벤트 시간 갱신
-                            
-                            # ===== 비주력 20% 시장가 청산 =====
-                            counter_side = get_counter_side(side)
-                            
-                            with position_lock:
-                                counter_size = position_state[SYMBOL][counter_side]["size"]
-                            
-                            if counter_size > 0:
-                                # 20% 청산
-                                close_qty = max(1, int(counter_size * COUNTER_CLOSE_RATIO))
-                                close_size = -close_qty if counter_side == "long" else close_qty
-                                
-                                log("🔄 COUNTER CLOSE", f"{counter_side.upper()} {close_qty} @ market (20% of {counter_size})")
-                                
-                                close_order = FuturesOrder(
-                                    contract=SYMBOL,
-                                    size=close_size,
-                                    price="0",
-                                    tif="ioc",
-                                    reduce_only=True
-                                )
-                                api.create_futures_order(SETTLE, close_order)
-                                
-                                time.sleep(0.5)
-                                sync_position()
-                            
-                            # 시스템 새로고침
-                            time.sleep(0.5)
-                            full_refresh("Individual_TP")
-                            break
-                    except:
-                        pass
-            
+                       
             # ===== 평단 TP 체결 확인 =====
             for side in ["long", "short"]:
                 tp_id = average_tp_orders[SYMBOL].get(side)
@@ -1938,32 +1512,17 @@ def position_monitor():
                 max_position_locked["short"] = False
                 full_refresh("Max_Unlock_Short")
                 continue
-            
-            # 임계값 이하 복귀 시 초기화
-            if long_value < threshold:
-                if counter_position_snapshot[SYMBOL]["long"] != Decimal("0") or len(post_threshold_entries[SYMBOL]["long"]) > 0:
-                    log("🔄 RESET", f"Long ${long_value:.2f} < threshold ${threshold:.2f}")
-                    counter_position_snapshot[SYMBOL]["long"] = Decimal("0")
-                    post_threshold_entries[SYMBOL]["long"].clear()
-                    log("✅ CLEARED", "Long tracking data reset")
-            
-            if short_value < threshold:
-                if counter_position_snapshot[SYMBOL]["short"] != Decimal("0") or len(post_threshold_entries[SYMBOL]["short"]) > 0:
-                    log("🔄 RESET", f"Short ${short_value:.2f} < threshold ${threshold:.2f}")
-                    counter_position_snapshot[SYMBOL]["short"] = Decimal("0")
-                    post_threshold_entries[SYMBOL]["short"].clear()
-                    log("✅ CLEARED", "Short tracking data reset")
         
         except Exception as e:
             log("❌", f"Position monitor error: {e}")
             time.sleep(5)
 
 def idle_monitor():
-    """30분 무이벤트 모니터링"""
+    """5분 아이들 시 자동 진입 (IDLE_TIME_SECONDS)"""
     while True:
         try:
             time.sleep(60)  # 1분마다 체크
-            check_idle_and_enter()
+            check_idle_and_enter()  # ✅ 이미 아이들 판단 로직 포함
         except Exception as e:
             log("❌", f"Idle monitor error: {e}")
             time.sleep(10)
@@ -2105,6 +1664,12 @@ def status():
     
     obv_display = float(obv_macd_value) * 1000
     
+    # ✅ 수정: threshold_status 제거 또는 계산 직접 수행
+    threshold = Decimal(str(bal)) * THRESHOLD_RATIO
+    current_price = get_current_price()
+    long_value = pos["long"]["size"] * current_price
+    short_value = pos["short"]["size"] * current_price
+    
     return jsonify({
         "balance": bal,
         "obv_macd_display": obv_display,
@@ -2113,21 +1678,15 @@ def status():
             "long": {"size": float(pos["long"]["size"]), "price": float(pos["long"]["price"])},
             "short": {"size": float(pos["short"]["size"]), "price": float(pos["short"]["price"])}
         },
-        "post_threshold_entries": {
-            "long": [{"qty": e["qty"], "price": e["price"], "type": e["entry_type"]} 
-                     for e in post_threshold_entries[SYMBOL]["long"]],
-            "short": [{"qty": e["qty"], "price": e["price"], "type": e["entry_type"]} 
-                      for e in post_threshold_entries[SYMBOL]["short"]]
-        },
-        "counter_snapshot": {
-            "long": float(counter_position_snapshot[SYMBOL]["long"]),
-            "short": float(counter_position_snapshot[SYMBOL]["short"])
-        },
-        "max_locked": max_position_locked,
+        # ✅ 수정: 직접 계산
         "threshold_status": {
-            "long": is_above_threshold("long"),
-            "short": is_above_threshold("short")
+            "threshold_value": float(threshold),
+            "long_value": float(long_value),
+            "short_value": float(short_value),
+            "long_above": float(long_value) >= float(threshold),
+            "short_above": float(short_value) >= float(threshold)
         }
+        # ❌ 삭제: post_threshold_entries, counter_snapshot 제거
     }), 200
 
 @app.route('/refresh', methods=['POST'])
@@ -2141,13 +1700,11 @@ def manual_refresh():
 
 @app.route('/reset', methods=['POST'])
 def reset_tracking():
-    """임계값 추적 데이터 강제 초기화"""
+    """아이들 카운트 리셋"""
+    global idle_entry_count
     try:
-        post_threshold_entries[SYMBOL]["long"].clear()
-        post_threshold_entries[SYMBOL]["short"].clear()
-        counter_position_snapshot[SYMBOL]["long"] = Decimal("0")
-        counter_position_snapshot[SYMBOL]["short"] = Decimal("0")
-        log("🔄 RESET", "All tracking data cleared")
+        idle_entry_count = 0
+        log("🔄 RESET", "Idle entry count reset to 0")
         return jsonify({"status": "success"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
