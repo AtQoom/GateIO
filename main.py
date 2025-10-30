@@ -117,7 +117,7 @@ kline_history = deque(maxlen=200)
 account_balance = INITIAL_BALANCE  # 추가
 ENABLE_AUTO_HEDGE = True
 last_event_time = 0  # 마지막 이벤트 시간 (그리드 체결 또는 TP 체결)
-IDLE_TIMEOUT = 1800  # 30분 (초 단위)
+IDLE_TIMEOUT = 900  # 15분 (초 단위)
 idle_entry_count = 0  # 아이들 진입 횟수 ← 추가
 
 # =============================================================================
@@ -1944,7 +1944,7 @@ def idle_monitor():
             time.sleep(10)
 
 def periodic_health_check():
-    """2분마다 종합 헬스체크 (강화)"""
+    """2분마다 종합 헬스체크 (TP 불필요 취소 방지)"""
     while True:
         try:
             time.sleep(120)  # 2분
@@ -1974,23 +1974,31 @@ def periodic_health_check():
                 log("❌", f"List orders error: {e}")
                 continue
             
-            # 3. TP 확인 및 보완
+            # ✅ 3. TP 확인 (수정: 실제 문제가 있을 때만 재생성!)
             if long_size > 0 or short_size > 0:
                 tp_orders_list = [o for o in orders if o.reduce_only]
                 
                 tp_long_qty = sum(abs(o.size) for o in tp_orders_list if o.size > 0)
                 tp_short_qty = sum(abs(o.size) for o in tp_orders_list if o.size < 0)
                 
-                needs_tp_refresh = (
-                    tp_count == 0 or
-                    (long_size > 0 and abs(tp_long_qty - long_size) > 1.0) or
-                    (short_size > 0 and abs(tp_short_qty - short_size) > 1.0)
-                )
+                # ✅ 수정: 오차 범위 확대 (1 → 2) + 수량 차이만 체크
+                tp_mismatch = False
                 
-                if needs_tp_refresh:
-                    log("🔧 HEALTH", f"TP mismatch → Refreshing")
+                if tp_count == 0:
+                    log("🔧 HEALTH", "No TP orders → Refreshing")
+                    tp_mismatch = True
+                elif long_size > 0 and abs(tp_long_qty - long_size) > 2.0:
+                    log("🔧 HEALTH", f"LONG TP mismatch: {tp_long_qty} vs {long_size} → Refreshing")
+                    tp_mismatch = True
+                elif short_size > 0 and abs(tp_short_qty - short_size) > 2.0:
+                    log("🔧 HEALTH", f"SHORT TP mismatch: {tp_short_qty} vs {short_size} → Refreshing")
+                    tp_mismatch = True
+                
+                if tp_mismatch:
                     time.sleep(0.5)
                     refresh_all_tp_orders()
+                else:
+                    log("✅ HEALTH", "TP orders normal")
             
             # ✅ 4. 단일 포지션 + 그리드 없음 → 시장가 진입!
             single_position = (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0)
