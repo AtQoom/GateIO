@@ -54,7 +54,7 @@ BASE_RATIO = Decimal("0.1")       # 기본 수량 비율
 THRESHOLD_RATIO = Decimal("0.8")  # 임계값
 COUNTER_RATIO = Decimal("0.20")   # 비주력 20%
 COUNTER_CLOSE_RATIO = Decimal("0.20")  # 비주력 20% 청산
-MAX_POSITION_RATIO = Decimal("10.0")    # 최대 10배
+MAX_POSITION_RATIO = Decimal("20.0")    # 최대 10배
 HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
 POSITION_SCALE_RATIO = Decimal("0.10")  # ✅ 새로 추가! 포지션 비례 10%
 
