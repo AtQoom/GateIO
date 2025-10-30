@@ -766,7 +766,6 @@ def is_above_threshold(side):
 # =============================================================================
 # TITLE 17-1. 전략 일관성 검증
 # =============================================================================
-
 def validate_strategy_consistency():
     """전략 일관성 검증 + 그리드 생성"""
     
@@ -791,13 +790,7 @@ def validate_strategy_consistency():
             log("❌", f"List orders error: {e}")
             return
         
-        # ✅ 검증 1: 양방향 + 그리드 존재
-        if long_size > 0 and short_size > 0 and grid_count > 0:
-            log("🚨 INVALID", f"Both positions with {grid_count} grids → Canceling all orders!")
-            cancel_all_orders() 
-            return
-        
-        # ✅ 검증 2: 단일 포지션 + 그리드 없음 → 그리드 생성!
+        # ✅ 검증 1: 단일 포지션 + 그리드 없음 → 그리드 생성!
         single_position = (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0)
         
         if single_position and grid_count == 0:
@@ -805,7 +798,7 @@ def validate_strategy_consistency():
             initialize_grid(current_price)
             return
         
-        # ✅ 검증 3: 최대 한도 초과 (완화: 20%)
+        # ✅ 검증 2: 최대 한도 초과 (완화: 20%)
         with balance_lock:
             max_value = Decimal(str(account_balance)) * MAX_POSITION_RATIO
         
