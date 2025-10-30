@@ -1126,9 +1126,15 @@ def initialize_grid(current_price=None):
     finally:
         initialize_grid_lock.release()
 
-def refresh_all_tp_orders():
-    """TP 주문 새로 생성 (즉시 체결 감지 + 중복 방지 + 디버깅 강화)"""
-    cancel_tp_only()
+def refresh_all_tp_orders(cancel_first=False):
+    """TP 주문 새로 생성
+    cancel_first=True: 기존 TP 취소 후 재생성 (긴급 상황)
+    cancel_first=False: 기존 TP 유지, 부족분만 생성 (정상 작동)
+    """
+    
+    # ✅ 수정: 필요할 때만 취소!
+    if cancel_first:
+        cancel_tp_only()  # 기존 TP 취소
     
     try:
         average_tp_orders[SYMBOL] = {"long": None, "short": None}
