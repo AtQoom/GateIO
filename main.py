@@ -1748,7 +1748,6 @@ def print_startup_summary():
     log("  ├─", f"Base Ratio: {BASE_RATIO * 100}%")
     log("  ├─", f"Threshold: {THRESHOLD_RATIO * 100}%")
     log("  ├─", f"Max Position: {MAX_POSITION_RATIO * 100}%")
-    log("  ├─", f"Counter Ratio: {COUNTER_RATIO * 100}%")
     log("  ├─", f"Counter Close: {COUNTER_CLOSE_RATIO * 100}%")
     log("  └─", f"Hedge Main: {HEDGE_RATIO_MAIN * 100}%")
     log_divider("-")
