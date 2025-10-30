@@ -47,7 +47,6 @@ initialize_grid_lock = threading.Lock()
 refresh_tp_lock = threading.Lock()
 hedge_lock = threading.Lock()
 
-GRID_GAP_PCT = Decimal("0.0019")  # 0.19%
 TP_GAP_PCT = Decimal("0.0019")    # 0.19%
 BASE_RATIO = Decimal("0.1")       # 기본 수량 비율
 THRESHOLD_RATIO = Decimal("0.8")  # 임계값
@@ -626,32 +625,6 @@ def cancel_all_orders():
     except Exception as e:
         log("[❌]", f"Order cancellation error: {e}")
 
-def cancel_grid_only():
-    try:
-        orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-        grid_orders_to_cancel = [o for o in orders if not o.is_reduce_only]
-        if not grid_orders_to_cancel: 
-            return
-        log("🗑️ CANCEL", f"{len(grid_orders_to_cancel)} grid orders")
-        for order in grid_orders_to_cancel:
-            try:
-                api.cancel_futures_order(SETTLE, order.id)
-                time.sleep(0.1)
-            except GateApiException as e:
-                if "ORDER_NOT_FOUND" not in str(e):
-                    log("⚠️", f"Cancel grid {order.id}: {e}")
-            except:
-                pass
-        grid_orders[SYMBOL] = {"long": [], "short": []}
-    except GateApiException as e:
-        if "400" in str(e):
-            log("⚠️", "Cancel grids: API authentication error")
-        else:
-            log("❌", f"Grid cancellation error: {e}")
-    except Exception as e:
-        log("❌", f"Grid cancellation error: {e}")
-
-
 def cancel_tp_only():
     """TP 주문만 취소 (그리드는 유지)"""
     try:
@@ -789,54 +762,6 @@ def is_above_threshold(side):
     value = price * size
     return value >= threshold
 
-# =============================================================================
-# 주문 실행
-# =============================================================================
-def place_grid_order(side, price, qty, is_counter=False, base_qty=2):
-    try:
-        if qty <= 0:
-            log("⚠️ GRID", f"Invalid quantity: {qty}")
-            return None
-        
-        # ✅ 추가: side 검증
-        if side not in ["long", "short"]:
-            log("❌ GRID", f"Invalid side: {side}")
-            return None
-            
-        size = qty if side == "long" else -qty
-        order = FuturesOrder(
-            contract=SYMBOL, 
-            size=int(size), 
-            price=str(price), 
-            tif="gtc"
-        )
-        result = api.create_futures_order(SETTLE, order)
-        if result and hasattr(result, 'id'):
-            # ✅ 추가: 안전한 접근
-            if SYMBOL not in grid_orders:
-                grid_orders[SYMBOL] = {"long": [], "short": []}
-            if side not in grid_orders[SYMBOL]:
-                grid_orders[SYMBOL][side] = []
-            
-            grid_orders[SYMBOL][side].append({
-                "order_id": result.id,
-                "price": float(price),
-                "qty": int(qty),
-                "is_counter": is_counter,
-                "base_qty": int(base_qty)
-            })
-            tag = "Counter(30%)" if is_counter else "Same"
-            log("📐 GRID", f"{tag} {side.upper()} {qty} @ {price:.4f}")
-        return result
-    except GateApiException as e:
-        if "400" in str(e):
-            log("❌", f"Grid order ({side}): API authentication error - {e}")
-        else:
-            log("❌", f"Grid order ({side}): {e}")
-        return None
-    except Exception as e:
-        log("❌", f"Grid order error ({side}): {e}")
-        return None
 
 # =============================================================================
 # TITLE 17-1. 전략 일관성 검증
@@ -868,8 +793,8 @@ def validate_strategy_consistency():
         
         # ✅ 검증 1: 양방향 + 그리드 존재
         if long_size > 0 and short_size > 0 and grid_count > 0:
-            log("🚨 INVALID", f"Both positions with {grid_count} grids → Canceling!")
-            cancel_grid_only()
+            log("🚨 INVALID", f"Both positions with {grid_count} grids → Canceling all orders!")
+            cancel_all_orders() 
             return
         
         # ✅ 검증 2: 단일 포지션 + 그리드 없음 → 그리드 생성!
@@ -1003,7 +928,12 @@ def cancel_stale_orders():
         log("❌", f"Cancel stale orders error: {e}")
 
 def initialize_grid(current_price=None):
-    """그리드 주문 생성 - 전략에 맞게 생성"""
+    """
+    시장가 양방향 즉시 진입
+    - OBV MACD 기반 수량 조절 (전체 구간 적용!)
+    - 임계값 이전: BASE_RATIO × OBV MACD
+    - 임계값 이후: 포지션 비례 + OBV MACD 추가 가중
+    """
     
     global last_grid_time
     
@@ -1041,7 +971,7 @@ def initialize_grid(current_price=None):
         both_positions = long_size > 0 and short_size > 0
         
         if both_positions:
-            log("[ℹ️ GRID]", "Both positions exist → No grid creation (TP only)")
+            log("[ℹ️ GRID]", "Both positions exist → No entry (TP only)")
             return
         
         # 최대 한도 체크
@@ -1056,7 +986,7 @@ def initialize_grid(current_price=None):
             log("[⚠️ LIMIT]", f"Max position reached (Long: {float(long_value):.2f}, Short: {float(short_value):.2f})")
             return
         
-        obv_display = get_obv_macd_value()
+        obv_display = float(obv_macd_value) * 1000
         
         with balance_lock:
             base_value = account_balance * BASE_RATIO
@@ -1064,13 +994,19 @@ def initialize_grid(current_price=None):
         base_qty_long = int(base_value / current_price_dec)
         base_qty_short = int(base_value / current_price_dec)
         
+        if base_qty_long < 1 or base_qty_short < 1:
+            log("[⚠️]", f"Insufficient quantity: long={base_qty_long}, short={base_qty_short}")
+            return
+        
         try:
             is_above_threshold = is_above_threshold_main_side()
         except Exception as e:
             log("[⚠️]", f"Threshold check error: {e}, assuming below threshold")
             is_above_threshold = False
         
+        # ===== OBV MACD 수량 조절 =====
         if not is_above_threshold:
+            # 임계값 이전: OBV MACD만 적용
             obv_abs = abs(obv_display)
             if obv_abs <= 5:
                 obv_multiplier = Decimal("0.10")
@@ -1097,27 +1033,55 @@ def initialize_grid(current_price=None):
                 base_qty_long = int(base_qty_long * (Decimal("1") + obv_multiplier))
             elif obv_display < 0:
                 base_qty_short = int(base_qty_short * (Decimal("1") + obv_multiplier))
+        
         else:
+            # 임계값 이후: 포지션 비례 + OBV MACD 추가 가중
+            obv_abs = abs(obv_display)
+            if obv_abs <= 5:
+                obv_multiplier = Decimal("0.10")
+            elif obv_abs <= 10:
+                obv_multiplier = Decimal("0.11")
+            elif obv_abs <= 15:
+                obv_multiplier = Decimal("0.12")
+            elif obv_abs <= 20:
+                obv_multiplier = Decimal("0.13")
+            elif obv_abs <= 30:
+                obv_multiplier = Decimal("0.15")
+            elif obv_abs <= 40:
+                obv_multiplier = Decimal("0.16")
+            elif obv_abs <= 50:
+                obv_multiplier = Decimal("0.17")
+            elif obv_abs <= 70:
+                obv_multiplier = Decimal("0.18")
+            elif obv_abs <= 100:
+                obv_multiplier = Decimal("0.19")
+            else:
+                obv_multiplier = Decimal("0.20")
+            
             if long_size > short_size:
+                # 롱이 주력
                 base_qty_long = max(base_qty_long, int(long_size * POSITION_SCALE_RATIO))
                 base_qty_short = int(long_size * COUNTER_RATIO)
+                
+                # ✅ OBV MACD 추가 가중 (주력에만)
+                if obv_display > 0:
+                    base_qty_long = int(base_qty_long * (Decimal("1") + obv_multiplier))
+            
             elif short_size > long_size:
+                # 숏이 주력
                 base_qty_short = max(base_qty_short, int(short_size * POSITION_SCALE_RATIO))
                 base_qty_long = int(short_size * COUNTER_RATIO)
+                
+                # ✅ OBV MACD 추가 가중 (주력에만)
+                if obv_display < 0:
+                    base_qty_short = int(base_qty_short * (Decimal("1") + obv_multiplier))
         
         long_qty = max(1, base_qty_long)
         short_qty = max(1, base_qty_short)
         
         log("[🔰 QUANTITY]", f"Long: {long_qty}, Short: {short_qty} (OBV={obv_display:.1f}, Threshold={is_above_threshold})")
         
-        price_dec = Decimal(str(current_price))
-        long_price = price_dec * (Decimal("1") - GRID_GAP_PCT)
-        short_price = price_dec * (Decimal("1") + GRID_GAP_PCT)
-        
-        long_price = float(long_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN))
-        short_price = float(short_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN))
-        
-        log("[📊 GRID]", f"Creating both grids (Long: {long_qty} @ {long_price:.4f}, Short: {short_qty} @ {short_price:.4f})")
+        log("[📊 ENTRY]", f"Market order execution (Long: {long_qty}, Short: {short_qty})")
         
         # ✅ grid_orders 초기화
         if SYMBOL not in grid_orders:
@@ -1126,206 +1090,45 @@ def initialize_grid(current_price=None):
             grid_orders[SYMBOL]["long"] = []
             grid_orders[SYMBOL]["short"] = []
         
-        created_long = False
-        created_short = False
-        
-        # ✅ 롱 그리드 생성
+        # ===== 롱 시장가 진입 =====
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
                 size=long_qty,
-                price=str(long_price),
-                tif="gtc",
+                price="0",
+                tif="ioc",
                 reduce_only=False
             )
             result = api.create_futures_order(SETTLE, order)
-            
-            # ✅ grid_orders에 저장 (is_counter 포함!)
-            is_counter_long = short_size > long_size  # 숏이 더 크면 롱은 비주력
-            
-            grid_orders[SYMBOL]["long"].append({
-                "order_id": result.id,
-                "price": long_price,
-                "qty": long_qty,
-                "is_counter": is_counter_long,
-                "base_qty": int(base_value / current_price_dec)
-            })
-            
-            log("[✅ GRID]", f"LONG {long_qty} @ {long_price:.4f} (ID: {result.id}, Counter: {is_counter_long})")
-            created_long = True
-            
+            log("[✅ ENTRY]", f"LONG {long_qty} @ market (ID: {result.id})")
         except GateApiException as e:
-            log("[❌]", f"LONG grid error: {e}")
+            log("[❌]", f"LONG entry error: {e}")
         
-        # ✅ 숏 그리드 생성
+        time.sleep(0.2)
+        
+        # ===== 숏 시장가 진입 =====
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
                 size=-short_qty,
-                price=str(short_price),
-                tif="gtc",
+                price="0",
+                tif="ioc",
                 reduce_only=False
             )
             result = api.create_futures_order(SETTLE, order)
-            
-            # ✅ grid_orders에 저장 (is_counter 포함!)
-            is_counter_short = long_size > short_size  # 롱이 더 크면 숏은 비주력
-            
-            grid_orders[SYMBOL]["short"].append({
-                "order_id": result.id,
-                "price": short_price,
-                "qty": short_qty,
-                "is_counter": is_counter_short,
-                "base_qty": int(base_value / current_price_dec)
-            })
-            
-            log("[✅ GRID]", f"SHORT {short_qty} @ {short_price:.4f} (ID: {result.id}, Counter: {is_counter_short})")
-            created_short = True
-            
+            log("[✅ ENTRY]", f"SHORT {short_qty} @ market (ID: {result.id})")
         except GateApiException as e:
-            log("[❌]", f"SHORT grid error: {e}")
+            log("[❌]", f"SHORT entry error: {e}")
         
-        if created_long and created_short:
-            log("[✅ GRID]", "Both grids created successfully!")
-        elif created_long or created_short:
-            log("[⚠️ GRID]", f"Partial grid (Long: {created_long}, Short: {created_short})")
-        else:
-            log("[❌ GRID]", "No grids created (API errors)")
-            
+        # ===== TP 재생성 =====
+        time.sleep(0.5)
+        sync_position()
+        refresh_all_tp_orders()
+        
+        log("[✅ GRID]", "Market entry complete!")
+        
     finally:
         initialize_grid_lock.release()
-
-def hedge_after_grid_fill(side, grid_price, grid_qty, was_counter, base_qty):
-    """그리드 체결 후 헷징 + 후속 처리 (완전 통합)"""
-    if not ENABLE_AUTO_HEDGE:
-        return
-    
-    try:
-        log("[🔶 HEDGE]", f"Starting hedge after {side} grid fill")
-        
-        # 1. 모든 주문 취소
-        cancel_all_orders()
-        time.sleep(0.5)
-        
-        # 2. 포지션 동기화
-        sync_position()
-        time.sleep(0.3)
-        
-        current_price = get_current_price()
-        if current_price <= 0:
-            log("[❌]", "Cannot get price for hedge")
-            return
-        
-        counter_side = get_counter_side(side)
-        
-        with position_lock:
-            main_size = position_state[SYMBOL][side]["size"]
-            counter_size = position_state[SYMBOL][counter_side]["size"]
-        
-        obv_display = float(obv_macd_value) * 1000
-        
-        # ✅ main_side 체크 (post_threshold_entries 추적)
-        main_side = get_main_side()
-        if main_side != "none" and is_above_threshold(main_side) and side == main_side:
-            post_threshold_entries[SYMBOL][side].append({
-                "qty": int(grid_qty),
-                "price": float(grid_price),
-                "entry_type": "grid",
-                "tp_order_id": None
-            })
-            log("[📝 TRACKED]", f"{side.upper()} grid {grid_qty} @ {grid_price:.4f} (MAIN, above threshold)")
-        
-        # ✅ 3. 헷징 수량 계산 (수정됨!)
-        if was_counter:
-            # 비주력 그리드 체결 시: max(기본 수량, 주력 × 10%)
-            other_side = get_counter_side(counter_side)
-            with position_lock:
-                other_size = position_state[SYMBOL][other_side]["size"]
-            
-            hedge_qty = max(base_qty, int(other_size * 0.1))
-            hedge_side = side  # ✅ 비주력 그리드 체결 → 비주력에 헷징!
-            log("[🔄 HEDGE]", f"Counter grid filled → Main hedge: {hedge_side.upper()} {hedge_qty} (OBV:{obv_display:.1f})")
-        else:
-            # 주력 그리드 체결 시: 기본 수량으로 반대 방향 헷징
-            hedge_qty = base_qty
-            hedge_side = counter_side  # ✅ 주력 그리드 체결 → 비주력으로 헷징!
-            log("[🔄 HEDGE]", f"Main grid filled → Counter hedge: {hedge_side.upper()} {hedge_qty} (base={base_qty})")
-        
-        # 4. 헷징 주문 실행
-        hedge_order_data = {
-            "contract": SYMBOL,
-            "size": int(hedge_qty * (1 if hedge_side == "long" else -1)),
-            "price": "0",
-            "tif": "ioc",
-            "close": False
-        }
-        
-        try:
-            order = api.create_futures_order(SETTLE, FuturesOrder(**hedge_order_data))
-            
-            if order and hasattr(order, 'id'):
-                order_id = order.id
-                log("[✅ HEDGE]", f"{hedge_side.upper()} {hedge_qty} @ market (ID: {order_id})")
-            else:
-                log("[✅ HEDGE]", f"{hedge_side.upper()} {hedge_qty} @ market (IOC filled immediately)")
-        except GateApiException as e:
-            log("[❌]", f"Hedge order API error: {e}")
-            return
-        
-        # ✅ 5. 헷징 후 포지션 재동기화 (중요!)
-        time.sleep(0.5)
-        sync_position()
-        time.sleep(0.3)
-        
-        # ✅ 6. 헷징 후 main_side 재확인 및 추적
-        main_side_after = get_main_side()
-        if main_side_after != "none" and is_above_threshold(main_side_after) and hedge_side == main_side_after:
-            with position_lock:
-                entry_price = position_state[SYMBOL][hedge_side]["price"]
-            
-            post_threshold_entries[SYMBOL][hedge_side].append({
-                "qty": int(hedge_qty),
-                "price": float(entry_price),
-                "entry_type": "hedge",
-                "tp_order_id": None
-            })
-            log("[📝 TRACKED]", f"{hedge_side.upper()} hedge {hedge_qty} @ {entry_price:.4f} (MAIN, above threshold)")
-        
-        # 7. 그리드 취소 (중복 방지)
-        cancel_grid_only()
-        time.sleep(0.3)
-        
-        # 8. 포지션 재확인
-        with position_lock:
-            final_long = position_state[SYMBOL]["long"]["size"]
-            final_short = position_state[SYMBOL]["short"]["size"]
-        
-        log("[🔍 DEBUG]", f"After hedge: Long={final_long}, Short={final_short}")
-        
-        # ✅ 9. 양방향 포지션 체크 → TP만 또는 그리드+TP
-        both_positions = final_long > 0 and final_short > 0
-        
-        if both_positions:
-            # 양방향 포지션 → TP만 생성
-            log("[ℹ️ GRID]", "Both positions exist → TP only")
-            refresh_all_tp_orders()
-        else:
-            # 단일 포지션 → 그리드 + TP 생성
-            log("[📊 GRID]", "Single position after hedge → Creating grids + TP")
-            global last_grid_time
-            last_grid_time = 0
-            time.sleep(0.3)
-            initialize_grid(current_price)
-            time.sleep(0.3)
-            refresh_all_tp_orders()
-        
-        # 10. 이벤트 타이머 업데이트
-        update_event_time()
-        
-    except Exception as e:
-        log("[❌]", f"Hedge error: {e}")
-        import traceback
-        log("[❌]", f"Traceback: {traceback.format_exc()}")
 
 def refresh_all_tp_orders():
     """TP 주문 새로 생성 (즉시 체결 감지 + 중복 방지 + 디버깅 강화)"""
@@ -1854,67 +1657,8 @@ def full_refresh(event_type, skip_grid=False):
 # =============================================================================
 # 모니터링 스레드
 # =============================================================================
-def place_hedge_order(side):
-    if not ENABLE_AUTO_HEDGE:
-        return None
-    
-    try:
-        current_price = get_current_price()
-        if current_price <= 0:
-            return None
-        
-        counter_side = get_counter_side(side)
-        with position_lock:
-            main_size = position_state[SYMBOL][side]["size"]
-            counter_size = position_state[SYMBOL][counter_side]["size"]
-        
-        # 비주력 포지션이 체결된 경우, 주력 포지션은 기본수량 또는 10% 중 큰 값으로 헷징
-        if counter_size > 0 and main_size > 0:
-            with balance_lock:
-                base_size = int(Decimal(str(account_balance)) * BASE_RATIO)
-            hedge_size = max(base_size, int(main_size * 0.1))
-            size = hedge_size
-        else:
-            with balance_lock:
-                base_size = int(Decimal(str(account_balance)) * BASE_RATIO)
-            size = base_size
-        
-        hedge_order_data = {
-            "contract": SYMBOL,
-            "size": int(size * (1 if side == "long" else -1)),
-            "price": "0",  # 시장가는 "0"
-            "tif": "ioc"
-        }
-        
-        order = api.create_futures_order(SETTLE, FuturesOrder(**hedge_order_data))
-        order_id = order.id
-        
-        log_event_header("AUTO HEDGE")
-        log("✅ HEDGE", f"{side.upper()} {size} @ market")
-        
-        # 주력 포지션은 개별 TP 주문 설정
-        tp_id = create_individual_tp(side, size, current_price)
-        if tp_id:
-            with position_lock:
-                post_threshold_entries[SYMBOL][side].append({
-                    "price": float(current_price),
-                    "qty": int(size),
-                    "tp_order_id": tp_id,
-                    "entry_type": "hedge"
-                })
-        
-        full_refresh("Hedge")
-        return order_id
-        
-    except GateApiException as e:
-        log("❌", f"Hedge submission error: {e}")
-        return None
-    except Exception as e:
-        log("❌", f"Hedge order error: {e}")
-        return None
-
 async def grid_fill_monitor():
-    """WebSocket으로 그리드 체결 및 TP 체결 모니터링 (체결 감지 강화)"""
+    """WebSocket으로 TP 체결 모니터링 (그리드 제거!)"""
     global last_grid_time, idle_entry_count
     
     uri = f"wss://fx-ws.gateio.ws/v4/ws/{SETTLE}"
@@ -1951,16 +1695,12 @@ async def grid_fill_monitor():
                                 contract = order_data.get("contract")
                                 if contract != SYMBOL:
                                     continue
-
-                                # ✅ 추가: 모든 주문 이벤트 로그 (디버깅용)
+                                
                                 log("🔍 WS RAW", f"id={order_data.get('id')}, status={order_data.get('status')}, finish_as={order_data.get('finish_as')}, size={order_data.get('size')}")
                                 
-                                # ✅ 수정: finish_as 체크 강화
                                 finish_as = order_data.get("finish_as", "")
                                 status = order_data.get("status", "")
                                 
-                                # ✅ 체결 조건: finish_as가 "filled", "ioc", "cancelled" 등이 아니고
-                                # status가 "finished"인 경우도 포함
                                 is_filled = (
                                     finish_as in ["filled", "ioc"] or 
                                     status in ["finished", "closed"]
@@ -1969,7 +1709,6 @@ async def grid_fill_monitor():
                                 if not is_filled:
                                     continue
                                 
-                                # ✅ 추가: 체결 확인 로그
                                 log("🔍 DEBUG", f"Order filled detected: id={order_data.get('id')}, finish_as={finish_as}, status={status}")
                                 
                                 is_reduce_only = order_data.get("is_reduce_only", False)
@@ -1977,7 +1716,7 @@ async def grid_fill_monitor():
                                 size = order_data.get("size", 0)
                                 price = float(order_data.get("price", 0))
                                 
-                                # TP 체결 시
+                                # ✅ TP 체결만 처리!
                                 if is_reduce_only:
                                     side = "long" if size < 0 else "short"
                                     log("🎯 TP FILLED", f"{side.upper()} @ {price:.4f}")
@@ -2005,52 +1744,6 @@ async def grid_fill_monitor():
                                             args=("Average_TP",), 
                                             daemon=True
                                         ).start()
-                                
-                                # 그리드 체결 시
-                                elif not is_reduce_only:
-                                    side = "long" if size > 0 else "short"
-                                    log("🔥 GRID FILLED", f"{side.upper()} @ {price:.4f}")
-                                    
-                                    update_event_time()
-                                    
-                                    try:
-                                        grid_info = None
-                                        if SYMBOL in grid_orders and side in grid_orders[SYMBOL]:
-                                            for grid in grid_orders[SYMBOL][side]:
-                                                if grid.get("order_id") == order_id:
-                                                    grid_info = grid
-                                                    break
-                                        
-                                        if grid_info:
-                                            grid_price = grid_info.get("price", price)
-                                            grid_qty = grid_info.get("qty", abs(size))
-                                            was_counter = grid_info.get("is_counter", False)
-                                            base_qty = grid_info.get("base_qty", 1)
-                                            
-                                            log("🔍 DEBUG", f"Grid info found: price={grid_price}, qty={grid_qty}, counter={was_counter}")
-                                            
-                                            threading.Thread(
-                                                target=hedge_after_grid_fill, 
-                                                args=(side, grid_price, grid_qty, was_counter, base_qty), 
-                                                daemon=True
-                                            ).start()
-                                        else:
-                                            log("⚠️ GRID", "Grid info not found, using defaults")
-                                            with balance_lock:
-                                                base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
-                                                if base_qty <= 0:
-                                                    base_qty = 1
-                                            
-                                            threading.Thread(
-                                                target=hedge_after_grid_fill, 
-                                                args=(side, price, abs(size), False, base_qty), 
-                                                daemon=True
-                                            ).start()
-                                    
-                                    except Exception as e:
-                                        log("❌", f"Grid fill processing error: {e}")
-                                        import traceback
-                                        log("❌", traceback.format_exc())
                     
                     except asyncio.TimeoutError:
                         ping_count += 1
@@ -2183,75 +1876,10 @@ def position_monitor():
                 long_price = position_state[SYMBOL]["long"]["price"]
                 short_price = position_state[SYMBOL]["short"]["price"]
             
-            # ✅ 포지션 변경 감지 + 그리드 체결 처리
+            # ✅ 포지션 변경 로그만 (그리드 체결 처리 제거!)
             if long_size != prev_long_size or short_size != prev_short_size:
                 if prev_long_size != Decimal("-1"):
                     log("🔄 CHANGE", f"Long {prev_long_size}→{long_size} | Short {prev_short_size}→{short_size}")
-                    
-                    # ✅ 그리드 체결 감지 (포지션 증가)
-                    long_increased = long_size > prev_long_size
-                    short_increased = short_size > prev_short_size
-                    
-                    if long_increased or short_increased:
-                        side = "long" if long_increased else "short"
-                        increased_qty = int(abs(long_size - prev_long_size)) if long_increased else int(abs(short_size - prev_short_size))
-                        
-                        log("[🔸 DEBUG]", f"{side.upper()} increased by {increased_qty}")
-                        
-                        # grid_orders에서 정보 찾기
-                        grid_info = None
-                        if SYMBOL in grid_orders and side in grid_orders[SYMBOL]:
-                            for grid in grid_orders[SYMBOL][side]:
-                                if grid.get("qty") == increased_qty:
-                                    grid_info = grid
-                                    log("[🔸 DEBUG]", f"Found matching grid: {grid}")
-                                    break
-                        
-                        if grid_info:
-                            # 그리드 정보 있음 → 헷징 호출
-                            grid_price = grid_info.get("price", 0)
-                            grid_qty = grid_info.get("qty", increased_qty)
-                            was_counter = grid_info.get("is_counter", False)
-                            base_qty = grid_info.get("base_qty", 1)
-                            
-                            log("[⚫ GRID FILLED]", f"{side.upper()} {grid_qty} @ {grid_price:.4f}")
-                            
-                            # 헷징 스레드 시작
-                            threading.Thread(
-                                target=hedge_after_grid_fill,
-                                args=(side, grid_price, grid_qty, was_counter, base_qty),
-                                daemon=True
-                            ).start()
-                        else:
-                            # grid_info 없음 → 기본값으로 처리
-                            log("[⚠️ GRID]", f"{side.upper()} increased but no grid info → Using defaults")
-                            
-                            # 주력/비주력 판단
-                            if side == "long":
-                                was_counter = short_size > long_size
-                            else:
-                                was_counter = long_size > short_size
-                            
-                            with balance_lock:
-                                current_price = get_current_price()
-                                if current_price > 0:
-                                    base_qty = int(account_balance * BASE_RATIO / Decimal(str(current_price)))
-                                else:
-                                    base_qty = 1
-                            
-                            base_qty = max(1, base_qty)
-                            
-                            with position_lock:
-                                grid_price = position_state[SYMBOL][side]["price"]
-                            
-                            log("[🔸 DEBUG]", f"Defaults: counter={was_counter}, base={base_qty}, price={grid_price:.4f}")
-                            
-                            # 헷징 스레드 시작
-                            threading.Thread(
-                                target=hedge_after_grid_fill,
-                                args=(side, float(grid_price), increased_qty, was_counter, base_qty),
-                                daemon=True
-                            ).start()
                 
                 prev_long_size = long_size
                 prev_short_size = short_size
@@ -2269,13 +1897,13 @@ def position_monitor():
                 log_event_header("MAX POSITION LIMIT")
                 log("⚠️ LIMIT", f"LONG ${long_value:.2f} >= ${max_value:.2f}")
                 max_position_locked["long"] = True
-                cancel_grid_only()
+                cancel_all_orders()  # ✅ 수정
             
             if short_value >= max_value and not max_position_locked["short"]:
                 log_event_header("MAX POSITION LIMIT")
                 log("⚠️ LIMIT", f"SHORT ${short_value:.2f} >= ${max_value:.2f}")
                 max_position_locked["short"] = True
-                cancel_grid_only()
+                cancel_all_orders()  # ✅ 수정
             
             # 한도 잠금 해제
             if long_value < max_value and max_position_locked["long"]:
@@ -2368,28 +1996,22 @@ def periodic_health_check():
                     time.sleep(0.5)
                     refresh_all_tp_orders()
             
-            # 4. 양방향 포지션 + 그리드 존재 체크
-            if long_size > 0 and short_size > 0 and grid_count >= 2:
-                log("🔧 HEALTH", f"Both positions with {grid_count} grids → Cancelling")
-                time.sleep(0.5)
-                cancel_grid_only()
-            
-            # ✅ 5. 단일 포지션 + 그리드 없음 → 그리드 생성!
+            # ✅ 4. 단일 포지션 + 그리드 없음 → 시장가 진입!
             single_position = (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0)
             
             if single_position and grid_count == 0:
-                log("🔧 HEALTH", "Single position without grids → Creating grids!")
+                log("🔧 HEALTH", "Single position without grids → Creating market entry!")
                 current_price = get_current_price()
                 if current_price > 0:
                     initialize_grid(current_price)
             
-            # ✅ 6. 전략 일관성 검증
+            # ✅ 5. 전략 일관성 검증
             validate_strategy_consistency()
             
-            # ✅ 7. 중복 그리드 제거
+            # ✅ 6. 중복 주문 제거
             remove_duplicate_orders()
             
-            # ✅ 8. 오래된 주문 취소
+            # ✅ 7. 오래된 주문 취소
             cancel_stale_orders()
             
             log("✅ HEALTH", "Health check complete")
@@ -2522,7 +2144,7 @@ def print_startup_summary():
     log_divider("-")
     log("📜 CONFIG", "Settings:")
     log("  ├─", f"Symbol: {SYMBOL}")
-    log("  ├─", f"Grid/TP Gap: {GRID_GAP_PCT * 100}%")
+    log("  ├─", f"TP Gap: {TP_GAP_PCT * 100}%")
     log("  ├─", f"Base Ratio: {BASE_RATIO * 100}%")
     log("  ├─", f"Threshold: {THRESHOLD_RATIO * 100}%")
     log("  ├─", f"Max Position: {MAX_POSITION_RATIO * 100}%")
