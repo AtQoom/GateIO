@@ -1126,13 +1126,13 @@ def initialize_grid(current_price=None):
     finally:
         initialize_grid_lock.release()
 
-def refresh_all_tp_orders(cancel_first=False):
+def refresh_all_tp_orders(cancel_first=True):  # ← False → True로 변경!
     """TP 주문 새로 생성
-    cancel_first=True: 기존 TP 취소 후 재생성 (긴급 상황)
-    cancel_first=False: 기존 TP 유지, 부족분만 생성 (정상 작동)
+    cancel_first=True: 기존 TP 취소 후 재생성 (기본값, 안전)
+    cancel_first=False: 기존 TP 유지, 부족분만 생성 (위험)
     """
     
-    # ✅ 수정: 필요할 때만 취소!
+    # ✅ 기본값: 항상 기존 TP 취소 후 재생성 (안전)
     if cancel_first:
         cancel_tp_only()  # 기존 TP 취소
     
