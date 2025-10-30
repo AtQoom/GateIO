@@ -49,12 +49,12 @@ initialize_grid_lock = threading.Lock()
 refresh_tp_lock = threading.Lock()
 hedge_lock = threading.Lock()
 
-TP_GAP_PCT = Decimal("0.0019")    # 0.19%
+TP_GAP_PCT = Decimal("0.0021")    # 0.19%
 BASE_RATIO = Decimal("0.1")       # 기본 수량 비율
 THRESHOLD_RATIO = Decimal("0.8")  # 임계값
 COUNTER_RATIO = Decimal("0.30")   # 비주력 30%
 COUNTER_CLOSE_RATIO = Decimal("0.20")  # 비주력 20% 청산
-MAX_POSITION_RATIO = Decimal("5.0")    # 최대 5배
+MAX_POSITION_RATIO = Decimal("8.0")    # 최대 5배
 HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
 POSITION_SCALE_RATIO = Decimal("0.20")  # ✅ 새로 추가! 포지션 비례 20%
 
