@@ -790,6 +790,9 @@ def validate_strategy_consistency():
             log("❌", f"List orders error: {e}")
             return
         
+        # ❌ 삭제: 양방향 + 그리드 존재 체크 (시장가 전략에서는 불필요!)
+        # 시장가 전략에서는 양방향 포지션이 정상 상태이므로 이 검증 제거
+        
         # ✅ 검증 1: 단일 포지션 + 그리드 없음 → 그리드 생성!
         single_position = (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0)
         
