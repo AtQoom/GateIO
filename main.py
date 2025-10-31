@@ -674,23 +674,22 @@ def refresh_all_tp_orders():
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
-            
-            # ✅ 평단 추가
             long_entry_price = position_state[SYMBOL]["long"]["entry_price"]
             short_entry_price = position_state[SYMBOL]["short"]["entry_price"]
 
-        # OBV 기반 TP 계산
         long_tp, short_tp, base_tp = calculate_dynamic_tp_gap()
         
-        log("TP_INFO", f"Long Entry: {float(long_entry_price):.4f}, Short Entry: {float(short_entry_price):.4f}, Long TP: {float(long_tp)*100:.2f}%, Short TP: {float(short_tp)*100:.2f}%")
-
-        # 기존 TP 취소
         cancel_tp_only()
         time.sleep(0.5)
 
         # 롱 TP (평단 기준!)
         if long_size > 0:
             tp_price_long = long_entry_price * (Decimal("1") + long_tp)
+            # ✅ 소수점 12자리로 제한!
+            tp_price_long = tp_price_long.quantize(
+                Decimal("0.000000000001"),  # 12자리
+                rounding=ROUND_DOWN
+            )
             try:
                 order = FuturesOrder(
                     contract=SYMBOL,
@@ -710,6 +709,11 @@ def refresh_all_tp_orders():
         # 숏 TP (평단 기준! - 마이너스!)
         if short_size > 0:
             tp_price_short = short_entry_price * (Decimal("1") - short_tp)
+            # ✅ 소수점 12자리로 제한!
+            tp_price_short = tp_price_short.quantize(
+                Decimal("0.000000000001"),  # 12자리
+                rounding=ROUND_DOWN
+            )
             try:
                 order = FuturesOrder(
                     contract=SYMBOL,
