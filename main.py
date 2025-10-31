@@ -668,31 +668,29 @@ def cancel_tp_only():
 # ============================================================================
 
 def refresh_all_tp_orders():
-    """동적 TP 새로고침 (OBV MACD 기반)"""
-    global average_tp_orders
-    
     try:
         sync_position()
-        
+
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
-        
+
+        # ✅ REAL-TIME 현재가 가져오기!
         current_price = get_current_price()
         if current_price == 0:
+            log("ERROR", "Cannot get current price")
             return
-        
-        # ✅ 동적 TP 계산
+
+        # ✅ OBV 기반 TP 계산
         long_tp, short_tp, base_tp = calculate_dynamic_tp_gap()
         
-        obv_display = float(obv_macd_value) * 1000
-        log("📊 TP", f"OBV={obv_display:.1f} | Long={float(long_tp)*100:.2f}% | Short={float(short_tp)*100:.2f}%")
-        
+        log("TP_INFO", f"CurrentPrice: {current_price}, Long TP: {float(long_tp)*100:.2f}%, Short TP: {float(short_tp)*100:.2f}%")
+
         # 기존 TP 취소
         cancel_tp_only()
         time.sleep(0.5)
-        
-        # ✅ 롱 TP 생성
+
+        # 롱 TP (현재가 + TP%)
         if long_size > 0:
             tp_price_long = current_price * (Decimal("1") + long_tp)
             try:
@@ -705,13 +703,13 @@ def refresh_all_tp_orders():
                 result = api.create_futures_order(SETTLE, order)
                 if result and hasattr(result, 'id'):
                     average_tp_orders[SYMBOL]["long"] = result.id
-                    log("✅ TP LONG", f"#{int(long_size)} @ {float(tp_price_long):.4f}")
+                    log("TP_LONG", f"#{int(long_size)} @ {float(tp_price_long):.4f}")
             except Exception as e:
-                log("❌", f"Long TP creation error: {e}")
-        
+                log("ERROR", f"Long TP: {e}")
+
         time.sleep(0.5)
-        
-        # ✅ 숏 TP 생성
+
+        # 숏 TP (현재가 - TP%)
         if short_size > 0:
             tp_price_short = current_price * (Decimal("1") - short_tp)
             try:
@@ -724,12 +722,12 @@ def refresh_all_tp_orders():
                 result = api.create_futures_order(SETTLE, order)
                 if result and hasattr(result, 'id'):
                     average_tp_orders[SYMBOL]["short"] = result.id
-                    log("✅ TP SHORT", f"#{int(short_size)} @ {float(tp_price_short):.4f}")
+                    log("TP_SHORT", f"#{int(short_size)} @ {float(tp_price_short):.4f}")
             except Exception as e:
-                log("❌", f"Short TP creation error: {e}")
-        
+                log("ERROR", f"Short TP: {e}")
+
     except Exception as e:
-        log("❌", f"Refresh TP error: {e}")
+        log("ERROR", f"Refresh TP: {e}")
         
 
 # =============================================================================
