@@ -898,7 +898,7 @@ def initialize_grid(current_price=None, idle_multiplier=1.0):
     
     try:
         now = time.time()
-        if now - last_grid_time < 3:
+        if now - last_grid_time < 10:
             log("🔵 GRID", f"Too soon ({now - last_grid_time:.1f}s) → Skipping")
             return
         
@@ -1166,12 +1166,12 @@ def refresh_all_tp_orders(cancel_first=True):
         log("❌", f"Traceback: {traceback.format_exc()}")
 
 def check_idle_and_enter():
-    """30분 무이벤트 진입"""
     global last_event_time, idle_entry_count
     
     try:
-        # 30분 체크
-        if time.time() - last_event_time < IDLE_TIMEOUT:
+        # ✅ 수정 1: 10분 체크 (600초)
+        elapsed = time.time() - last_event_time
+        if elapsed < IDLE_TIMEOUT:
             return
         
         with position_lock:
@@ -1195,7 +1195,12 @@ def check_idle_and_enter():
         # 최대 한도 체크
         with balance_lock:
             max_value = account_balance * MAX_POSITION_RATIO
-            base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
+            current_price = get_current_price()
+            if current_price == 0:
+                return
+            
+            # ✅ 수정: base_qty 계산 간소화
+            base_qty = int(account_balance * BASE_RATIO / current_price)
             if base_qty <= 0:
                 base_qty = 1
         
@@ -1208,71 +1213,66 @@ def check_idle_and_enter():
         
         # OBV MACD 값
         obv_display = float(obv_macd_value) * 1000
-        
-        # ✅ 수정: 기존 함수 호출!
         obv_multiplier = calculate_obv_macd_weight(obv_display)
         
-        # 진입 카운트 증가
+        # ✅ 수정: 진입 카운트 증가
         idle_entry_count += 1
         multiplier = idle_entry_count
         
-        # Main 수량 (OBV MACD 적용)
-        main_qty = max(1, int(base_qty * obv_multiplier * multiplier))
-        
-        # ✅ 수정: Counter 수량 (최소 1개 보장!)
-        counter_qty = max(1, int(base_qty * multiplier))
+        # ✅ 수정: 롱/숏 동일 수량 + OBV MACD 가중치!
+        entry_qty = max(1, int(base_qty * obv_multiplier * multiplier))
         
         log_event_header("IDLE ENTRY")
-        log("⏱️ IDLE", f"Entry #{idle_entry_count} (x{multiplier}) → BOTH sides")
-        log("📊 IDLE QTY", f"Main {main_side.upper()} {main_qty} (OBV:{obv_display:.1f}, x{multiplier}) | Counter {counter_side.upper()} {counter_qty} (base, x{multiplier})")
+        log("⏱️ IDLE", f"Entry #{idle_entry_count} (x{multiplier}) after {elapsed:.0f}s")
+        log("📊 IDLE QTY", f"LONG {entry_qty} | SHORT {entry_qty} (OBV:{obv_display:.1f}, x{obv_multiplier:.2f})")
         
-        # Main 진입
-        main_order_data = {
-            "contract": SYMBOL,
-            "size": int(main_qty * (1 if main_side == "long" else -1)),
-            "price": "0",
-            "tif": "ioc",
-            "close": False  # ✅ 추가
-        }
-        
+        # ✅ 수정: 롱 진입
         try:
-            main_order = api.create_futures_order(SETTLE, FuturesOrder(**main_order_data))
-            if main_order and hasattr(main_order, 'id'):
-                log("✅ IDLE ENTRY", f"Main {main_side.upper()} {main_qty} @ market (x{multiplier})")
+            order = FuturesOrder(
+                contract=SYMBOL,
+                size=entry_qty,
+                price="0",
+                tif="ioc",
+                reduce_only=False
+            )
+            result = api.create_futures_order(SETTLE, order)
+            if result and hasattr(result, 'id'):
+                log("✅ IDLE", f"LONG {entry_qty} @ market (#{idle_entry_count})")
             else:
-                log("❌ IDLE", f"Main entry failed: result={main_order}")
+                log("❌ IDLE", f"LONG entry failed: result={result}")
         except GateApiException as e:
-            log("❌", f"Idle entry API error (Main): {e}")
+            log("❌", f"LONG idle entry API error: {e}")
             return
         
         time.sleep(0.2)
         
-        # Counter 진입
-        counter_order_data = {
-            "contract": SYMBOL,
-            "size": int(counter_qty * (1 if counter_side == "long" else -1)),
-            "price": "0",
-            "tif": "ioc",
-            "close": False  # ✅ 추가
-        }
-        
+        # ✅ 수정: 숏 진입
         try:
-            counter_order = api.create_futures_order(SETTLE, FuturesOrder(**counter_order_data))
-            if counter_order and hasattr(counter_order, 'id'):
-                log("✅ IDLE ENTRY", f"Counter {counter_side.upper()} {counter_qty} @ market (x{multiplier})")
+            order = FuturesOrder(
+                contract=SYMBOL,
+                size=-entry_qty,
+                price="0",
+                tif="ioc",
+                reduce_only=False
+            )
+            result = api.create_futures_order(SETTLE, order)
+            if result and hasattr(result, 'id'):
+                log("✅ IDLE", f"SHORT {entry_qty} @ market (#{idle_entry_count})")
             else:
-                log("❌ IDLE", f"Counter entry failed: result={counter_order}")
+                log("❌ IDLE", f"SHORT entry failed: result={result}")
         except GateApiException as e:
-            log("❌", f"Idle entry API error (Counter): {e}")
+            log("❌", f"SHORT idle entry API error: {e}")
         
         time.sleep(0.5)
         sync_position()
-              
-        # 타이머 리셋 (배수는 유지)
-        last_event_time = time.time()
+        
+        # ✅ 핵심 수정: update_event_time() 호출!
+        update_event_time()  # idle_entry_count = 0, last_event_time 갱신!
         
         # TP 재생성
         refresh_all_tp_orders()
+        
+        log("🎉 IDLE", f"Entry complete! Next entry in {IDLE_TIMEOUT}s")
         
     except Exception as e:
         log("❌", f"Idle entry error: {e}")
@@ -1375,8 +1375,7 @@ async def grid_fill_monitor():
                                 if is_reduce_only:
                                     side = "long" if size < 0 else "short"
                                     log("🎯 TP FILLED", f"{side.upper()} @ {price:.4f}")
-                                    
-                                    update_event_time()
+
                                     time.sleep(0.5)
                                     
                                     with position_lock:
@@ -1518,7 +1517,7 @@ def position_monitor():
             time.sleep(5)
 
 def idle_monitor():
-    """5분 아이들 시 자동 진입 (IDLE_TIME_SECONDS)"""
+    """10분 아이들 시 자동 진입 (IDLE_TIME_SECONDS)"""
     while True:
         try:
             time.sleep(60)  # 1분마다 체크
