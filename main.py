@@ -91,8 +91,8 @@ position_lock = threading.Lock()
 
 position_state = {
     SYMBOL: {
-        "long": {"size": Decimal("0"), "price": Decimal("0")},
-        "short": {"size": Decimal("0"), "price": Decimal("0")}
+        "long": {"size": Decimal("0"), "entry_price": Decimal("0")},  # ← 변경!
+        "short": {"size": Decimal("0"), "entry_price": Decimal("0")}  # ← 변경!
     }
 }
 
@@ -140,9 +140,9 @@ def log_position_state():
     """현재 포지션 상태 로그"""
     with position_lock:
         long_size = position_state[SYMBOL]["long"]["size"]
-        long_price = position_state[SYMBOL]["long"]["price"]
+        long_price = position_state[SYMBOL]["long"]["entry_price"]
         short_size = position_state[SYMBOL]["short"]["size"]
-        short_price = position_state[SYMBOL]["short"]["price"]
+        short_price = position_state[SYMBOL]["short"]["entry_price"]
     
     with balance_lock:
         balance = account_balance
@@ -165,9 +165,9 @@ def log_threshold_info():
         balance = account_balance  # 실시간 잔고
     with position_lock:
         long_size = position_state[SYMBOL]["long"]["size"]
-        long_price = position_state[SYMBOL]["long"]["price"]
+        long_price = position_state[SYMBOL]["long"]["entry_price"]
         short_size = position_state[SYMBOL]["short"]["size"]
-        short_price = position_state[SYMBOL]["short"]["price"]
+        short_price = position_state[SYMBOL]["short"]["entry_price"]
     
     threshold = balance * THRESHOLD_RATIO  # account_balance 기준
     long_value = long_price * long_size
@@ -538,11 +538,11 @@ def sync_position(max_retries=3, retry_delay=2):
                         if size_dec > 0:
                             with position_lock:
                                 position_state[SYMBOL]["long"]["size"] = size_dec
-                                position_state[SYMBOL]["long"]["price"] = entry_price
+                                position_state[SYMBOL]["long"]["entry_price"] = entry_price  # ← 변경!
                         elif size_dec < 0:
                             with position_lock:
                                 position_state[SYMBOL]["short"]["size"] = abs(size_dec)
-                                position_state[SYMBOL]["short"]["price"] = entry_price
+                                position_state[SYMBOL]["short"]["entry_price"] = entry_price
             
             return True  # ✅ 성공
             
@@ -674,25 +674,23 @@ def refresh_all_tp_orders():
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
+            
+            # ✅ 평단 추가
+            long_entry_price = position_state[SYMBOL]["long"]["entry_price"]
+            short_entry_price = position_state[SYMBOL]["short"]["entry_price"]
 
-        # ✅ REAL-TIME 현재가 가져오기!
-        current_price = get_current_price()
-        if current_price == 0:
-            log("ERROR", "Cannot get current price")
-            return
-
-        # ✅ OBV 기반 TP 계산
+        # OBV 기반 TP 계산
         long_tp, short_tp, base_tp = calculate_dynamic_tp_gap()
         
-        log("TP_INFO", f"CurrentPrice: {current_price}, Long TP: {float(long_tp)*100:.2f}%, Short TP: {float(short_tp)*100:.2f}%")
+        log("TP_INFO", f"Long Entry: {float(long_entry_price):.4f}, Short Entry: {float(short_entry_price):.4f}, Long TP: {float(long_tp)*100:.2f}%, Short TP: {float(short_tp)*100:.2f}%")
 
         # 기존 TP 취소
         cancel_tp_only()
         time.sleep(0.5)
 
-        # 롱 TP (현재가 + TP%)
+        # 롱 TP (평단 기준!)
         if long_size > 0:
-            tp_price_long = current_price * (Decimal("1") + long_tp)
+            tp_price_long = long_entry_price * (Decimal("1") + long_tp)
             try:
                 order = FuturesOrder(
                     contract=SYMBOL,
@@ -709,9 +707,9 @@ def refresh_all_tp_orders():
 
         time.sleep(0.5)
 
-        # 숏 TP (현재가 - TP%)
+        # 숏 TP (평단 기준! - 마이너스!)
         if short_size > 0:
-            tp_price_short = current_price * (Decimal("1") - short_tp)
+            tp_price_short = short_entry_price * (Decimal("1") - short_tp)
             try:
                 order = FuturesOrder(
                     contract=SYMBOL,
@@ -1458,8 +1456,8 @@ def position_monitor():
             with position_lock:
                 long_size = position_state[SYMBOL]["long"]["size"]
                 short_size = position_state[SYMBOL]["short"]["size"]
-                long_price = position_state[SYMBOL]["long"]["price"]
-                short_price = position_state[SYMBOL]["short"]["price"]
+                long_price = position_state[SYMBOL]["long"]["entry_price"]
+                short_price = position_state[SYMBOL]["short"]["entry_price"]
             
             # ✅ 포지션 변경 로그만 (그리드 체결 처리 제거!)
             if long_size != prev_long_size or short_size != prev_short_size:
