@@ -947,31 +947,29 @@ def initialize_grid(current_price=None, idle_multiplier=1.0):
         
         obv_abs = abs(obv_display)
         
-        if obv_abs < 5:
+        if obv_abs < 10:
             obv_multiplier = Decimal("0.10")
-        elif obv_abs < 10:
-            obv_multiplier = Decimal("0.11")
         elif obv_abs < 15:
-            obv_multiplier = Decimal("0.12")
+            obv_multiplier = Decimal("0.11")
         elif obv_abs < 20:
-            obv_multiplier = Decimal("0.13")
+            obv_multiplier = Decimal("0.12")
         elif obv_abs < 30:
-            obv_multiplier = Decimal("0.15")
+            obv_multiplier = Decimal("0.13")
         elif obv_abs < 40:
-            obv_multiplier = Decimal("0.16")
+            obv_multiplier = Decimal("0.15")
         elif obv_abs < 50:
+            obv_multiplier = Decimal("0.16")
+        elif obv_abs < 60:
             obv_multiplier = Decimal("0.17")
-        elif obv_abs < 70:
-            obv_multiplier = Decimal("0.18")
         elif obv_abs < 100:
             obv_multiplier = Decimal("0.19")
         else:
             obv_multiplier = Decimal("0.20")
         
-        if obv_display > 0:
-            base_qty_long = int(base_qty_long * (Decimal("1") + obv_multiplier))
-        elif obv_display < 0:
-            base_qty_short = int(base_qty_short * (Decimal("1") + obv_multiplier))
+        if obv_display > 0:  # 롱 강세
+            base_qty_short = int(base_qty_short * (Decimal("1") + obv_multiplier))  # ← 숏 증가!
+        elif obv_display < 0:  # 숏 강세
+            base_qty_long = int(base_qty_long * (Decimal("1") + obv_multiplier))  # ← 롱 증가!
         
         long_qty = max(1, base_qty_long)
         short_qty = max(1, base_qty_short)
@@ -1022,160 +1020,43 @@ def initialize_grid(current_price=None, idle_multiplier=1.0):
         initialize_grid_lock.release()
 
 # ============================================================================
-# 4️⃣ calculate_dynamic_tp_gap() - 완전 코드 (한 줄도 생략 없음!)
+# 2️⃣ calculate_dynamic_tp_gap() - TP 정방향 수정 (5단계)
 # ============================================================================
 
 def calculate_dynamic_tp_gap():
+    """
+    OBV MACD 기반 동적 TP 계산 - 정방향 (강세 방향)
+    
+    5단계: 0.16% → 0.21% → 0.24% → 0.26% → 0.30%
+    """
     obv_display = float(obv_macd_value) * 1000
     obv_abs = abs(obv_display)
     
-    if obv_abs < 20:
-        tp_gap = TP_MIN
-    elif obv_abs < 40:
-        tp_gap = TP_DEFAULT
-    elif obv_abs < 70:
-        tp_gap = Decimal("0.0026")
+    # ✅ 강도별 기본 TP 결정 (5단계)
+    if obv_abs < 10:
+        tp_gap = TP_MIN  # 0.16%
+    elif obv_abs < 15:
+        tp_gap = Decimal("0.0021")  # 0.21%
+    elif obv_abs < 20:
+        tp_gap = Decimal("0.0024")  # 0.24%
+    elif obv_abs < 30:
+        tp_gap = Decimal("0.0026")  # 0.26%
     else:
-        tp_gap = TP_MAX
+        tp_gap = TP_MAX  # 0.30%
     
-    if obv_display > 0:
-        long_tp = tp_gap
-        short_tp = tp_gap + (TP_MAX - TP_DEFAULT)
-    else:
-        long_tp = tp_gap + (TP_MAX - TP_DEFAULT)
-        short_tp = tp_gap
+    # ✅ 정방향 TP: 강세 방향의 TP를 확대!
+    if obv_display > 0:  # 롱 강세
+        long_tp = tp_gap + (TP_MAX - TP_DEFAULT)  # ✅ 롱 TP 확대!
+        short_tp = tp_gap  # 숏 TP 기본값
+    else:  # 숏 강세
+        long_tp = tp_gap  # 롱 TP 기본값
+        short_tp = tp_gap + (TP_MAX - TP_DEFAULT)  # ✅ 숏 TP 확대!
     
     return long_tp, short_tp, tp_gap
 
-def refresh_all_tp_orders(cancel_first=True):
-    """TP 주문 새로 생성 - 동적 TP 적용! + OBV 로그"""
-    
-    if cancel_first:
-        cancel_tp_only()
-    
-    try:
-        average_tp_orders[SYMBOL] = {"long": None, "short": None}
-        instant_tp_triggered = False
-        
-        with position_lock:
-            long_size = position_state[SYMBOL]["long"]["size"]
-            short_size = position_state[SYMBOL]["short"]["size"]
-            long_price = position_state[SYMBOL]["long"]["price"]
-            short_price = position_state[SYMBOL]["short"]["price"]
-        
-        # ✅ 동적 TP 계산!
-        long_tp_gap, short_tp_gap, base_tp = calculate_dynamic_tp_gap()
-        obv_display = float(obv_macd_value) * 1000
-        
-        log("📊 TP CALC", f"OBV={obv_display:.1f} | Base={float(base_tp)*100:.2f}% | Long={float(long_tp_gap)*100:.2f}% | Short={float(short_tp_gap)*100:.2f}%")
-        log("🎯 TP REFRESH", "Creating TP orders with dynamic gaps...")
-        log_threshold_info()
-        
-        # ========================================================================
-        # === 롱 TP 생성 ===
-        # ========================================================================
-        if long_size > 0:
-            try:
-                # ✅ 동적 TP 적용!
-                tp_price = long_price * (Decimal("1") + long_tp_gap)
-                tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-                
-                order = FuturesOrder(
-                    contract=SYMBOL,
-                    size=-int(long_size),
-                    price=str(tp_price),
-                    tif="gtc",
-                    reduce_only=True
-                )
-                
-                result = api.create_futures_order(SETTLE, order)
-                
-                if result and hasattr(result, 'id'):
-                    if hasattr(result, 'status') and result.status in ["finished", "closed"]:
-                        log("⚡ INSTANT TP", f"LONG full TP filled immediately @ {tp_price:.4f} (OBV:{obv_display:.1f}, TP:{float(long_tp_gap)*100:.2f}%)")
-                        instant_tp_triggered = True
-                        threading.Thread(
-                            target=full_refresh,
-                            args=("Instant_TP_Long",),
-                            daemon=True
-                        ).start()
-                    else:
-                        average_tp_orders[SYMBOL]["long"] = result.id
-                        # ✅ OBV 수치 표시!
-                        log("🎯 LONG TP", f"{int(long_size)} @ {tp_price:.4f} (+{float(long_tp_gap)*100:.2f}%) | OBV:{obv_display:.1f}")
-                else:
-                    log("❌ TP", f"LONG TP creation failed: result={result}")
-            
-            except Exception as e:
-                log("❌ TP", f"LONG TP exception: {e}")
-                import traceback
-                log("❌", traceback.format_exc())
-        
-        # ========================================================================
-        # === 숏 TP 생성 ===
-        # ========================================================================
-        if short_size > 0:
-            try:
-                # ✅ 동적 TP 적용!
-                tp_price = short_price * (Decimal("1") - short_tp_gap)
-                tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-                
-                order = FuturesOrder(
-                    contract=SYMBOL,
-                    size=int(short_size),
-                    price=str(tp_price),
-                    tif="gtc",
-                    reduce_only=True
-                )
-                
-                result = api.create_futures_order(SETTLE, order)
-                
-                if result and hasattr(result, 'id'):
-                    if hasattr(result, 'status') and result.status in ["finished", "closed"]:
-                        log("⚡ INSTANT TP", f"SHORT full TP filled immediately @ {tp_price:.4f} (OBV:{obv_display:.1f}, TP:{float(short_tp_gap)*100:.2f}%)")
-                        instant_tp_triggered = True
-                        threading.Thread(
-                            target=full_refresh,
-                            args=("Instant_TP_Short",),
-                            daemon=True
-                        ).start()
-                    else:
-                        average_tp_orders[SYMBOL]["short"] = result.id
-                        # ✅ OBV 수치 표시!
-                        log("🎯 SHORT TP", f"{int(short_size)} @ {tp_price:.4f} (-{float(short_tp_gap)*100:.2f}%) | OBV:{obv_display:.1f}")
-                else:
-                    log("❌ TP", f"SHORT TP creation failed: result={result}")
-            
-            except Exception as e:
-                log("❌ TP", f"SHORT TP exception: {e}")
-                import traceback
-                log("❌", traceback.format_exc())
-        
-        time.sleep(0.5)
-        sync_position()
-        
-        with position_lock:
-            long_size_after = position_state[SYMBOL]["long"]["size"]
-            short_size_after = position_state[SYMBOL]["short"]["size"]
-        
-        if not instant_tp_triggered:
-            if (long_size > 0 and long_size_after == 0) or (short_size > 0 and short_size_after == 0):
-                log("⚡ INSTANT TP", "Position closed after TP creation → Triggering refresh")
-                threading.Thread(
-                    target=full_refresh,
-                    args=("Instant_TP_Detected",),
-                    daemon=True
-                ).start()
-        else:
-            log("ℹ️ TP", "Instant TP already triggered, skipping duplicate refresh")
-    
-    except Exception as e:
-        log("❌", f"TP refresh error: {e}")
-        import traceback
-        log("❌", f"Traceback: {traceback.format_exc()}")
 
 # ============================================================================
-# 2️⃣ check_idle_and_enter() - 완전 코드 (한 줄도 생략 없음!)
+# 1️⃣ check_idle_and_enter() - 아이들 진입 (역방향 가중치 적용!)
 # ============================================================================
 
 def check_idle_and_enter():
@@ -1203,21 +1084,84 @@ def check_idle_and_enter():
             log("❌ IDLE", "Cannot get current price")
             return
         
+        # ✅ OBV MACD 가중치 계산 (initialize_grid와 동일!)
+        obv_display = float(obv_macd_value) * 1000
+        obv_abs = abs(obv_display)
+        
+        if obv_abs < 5:
+            obv_multiplier = Decimal("0.10")
+        elif obv_abs < 10:
+            obv_multiplier = Decimal("0.11")
+        elif obv_abs < 15:
+            obv_multiplier = Decimal("0.12")
+        elif obv_abs < 20:
+            obv_multiplier = Decimal("0.13")
+        elif obv_abs < 30:
+            obv_multiplier = Decimal("0.15")
+        elif obv_abs < 40:
+            obv_multiplier = Decimal("0.16")
+        elif obv_abs < 50:
+            obv_multiplier = Decimal("0.17")
+        elif obv_abs < 60:
+            obv_multiplier = Decimal("0.18")
+        elif obv_abs < 100:
+            obv_multiplier = Decimal("0.19")
+        else:
+            obv_multiplier = Decimal("0.20")
+        
+        # ✅ 기본 진입 수량 계산
         with balance_lock:
             base_value = account_balance * BASE_RATIO
-            entry_qty = int(base_value / Decimal(str(current_price)))
-            if entry_qty < 1:
-                log("❌ IDLE", "Insufficient quantity")
-                return
+        
+        base_qty = int(base_value / Decimal(str(current_price)))
+        if base_qty < 1:
+            log("❌ IDLE", "Insufficient quantity")
+            return
+        
+        # ✅ 아이들 진입 수량 (역방향 가중치 적용!)
+        if obv_display > 0:  # 롱 강세
+            idle_qty_long = int(
+                base_qty * 
+                Decimal(str(abs(long_size))) * 
+                Decimal("0.1")
+            )
+            idle_qty_short = int(
+                base_qty * (Decimal("1") + obv_multiplier) *  # ← 역방향 가중치!
+                Decimal(str(abs(short_size))) * 
+                Decimal("0.1")
+            )
+        elif obv_display < 0:  # 숏 강세
+            idle_qty_long = int(
+                base_qty * (Decimal("1") + obv_multiplier) *  # ← 역방향 가중치!
+                Decimal(str(abs(long_size))) * 
+                Decimal("0.1")
+            )
+            idle_qty_short = int(
+                base_qty * 
+                Decimal(str(abs(short_size))) * 
+                Decimal("0.1")
+            )
+        else:  # 중립
+            idle_qty_long = int(
+                base_qty * 
+                Decimal(str(abs(long_size))) * 
+                Decimal("0.1")
+            )
+            idle_qty_short = int(
+                base_qty * 
+                Decimal(str(abs(short_size))) * 
+                Decimal("0.1")
+            )
         
         idle_entry_count += 1
-        
         log_event_header(f"IDLE ENTRY #{idle_entry_count}")
+        log("📊 IDLE QTY", f"Long={idle_qty_long}, Short={idle_qty_short} | OBV:{obv_display:.1f}")
         
+        # 롱 진입
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=entry_qty,
+                size=idle_qty_long,
                 price="0",
                 tif="ioc",
                 reduce_only=False
@@ -1235,10 +1179,11 @@ def check_idle_and_enter():
         time.sleep(1.5)
         sync_position()
         
+        # 숏 진입
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=-entry_qty,
+                size=-idle_qty_short,
                 price="0",
                 tif="ioc",
                 reduce_only=False
