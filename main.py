@@ -1671,8 +1671,8 @@ def status():
         "obv_macd_display": obv_display,
         "obv_macd_internal": float(obv_macd_value),
         "position": {
-            "long": {"size": float(pos["long"]["size"]), "price": float(pos["long"]["price"])},
-            "short": {"size": float(pos["short"]["size"]), "price": float(pos["short"]["price"])}
+            "long": {"size": float(pos["long"]["size"]), "entry_price": float(pos["long"]["entry_price"])},
+            "short": {"size": float(pos["short"]["size"]), "entry_price": float(pos["short"]["entry_price"])}
         },
         # ✅ 수정: 직접 계산
         "threshold_status": {
