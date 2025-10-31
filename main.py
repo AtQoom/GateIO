@@ -1784,7 +1784,7 @@ def print_startup_summary():
     log_divider("-")
     log("📜 CONFIG", "Settings:")
     log("  ├─", f"Symbol: {SYMBOL}")
-    log("  ├─", f"TP Gap: {TP_GAP_PCT * 100}%")
+    log(" |-", f"TP Gap: {float(TP_MIN)*100:.2f}%~{float(TP_MAX)*100:.2f}% (동적)")
     log("  ├─", f"Base Ratio: {BASE_RATIO * 100}%")
     log("  ├─", f"Threshold: {THRESHOLD_RATIO * 100}%")
     log("  ├─", f"Max Position: {MAX_POSITION_RATIO * 100}%")
