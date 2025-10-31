@@ -55,7 +55,7 @@ hedge_lock = threading.Lock()
 # ✅ 동적 TP 기본 범위
 TP_MIN = Decimal("0.0016")        # 0.16% (최소)
 TP_MAX = Decimal("0.0030")        # 0.30% (최대)
-TP_DEFAULT = Decimal("0.0021")    # 0.21% (기본값/중간값)
+TP_DEFAULT = Decimal("0.0016")    # 0.21% (기본값/중간값)
 
 # ✅ 기본 설정들
 BASE_RATIO = Decimal("0.1")       # 기본 수량 비율
@@ -1113,16 +1113,10 @@ def calculate_dynamic_tp_gap():
     else:
         tp_gap = TP_MAX  # 0.30%
     
-    # ✅ 정방향 TP: 강세 방향의 TP를 확대!
-    if obv_display > 0:  # 롱 강세
-        long_tp = tp_gap + (TP_MAX - TP_DEFAULT)  # ✅ 롱 TP 확대!
-        short_tp = tp_gap  # 숏 TP 기본값
-    else:  # 숏 강세
-        long_tp = tp_gap  # 롱 TP 기본값
-        short_tp = tp_gap + (TP_MAX - TP_DEFAULT)  # ✅ 숏 TP 확대!
+    long_tp = tp_gap
+    short_tp = tp_gap
     
     return long_tp, short_tp, tp_gap
-
 
 # ============================================================================
 # 1️⃣ check_idle_and_enter() - 아이들 진입 (역방향 가중치 적용!)
