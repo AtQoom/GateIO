@@ -1794,24 +1794,35 @@ def print_startup_summary():
             cancel_all_orders()
             time.sleep(0.5)
             
-            # 그리드 생성 (내부에서 롱/숏 모두 있으면 TP 생성)
-            initialize_grid(current_price)
-            
-            # initialize_grid에서 TP를 생성하지 않은 경우에만 추가 생성
-            # (롱/숏 중 하나만 있거나 없는 경우)
+            # ✅ 현재 포지션 확인!
+            sync_position()
             with position_lock:
                 long_size = position_state[SYMBOL]["long"]["size"]
                 short_size = position_state[SYMBOL]["short"]["size"]
-            
-            # 롱/숏 중 하나만 있으면 TP 생성 (initialize_grid에서 이미 처리되지 않은 경우)
-            if (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0):
-                time.sleep(1)
+        
+            # ✅ 포지션 상태에 따른 초기화!
+            if long_size > 0 and short_size > 0:
+                # 롱/숏 모두 있으면: TP만 생성
+                log("✅ INIT", f"Both sides exist → TP only (No new entry)")
+                time.sleep(0.5)
                 refresh_all_tp_orders()
+        
+            elif long_size > 0 or short_size > 0:
+                # 단일 포지션이면: 그리드 진입 (헤징)
+                log("✅ INIT", f"Single position → Creating grids for hedging")
+                initialize_grid(current_price)
+        
+            else:
+                # 포지션 없으면: 그리드 진입 (새로 시작)
+                log("✅ INIT", f"No position → Creating grids")
+                initialize_grid(current_price)
+    
         else:
             log("⚠️", "Could not fetch current price")
+
     except Exception as e:
         log("❌", f"Initialization error: {e}")
-    
+
     log_divider("=")
     log("✅ INIT", "Complete. Starting threads...")
     log_divider("=")
