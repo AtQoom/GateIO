@@ -49,7 +49,15 @@ initialize_grid_lock = threading.Lock()
 refresh_tp_lock = threading.Lock()
 hedge_lock = threading.Lock()
 
-TP_GAP_PCT = Decimal("0.0021")    # 0.21%
+# =============================================================================
+# TP 설정 (동적 TP)
+# =============================================================================
+# ✅ 동적 TP 기본 범위
+TP_MIN = Decimal("0.0016")        # 0.16% (최소)
+TP_MAX = Decimal("0.0030")        # 0.30% (최대)
+TP_DEFAULT = Decimal("0.0021")    # 0.21% (기본값/중간값)
+
+# ✅ 기본 설정들
 BASE_RATIO = Decimal("0.1")       # 기본 수량 비율
 THRESHOLD_RATIO = Decimal("0.8")  # 임계값
 COUNTER_CLOSE_RATIO = Decimal("0.20")  # 비주력 20% 청산
@@ -983,8 +991,7 @@ def initialize_grid(current_price=None, idle_multiplier=1.0):
         long_qty = max(1, base_qty_long)
         short_qty = max(1, base_qty_short)
         
-        log("📊 QUANTITY", f"Long: {long_qty}, Short: {short_qty}, OBV={obv_display:.1f}, Idle={idle_multiplier}")
-        log("✅ ENTRY", f"Market order execution: Long {long_qty}, Short {short_qty}")
+        log("📊 QUANTITY", f"Long: {long_qty}, Short: {short_qty} | OBV:{obv_display:.1f}")
         
         # 그리드 오더 초기화
         if SYMBOL not in grid_orders:
@@ -1032,8 +1039,48 @@ def initialize_grid(current_price=None, idle_multiplier=1.0):
     finally:
         initialize_grid_lock.release()
 
+def calculate_dynamic_tp_gap():
+    """
+    OBV MACD 기반 동적 TP 계산
+    
+    범위: 0.16% ~ 0.30%
+    기본값: 0.21%
+    
+    강도별:
+    - 약함 (<20): 0.16% (기본보다 -24%)
+    - 보통 (20-40): 0.21% (기본값)
+    - 강함 (40-70): 0.26% (기본보다 +24%)
+    - 매우강함 (>70): 0.30% (최대)
+    """
+    obv_display = float(obv_macd_value) * 1000
+    obv_abs = abs(obv_display)
+    
+    # ✅ 0.16 ~ 0.30 범위
+    if obv_abs < 20:
+        # 약한 방향성
+        tp_gap = TP_MIN  # 0.16%
+    elif obv_abs < 40:
+        # 보통 방향성
+        tp_gap = TP_DEFAULT  # 0.21%
+    elif obv_abs < 70:
+        # 강한 방향성
+        tp_gap = Decimal("0.0026")  # 0.26% (중간+)
+    else:
+        # 매우 강한 방향성
+        tp_gap = TP_MAX  # 0.30%
+    
+    # 방향별 비대칭 TP (역방향 확대!)
+    if obv_display > 0:  # 롱 강세
+        long_tp = tp_gap
+        short_tp = tp_gap + (TP_MAX - TP_DEFAULT)  # 숏 TP 확대
+    else:  # 숏 강세
+        long_tp = tp_gap + (TP_MAX - TP_DEFAULT)  # 롱 TP 확대
+        short_tp = tp_gap
+    
+    return long_tp, short_tp, tp_gap
+
 def refresh_all_tp_orders(cancel_first=True):
-    """TP 주문 새로 생성 - 평균 TP만 사용 (Individual TP 제거!)"""
+    """TP 주문 새로 생성 - 동적 TP 적용! + OBV 로그"""
     
     if cancel_first:
         cancel_tp_only()
@@ -1048,17 +1095,21 @@ def refresh_all_tp_orders(cancel_first=True):
             long_price = position_state[SYMBOL]["long"]["price"]
             short_price = position_state[SYMBOL]["short"]["price"]
         
-        log("🎯 TP REFRESH", "Creating TP orders...")
+        # ✅ 동적 TP 계산!
+        long_tp_gap, short_tp_gap, base_tp = calculate_dynamic_tp_gap()
+        obv_display = float(obv_macd_value) * 1000
+        
+        log("📊 TP CALC", f"OBV={obv_display:.1f} | Base={float(base_tp)*100:.2f}% | Long={float(long_tp_gap)*100:.2f}% | Short={float(short_tp_gap)*100:.2f}%")
+        log("🎯 TP REFRESH", "Creating TP orders with dynamic gaps...")
         log_threshold_info()
         
         # ========================================================================
-        # === 롱 TP 생성 (Full Average만!) ===
+        # === 롱 TP 생성 ===
         # ========================================================================
         if long_size > 0:
             try:
-                # ✅ Full average TP
-                log("📈 LONG TP", "Creating full average TP")
-                tp_price = long_price * (Decimal("1") + TP_GAP_PCT)
+                # ✅ 동적 TP 적용!
+                tp_price = long_price * (Decimal("1") + long_tp_gap)
                 tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
                 
                 order = FuturesOrder(
@@ -1069,14 +1120,11 @@ def refresh_all_tp_orders(cancel_first=True):
                     reduce_only=True
                 )
                 
-                log("🔍 DEBUG", f"Creating LONG full TP: size={int(long_size)}, price={tp_price}")
                 result = api.create_futures_order(SETTLE, order)
-                log("🔍 DEBUG", f"LONG full TP result: {result}")
                 
-                # ✅ 즉시 체결 확인
                 if result and hasattr(result, 'id'):
                     if hasattr(result, 'status') and result.status in ["finished", "closed"]:
-                        log("⚡ INSTANT TP", f"LONG full TP filled immediately @ {tp_price:.4f}")
+                        log("⚡ INSTANT TP", f"LONG full TP filled immediately @ {tp_price:.4f} (OBV:{obv_display:.1f}, TP:{float(long_tp_gap)*100:.2f}%)")
                         instant_tp_triggered = True
                         threading.Thread(
                             target=full_refresh,
@@ -1085,9 +1133,10 @@ def refresh_all_tp_orders(cancel_first=True):
                         ).start()
                     else:
                         average_tp_orders[SYMBOL]["long"] = result.id
-                        log("🎯 FULL TP", f"LONG {int(long_size)} @ {tp_price:.4f}")
+                        # ✅ OBV 수치 표시!
+                        log("🎯 LONG TP", f"{int(long_size)} @ {tp_price:.4f} (+{float(long_tp_gap)*100:.2f}%) | OBV:{obv_display:.1f}")
                 else:
-                    log("❌ TP", f"LONG full TP creation failed: result={result}")
+                    log("❌ TP", f"LONG TP creation failed: result={result}")
             
             except Exception as e:
                 log("❌ TP", f"LONG TP exception: {e}")
@@ -1095,13 +1144,12 @@ def refresh_all_tp_orders(cancel_first=True):
                 log("❌", traceback.format_exc())
         
         # ========================================================================
-        # === 숏 TP 생성 (Full Average만!) ===
+        # === 숏 TP 생성 ===
         # ========================================================================
         if short_size > 0:
             try:
-                # ✅ Full average TP
-                log("📉 SHORT TP", "Creating full average TP")
-                tp_price = short_price * (Decimal("1") - TP_GAP_PCT)
+                # ✅ 동적 TP 적용!
+                tp_price = short_price * (Decimal("1") - short_tp_gap)
                 tp_price = tp_price.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
                 
                 order = FuturesOrder(
@@ -1112,14 +1160,11 @@ def refresh_all_tp_orders(cancel_first=True):
                     reduce_only=True
                 )
                 
-                log("🔍 DEBUG", f"Creating SHORT full TP: size={int(short_size)}, price={tp_price}")
                 result = api.create_futures_order(SETTLE, order)
-                log("🔍 DEBUG", f"SHORT full TP result: {result}")
                 
-                # ✅ 즉시 체결 확인
                 if result and hasattr(result, 'id'):
                     if hasattr(result, 'status') and result.status in ["finished", "closed"]:
-                        log("⚡ INSTANT TP", f"SHORT full TP filled immediately @ {tp_price:.4f}")
+                        log("⚡ INSTANT TP", f"SHORT full TP filled immediately @ {tp_price:.4f} (OBV:{obv_display:.1f}, TP:{float(short_tp_gap)*100:.2f}%)")
                         instant_tp_triggered = True
                         threading.Thread(
                             target=full_refresh,
@@ -1128,18 +1173,16 @@ def refresh_all_tp_orders(cancel_first=True):
                         ).start()
                     else:
                         average_tp_orders[SYMBOL]["short"] = result.id
-                        log("🎯 FULL TP", f"SHORT {int(short_size)} @ {tp_price:.4f}")
+                        # ✅ OBV 수치 표시!
+                        log("🎯 SHORT TP", f"{int(short_size)} @ {tp_price:.4f} (-{float(short_tp_gap)*100:.2f}%) | OBV:{obv_display:.1f}")
                 else:
-                    log("❌ TP", f"SHORT full TP creation failed: result={result}")
+                    log("❌ TP", f"SHORT TP creation failed: result={result}")
             
             except Exception as e:
                 log("❌ TP", f"SHORT TP exception: {e}")
                 import traceback
                 log("❌", traceback.format_exc())
         
-        # ========================================================================
-        # === TP 생성 후 포지션 재확인 (중복 방지) ===
-        # ========================================================================
         time.sleep(0.5)
         sync_position()
         
@@ -1147,7 +1190,6 @@ def refresh_all_tp_orders(cancel_first=True):
             long_size_after = position_state[SYMBOL]["long"]["size"]
             short_size_after = position_state[SYMBOL]["short"]["size"]
         
-        # ✅ instant_tp_triggered가 False일 때만 실행 (중복 방지)
         if not instant_tp_triggered:
             if (long_size > 0 and long_size_after == 0) or (short_size > 0 and short_size_after == 0):
                 log("⚡ INSTANT TP", "Position closed after TP creation → Triggering refresh")
@@ -1222,8 +1264,8 @@ def check_idle_and_enter():
         entry_qty = max(1, int(base_qty * obv_multiplier * multiplier))
         
         log_event_header("IDLE ENTRY")
-        log("⏱️ IDLE", f"Entry #{idle_entry_count} (x{multiplier}) after {elapsed:.0f}s")
-        log("📊 IDLE QTY", f"LONG {entry_qty} | SHORT {entry_qty} (OBV:{obv_display:.1f}, x{obv_multiplier:.2f})")
+        log("⏱️ IDLE", f"Entry #{idle_entry_count} (x{multiplier}) after {elapsed:.0f}s | OBV:{obv_display:.1f}")
+        log("📊 IDLE QTY", f"LONG {entry_qty} | SHORT {entry_qty} | OBV:{obv_display:.1f}, x{obv_multiplier:.2f}")
         
         # ✅ 수정: 롱 진입
         try:
@@ -1236,7 +1278,7 @@ def check_idle_and_enter():
             )
             result = api.create_futures_order(SETTLE, order)
             if result and hasattr(result, 'id'):
-                log("✅ IDLE", f"LONG {entry_qty} @ market (#{idle_entry_count})")
+                log("✅ IDLE", f"LONG {entry_qty} @ market (#{idle_entry_count}) | OBV:{obv_display:.1f}")
             else:
                 log("❌ IDLE", f"LONG entry failed: result={result}")
         except GateApiException as e:
@@ -1256,7 +1298,7 @@ def check_idle_and_enter():
             )
             result = api.create_futures_order(SETTLE, order)
             if result and hasattr(result, 'id'):
-                log("✅ IDLE", f"SHORT {entry_qty} @ market (#{idle_entry_count})")
+                log("✅ IDLE", f"SHORT {entry_qty} @ market (#{idle_entry_count}) | OBV:{obv_display:.1f}")
             else:
                 log("❌ IDLE", f"SHORT entry failed: result={result}")
         except GateApiException as e:
