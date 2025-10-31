@@ -56,7 +56,6 @@ COUNTER_CLOSE_RATIO = Decimal("0.20")  # 비주력 20% 청산
 MAX_POSITION_RATIO = Decimal("10.0")    # 최대 10배
 HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
 IDLE_TIME_SECONDS = 600  # 10분 (아이들 감지 시간)
-IDLE_MULTIPLIER = Decimal("2.0")  # 아이들 시 2배 (20%)
 
 # =============================================================================
 # API 설정
