@@ -895,19 +895,20 @@ def cancel_stale_orders():
         log("❌", f"Cancel stale orders error: {e}")
 
 def initialize_grid(current_price=None, idle_multiplier=1.0):
-    # ✅ 수정: blocking=True로 변경!
+    global last_grid_time  # ← 이 줄 추가!
+    
     if not initialize_grid_lock.acquire(blocking=True, timeout=5):
         log("🔵 GRID", "Lock timeout → Skipping")
         return
     
     try:
         now = time.time()
-        # ✅ 10초 체크 전에 이미 락을 가진 스레드만 여기 도달
+        # ✅ 이제 last_grid_time이 전역변수임을 명시
         if now - last_grid_time < 10:
             log("🔵 GRID", f"Too soon ({now - last_grid_time:.1f}s) → Skipping")
             return
         
-        last_grid_time = now  # ← 이제 안전함!
+        last_grid_time = now  # ✅ 이제 안전!
         
         if current_price is None or current_price == 0:
             current_price = get_current_price()
