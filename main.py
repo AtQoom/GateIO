@@ -668,15 +668,11 @@ def refresh_all_tp_orders():
             return
         
         # TP % 계산
-        try:
-            tp_result = calculate_dynamic_tp_gap()
-            if isinstance(tp_result, (tuple, list)) and len(tp_result) >= 2:
-                long_tp = tp_result[0]
-                short_tp = tp_result[1]
-            else:
-                long_tp = tp_gap_min
-                short_tp = tp_gap_max
-        except Exception as e:
+        tp_result = calculate_dynamic_tp_gap()
+        if isinstance(tp_result, (tuple, list)) and len(tp_result) >= 2:
+            long_tp = tp_result[0]
+            short_tp = tp_result[1]
+        else:
             long_tp = tp_gap_min
             short_tp = tp_gap_max
         
@@ -684,33 +680,45 @@ def refresh_all_tp_orders():
         cancel_tp_only()
         time.sleep(0.5)
         
-        # LONG TP
+        # ★ LONG TP (수정됨!)
         if long_size > 0:
             tp_price_long = long_entry_price * (Decimal("1") + long_tp)
             tp_price_long = tp_price_long.quantize(Decimal("0.000000000001"), rounding=ROUND_DOWN)
             
-            api.create_futures_order(
-                SETTLE, contract=SYMBOL, size=-int(long_size),
-                price=str(tp_price_long), reduce_only=True,
+            # ✅ FuturesOrder 객체 생성
+            order = FuturesOrder(
+                contract=SYMBOL,
+                size=-int(long_size),
+                price=str(tp_price_long),
+                reduce_only=True,
                 text=generate_order_id()
             )
+            # ✅ api.create_futures_order()에 객체 전달
+            api.create_futures_order(SETTLE, order)
+            
             log("✅ TP LONG", f"Qty: {int(long_size)}, Price: {float(tp_price_long):.4f}")
         
         time.sleep(0.3)
         
-        # SHORT TP
+        # ★ SHORT TP (수정됨!)
         if short_size > 0:
             tp_price_short = short_entry_price * (Decimal("1") - short_tp)
             tp_price_short = tp_price_short.quantize(Decimal("0.000000000001"), rounding=ROUND_DOWN)
             
-            api.create_futures_order(
-                SETTLE, contract=SYMBOL, size=int(short_size),
-                price=str(tp_price_short), reduce_only=True,
+            # ✅ FuturesOrder 객체 생성
+            order = FuturesOrder(
+                contract=SYMBOL,
+                size=int(short_size),
+                price=str(tp_price_short),
+                reduce_only=True,
                 text=generate_order_id()
             )
+            # ✅ api.create_futures_order()에 객체 전달
+            api.create_futures_order(SETTLE, order)
+            
             log("✅ TP SHORT", f"Qty: {int(short_size)}, Price: {float(tp_price_short):.4f}")
         
-        log("✅ TP", "Refresh complete")
+        log("✅ TP", "All TP orders created successfully")
     
     except Exception as e:
         log("❌ TP REFRESH", f"Error: {e}")
