@@ -738,22 +738,20 @@ def refresh_all_tp_orders():
 def calculate_obv_macd_weight(tt1_value):
     """OBV MACD 값에 따른 동적 배수 (*1000 적용된 값 기준)"""
     abs_val = abs(tt1_value)
-    if abs_val < 5:
+    if abs_val < 10:
         return Decimal("0.10")
-    elif abs_val < 10:
-        return Decimal("0.11")
     elif abs_val < 15:
-        return Decimal("0.12")
+        return Decimal("0.11")
     elif abs_val < 20:
-        return Decimal("0.13")
+        return Decimal("0.12")
     elif abs_val < 30:
-        return Decimal("0.15")
+        return Decimal("0.13")
     elif abs_val < 40:
-        return Decimal("0.16")
+        return Decimal("0.15")
     elif abs_val < 50:
+        return Decimal("0.16")
+    elif abs_val < 60:
         return Decimal("0.17")
-    elif abs_val < 70:
-        return Decimal("0.18")
     elif abs_val < 100:
         return Decimal("0.19")
     else:
@@ -780,22 +778,20 @@ def calculate_grid_qty(is_above_threshold):
     
     # OBV MACD (tt1) 값 기준 동적 수량 조절
     obv_value = abs(float(obv_macd_value) * 1000)  # 절댓값 추가
-    if obv_value <= 5:
+    if obv_value <= 10:
         multiplier = 0.1
-    elif obv_value <= 10:
-        multiplier = 0.11
     elif obv_value <= 15:
-        multiplier = 0.12
+        multiplier = 0.11
     elif obv_value <= 20:
-        multiplier = 0.13
+        multiplier = 0.12
     elif obv_value <= 30:
-        multiplier = 0.15
+        multiplier = 0.13
     elif obv_value <= 40:
-        multiplier = 0.16
+        multiplier = 0.15
     elif obv_value <= 50:
+        multiplier = 0.16
+    elif obv_value <= 60:
         multiplier = 0.17
-    elif obv_value <= 70:
-        multiplier = 0.18
     elif obv_value <= 100:
         multiplier = 0.19
     else:
