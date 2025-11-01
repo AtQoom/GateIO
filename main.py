@@ -59,14 +59,10 @@ TP_DEFAULT = Decimal("0.0016")    # 0.21% (기본값/중간값)
 
 # ✅ 기본 설정들
 BASE_RATIO = Decimal("0.1")       # 기본 수량 비율
-COUNTER_CLOSE_RATIO = Decimal("0.20")  # 비주력 20% 청산
 MAX_POSITION_RATIO = Decimal("10.0")    # 최대 10배
 HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
 IDLE_TIME_SECONDS = 600  # 10분 (아이들 감지 시간)
 last_idle_check = 0 
-last_entry_time = 0  # 마지막 진입 시간
-entry_cooldown = 10  # 10초 쿨타임
-entry_time_lock = threading.Lock()  # 시간 갱신 보호
 
 # =============================================================================
 # API 설정
@@ -91,6 +87,8 @@ idle_entry_in_progress = False
 idle_entry_progress_lock = threading.Lock()
 last_idle_entry_time = 0
 IDLE_ENTRY_COOLDOWN = 10  # 10초 최소 간격
+pending_orders = deque(maxlen=100)
+order_sequence_id = 0
 
 position_state = {
     SYMBOL: {
@@ -1096,8 +1094,16 @@ def calculate_dynamic_tp_gap():
     
     return long_tp, short_tp, tp_gap
 
+def generate_order_id(side):
+    '''고유 주문 ID 생성 (Gate.io 중복 방지)'''
+    global order_sequence_id
+    order_sequence_id += 1
+    timestamp = int(time.time() * 1000)
+    return f"idle_{side}_{timestamp}_{order_sequence_id}"
+
+
 # ============================================================================
-# 1️⃣ check_idle_and_enter() - 아이들 진입 (역방향 가중치 적용!)
+# check_idle_and_enter() - 아이들 진입 (중복 방지 + Order Request ID)
 # ============================================================================
 
 def check_idle_and_enter():
@@ -1189,47 +1195,105 @@ def check_idle_and_enter():
         log_event_header(f"IDLE ENTRY #{idle_entry_count}")
         log("📊 IDLE QTY", f"Long={idle_qty_long}, Short={idle_qty_short} | OBV:{obv_display:.1f}")
         
-        # 롱 진입
+        # ★ 핵심 수정 1: 롱 진입 + 주문 Request ID
+        order_id_long = generate_order_id("long")
+        
         try:
+            # ★ 주문 직후 즉시 로컬 업데이트!
+            with position_lock:
+                position_state[SYMBOL]["long"]["size"] += Decimal(str(idle_qty_long))
+            
+            # pending_orders에 기록
+            pending_orders.append({
+                'id': order_id_long,
+                'side': 'long',
+                'qty': idle_qty_long,
+                'timestamp': time.time(),
+                'status': 'pending'
+            })
+            
+            # 주문 실행 (Order Request ID 사용!)
             order = FuturesOrder(
                 contract=SYMBOL,
                 size=idle_qty_long,
                 price="0",
                 tif="ioc",
-                reduce_only=False
+                reduce_only=False,
+                text=order_id_long  # ← Gate.io 중복 방지!
             )
             result = api.create_futures_order(SETTLE, order)
+            
             if result and hasattr(result, 'id'):
                 log("✅ IDLE LONG", f"#{idle_entry_count}")
+                pending_orders[-1]['status'] = 'open'
             else:
                 log("❌ IDLE", "LONG entry failed")
+                # 롤백!
+                with position_lock:
+                    position_state[SYMBOL]["long"]["size"] -= Decimal(str(idle_qty_long))
+                pending_orders[-1]['status'] = 'failed'
                 return
+        
         except Exception as e:
             log("❌ IDLE", f"LONG failed: {e}")
+            # 롤백!
+            with position_lock:
+                position_state[SYMBOL]["long"]["size"] -= Decimal(str(idle_qty_long))
+            if pending_orders:
+                pending_orders[-1]['status'] = 'failed'
             return
         
         time.sleep(1.5)
-        sync_position()
+        sync_position()  # 검증용
         
-        # 숏 진입
+        # ★ 핵심 수정 2: 숏 진입 + 주문 Request ID
+        order_id_short = generate_order_id("short")
+        
         try:
+            # ★ 주문 직후 즉시 로컬 업데이트!
+            with position_lock:
+                position_state[SYMBOL]["short"]["size"] += Decimal(str(idle_qty_short))
+            
+            # pending_orders에 기록
+            pending_orders.append({
+                'id': order_id_short,
+                'side': 'short',
+                'qty': idle_qty_short,
+                'timestamp': time.time(),
+                'status': 'pending'
+            })
+            
+            # 주문 실행 (Order Request ID 사용!)
             order = FuturesOrder(
                 contract=SYMBOL,
                 size=-idle_qty_short,
                 price="0",
                 tif="ioc",
-                reduce_only=False
+                reduce_only=False,
+                text=order_id_short  # ← Gate.io 중복 방지!
             )
             result = api.create_futures_order(SETTLE, order)
+            
             if result and hasattr(result, 'id'):
                 log("✅ IDLE SHORT", f"#{idle_entry_count}")
+                pending_orders[-1]['status'] = 'open'
             else:
                 log("❌ IDLE", "SHORT entry failed")
+                # 롤백!
+                with position_lock:
+                    position_state[SYMBOL]["short"]["size"] -= Decimal(str(idle_qty_short))
+                pending_orders[-1]['status'] = 'failed'
+        
         except Exception as e:
             log("❌ IDLE", f"SHORT failed: {e}")
+            # 롤백!
+            with position_lock:
+                position_state[SYMBOL]["short"]["size"] -= Decimal(str(idle_qty_short))
+            if pending_orders:
+                pending_orders[-1]['status'] = 'failed'
         
         time.sleep(1.5)
-        sync_position()
+        sync_position()  # 최종 검증
         
         update_event_time()
         last_idle_entry_time = time.time()
@@ -1701,8 +1765,6 @@ def print_startup_summary():
     log(" |-", f"TP Gap: {float(TP_MIN)*100:.2f}%~{float(TP_MAX)*100:.2f}% (동적)")
     log("  ├─", f"Base Ratio: {BASE_RATIO * 100}%")
     log("  ├─", f"Max Position: {MAX_POSITION_RATIO * 100}%")
-    log("  ├─", f"Counter Close: {COUNTER_CLOSE_RATIO * 100}%")
-    log("  └─", f"Hedge Main: {HEDGE_RATIO_MAIN * 100}%")
     log_divider("-")
     
     # 초기 잔고 조회
