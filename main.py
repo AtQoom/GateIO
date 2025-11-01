@@ -59,7 +59,6 @@ TP_DEFAULT = Decimal("0.0016")    # 0.21% (기본값/중간값)
 
 # ✅ 기본 설정들
 BASE_RATIO = Decimal("0.1")       # 기본 수량 비율
-THRESHOLD_RATIO = Decimal("0.8")  # 임계값
 COUNTER_CLOSE_RATIO = Decimal("0.20")  # 비주력 20% 청산
 MAX_POSITION_RATIO = Decimal("10.0")    # 최대 10배
 HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
@@ -147,34 +146,16 @@ def log_position_state():
     with balance_lock:
         balance = account_balance
     
-    threshold = balance * THRESHOLD_RATIO
     long_value = long_price * long_size
     short_value = short_price * short_size
     
     log("📊 POSITION", f"Long: {long_size} @ {long_price:.4f} (${long_value:.2f})")
     log("📊 POSITION", f"Short: {short_size} @ {short_price:.4f} (${short_value:.2f})")
-    log("📊 THRESHOLD", f"${threshold:.2f} | Long {'✅' if long_value >= threshold else '❌'} | Short {'✅' if short_value >= threshold else '❌'}")
-    
+      
     main = get_main_side()
     if main != "none":
         log("📊 MAIN", f"{main.upper()} (더 큰 포지션)")
 
-def log_threshold_info():
-    """임계값 정보 로그"""
-    with balance_lock:
-        balance = account_balance  # 실시간 잔고
-    with position_lock:
-        long_size = position_state[SYMBOL]["long"]["size"]
-        long_price = position_state[SYMBOL]["long"]["entry_price"]
-        short_size = position_state[SYMBOL]["short"]["size"]
-        short_price = position_state[SYMBOL]["short"]["entry_price"]
-    
-    threshold = balance * THRESHOLD_RATIO  # account_balance 기준
-    long_value = long_price * long_size
-    short_value = short_price * short_size
-    
-    log("💰 THRESHOLD", f"${threshold:.2f} | Long: ${long_value:.2f} {'✅' if long_value >= threshold else '❌'} | Short: ${short_value:.2f} {'✅' if short_value >= threshold else '❌'}")
-    log("💰 BALANCE", f"Current: ${balance:.2f} USDT")
 
 # =============================================================================
 # OBV MACD 계산 (Pine Script 정확한 변환)
@@ -767,15 +748,12 @@ def get_current_price():
         log("❌", f"Price fetch error: {e}")
         return Decimal("0")
 
-def calculate_grid_qty(is_above_threshold):
+def calculate_grid_qty():
     with balance_lock:
         base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
         if base_qty <= 0:
             base_qty = 1
-    
-    if is_above_threshold:
-        return base_qty
-    
+       
     # OBV MACD (tt1) 값 기준 동적 수량 조절
     obv_value = abs(float(obv_macd_value) * 1000)  # 절댓값 추가
     if obv_value <= 10:
@@ -1259,7 +1237,6 @@ def full_refresh(event_type, skip_grid=False):
     log("🔄 SYNC", "Syncing position...")
     sync_position()
     log_position_state()
-    log_threshold_info()
 
     cancel_all_orders()
     time.sleep(0.5)
@@ -1447,7 +1424,6 @@ def position_monitor():
             with balance_lock:
                 balance = account_balance
             
-            threshold = balance * THRESHOLD_RATIO
             max_value = balance * MAX_POSITION_RATIO
             long_value = long_price * long_size
             short_value = short_price * short_size
@@ -1637,12 +1613,6 @@ def status():
     
     obv_display = float(obv_macd_value) * 1000
     
-    # ✅ 수정: threshold_status 제거 또는 계산 직접 수행
-    threshold = Decimal(str(bal)) * THRESHOLD_RATIO
-    current_price = get_current_price()
-    long_value = pos["long"]["size"] * current_price
-    short_value = pos["short"]["size"] * current_price
-    
     return jsonify({
         "balance": bal,
         "obv_macd_display": obv_display,
@@ -1650,18 +1620,9 @@ def status():
         "position": {
             "long": {"size": float(pos["long"]["size"]), "entry_price": float(pos["long"]["entry_price"])},
             "short": {"size": float(pos["short"]["size"]), "entry_price": float(pos["short"]["entry_price"])}
-        },
-        # ✅ 수정: 직접 계산
-        "threshold_status": {
-            "threshold_value": float(threshold),
-            "long_value": float(long_value),
-            "short_value": float(short_value),
-            "long_above": float(long_value) >= float(threshold),
-            "short_above": float(short_value) >= float(threshold)
         }
-        # ❌ 삭제: post_threshold_entries, counter_snapshot 제거
     }), 200
-
+    
 @app.route('/refresh', methods=['POST'])
 def manual_refresh():
     """수동 새로고침"""
@@ -1719,7 +1680,6 @@ def print_startup_summary():
     log("  ├─", f"Symbol: {SYMBOL}")
     log(" |-", f"TP Gap: {float(TP_MIN)*100:.2f}%~{float(TP_MAX)*100:.2f}% (동적)")
     log("  ├─", f"Base Ratio: {BASE_RATIO * 100}%")
-    log("  ├─", f"Threshold: {THRESHOLD_RATIO * 100}%")
     log("  ├─", f"Max Position: {MAX_POSITION_RATIO * 100}%")
     log("  ├─", f"Counter Close: {COUNTER_CLOSE_RATIO * 100}%")
     log("  └─", f"Hedge Main: {HEDGE_RATIO_MAIN * 100}%")
@@ -1739,7 +1699,6 @@ def print_startup_summary():
             else:
                 log("⚠️ BALANCE", "Could not fetch - using default 50 USDT")
         
-        log("💰 THRESHOLD", f"{account_balance * THRESHOLD_RATIO:.2f} USDT")
         log("💰 MAX POSITION", f"{account_balance * MAX_POSITION_RATIO:.2f} USDT")
     except Exception as e:
         log("❌ ERROR", f"Balance check failed: {e}")
@@ -1750,7 +1709,6 @@ def print_startup_summary():
     # 기존 포지션 확인
     sync_position()
     log_position_state()
-    log_threshold_info()
     log_divider("-")
     
     # 초기화
