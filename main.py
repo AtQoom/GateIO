@@ -89,6 +89,9 @@ last_idle_entry_time = 0
 IDLE_ENTRY_COOLDOWN = 10  # 10초 최소 간격
 pending_orders = deque(maxlen=100)
 order_sequence_id = 0
+last_adjusted_obv = 0  # 마지막 TP 조정 시 OBV 값
+OBV_CHANGE_THRESHOLD = Decimal("0.05")  # OBV 0.05 이상 변화시만 갱신
+TP_CHANGE_THRESHOLD = Decimal("0.01")  # 0.01% 이상 차이만 갱신
 
 position_state = {
     SYMBOL: {
@@ -1560,14 +1563,15 @@ def idle_monitor():
             time.sleep(10)
 
 def periodic_health_check():
-    global last_idle_check  # ← 전역 선언
+    """2분마다 헬스 체크 + OBV 기반 TP 동적 조정"""
+    global last_idle_check, obv_macd_value, tp_gap_min, tp_gap_max, last_adjusted_obv
     
     while True:
         try:
             time.sleep(120)  # 2분
-            log("🔍 HEALTH", "Starting health check...")
+            log("💊 HEALTH", "Starting health check...")
             
-            # 1. 포지션 동기화
+            # 1️⃣ 포지션 동기화 (기존)
             sync_position()
             
             with position_lock:
@@ -1575,27 +1579,23 @@ def periodic_health_check():
                 short_size = position_state[SYMBOL]["short"]["size"]
             
             if long_size == 0 and short_size == 0:
-                log("🔍 HEALTH", "No position")
+                log("💊 HEALTH", "No position")
                 continue
             
-            # 2. 주문 상태 확인
+            # 2️⃣ 주문 상태 확인 (기존)
             try:
                 orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-                
                 grid_count = sum(1 for o in orders if not o.reduce_only)
                 tp_count = sum(1 for o in orders if o.reduce_only)
-                
-                log("🔍 ORDERS", f"Grid: {grid_count}, TP: {tp_count}")
+                log("📊 ORDERS", f"Grid: {grid_count}, TP: {tp_count}")
                 
             except Exception as e:
-                log("❌", f"List orders error: {e}")
+                log("❌ HEALTH", f"List orders error: {e}")
                 continue
             
-            # ✅ 3. TP 확인 (변화 감지!)
+            # 3️⃣ TP 확인 + 해시값 검증 (기존)
             if long_size > 0 or short_size > 0:
                 tp_orders_list = [o for o in orders if o.reduce_only]
-                
-                # ✅ 현재 TP 해시값 계산
                 current_hash = get_tp_orders_hash(tp_orders_list)
                 previous_hash = tp_order_hash.get(SYMBOL)
                 
@@ -1604,7 +1604,6 @@ def periodic_health_check():
                 
                 tp_mismatch = False
                 
-                # ✅ 심각한 문제만 감지 (수량 부족)
                 if tp_count == 0 and (long_size > 0 or short_size > 0):
                     log("🔧 HEALTH", "❌ TP CRITICAL: No TP at all!")
                     tp_mismatch = True
@@ -1615,7 +1614,6 @@ def periodic_health_check():
                     log("🔧 HEALTH", f"❌ SHORT TP critical: {tp_short_qty} < {short_size * 0.3}")
                     tp_mismatch = True
                 
-                # ✅ TP 재생성: 문제 있고 + TP 변화 있을 때만!
                 if tp_mismatch and current_hash != previous_hash:
                     log("🔧 HEALTH", "⚠️ TP changed + problem detected → Refreshing!")
                     time.sleep(0.5)
@@ -1628,10 +1626,35 @@ def periodic_health_check():
                 
                 else:
                     log("✅ HEALTH", "TP orders stable")
-                    # ✅ 이벤트 없으면 해시만 업데이트 (TP 유지!)
                     tp_order_hash[SYMBOL] = current_hash
             
-            # ✅ 4. 단일 포지션 + 그리드 없음 → 시장가 진입!
+            # ★ 4️⃣ 새로운 부분: OBV 기반 동적 TP 조정!
+            calculate_obv_macd()
+            current_obv = float(obv_macd_value)
+            new_tp_gap_min, new_tp_gap_max = calculate_dynamic_tp_gap()
+            
+            if abs(current_obv - last_adjusted_obv) >= 0.05:
+                if abs(float(new_tp_gap_min) - float(tp_gap_min)) >= 0.01:
+                    log("🔄 TP ADJUST", 
+                        f"OBV:{current_obv:.2f}, "
+                        f"TP %: {float(tp_gap_min):.3f}~{float(tp_gap_max):.3f}% → "
+                        f"{float(new_tp_gap_min):.3f}~{float(new_tp_gap_max):.3f}%")
+                    
+                    try:
+                        with position_lock:
+                            tp_gap_min = new_tp_gap_min
+                            tp_gap_max = new_tp_gap_max
+                        
+                        cancel_tp_only()
+                        time.sleep(0.5)
+                        refresh_all_tp_orders()
+                        log("✅ TP ADJUST", "Success!")
+                        last_adjusted_obv = current_obv
+                        
+                    except Exception as e:
+                        log("❌ TP ADJUST", f"Failed: {e}")
+            
+            # 5️⃣ 단일 포지션 + 그리드 없음 처리 (기존)
             single_position = (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0)
             
             if single_position and grid_count == 0:
@@ -1640,21 +1663,21 @@ def periodic_health_check():
                 if current_price > 0:
                     initialize_grid(current_price)
             
-            # ✅ 5. 전략 일관성 검증
+            # 6️⃣ 전략 일관성 검증 (기존)
             validate_strategy_consistency()
             
-            # ✅ 6. 중복 주문 제거
+            # 7️⃣ 중복 주문 제거 (기존)
             remove_duplicate_orders()
             
-            # ✅ 7. 오래된 주문 취소
+            # 8️⃣ 오래된 주문 취소 (기존)
             cancel_stale_orders()
             
             log("✅ HEALTH", "Health check complete")
             
         except Exception as e:
-            log("❌", f"Health check error: {e}")
+            log("❌ HEALTH", f"Health check error: {e}")
             import traceback
-            log("❌", f"Traceback: {traceback.format_exc()}")
+            log("❌ HEALTH", f"Traceback: {traceback.format_exc()}")
             
 
 # =============================================================================
