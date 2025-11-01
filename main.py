@@ -1097,12 +1097,10 @@ def calculate_dynamic_tp_gap():
     
     return long_tp, short_tp, tp_gap
 
-def generate_order_id(side):
-    '''고유 주문 ID 생성 (Gate.io 중복 방지)'''
+def generate_order_id():
     global order_sequence_id
     order_sequence_id += 1
-    timestamp = int(time.time() * 1000)
-    return f"idle_{side}_{timestamp}_{order_sequence_id}"
+    return f"t-{order_sequence_id}"  # ← "t-1", "t-2" (O)
 
 
 # ============================================================================
