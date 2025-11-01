@@ -1138,6 +1138,7 @@ def check_idle_and_enter():
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
         
+        # ✅ 포지션이 둘 다 없으면 스킵!
         if long_size == 0 or short_size == 0:
             log("⏱️ IDLE", "Position incomplete → Skipping")
             return
@@ -1147,7 +1148,7 @@ def check_idle_and_enter():
             log("❌ IDLE", "Cannot get current price")
             return
         
-        # ✅ OBV MACD 가중치 계산 (initialize_grid와 동일!)
+        # OBV MACD 가중치 계산
         obv_display = float(obv_macd_value) * 1000
         obv_abs = abs(obv_display)
         
@@ -1172,7 +1173,7 @@ def check_idle_and_enter():
         else:
             obv_multiplier = Decimal("0.20")
         
-        # ✅ 기본 진입 수량 계산
+        # 기본 진입 수량 계산
         with balance_lock:
             base_value = account_balance * BASE_RATIO
         
@@ -1181,40 +1182,16 @@ def check_idle_and_enter():
             log("❌ IDLE", "Insufficient quantity")
             return
         
-        # ✅ 아이들 진입 수량 (역방향 가중치 적용!)
+        # ✅ 핵심 수정: max(1, ...) 사용! (1보다 작으면 최소 1!)
         if obv_display > 0:  # 롱 강세
-            idle_qty_long = int(
-                base_qty * 
-                Decimal(str(abs(long_size))) * 
-                Decimal("0.1")
-            )
-            idle_qty_short = int(
-                base_qty * (Decimal("1") + obv_multiplier) *  # ← 역방향 가중치!
-                Decimal(str(abs(short_size))) * 
-                Decimal("0.1")
-            )
+            idle_qty_long = max(1, int(base_qty * Decimal("0.10")))
+            idle_qty_short = max(1, int(base_qty * (Decimal("1") + obv_multiplier) * Decimal("0.10")))
         elif obv_display < 0:  # 숏 강세
-            idle_qty_long = int(
-                base_qty * (Decimal("1") + obv_multiplier) *  # ← 역방향 가중치!
-                Decimal(str(abs(long_size))) * 
-                Decimal("0.1")
-            )
-            idle_qty_short = int(
-                base_qty * 
-                Decimal(str(abs(short_size))) * 
-                Decimal("0.1")
-            )
+            idle_qty_long = max(1, int(base_qty * (Decimal("1") + obv_multiplier) * Decimal("0.10")))
+            idle_qty_short = max(1, int(base_qty * Decimal("0.10")))
         else:  # 중립
-            idle_qty_long = int(
-                base_qty * 
-                Decimal(str(abs(long_size))) * 
-                Decimal("0.1")
-            )
-            idle_qty_short = int(
-                base_qty * 
-                Decimal(str(abs(short_size))) * 
-                Decimal("0.1")
-            )
+            idle_qty_long = max(1, int(base_qty * Decimal("0.10")))
+            idle_qty_short = max(1, int(base_qty * Decimal("0.10")))
         
         idle_entry_count += 1
         log_event_header(f"IDLE ENTRY #{idle_entry_count}")
