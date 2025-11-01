@@ -87,6 +87,10 @@ app = Flask(__name__)
 INITIAL_BALANCE = Decimal("50")
 balance_lock = threading.Lock()
 position_lock = threading.Lock()
+idle_entry_in_progress = False
+idle_entry_progress_lock = threading.Lock()
+last_idle_entry_time = 0
+IDLE_ENTRY_COOLDOWN = 10  # 10초 최소 간격
 
 position_state = {
     SYMBOL: {
@@ -1097,10 +1101,24 @@ def calculate_dynamic_tp_gap():
 # ============================================================================
 
 def check_idle_and_enter():
-    global last_event_time, idle_entry_count, last_idle_check
+    global last_event_time, idle_entry_count, idle_entry_in_progress, last_idle_entry_time
     
+    # ✅ 1단계: 진입 중 체크
+    with idle_entry_progress_lock:
+        if idle_entry_in_progress:
+            return
+        idle_entry_in_progress = True
+    
+    # ✅ 2단계: Cooldown 체크
+    if time.time() - last_idle_entry_time < IDLE_ENTRY_COOLDOWN:
+        with idle_entry_progress_lock:
+            idle_entry_in_progress = False
+        return
+    
+    # ✅ 3단계: Lock 획득
     if not idle_entry_lock.acquire(blocking=True, timeout=10):
-        log("⏱️ IDLE", "Lock timeout → Skipping")
+        with idle_entry_progress_lock:
+            idle_entry_in_progress = False
         return
     
     try:
@@ -1214,13 +1232,15 @@ def check_idle_and_enter():
         sync_position()
         
         update_event_time()
-        last_idle_check = time.time()
+        last_idle_entry_time = time.time()
         
         refresh_all_tp_orders()
         
         log("🎉 IDLE", "Entry complete!")
         
     finally:
+        with idle_entry_progress_lock:
+            idle_entry_in_progress = False
         idle_entry_lock.release()
 
 
