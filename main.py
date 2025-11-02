@@ -1172,16 +1172,14 @@ def check_idle_and_enter():
         # ✅ 주력 포지션 판단 (역추세!)
         if obv_display > 0:  # 롱 강세 → SHORT이 주력
             main_size = short_size
-            hedge_size = long_size
             main_entry_qty = int(main_size * Decimal("0.1") * obv_multiplier)  # 주력: 10% × 가중치
-            hedge_entry_qty = int(main_size * Decimal("0.1"))  # 헤징: 10% (가중치 없음)
+            hedge_entry_qty = int(main_size * Decimal("0.1"))  # 헤징: 10% (가중치 없음, 같은 기준!)
             log("📊", f"OBV+ (롱 강세): SHORT 주력 | LONG 헤징")
         
         elif obv_display < 0:  # 숏 강세 → LONG이 주력
             main_size = long_size
-            hedge_size = short_size
             main_entry_qty = int(main_size * Decimal("0.1") * obv_multiplier)  # 주력: 10% × 가중치
-            hedge_entry_qty = int(main_size * Decimal("0.1"))  # 헤징: 10% (가중치 없음)
+            hedge_entry_qty = int(main_size * Decimal("0.1"))  # 헤징: 10% (가중치 없음, 같은 기준!)
             log("📊", f"OBV- (숏 강세): LONG 주력 | SHORT 헤징")
         
         else:  # 중립
