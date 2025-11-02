@@ -1128,6 +1128,7 @@ def check_idle_and_enter():
     """
     10분 아이들 진입
     - 진입 수량 < 기본 수량 → 기본 수량으로 진입!
+    - 헤징 수량 < 기본 수량 → 기본 수량으로 진입!
     - 양쪽 포지션 있으면: 계정 잔고 기반 진입
     - 한쪽만 있으면: 역추세 진입 (OBV MACD 가중치)
     """
@@ -1176,6 +1177,8 @@ def check_idle_and_enter():
             log("⚠️ IDLE", "Insufficient base quantity")
             return
         
+        log("📊 BASE_QTY", f"Base quantity: {base_qty}")
+        
         # ✅ 포지션이 하나만 있을 때
         if long_size == 0 or short_size == 0:
             log("📊 SINGLE", "Single position detected - Counter-trend entry")
@@ -1200,6 +1203,11 @@ def check_idle_and_enter():
             if main_qty < base_qty:
                 log("📊 ADJUST", f"Main qty {main_qty} < base {base_qty} → Using base qty")
                 main_qty = base_qty
+            
+            # ✅ 수정: hedge_qty < base_qty이면 base_qty로 진입!
+            if hedge_qty < base_qty:
+                log("📊 ADJUST", f"Hedge qty {hedge_qty} < base {base_qty} → Using base qty")
+                hedge_qty = base_qty
             
             log("📊 QUANTITY", f"Main: {main_qty}, Hedge: {hedge_qty} (OBV x{float(obv_multiplier):.2f})")
             
@@ -1282,10 +1290,12 @@ def check_idle_and_enter():
             log("📊", f"OBV 중립: 동일 수량")
         
         # ✅ 핵심 수정: 계산된 수량 < 기본 수량 → 기본 수량 사용!
+        # 주력 수량 조정
         if main_entry_qty < base_qty:
             log("📊 ADJUST", f"Main qty {main_entry_qty} < base {base_qty} → Using base qty")
             main_entry_qty = base_qty
         
+        # ✅ 헤징 수량 조정
         if hedge_entry_qty < base_qty:
             log("📊 ADJUST", f"Hedge qty {hedge_entry_qty} < base {base_qty} → Using base qty")
             hedge_entry_qty = base_qty
