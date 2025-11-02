@@ -1438,31 +1438,34 @@ def market_entry_when_imbalanced():
                 log("📊 QTY", f"LONG {entry_qty} | SHORT {entry_qty} (OBV x{float(obv_multiplier):.2f})")
                 
                 try:
-                    # LONG
+                    # ✅ LONG 진입
                     long_order = FuturesOrder(
                         contract=SYMBOL,
                         size=entry_qty,
                         price="0",
                         tif="ioc",
+                        reduce_only=False,  # ← 추가: 새로 진입
                         text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, long_order)
                     log("✅ LONG", f"Market: {entry_qty}")
                     time.sleep(0.2)
                     
-                    # SHORT
+                    # ✅ SHORT 진입 (수정!)
                     short_order = FuturesOrder(
                         contract=SYMBOL,
-                        size=-entry_qty,
+                        size=-entry_qty,  # ← 음수 (SHORT)
                         price="0",
                         tif="ioc",
+                        reduce_only=False,  # ← 추가: 새로 진입
                         text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, short_order)
                     log("✅ SHORT", f"Market: {entry_qty}")
                 
-                except Exception as e:
+                except GateApiException as e:
                     log("❌ MARKET", f"Entry error: {e}")
+                    return
             
             # ════════════════════════════════════════════════════════════════
             # 2️⃣ LONG만 있음: SHORT 헤징
@@ -1473,20 +1476,27 @@ def market_entry_when_imbalanced():
                 # ✅ OBV 가중치로 헤징 수량 결정
                 hedge_qty = int(base_qty * obv_multiplier)
                 
+                # ✅ 기본 수량보다 작으면 조정
+                if hedge_qty < base_qty:
+                    log("📊 ADJUST", f"Hedge qty {hedge_qty} < base {base_qty} → Using base qty")
+                    hedge_qty = base_qty
+                
                 log("📊 QTY", f"SHORT {hedge_qty} (OBV x{float(obv_multiplier):.2f})")
                 
                 try:
                     short_order = FuturesOrder(
                         contract=SYMBOL,
-                        size=-hedge_qty,
+                        size=-hedge_qty,  # ← 음수 (SHORT)
                         price="0",
                         tif="ioc",
+                        reduce_only=False,  # ← 추가: 새로 진입
                         text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, short_order)
                     log("✅ SHORT", f"Hedge: {hedge_qty}")
-                except Exception as e:
+                except GateApiException as e:
                     log("❌ MARKET", f"SHORT error: {e}")
+                    return
             
             # ════════════════════════════════════════════════════════════════
             # 3️⃣ SHORT만 있음: LONG 헤징
@@ -1497,20 +1507,27 @@ def market_entry_when_imbalanced():
                 # ✅ OBV 가중치로 헤징 수량 결정
                 hedge_qty = int(base_qty * obv_multiplier)
                 
+                # ✅ 기본 수량보다 작으면 조정
+                if hedge_qty < base_qty:
+                    log("📊 ADJUST", f"Hedge qty {hedge_qty} < base {base_qty} → Using base qty")
+                    hedge_qty = base_qty
+                
                 log("📊 QTY", f"LONG {hedge_qty} (OBV x{float(obv_multiplier):.2f})")
                 
                 try:
                     long_order = FuturesOrder(
                         contract=SYMBOL,
-                        size=hedge_qty,
+                        size=hedge_qty,  # ← 양수 (LONG)
                         price="0",
                         tif="ioc",
+                        reduce_only=False,  # ← 추가: 새로 진입
                         text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, long_order)
                     log("✅ LONG", f"Hedge: {hedge_qty}")
-                except Exception as e:
+                except GateApiException as e:
                     log("❌ MARKET", f"LONG error: {e}")
+                    return
     
     except Exception as e:
         log("❌ MARKET", f"Imbalanced entry error: {e}")
