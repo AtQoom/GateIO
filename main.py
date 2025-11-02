@@ -687,7 +687,7 @@ def refresh_all_tp_orders():
         
         # 기존 TP 취소
         cancel_tp_only()
-        time.sleep(0.5)
+        time.sleep(0.2)
         
         # ★ LONG TP (수정됨!)
         if long_size > 0:
@@ -1073,7 +1073,7 @@ def initialize_grid(current_price=None):
             log("❌", f"SHORT entry error: {e}")
             return
         
-        time.sleep(0.5)
+        time.sleep(0.2)
         sync_position()
         refresh_all_tp_orders()
         
@@ -1264,7 +1264,7 @@ def check_idle_and_enter():
                 log("❌", f"IDLE entry error: {e}")
                 return
             
-            time.sleep(0.5)
+            time.sleep(0.2)
             sync_position()
             refresh_all_tp_orders()
             update_event_time()
@@ -1379,7 +1379,7 @@ def check_idle_and_enter():
             log("❌", f"IDLE entry error: {e}")
             return
         
-        time.sleep(0.5)
+        time.sleep(0.2)
         sync_position()
         refresh_all_tp_orders()
         update_event_time()
@@ -1548,7 +1548,7 @@ def full_refresh(event_type, skip_grid=False):
     log_position_state()
 
     cancel_all_orders()
-    time.sleep(0.5)
+    time.sleep(0.2)
     
     if not skip_grid:
         current_price = get_current_price()
@@ -1628,7 +1628,7 @@ async def grid_fill_monitor():
                                     side = "long" if size < 0 else "short"
                                     log("🎯 TP FILLED", f"{side.upper()} @ {price:.4f}")
 
-                                    time.sleep(0.5)
+                                    time.sleep(0.2)
                                     
                                     with position_lock:
                                         long_size = position_state[SYMBOL]["long"]["size"]
@@ -1677,7 +1677,7 @@ def tp_monitor():
                         log("🎯 TP", f"{side.upper()} average position closed")
                         average_tp_orders[SYMBOL][side] = None
                         
-                        time.sleep(0.5)
+                        time.sleep(0.2)
                         sync_position()  # 포지션 동기화
                         
                         # ✅ 수정: skip_grid=False (그리드도 생성!)
@@ -1846,7 +1846,7 @@ def periodic_health_check():
                 
                 if tp_mismatch and current_hash != previous_hash:
                     log("🔧 HEALTH", "⚠️ TP changed + problem detected → Refreshing!")
-                    time.sleep(0.5)
+                    time.sleep(0.2)
                     try:
                         refresh_all_tp_orders()
                         tp_order_hash[SYMBOL] = current_hash
@@ -1891,7 +1891,7 @@ def periodic_health_check():
                                 
                                 try:
                                     cancel_tp_only()
-                                    time.sleep(0.5)
+                                    time.sleep(0.2)
                                     
                                     # ✅ 핵심: position_lock 없음!
                                     tp_gap_min = new_tp_long
@@ -2082,7 +2082,7 @@ def print_startup_summary():
         if current_price > 0:
             log("💹 PRICE", f"{current_price:.4f}")
             cancel_all_orders()
-            time.sleep(0.5)
+            time.sleep(0.2)
             
             # ✅ 현재 포지션 확인!
             sync_position()
@@ -2094,7 +2094,7 @@ def print_startup_summary():
             if long_size > 0 and short_size > 0:
                 # 롱/숏 모두 있으면: TP만 생성
                 log("✅ INIT", f"Both sides exist → TP only (No new entry)")
-                time.sleep(0.5)
+                time.sleep(0.2)
                 refresh_all_tp_orders()
         
             elif long_size > 0 or short_size > 0:
