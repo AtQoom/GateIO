@@ -141,15 +141,15 @@ idle_entry_lock = threading.Lock()
 
 def generate_order_id():
     """
-    고유한 주문 ID 생성 (Order Request ID)
-    - UUID 또는 타임스탬프 기반
-    - 중복 방지용
+    Gate.io 고유한 주문 ID 생성
+    - 반드시 't-'로 시작해야 함! (Gate.io API 요구사항)
+    - 형식: t-{timestamp}_{sequence}
     """
     global order_sequence_id
     
     order_sequence_id += 1
     timestamp = int(time.time() * 1000)  # 밀리초 단위
-    unique_id = f"{timestamp}_{order_sequence_id}"
+    unique_id = f"t-{timestamp}_{order_sequence_id}"  # ← ✅ 't-' 접두사 추가!
     
     return unique_id
 
