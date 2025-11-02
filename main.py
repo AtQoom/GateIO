@@ -58,7 +58,7 @@ TP_MAX = Decimal("0.0030")        # 0.30% (최대)
 TP_DEFAULT = Decimal("0.0016")    # 0.21% (기본값/중간값)
 
 # ✅ 기본 설정들
-BASE_RATIO = Decimal("0.1")       # 기본 수량 비율
+BASE_RATIO = Decimal("0.05")       # 기본 수량 비율
 MAX_POSITION_RATIO = Decimal("10.0")    # 최대 10배
 HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
 IDLE_TIME_SECONDS = 600  # 10분 (아이들 감지 시간)
@@ -786,23 +786,23 @@ def calculate_grid_qty():
     # OBV MACD (tt1) 값 기준 동적 수량 조절
     obv_value = abs(float(obv_macd_value) * 1000)  # 절댓값 추가
     if obv_value <= 10:
-        multiplier = 0.1
+        multiplier = 1.0
     elif obv_value <= 15:
-        multiplier = 0.11
+        multiplier = 1.1
     elif obv_value <= 20:
-        multiplier = 0.12
+        multiplier = 1.2
     elif obv_value <= 30:
-        multiplier = 0.13
+        multiplier = 1.3
     elif obv_value <= 40:
-        multiplier = 0.15
+        multiplier = 1.5
     elif obv_value <= 50:
-        multiplier = 0.16
+        multiplier = 1.6
     elif obv_value <= 60:
-        multiplier = 0.17
+        multiplier = 1.7
     elif obv_value <= 100:
-        multiplier = 0.19
+        multiplier = 1.9
     else:
-        multiplier = 0.2
+        multiplier = 2.0
     
     return max(1, int(base_qty * multiplier))
 
