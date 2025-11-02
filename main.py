@@ -963,11 +963,10 @@ def cancel_stale_orders():
 
 def initialize_grid(current_price=None):
     """
-    그리드 초기화 - 역추세 전략 (OBV MACD 반대 방향!)
+    역추세 전략 (수정됨!)
     
-    당신의 전략:
-    - OBV > 0 (롱 강세) → SHORT을 더 많이! (역추세)
-    - OBV < 0 (숏 강세) → LONG을 더 많이! (역추세)
+    OBV > 0 (롱 강세) → SHORT 주력 (더 많이!)
+    OBV < 0 (숏 강세) → LONG 주력 (더 많이!)
     """
     global last_grid_time
     
@@ -1007,7 +1006,6 @@ def initialize_grid(current_price=None):
             log("⚠️ LIMIT", "Max position reached")
             return
         
-        # OBV MACD 값 (절댓값 기준 가중치)
         obv_display = float(obv_macd_value) * 1000
         obv_multiplier = calculate_obv_macd_weight(obv_display)
         
@@ -1020,26 +1018,24 @@ def initialize_grid(current_price=None):
             log("❌", f"Insufficient quantity")
             return
         
-        # ✅ 역추세 전략 (신규!)
-        # 강세 방향의 반대로 더 많이 진입!
-        if obv_display > 0:  # 롱 강세 → SHORT 주력
-            short_qty = int(base_qty * obv_multiplier)  # 주력 (OBV 배수)
-            long_qty = base_qty  # 헤징 (기본)
-            log("📊", f"OBV Positive (롱 강세): SHORT {short_qty} (주력 x{float(obv_multiplier):.2f}) | LONG {long_qty} (헤징)")
+        # ✅ 수정: 강세 방향의 반대를 (1 + 배수)배로!
+        if obv_display > 0:  # 롱 강세 → SHORT 주력 (더 많이!)
+            short_qty = int(base_qty * (1 + obv_multiplier))  # ← 수정!
+            long_qty = base_qty
+            log("📊", f"OBV+ (롱 강세): SHORT {short_qty} (주력 x{float(1+obv_multiplier):.2f}) | LONG {long_qty} (헤징)")
         
-        elif obv_display < 0:  # 숏 강세 → LONG 주력
-            long_qty = int(base_qty * obv_multiplier)  # 주력 (OBV 배수)
-            short_qty = base_qty  # 헤징 (기본)
-            log("📊", f"OBV Negative (숏 강세): LONG {long_qty} (주력 x{float(obv_multiplier):.2f}) | SHORT {short_qty} (헤징)")
+        elif obv_display < 0:  # 숏 강세 → LONG 주력 (더 많이!)
+            long_qty = int(base_qty * (1 + obv_multiplier))  # ← 수정!
+            short_qty = base_qty
+            log("📊", f"OBV- (숏 강세): LONG {long_qty} (주력 x{float(1+obv_multiplier):.2f}) | SHORT {short_qty} (헤징)")
         
         else:  # 중립
             long_qty = base_qty
             short_qty = base_qty
-            log("📊", f"OBV Neutral: LONG {long_qty} | SHORT {short_qty}")
+            log("📊", f"OBV 중립: LONG {long_qty} | SHORT {short_qty}")
         
         log("📊 QUANTITY", f"Long: {long_qty}, Short: {short_qty}, OBV={obv_display:.1f}, Multiplier={float(obv_multiplier):.2f}")
         
-        # LONG 진입
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
@@ -1055,9 +1051,8 @@ def initialize_grid(current_price=None):
             log("❌", f"LONG entry error: {e}")
             return
         
-        time.sleep(0.5)
+        time.sleep(0.1)
         
-        # SHORT 진입
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
@@ -1073,7 +1068,7 @@ def initialize_grid(current_price=None):
             log("❌", f"SHORT entry error: {e}")
             return
         
-        time.sleep(0.5)
+        time.sleep(0.2)
         sync_position()
         refresh_all_tp_orders()
         
@@ -1272,15 +1267,15 @@ def check_idle_and_enter():
             return
         
         # ✅ 양쪽 포지션 모두 있을 때
-        if obv_display > 0:  # SHORT 주력
+        if obv_display > 0:  # SHORT 주력 추가
             main_size = short_size
-            main_entry_qty = int(main_size * Decimal("0.1") * obv_multiplier)
+            main_entry_qty = int(base_qty * (1 + obv_multiplier))
             hedge_entry_qty = int(main_size * Decimal("0.1"))
             log("📊", f"OBV+ (롱 강세): SHORT 주력 | LONG 헤징")
         
         elif obv_display < 0:  # LONG 주력
             main_size = long_size
-            main_entry_qty = int(main_size * Decimal("0.1") * obv_multiplier)
+            main_entry_qty = int(base_qty * (1 + obv_multiplier))
             hedge_entry_qty = int(main_size * Decimal("0.1"))
             log("📊", f"OBV- (숏 강세): LONG 주력 | SHORT 헤징")
         
