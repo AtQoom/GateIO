@@ -1150,12 +1150,11 @@ def calculate_dynamic_tp_gap():
 
 def check_idle_and_enter():
     """
-    10분 아이들 진입 (CORRECTED!)
+    10분 아이들 진입 (최종 수정!)
     
     전략:
-    - 주력 포지션(더 큰 쪽) 크기의 10% × OBV 가중치 진입
-    - 반대 포지션: 10% 고정
-    - OBV MACD 방향은 무관 (항상 같은 방식)
+    - 주력 포지션 × 10% × OBV (역방향)
+    - 반대 포지션 × 10% (고정)
     """
     global last_event_time
     
@@ -1168,7 +1167,7 @@ def check_idle_and_enter():
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
         
-        # ✅ 양쪽 포지션 모두 있어야 함 (필수 조건)
+        # 양쪽 포지션 모두 필수
         if long_size == 0 or short_size == 0:
             log("⚠️ IDLE", "Not both sides → Skipping")
             return
@@ -1187,34 +1186,32 @@ def check_idle_and_enter():
             log("⚠️ IDLE", "Max position reached")
             return
         
-        # OBV MACD 가중치
+        # OBV 가중치
         obv_display = float(obv_macd_value) * 1000
         obv_multiplier = calculate_obv_macd_weight(obv_display)
         
         log_event_header("IDLE ENTRY")
         log("⏱️ IDLE", f"Entry after {elapsed:.0f}s, OBV={obv_display:.1f}")
-        
         log("📊 POSITION", f"Long: {long_size}, Short: {short_size}")
         
-        # ✅ 주력 포지션 결정 (더 큰 쪽)
+        # ✅ 주력 결정 (더 큰 쪽)
         if long_size >= short_size:
             main_size = long_size
-            hedge_size = short_size
-            is_long_main = True  # LONG이 주력
-            log("📊 MAIN", "LONG is main (larger)")
+            is_long_main = True
+            log("📊 MAIN", f"LONG is main: {long_size}")
         else:
             main_size = short_size
-            hedge_size = long_size
-            is_long_main = False  # SHORT이 주력
-            log("📊 MAIN", "SHORT is main (larger)")
+            is_long_main = False
+            log("📊 MAIN", f"SHORT is main: {short_size}")
         
-        # ✅ 수량 계산 (정확한 전략!)
-        main_entry_qty = int(main_size * Decimal("0.1") * obv_multiplier)  # 주력: 10% × OBV
-        hedge_entry_qty = int(main_size * Decimal("0.1"))  # 반대: 10% (OBV 무관)
+        # ✅ 수량 계산 (정확함!)
+        main_qty = int(main_size * Decimal("0.1") * obv_multiplier)  # 주력: 10% × OBV
+        hedge_qty = int(main_size * Decimal("0.1"))                   # 반대: 10%
         
-        log("📊 QUANTITY", f"Main: {main_entry_qty} (10% × OBV {float(obv_multiplier):.2f}), Hedge: {hedge_entry_qty} (10%)")
+        log("📊 CALC", f"Main: {main_size} × 0.1 × {float(obv_multiplier):.2f} = {main_qty}")
+        log("📊 CALC", f"Hedge: {main_size} × 0.1 = {hedge_qty}")
         
-        # ✅ 기본 수량 최소값 보장 (이미 있는 로직)
+        # ✅ 최소값 보장
         with balance_lock:
             base_value = account_balance * BASE_RATIO
             base_qty = int(base_value / current_price_dec)
@@ -1222,65 +1219,69 @@ def check_idle_and_enter():
         if base_qty < 1:
             base_qty = 1
         
-        if main_entry_qty < base_qty:
-            log("📊 ADJUST", f"Main qty {main_entry_qty} < base {base_qty} → Using base qty")
-            main_entry_qty = base_qty
+        if main_qty < base_qty:
+            log("📊 ADJUST", f"Main {main_qty} < base {base_qty} → {base_qty}")
+            main_qty = base_qty
         
-        if hedge_entry_qty < base_qty:
-            log("📊 ADJUST", f"Hedge qty {hedge_entry_qty} < base {base_qty} → Using base qty")
-            hedge_entry_qty = base_qty
+        if hedge_qty < base_qty:
+            log("📊 ADJUST", f"Hedge {hedge_qty} < base {base_qty} → {base_qty}")
+            hedge_qty = base_qty
         
-        log("📊 FINAL", f"Main: {main_entry_qty}, Hedge: {hedge_entry_qty}")
+        log("📊 FINAL", f"Main: {main_qty}, Hedge: {hedge_qty}")
         
-        # ✅ 주력이 LONG이면 LONG 진입, SHORT이면 SHORT 진입
+        # ✅ 진입 (역방향이 더 많이!)
         try:
-            if is_long_main:  # LONG이 주력
-                long_order = FuturesOrder(
-                    contract=SYMBOL,
-                    size=main_entry_qty,
-                    price="0",
-                    tif="ioc",
-                    reduce_only=False,
-                    text=generate_order_id()
-                )
-                api.create_futures_order(SETTLE, long_order)
-                log("✅ IDLE", f"LONG {main_entry_qty} (주력)")
-                time.sleep(0.5)
-                
+            if is_long_main:  # LONG이 주력 → SHORT가 더 많이!
+                # SHORT 진입 (역방향, 더 많음)
                 short_order = FuturesOrder(
                     contract=SYMBOL,
-                    size=-hedge_entry_qty,
+                    size=-main_qty,  # ← main_qty (OBV 적용된 수량)
                     price="0",
                     tif="ioc",
                     reduce_only=False,
                     text=generate_order_id()
                 )
                 api.create_futures_order(SETTLE, short_order)
-                log("✅ IDLE", f"SHORT {hedge_entry_qty} (보조)")
+                log("✅ IDLE", f"SHORT {main_qty} (역방향, OBV 적용)")
+                time.sleep(0.5)
+                
+                # LONG 진입 (주력방향, 고정)
+                long_order = FuturesOrder(
+                    contract=SYMBOL,
+                    size=hedge_qty,  # ← hedge_qty (고정 10%)
+                    price="0",
+                    tif="ioc",
+                    reduce_only=False,
+                    text=generate_order_id()
+                )
+                api.create_futures_order(SETTLE, long_order)
+                log("✅ IDLE", f"LONG {hedge_qty} (주력방향, 고정)")
             
-            else:  # SHORT이 주력
-                short_order = FuturesOrder(
-                    contract=SYMBOL,
-                    size=-main_entry_qty,
-                    price="0",
-                    tif="ioc",
-                    reduce_only=False,
-                    text=generate_order_id()
-                )
-                api.create_futures_order(SETTLE, short_order)
-                log("✅ IDLE", f"SHORT {main_entry_qty} (주력)")
-                time.sleep(0.5)
-                
+            else:  # SHORT이 주력 → LONG이 더 많이!
+                # LONG 진입 (역방향, 더 많음)
                 long_order = FuturesOrder(
                     contract=SYMBOL,
-                    size=hedge_entry_qty,
+                    size=main_qty,  # ← main_qty (OBV 적용된 수량)
                     price="0",
                     tif="ioc",
                     reduce_only=False,
                     text=generate_order_id()
                 )
                 api.create_futures_order(SETTLE, long_order)
-                log("✅ IDLE", f"LONG {hedge_entry_qty} (보조)")
+                log("✅ IDLE", f"LONG {main_qty} (역방향, OBV 적용)")
+                time.sleep(0.5)
+                
+                # SHORT 진입 (주력방향, 고정)
+                short_order = FuturesOrder(
+                    contract=SYMBOL,
+                    size=-hedge_qty,  # ← hedge_qty (고정 10%)
+                    price="0",
+                    tif="ioc",
+                    reduce_only=False,
+                    text=generate_order_id()
+                )
+                api.create_futures_order(SETTLE, short_order)
+                log("✅ IDLE", f"SHORT {hedge_qty} (주력방향, 고정)")
         
         except GateApiException as e:
             log("❌", f"IDLE entry error: {e}")
@@ -1290,7 +1291,7 @@ def check_idle_and_enter():
         sync_position()
         refresh_all_tp_orders()
         update_event_time()
-        log("🎉 IDLE", "Complete! Waiting 10min for next entry...")
+        log("🎉 IDLE", "Complete!")
         
     except Exception as e:
         log("❌", f"Idle entry error: {e}")
