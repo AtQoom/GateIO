@@ -1150,13 +1150,14 @@ def calculate_dynamic_tp_gap():
 
 def check_idle_and_enter():
     """
-    10분 아이들 진입
-    - 진입 수량 < 기본 수량 → 기본 수량으로 진입!
-    - 헤징 수량 < 기본 수량 → 기본 수량으로 진입!
-    - 양쪽 포지션 있으면: 계정 잔고 기반 진입
-    - 한쪽만 있으면: 역추세 진입 (OBV MACD 가중치)
+    10분 아이들 진입 (CORRECTED!)
+    
+    전략:
+    - 주력 포지션(더 큰 쪽) 크기의 10% × OBV 가중치 진입
+    - 반대 포지션: 10% 고정
+    - OBV MACD 방향은 무관 (항상 같은 방식)
     """
-    global last_event_time, idle_entry_count
+    global last_event_time
     
     try:
         elapsed = time.time() - last_event_time
@@ -1167,8 +1168,9 @@ def check_idle_and_enter():
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
         
-        if long_size == 0 and short_size == 0:
-            log("⚠️ IDLE", "No positions, skipping")
+        # ✅ 양쪽 포지션 모두 있어야 함 (필수 조건)
+        if long_size == 0 or short_size == 0:
+            log("⚠️ IDLE", "Not both sides → Skipping")
             return
         
         with balance_lock:
@@ -1192,166 +1194,47 @@ def check_idle_and_enter():
         log_event_header("IDLE ENTRY")
         log("⏱️ IDLE", f"Entry after {elapsed:.0f}s, OBV={obv_display:.1f}")
         
-        # ✅ 기본 수량 계산 (모든 경우에 필요)
+        log("📊 POSITION", f"Long: {long_size}, Short: {short_size}")
+        
+        # ✅ 주력 포지션 결정 (더 큰 쪽)
+        if long_size >= short_size:
+            main_size = long_size
+            hedge_size = short_size
+            is_long_main = True  # LONG이 주력
+            log("📊 MAIN", "LONG is main (larger)")
+        else:
+            main_size = short_size
+            hedge_size = long_size
+            is_long_main = False  # SHORT이 주력
+            log("📊 MAIN", "SHORT is main (larger)")
+        
+        # ✅ 수량 계산 (정확한 전략!)
+        main_entry_qty = int(main_size * Decimal("0.1") * obv_multiplier)  # 주력: 10% × OBV
+        hedge_entry_qty = int(main_size * Decimal("0.1"))  # 반대: 10% (OBV 무관)
+        
+        log("📊 QUANTITY", f"Main: {main_entry_qty} (10% × OBV {float(obv_multiplier):.2f}), Hedge: {hedge_entry_qty} (10%)")
+        
+        # ✅ 기본 수량 최소값 보장 (이미 있는 로직)
         with balance_lock:
             base_value = account_balance * BASE_RATIO
             base_qty = int(base_value / current_price_dec)
         
         if base_qty < 1:
-            log("⚠️ IDLE", "Insufficient base quantity")
-            return
+            base_qty = 1
         
-        log("📊 BASE_QTY", f"Base quantity: {base_qty}")
-        
-        # ✅ 포지션이 하나만 있을 때
-        if long_size == 0 or short_size == 0:
-            log("📊 SINGLE", "Single position detected - Counter-trend entry")
-            
-            # 역추세 진입 (OBV 가중치 적용)
-            if obv_display > 0:  # 롱 강세 → SHORT 주력
-                main_qty = int(base_qty * obv_multiplier)  # SHORT (주력)
-                hedge_qty = base_qty  # LONG (헤징)
-                log("📊", f"OBV+ (롱 강세): SHORT {main_qty} (주력) | LONG {hedge_qty} (헤징)")
-            
-            elif obv_display < 0:  # 숏 강세 → LONG 주력
-                main_qty = int(base_qty * obv_multiplier)  # LONG (주력)
-                hedge_qty = base_qty  # SHORT (헤징)
-                log("📊", f"OBV- (숏 강세): LONG {main_qty} (주력) | SHORT {hedge_qty} (헤징)")
-            
-            else:  # 중립
-                main_qty = base_qty
-                hedge_qty = base_qty
-                log("📊", f"OBV 중립: 동일 수량")
-            
-            # ✅ 수정: main_qty < base_qty이면 base_qty로 진입!
-            if main_qty < base_qty:
-                log("📊 ADJUST", f"Main qty {main_qty} < base {base_qty} → Using base qty")
-                main_qty = base_qty
-            
-            # ✅ 수정: hedge_qty < base_qty이면 base_qty로 진입!
-            if hedge_qty < base_qty:
-                log("📊 ADJUST", f"Hedge qty {hedge_qty} < base {base_qty} → Using base qty")
-                hedge_qty = base_qty
-            
-            log("📊 QUANTITY", f"Main: {main_qty}, Hedge: {hedge_qty} (OBV x{float(obv_multiplier):.2f})")
-            
-            try:
-                if long_size == 0:  # SHORT만 있음 → LONG 진입
-                    if obv_display < 0:  # LONG 주력
-                        long_order = FuturesOrder(
-                            contract=SYMBOL,
-                            size=main_qty,
-                            price="0",
-                            tif="ioc",
-                            reduce_only=False,
-                            text=generate_order_id()
-                        )
-                        api.create_futures_order(SETTLE, long_order)
-                        log("✅ IDLE", f"LONG {main_qty} (주력)")
-                    else:  # SHORT 주력 (이미 있음) → LONG 헤징만
-                        long_order = FuturesOrder(
-                            contract=SYMBOL,
-                            size=hedge_qty,
-                            price="0",
-                            tif="ioc",
-                            reduce_only=False,
-                            text=generate_order_id()
-                        )
-                        api.create_futures_order(SETTLE, long_order)
-                        log("✅ IDLE", f"LONG {hedge_qty} (헤징)")
-                
-                elif short_size == 0:  # LONG만 있음 → SHORT 진입
-                    if obv_display > 0:  # SHORT 주력
-                        short_order = FuturesOrder(
-                            contract=SYMBOL,
-                            size=-main_qty,
-                            price="0",
-                            tif="ioc",
-                            reduce_only=False,
-                            text=generate_order_id()
-                        )
-                        api.create_futures_order(SETTLE, short_order)
-                        log("✅ IDLE", f"SHORT {main_qty} (주력)")
-                    else:  # LONG 주력 (이미 있음) → SHORT 헤징만
-                        short_order = FuturesOrder(
-                            contract=SYMBOL,
-                            size=-hedge_qty,
-                            price="0",
-                            tif="ioc",
-                            reduce_only=False,
-                            text=generate_order_id()
-                        )
-                        api.create_futures_order(SETTLE, short_order)
-                        log("✅ IDLE", f"SHORT {hedge_qty} (헤징)")
-            
-            except GateApiException as e:
-                log("❌", f"IDLE entry error: {e}")
-                return
-            
-            time.sleep(0.5)
-            sync_position()
-            refresh_all_tp_orders()
-            update_event_time()
-            log("🎉 IDLE", "Single position entry complete!")
-            return
-        
-        # ✅ 양쪽 포지션 모두 있을 때
-        if obv_display > 0:  # SHORT 주력 추가
-            main_size = short_size
-            main_entry_qty = int(base_qty * (1 + obv_multiplier))
-            hedge_entry_qty = int(main_size * Decimal("0.1"))
-            log("📊", f"OBV+ (롱 강세): SHORT 주력 | LONG 헤징")
-        
-        elif obv_display < 0:  # LONG 주력
-            main_size = long_size
-            main_entry_qty = int(base_qty * (1 + obv_multiplier))
-            hedge_entry_qty = int(main_size * Decimal("0.1"))
-            log("📊", f"OBV- (숏 강세): LONG 주력 | SHORT 헤징")
-        
-        else:  # 중립
-            main_entry_qty = int(long_size * Decimal("0.1"))
-            hedge_entry_qty = int(short_size * Decimal("0.1"))
-            log("📊", f"OBV 중립: 동일 수량")
-        
-        # ✅ 핵심 수정: 계산된 수량 < 기본 수량 → 기본 수량 사용!
-        # 주력 수량 조정
         if main_entry_qty < base_qty:
             log("📊 ADJUST", f"Main qty {main_entry_qty} < base {base_qty} → Using base qty")
             main_entry_qty = base_qty
         
-        # ✅ 헤징 수량 조정
         if hedge_entry_qty < base_qty:
             log("📊 ADJUST", f"Hedge qty {hedge_entry_qty} < base {base_qty} → Using base qty")
             hedge_entry_qty = base_qty
         
-        log("📊 QUANTITY", f"Main: {main_entry_qty}, Hedge: {hedge_entry_qty} (OBV x{float(obv_multiplier):.2f})")
+        log("📊 FINAL", f"Main: {main_entry_qty}, Hedge: {hedge_entry_qty}")
         
+        # ✅ 주력이 LONG이면 LONG 진입, SHORT이면 SHORT 진입
         try:
-            if obv_display > 0:  # SHORT 주력
-                short_order = FuturesOrder(
-                    contract=SYMBOL,
-                    size=-main_entry_qty,
-                    price="0",
-                    tif="ioc",
-                    reduce_only=False,
-                    text=generate_order_id()
-                )
-                api.create_futures_order(SETTLE, short_order)
-                log("✅ IDLE", f"SHORT {main_entry_qty} (주력)")
-                time.sleep(0.5)
-                
-                long_order = FuturesOrder(
-                    contract=SYMBOL,
-                    size=hedge_entry_qty,
-                    price="0",
-                    tif="ioc",
-                    reduce_only=False,
-                    text=generate_order_id()
-                )
-                api.create_futures_order(SETTLE, long_order)
-                log("✅ IDLE", f"LONG {hedge_entry_qty} (헤징)")
-            
-            elif obv_display < 0:  # LONG 주력
+            if is_long_main:  # LONG이 주력
                 long_order = FuturesOrder(
                     contract=SYMBOL,
                     size=main_entry_qty,
@@ -1373,31 +1256,31 @@ def check_idle_and_enter():
                     text=generate_order_id()
                 )
                 api.create_futures_order(SETTLE, short_order)
-                log("✅ IDLE", f"SHORT {hedge_entry_qty} (헤징)")
+                log("✅ IDLE", f"SHORT {hedge_entry_qty} (보조)")
             
-            else:  # 중립
-                long_order = FuturesOrder(
-                    contract=SYMBOL,
-                    size=main_entry_qty,
-                    price="0",
-                    tif="ioc",
-                    reduce_only=False,
-                    text=generate_order_id()
-                )
-                api.create_futures_order(SETTLE, long_order)
-                log("✅ IDLE", f"LONG {main_entry_qty}")
-                time.sleep(0.5)
-                
+            else:  # SHORT이 주력
                 short_order = FuturesOrder(
                     contract=SYMBOL,
-                    size=-hedge_entry_qty,
+                    size=-main_entry_qty,
                     price="0",
                     tif="ioc",
                     reduce_only=False,
                     text=generate_order_id()
                 )
                 api.create_futures_order(SETTLE, short_order)
-                log("✅ IDLE", f"SHORT {hedge_entry_qty}")
+                log("✅ IDLE", f"SHORT {main_entry_qty} (주력)")
+                time.sleep(0.5)
+                
+                long_order = FuturesOrder(
+                    contract=SYMBOL,
+                    size=hedge_entry_qty,
+                    price="0",
+                    tif="ioc",
+                    reduce_only=False,
+                    text=generate_order_id()
+                )
+                api.create_futures_order(SETTLE, long_order)
+                log("✅ IDLE", f"LONG {hedge_entry_qty} (보조)")
         
         except GateApiException as e:
             log("❌", f"IDLE entry error: {e}")
