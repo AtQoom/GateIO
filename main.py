@@ -58,7 +58,7 @@ TP_MAX = Decimal("0.0030")        # 0.30% (최대)
 TP_DEFAULT = Decimal("0.0016")    # 0.21% (기본값/중간값)
 
 # ✅ 기본 설정들
-BASE_RATIO = Decimal("0.03")       # 기본 수량 비율
+BASE_RATIO = Decimal("0.02")       # 기본 수량 비율
 MAX_POSITION_RATIO = Decimal("10.0")    # 최대 10배
 HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
 IDLE_TIME_SECONDS = 600  # 10분 (아이들 감지 시간)
