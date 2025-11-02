@@ -1084,35 +1084,45 @@ def initialize_grid(current_price=None):
 
 def calculate_dynamic_tp_gap():
     """
-    OBV MACD 기반 동적 TP 계산 - 정방향 (강세 방향)
+    OBV MACD 기반 동적 TP 계산 - 정방향 (강세 방향에서 커짐!)
     
-    5단계: 0.16% → 0.21% → 0.24% → 0.26% → 0.30%
+    핵심:
+    - 순방향(강세 방향): TP 크게 (0.26%~0.30%)
+    - 역방향(약세 방향): TP 작게 (0.16%~0.21%)
     """
     obv_display = float(obv_macd_value) * 1000
     obv_abs = abs(obv_display)
     
-    # ✅ 강도별 기본 TP 결정 (5단계)
+    # ✅ 강도별 기본 TP 결정 (절댓값 기준)
     if obv_abs < 10:
-        tp_gap = TP_MIN  # 0.16%
+        tp_strength = TP_MIN  # 0.16% (약)
     elif obv_abs < 15:
-        tp_gap = Decimal("0.0021")  # 0.21%
+        tp_strength = Decimal("0.0021")  # 0.21%
     elif obv_abs < 20:
-        tp_gap = Decimal("0.0024")  # 0.24%
+        tp_strength = Decimal("0.0024")  # 0.24%
     elif obv_abs < 30:
-        tp_gap = Decimal("0.0026")  # 0.26%
+        tp_strength = Decimal("0.0026")  # 0.26%
     else:
-        tp_gap = TP_MAX  # 0.30%
+        tp_strength = TP_MAX  # 0.30% (강)
     
-    long_tp = tp_gap
-    short_tp = tp_gap
+    # ✅ 핵심 수정: 방향에 따라 롱/숏 TP 다르게 적용!
+    if obv_display > 0:  # 롱 강세 (OBV 양수)
+        # 순방향: LONG → 작은 TP (역방향)
+        # 역방향: SHORT → 큰 TP (순방향!)
+        long_tp = TP_MIN           # 0.16% (역방향 - 롱이 약세)
+        short_tp = tp_strength     # 0.16%~0.30% (순방향 - 숏이 강세)
     
-    return long_tp, short_tp, tp_gap
-
-def generate_order_id():
-    """Order Request ID 생성 (중복 방지용)"""
-    global order_sequence_id
-    order_sequence_id += 1
-    return f"t-{order_sequence_id}"
+    elif obv_display < 0:  # 숏 강세 (OBV 음수)
+        # 순방향: SHORT → 작은 TP (역방향)
+        # 역방향: LONG → 큰 TP (순방향!)
+        long_tp = tp_strength      # 0.16%~0.30% (순방향 - 롱이 강세!)
+        short_tp = TP_MIN          # 0.16% (역방향 - 숏이 약세)
+    
+    else:  # OBV 중립
+        long_tp = TP_MIN
+        short_tp = TP_MIN
+    
+    return long_tp, short_tp, tp_strength
 
 
 # ============================================================================
