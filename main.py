@@ -136,6 +136,25 @@ tp_order_hash = {}  # {SYMBOL: hash_value}
 idle_entry_lock = threading.Lock()
 
 # =============================================================================
+# 주문 ID 생성
+# =============================================================================
+
+def generate_order_id():
+    """
+    고유한 주문 ID 생성 (Order Request ID)
+    - UUID 또는 타임스탬프 기반
+    - 중복 방지용
+    """
+    global order_sequence_id
+    
+    order_sequence_id += 1
+    timestamp = int(time.time() * 1000)  # 밀리초 단위
+    unique_id = f"{timestamp}_{order_sequence_id}"
+    
+    return unique_id
+
+
+# =============================================================================
 # 로그
 # =============================================================================
 def log(tag, msg):
