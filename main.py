@@ -1127,7 +1127,8 @@ def generate_order_id():
 def check_idle_and_enter():
     """
     10분 아이들 진입
-    - 양쪽 포지션 있으면: 기존 로직 (평단 개선)
+    - 진입 수량 < 기본 수량 → 기본 수량으로 진입!
+    - 양쪽 포지션 있으면: 계정 잔고 기반 진입
     - 한쪽만 있으면: 역추세 진입 (OBV MACD 가중치)
     """
     global last_event_time, idle_entry_count
@@ -1141,7 +1142,6 @@ def check_idle_and_enter():
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
         
-        # ✅ 수정: 포지션이 하나만 있을 때 처리
         if long_size == 0 and short_size == 0:
             log("⚠️ IDLE", "No positions, skipping")
             return
@@ -1152,7 +1152,6 @@ def check_idle_and_enter():
             if current_price == 0:
                 return
         
-        # 포지션 한도 체크
         current_price_dec = Decimal(str(current_price))
         long_value = Decimal(str(long_size)) * current_price_dec
         short_value = Decimal(str(short_size)) * current_price_dec
@@ -1168,17 +1167,18 @@ def check_idle_and_enter():
         log_event_header("IDLE ENTRY")
         log("⏱️ IDLE", f"Entry after {elapsed:.0f}s, OBV={obv_display:.1f}")
         
-        # ✅ 새로 추가: 포지션이 하나만 있을 때
+        # ✅ 기본 수량 계산 (모든 경우에 필요)
+        with balance_lock:
+            base_value = account_balance * BASE_RATIO
+            base_qty = int(base_value / current_price_dec)
+        
+        if base_qty < 1:
+            log("⚠️ IDLE", "Insufficient base quantity")
+            return
+        
+        # ✅ 포지션이 하나만 있을 때
         if long_size == 0 or short_size == 0:
             log("📊 SINGLE", "Single position detected - Counter-trend entry")
-            
-            with balance_lock:
-                base_value = account_balance * BASE_RATIO
-                base_qty = int(base_value / current_price_dec)
-            
-            if base_qty < 1:
-                log("⚠️ IDLE", "Insufficient quantity")
-                return
             
             # 역추세 진입 (OBV 가중치 적용)
             if obv_display > 0:  # 롱 강세 → SHORT 주력
@@ -1195,6 +1195,11 @@ def check_idle_and_enter():
                 main_qty = base_qty
                 hedge_qty = base_qty
                 log("📊", f"OBV 중립: 동일 수량")
+            
+            # ✅ 수정: main_qty < base_qty이면 base_qty로 진입!
+            if main_qty < base_qty:
+                log("📊 ADJUST", f"Main qty {main_qty} < base {base_qty} → Using base qty")
+                main_qty = base_qty
             
             log("📊 QUANTITY", f"Main: {main_qty}, Hedge: {hedge_qty} (OBV x{float(obv_multiplier):.2f})")
             
@@ -1258,7 +1263,7 @@ def check_idle_and_enter():
             log("🎉 IDLE", "Single position entry complete!")
             return
         
-        # ✅ 기존 로직: 양쪽 포지션 모두 있을 때
+        # ✅ 양쪽 포지션 모두 있을 때
         if obv_display > 0:  # SHORT 주력
             main_size = short_size
             main_entry_qty = int(main_size * Decimal("0.1") * obv_multiplier)
@@ -1276,11 +1281,16 @@ def check_idle_and_enter():
             hedge_entry_qty = int(short_size * Decimal("0.1"))
             log("📊", f"OBV 중립: 동일 수량")
         
-        log("📊 QUANTITY", f"Main: {main_entry_qty}, Hedge: {hedge_entry_qty} (OBV x{float(obv_multiplier):.2f})")
+        # ✅ 핵심 수정: 계산된 수량 < 기본 수량 → 기본 수량 사용!
+        if main_entry_qty < base_qty:
+            log("📊 ADJUST", f"Main qty {main_entry_qty} < base {base_qty} → Using base qty")
+            main_entry_qty = base_qty
         
-        if main_entry_qty < 1:
-            log("⚠️ IDLE", "Entry quantity < 1, skipping")
-            return
+        if hedge_entry_qty < base_qty:
+            log("📊 ADJUST", f"Hedge qty {hedge_entry_qty} < base {base_qty} → Using base qty")
+            hedge_entry_qty = base_qty
+        
+        log("📊 QUANTITY", f"Main: {main_entry_qty}, Hedge: {hedge_entry_qty} (OBV x{float(obv_multiplier):.2f})")
         
         try:
             if obv_display > 0:  # SHORT 주력
