@@ -53,8 +53,8 @@ hedge_lock = threading.Lock()
 # TP 설정 (동적 TP)
 # =============================================================================
 # ✅ 동적 TP 기본 범위
-TP_MIN = Decimal("0.0015")        # 0.15% (최소)
-TP_MAX = Decimal("0.0026")        # 0.26% (최대)
+TP_MIN = Decimal("0.0016")        # 0.16% (최소)
+TP_MAX = Decimal("0.004")        # 0.4% (최대)
 
 # ✅ 기본 설정들
 BASE_RATIO = Decimal("0.03")       # 기본 수량 비율
@@ -422,7 +422,7 @@ def fetch_kline_thread():
                 candles = api.list_futures_candlesticks(
                     SETTLE, 
                     contract=SYMBOL, 
-                    interval='1m',
+                    interval='3m',
                     limit=200
                 )
                 
@@ -761,19 +761,19 @@ def calculate_obv_macd_weight(obv_value):
     obv_abs = abs(obv_value)
     
     # ★ 사용자 지정 가중치
-    if obv_abs <= 10:
+    if obv_abs <= 20:
         multiplier = Decimal("0.1")
-    elif obv_abs <= 15:
+    elif obv_abs <= 25:
         multiplier = Decimal("0.11")
-    elif obv_abs <= 20:
-        multiplier = Decimal("0.12")
     elif obv_abs <= 30:
-        multiplier = Decimal("0.13")
+        multiplier = Decimal("0.12")
     elif obv_abs <= 40:
-        multiplier = Decimal("0.15")
+        multiplier = Decimal("0.13")
     elif obv_abs <= 50:
-        multiplier = Decimal("0.16")
+        multiplier = Decimal("0.15")
     elif obv_abs <= 60:
+        multiplier = Decimal("0.16")
+    elif obv_abs <= 70:
         multiplier = Decimal("0.17")
     elif obv_abs <= 100:
         multiplier = Decimal("0.19")
@@ -801,19 +801,19 @@ def calculate_grid_qty():
        
     # OBV MACD (tt1) 값 기준 동적 수량 조절
     obv_value = abs(float(obv_macd_value) * 100)  # 절댓값 추가
-    if obv_value <= 10:
+    if obv_value <= 20:
         multiplier = 1.0
-    elif obv_value <= 15:
+    elif obv_value <= 25:
         multiplier = 1.1
-    elif obv_value <= 20:
-        multiplier = 1.2
     elif obv_value <= 30:
-        multiplier = 1.3
+        multiplier = 1.2
     elif obv_value <= 40:
-        multiplier = 1.5
+        multiplier = 1.3
     elif obv_value <= 50:
-        multiplier = 1.6
+        multiplier = 1.5
     elif obv_value <= 60:
+        multiplier = 1.6
+    elif obv_value <= 70:
         multiplier = 1.7
     elif obv_value <= 100:
         multiplier = 1.9
@@ -1110,16 +1110,16 @@ def calculate_dynamic_tp_gap():
     obv_abs = abs(obv_display)
     
     # ✅ 강도별 기본 TP 결정 (절댓값 기준)
-    if obv_abs < 10:
+    if obv_abs < 20:
         tp_strength = TP_MIN  # 0.16% (약)
-    elif obv_abs < 15:
+    elif obv_abs < 25:
         tp_strength = Decimal("0.0021")  # 0.21%
-    elif obv_abs < 20:
-        tp_strength = Decimal("0.0024")  # 0.24%
     elif obv_abs < 30:
         tp_strength = Decimal("0.0026")  # 0.26%
+    elif obv_abs < 40:
+        tp_strength = Decimal("0.0031")  # 0.31%
     else:
-        tp_strength = TP_MAX  # 0.30% (강)
+        tp_strength = TP_MAX  # 0.40% (강)
     
     # ✅ 핵심 수정: 방향에 따라 롱/숏 TP 다르게 적용!
     if obv_display > 0:  # 롱 강세 (OBV 양수)
@@ -2155,7 +2155,7 @@ if __name__ == '__main__':
     
     log("✅ THREADS", "All monitoring threads started")
     log("🌐 FLASK", "Starting server on port 8080...")
-    log("📊 OBV MACD", "Self-calculating from 1min candles")
+    log("📊 OBV MACD", "Self-calculating from 3min candles")
     log("📨 WEBHOOK", "Optional: TradingView webhook at /webhook")
     log("🔍 HEALTH", "Health check every 2 minutes")  # ✅ 추가
     
