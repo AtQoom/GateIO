@@ -53,11 +53,11 @@ hedge_lock = threading.Lock()
 # TP 설정 (동적 TP)
 # =============================================================================
 # ✅ 동적 TP 기본 범위
-TP_MIN = Decimal("0.0016")        # 0.16% (최소)
+TP_MIN = Decimal("0.0019")        # 0.19% (최소)
 TP_MAX = Decimal("0.004")        # 0.4% (최대)
 
 # ✅ 기본 설정들
-BASE_RATIO = Decimal("0.03")       # 기본 수량 비율
+BASE_RATIO = Decimal("0.02")       # 기본 수량 비율
 MAX_POSITION_RATIO = Decimal("10.0")    # 최대 10배
 HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
 IDLE_TIME_SECONDS = 600  # 10분 (아이들 감지 시간)
@@ -1111,13 +1111,13 @@ def calculate_dynamic_tp_gap():
     
     # ✅ 강도별 기본 TP 결정 (절댓값 기준)
     if obv_abs < 20:
-        tp_strength = TP_MIN  # 0.16% (약)
+        tp_strength = TP_MIN  # 0.19% (약)
     elif obv_abs < 25:
-        tp_strength = Decimal("0.0021")  # 0.21%
+        tp_strength = Decimal("0.0026")  # 0.21%
     elif obv_abs < 30:
-        tp_strength = Decimal("0.0026")  # 0.26%
+        tp_strength = Decimal("0.0031")  # 0.26%
     elif obv_abs < 40:
-        tp_strength = Decimal("0.0031")  # 0.31%
+        tp_strength = Decimal("0.0036")  # 0.31%
     else:
         tp_strength = TP_MAX  # 0.40% (강)
     
