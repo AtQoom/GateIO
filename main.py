@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
-SYMBOL = os.environ.get("SYMBOL", "ONDO_USDT")
+SYMBOL = os.environ.get("SYMBOL", "BNB_USDT")
 SETTLE = "usdt"
 
 # Railway 환경 변수 로그
@@ -53,11 +53,11 @@ hedge_lock = threading.Lock()
 # TP 설정 (동적 TP)
 # =============================================================================
 # ✅ 동적 TP 기본 범위
-TP_MIN = Decimal("0.0016")        # 0.16% (최소)
-TP_MAX = Decimal("0.0030")        # 0.30% (최대)
+TP_MIN = Decimal("0.0015")        # 0.15% (최소)
+TP_MAX = Decimal("0.0026")        # 0.26% (최대)
 
 # ✅ 기본 설정들
-BASE_RATIO = Decimal("0.02")       # 기본 수량 비율
+BASE_RATIO = Decimal("0.03")       # 기본 수량 비율
 MAX_POSITION_RATIO = Decimal("10.0")    # 최대 10배
 HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
 IDLE_TIME_SECONDS = 600  # 10분 (아이들 감지 시간)
@@ -339,8 +339,9 @@ def calculate_obv_macd():
         
         obv_macd_value = Decimal(str(normalized))
         
-        obv_display = float(obv_macd_value) * 1000
-        log("📊 OBV CALC", f"OBV={float(obv_macd_value):.6f} (Display={obv_display:.2f})")
+        obv_raw = float(obv_macd_value)
+        log("📊 OBV RAW", f"Raw value: {obv_raw:.8f}")  # ← 새로 추가!
+        log("📊 OBV CALC", f"OBV={obv_raw:.6f} | Display*1000={obv_raw*1000:.2f}")  # ← 새로 추가!
         
     except Exception as e:
         log("❌ OBV", f"Calculation error: {e}")
@@ -797,7 +798,7 @@ def calculate_grid_qty():
             base_qty = 1
        
     # OBV MACD (tt1) 값 기준 동적 수량 조절
-    obv_value = abs(float(obv_macd_value) * 1000)  # 절댓값 추가
+    obv_value = abs(float(obv_macd_value))  # 절댓값 추가
     if obv_value <= 10:
         multiplier = 1.0
     elif obv_value <= 15:
@@ -1019,7 +1020,7 @@ def initialize_grid(current_price=None):
             log("⚠️ LIMIT", "Max position reached")
             return
         
-        obv_display = float(obv_macd_value) * 1000
+        obv_display = float(obv_macd_value)
         obv_multiplier = calculate_obv_macd_weight(obv_display)
         
         with balance_lock:
@@ -1103,7 +1104,7 @@ def calculate_dynamic_tp_gap():
     - 순방향(강세 방향): TP 크게 (0.26%~0.30%)
     - 역방향(약세 방향): TP 작게 (0.16%~0.21%)
     """
-    obv_display = float(obv_macd_value) * 1000
+    obv_display = float(obv_macd_value)
     obv_abs = abs(obv_display)
     
     # ✅ 강도별 기본 TP 결정 (절댓값 기준)
@@ -1144,11 +1145,12 @@ def calculate_dynamic_tp_gap():
 
 def check_idle_and_enter():
     """
-    10분 아이들 진입 (최종 정정!)
+    10분 아이들 진입 (손실 기반 수량 조정!)
     
     당신의 전략:
-    main_qty = 주력크기 × 0.1 × (1 + OBV_가중치)
-    hedge_qty = 주력크기 × 0.1
+    - 주력포지션 손실 0.2% 이상 → 진입 수량 20%
+    - 주력포지션 손실 0.3% 이상 → 진입 수량 30%
+    - 그 외 → 기본 10%
     """
     global last_event_time
     
@@ -1160,16 +1162,19 @@ def check_idle_and_enter():
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
+            long_entry_price = position_state[SYMBOL]["long"]["entry_price"]
+            short_entry_price = position_state[SYMBOL]["short"]["entry_price"]
         
         if long_size == 0 or short_size == 0:
             log("⚠️ IDLE", "Not both sides → Skipping")
             return
         
+        current_price = get_current_price()
+        if current_price == 0:
+            return
+        
         with balance_lock:
             max_value = account_balance * MAX_POSITION_RATIO
-            current_price = get_current_price()
-            if current_price == 0:
-                return
         
         current_price_dec = Decimal(str(current_price))
         long_value = Decimal(str(long_size)) * current_price_dec
@@ -1179,8 +1184,8 @@ def check_idle_and_enter():
             log("⚠️ IDLE", "Max position reached")
             return
         
-        obv_display = float(obv_macd_value) * 1000
-        obv_weight = calculate_obv_macd_weight(obv_display)  # 0.10 ~ 0.20 반환
+        obv_display = float(obv_macd_value)
+        obv_weight = calculate_obv_macd_weight(obv_display)
         
         log_event_header("IDLE ENTRY")
         log("⏱️ IDLE", f"Entry after {elapsed:.0f}s, OBV={obv_display:.1f}")
@@ -1189,19 +1194,44 @@ def check_idle_and_enter():
         # 주력 결정
         if long_size >= short_size:
             main_size = long_size
+            main_entry_price = long_entry_price
             is_long_main = True
             log("📊 MAIN", f"LONG is main: {main_size}")
         else:
             main_size = short_size
+            main_entry_price = short_entry_price
             is_long_main = False
             log("📊 MAIN", f"SHORT is main: {main_size}")
         
-        # ✅ 정확한 계산 (1 + 가중치 적용!)
-        base_size = int(main_size * Decimal("0.1"))
-        main_qty = int(base_size * (1 + obv_weight))  # ← ✅ (1 + 가중치)
+        # ✅ 손실도 계산 (새로운 로직!)
+        loss_pct = Decimal("0")
+        if main_entry_price > 0:
+            if is_long_main:
+                # LONG 주력 손실
+                loss_pct = ((main_entry_price - current_price_dec) / main_entry_price) * Decimal("100")
+            else:
+                # SHORT 주력 손실
+                loss_pct = ((current_price_dec - main_entry_price) / main_entry_price) * Decimal("100")
+        
+        log("📊 LOSS", f"Main position loss: {float(loss_pct):.4f}%")
+        
+        # ✅ 손실에 따른 진입 수량 조정!
+        if loss_pct >= Decimal("0.3"):  # 0.3% 이상 손실
+            entry_ratio = Decimal("0.3")  # 30%
+            log("🔥 LOSS", "Loss ≥ 0.3% → Entry ratio 30%")
+        elif loss_pct >= Decimal("0.2"):  # 0.2% 이상 손실
+            entry_ratio = Decimal("0.2")  # 20%
+            log("🔥 LOSS", "Loss ≥ 0.2% → Entry ratio 20%")
+        else:  # 정상
+            entry_ratio = Decimal("0.1")  # 10% (기본)
+            log("✅ LOSS", "Loss < 0.2% → Entry ratio 10% (기본)")
+        
+        # ✅ 정확한 계산 (entry_ratio + OBV 가중치!)
+        base_size = int(main_size * entry_ratio)
+        main_qty = int(base_size * (1 + obv_weight))  # ← (1 + 가중치) 적용
         hedge_qty = base_size
         
-        log("📊 CALC", f"Base: {main_size} × 0.1 = {base_size}")
+        log("📊 CALC", f"Base: {main_size} × {float(entry_ratio)} = {base_size}")
         log("📊 CALC", f"Main: {base_size} × (1 + {float(obv_weight):.2f}) = {main_qty}")
         log("📊 CALC", f"Hedge: {base_size}")
         
@@ -1276,6 +1306,7 @@ def check_idle_and_enter():
     except Exception as e:
         log("❌", f"Idle entry error: {e}")
 
+
 def market_entry_when_imbalanced():
     """
     포지션 불균형 시 OBV MACD 가중치로 시장가 진입
@@ -1301,7 +1332,7 @@ def market_entry_when_imbalanced():
         if not has_position or (has_position and not balanced):
             
             calculate_obv_macd()
-            obv_display = float(obv_macd_value) * 1000
+            obv_display = float(obv_macd_value)
             obv_multiplier = calculate_obv_macd_weight(obv_display)
             
             with balance_lock:
@@ -1835,7 +1866,7 @@ def periodic_health_check():
                 else:
                     obv_change = abs(current_obv - last_adjusted_obv)
                     
-                    if obv_change >= 0.05:  # OBV 변화 감지!
+                    if obv_change >= 10:  # OBV 변화 감지!
                         log("🔔 HEALTH", f"OBV changed: {obv_change:.6f} → Recalculating TP...")
                         
                         tp_result = calculate_dynamic_tp_gap()
@@ -1936,7 +1967,7 @@ def webhook():
 @app.route('/health', methods=['GET'])
 def health():
     """헬스 체크"""
-    obv_display = float(obv_macd_value) * 1000
+    obv_display = float(obv_macd_value)
     return jsonify({
         "status": "running",
         "obv_macd_display": obv_display,
@@ -1952,7 +1983,7 @@ def status():
     with balance_lock:
         bal = float(account_balance)
     
-    obv_display = float(obv_macd_value) * 1000
+    obv_display = float(obv_macd_value)
     
     return jsonify({
         "balance": bal,
