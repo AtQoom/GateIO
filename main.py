@@ -129,6 +129,12 @@ idle_entry_count = 0  # 아이들 진입 횟수 ← 추가
 tp_order_hash = {}  # {SYMBOL: hash_value}
 idle_entry_lock = threading.Lock()
 
+# 긴급 손절 관련
+EMERGENCY_STOP_THRESHOLD = Decimal("-0.10")  # -10% 손실
+emergency_stop_triggered = False
+emergency_stop_time = 0
+EMERGENCY_COOLDOWN = 7200  # 2시간 (초 단위)
+
 # =============================================================================
 # 주문 ID 생성
 # =============================================================================
@@ -182,6 +188,146 @@ def log_position_state():
     main = get_main_side()
     if main != "none":
         log("📊 MAIN", f"{main.upper()} (더 큰 포지션)")
+
+
+# =============================================================================
+# 신규 함수 1: check_emergency_stop()
+# =============================================================================
+def check_emergency_stop():
+    """
+    총 자산 대비 -10% 손실 시 긴급 손절 발동
+    
+    기능:
+    1. 현재 잔고 확인
+    2. INITIAL_BALANCE 대비 손실률 계산
+    3. -10% 이상 손실 시:
+       - 모든 포지션 시장가 청산
+       - 모든 주문 취소
+       - 2시간 거래 중단
+    """
+    global emergency_stop_triggered, emergency_stop_time, account_balance
+    
+    try:
+        # 1️⃣ 현재 잔고 조회
+        with balance_lock:
+            current_balance = account_balance
+        
+        # 2️⃣ 손실률 계산
+        loss_ratio = (current_balance - INITIAL_BALANCE) / INITIAL_BALANCE
+        
+        log("💰 BALANCE", f"Current: {current_balance:.2f} | Initial: {INITIAL_BALANCE:.2f} | Loss: {loss_ratio * 100:.2f}%")
+        
+        # 3️⃣ -10% 손실 체크
+        if loss_ratio <= EMERGENCY_STOP_THRESHOLD:
+            log("🚨 EMERGENCY", f"STOP TRIGGERED! Loss: {loss_ratio * 100:.2f}%")
+            
+            # ① 모든 포지션 시장가 청산
+            emergency_close_all_positions()
+            
+            # ② 모든 주문 취소
+            cancel_all_orders()
+            
+            # ③ 2시간 거래 중단 설정
+            emergency_stop_triggered = True
+            emergency_stop_time = time.time()
+            
+            log("🛑 STOP", f"All positions closed. Trading halted for {EMERGENCY_COOLDOWN / 3600:.1f} hours.")
+            
+            return True
+        
+        return False
+        
+    except Exception as e:
+        log("❌ EMERGENCY", f"Check error: {e}")
+        return False
+
+
+# =============================================================================
+# 신규 함수 2: emergency_close_all_positions()
+# =============================================================================
+def emergency_close_all_positions():
+    """
+    모든 포지션을 시장가로 즉시 청산
+    """
+    try:
+        sync_position()
+        
+        with position_lock:
+            long_size = position_state[SYMBOL]["long"]["size"]
+            short_size = position_state[SYMBOL]["short"]["size"]
+        
+        if long_size == 0 and short_size == 0:
+            log("✅ CLOSE", "No positions to close")
+            return
+        
+        # LONG 포지션 청산
+        if long_size > 0:
+            try:
+                order = FuturesOrder(
+                    contract=SYMBOL,
+                    size=-int(long_size),  # 마이너스 = 매도
+                    price="0",
+                    tif="ioc",
+                    text="emergency-close-long"
+                )
+                result = api.create_futures_order(SETTLE, order)
+                log("🔴 CLOSE", f"LONG {long_size} closed @ market")
+            except Exception as e:
+                log("❌ CLOSE", f"LONG close error: {e}")
+        
+        # SHORT 포지션 청산
+        if short_size > 0:
+            try:
+                order = FuturesOrder(
+                    contract=SYMBOL,
+                    size=int(short_size),  # 플러스 = 매수
+                    price="0",
+                    tif="ioc",
+                    text="emergency-close-short"
+                )
+                result = api.create_futures_order(SETTLE, order)
+                log("🔴 CLOSE", f"SHORT {short_size} closed @ market")
+            except Exception as e:
+                log("❌ CLOSE", f"SHORT close error: {e}")
+        
+        time.sleep(1)
+        sync_position()
+        log("✅ CLOSE", "Emergency close complete")
+        
+    except Exception as e:
+        log("❌ CLOSE", f"Emergency close error: {e}")
+
+
+# =============================================================================
+# 신규 함수 3: is_trading_halted()
+# =============================================================================
+def is_trading_halted():
+    """
+    긴급 손절 후 2시간 거래 중단 체크
+    
+    Returns:
+        True: 거래 중단 중
+        False: 거래 재개 가능
+    """
+    global emergency_stop_triggered, emergency_stop_time
+    
+    if not emergency_stop_triggered:
+        return False
+    
+    elapsed = time.time() - emergency_stop_time
+    remaining = EMERGENCY_COOLDOWN - elapsed
+    
+    if elapsed >= EMERGENCY_COOLDOWN:
+        # 2시간 경과 -> 거래 재개
+        emergency_stop_triggered = False
+        emergency_stop_time = 0
+        log("✅ RESUME", "Trading resumed after 2-hour cooldown")
+        return False
+    else:
+        # 아직 2시간 안 됨 -> 거래 중단 유지
+        if int(elapsed) % 600 == 0:  # 10분마다 로그
+            log("⏳ HALT", f"Trading halted. Remaining: {remaining / 60:.1f} minutes")
+        return True
 
 
 # =============================================================================
@@ -340,10 +486,7 @@ def calculate_obv_macd():
         obv_macd_value = Decimal(str(normalized * 100))
         
         obv_raw = float(obv_macd_value) * 100
-        log("📊 OBV RAW", f"Raw value: {obv_raw:.8f}")  # ← 새로 추가!
-        log("📊 OBV CALC", f"OBV={obv_raw:.6f} | Multiplier range check")
-        
-        log("✅ OBV", "OBV MACD calculation started!")
+        log("✅ OBV CALC", f"Value: {obv_raw:.8f} | Multiplier check")
         
     except Exception as e:
         log("❌ OBV", f"Calculation error: {e}")
@@ -986,6 +1129,10 @@ def initialize_grid(current_price=None):
     """
     global last_grid_time
     
+    if is_trading_halted():
+        log("🛑 HALT", "Trading halted. Skipping grid initialization.")
+        return
+        
     if not initialize_grid_lock.acquire(blocking=False):
         log("🔵 GRID", "Already running → Skipping")
         return
@@ -1155,7 +1302,10 @@ def check_idle_and_enter():
     - 그 외 → 기본 10%
     """
     global last_event_time
-    
+
+    if is_trading_halted():
+        return
+        
     try:
         elapsed = time.time() - last_event_time
         if elapsed < IDLE_TIMEOUT:
@@ -1803,6 +1953,14 @@ def periodic_health_check():
         try:
             time.sleep(120)  # 2분 대기
             log("💊 HEALTH", "Starting health check...")
+
+            # 1️⃣ 긴급 손절 체크 (최우선)
+            if check_emergency_stop():
+                continue
+            
+            # 2️⃣ 거래 중단 중이면 스킵
+            if is_trading_halted():
+                continue
             
             # 1️⃣ 포지션 동기화
             sync_position()
