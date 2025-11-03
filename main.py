@@ -1247,45 +1247,60 @@ def initialize_grid(current_price=None):
 
 def calculate_dynamic_tp_gap():
     """
-    OBV MACD 기반 동적 TP 계산 - 정방향 (강세 방향에서 커짐!)
+    당신의 전략대로 수정:
     
-    핵심:
-    - 순방향(강세 방향): TP 크게 (0.26%~0.30%)
-    - 역방향(약세 방향): TP 작게 (0.16%~0.21%)
+    OBV > 0 (롱 강세):
+    - LONG TP: 0.19%~0.40% (순방향 - 수익성!)
+    - SHORT TP: 0.19% (역방향 - 안정화)
+    
+    OBV < 0 (숏 강세):
+    - LONG TP: 0.19% (역방향 - 안정화)
+    - SHORT TP: 0.19%~0.40% (순방향 - 수익성!)
     """
-    obv_display = float(obv_macd_value) * 100
-    obv_abs = abs(obv_display)
+    global last_tp_hash, tp_gap_long, tp_gap_short
     
-    # ✅ 강도별 기본 TP 결정 (절댓값 기준)
-    if obv_abs < 20:
-        tp_strength = TP_MIN  # 0.19% (약)
-    elif obv_abs < 25:
-        tp_strength = Decimal("0.0026")  # 0.21%
-    elif obv_abs < 30:
-        tp_strength = Decimal("0.0031")  # 0.26%
-    elif obv_abs < 40:
-        tp_strength = Decimal("0.0036")  # 0.31%
-    else:
-        tp_strength = TP_MAX  # 0.40% (강)
-    
-    # ✅ 핵심 수정: 방향에 따라 롱/숏 TP 다르게 적용!
-    if obv_display > 0:  # 롱 강세 (OBV 양수)
-        # 순방향: LONG → 작은 TP (역방향)
-        # 역방향: SHORT → 큰 TP (순방향!)
-        long_tp = TP_MIN           # 0.16% (역방향 - 롱이 약세)
-        short_tp = tp_strength     # 0.16%~0.30% (순방향 - 숏이 강세)
-    
-    elif obv_display < 0:  # 숏 강세 (OBV 음수)
-        # 순방향: SHORT → 작은 TP (역방향)
-        # 역방향: LONG → 큰 TP (순방향!)
-        long_tp = tp_strength      # 0.16%~0.30% (순방향 - 롱이 강세!)
-        short_tp = TP_MIN          # 0.16% (역방향 - 숏이 약세)
-    
-    else:  # OBV 중립
-        long_tp = TP_MIN
-        short_tp = TP_MIN
-    
-    return long_tp, short_tp, tp_strength
+    try:
+        obv_macd_value = calculate_obv_macd()
+        obv_display = float(obv_macd_value) * 100
+        
+        # OBV 절댓값 기반 TP % 결정
+        obv_abs = abs(obv_display)
+        
+        if obv_abs < 10:
+            tp_strength = Decimal("0.0019")  # 0.19%
+        elif obv_abs < 20:
+            tp_strength = Decimal("0.0026")  # 0.26%
+        elif obv_abs < 30:
+            tp_strength = Decimal("0.0031")  # 0.31%
+        elif obv_abs < 40:
+            tp_strength = Decimal("0.0036")  # 0.36%
+        else:
+            tp_strength = Decimal("0.0040")  # 0.40%
+        
+        # ✅ 전략대로 수정: 방향별 TP 적용
+        if obv_display > 0:  # 롱 강세
+            tp_gap_long = tp_strength         # LONG: 순방향 (크게!) 0.19%~0.40%
+            tp_gap_short = TP_MIN             # SHORT: 역방향 (작게) 0.19%
+            
+        elif obv_display < 0:  # 숏 강세
+            tp_gap_long = TP_MIN              # LONG: 역방향 (작게) 0.19%
+            tp_gap_short = tp_strength        # SHORT: 순방향 (크게!) 0.19%~0.40%
+            
+        else:  # OBV = 0 (중립)
+            tp_gap_long = TP_MIN              # 0.19%
+            tp_gap_short = TP_MIN             # 0.19%
+        
+        # 해시값 기록 (변화 감지용)
+        tp_hash_new = hashlib.md5(f"{tp_gap_long}_{tp_gap_short}_{obv_display}".encode()).hexdigest()
+        
+        if tp_hash_new != last_tp_hash:
+            log("📊 TP GAP", f"OBV={obv_display:.2f} | LONG_TP={tp_gap_long*100:.2f}% | SHORT_TP={tp_gap_short*100:.2f}%")
+            last_tp_hash = tp_hash_new
+        
+    except Exception as e:
+        log("❌ TP GAP", f"Error: {e}")
+        tp_gap_long = TP_MIN
+        tp_gap_short = TP_MIN
 
 
 # ============================================================================
@@ -1611,7 +1626,7 @@ def full_refresh(event_type, skip_grid=False):
     """
     시스템 새로고침 + 물량 누적 방지 로직
     
-    주력 > 3배 AND TP 체결 → 반대쪽 50% 청산 (시장가)
+    주력 > 2배 AND TP 체결 → 반대쪽 50% 청산 (시장가)
     """
     log_event_header(f"FULL REFRESH: {event_type}")
     
@@ -2182,7 +2197,7 @@ def print_startup_summary():
     global account_balance
     
     log_divider("=")
-    log("🚀 START", "ONDO Trading Bot v26.0")
+    log("🚀 START", "ARB Trading Bot v26.0")
     log_divider("=")
     
     # API 키 확인
@@ -2296,7 +2311,7 @@ if __name__ == '__main__':
         log("ℹ️ INFO", "Set Railway environment variables:")
         log("  ", "- API_KEY")
         log("  ", "- API_SECRET")
-        log("  ", "- SYMBOL (optional, default: ONDO_USDT)")
+        log("  ", "- SYMBOL (optional, default: ARB_USDT)")
         exit(1)
     
     update_event_time()  # ← 기존
