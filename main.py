@@ -55,7 +55,6 @@ hedge_lock = threading.Lock()
 # ✅ 동적 TP 기본 범위
 TP_MIN = Decimal("0.0016")        # 0.16% (최소)
 TP_MAX = Decimal("0.0030")        # 0.30% (최대)
-TP_DEFAULT = Decimal("0.0016")    # 0.21% (기본값/중간값)
 
 # ✅ 기본 설정들
 BASE_RATIO = Decimal("0.02")       # 기본 수량 비율
@@ -99,11 +98,6 @@ position_state = {
         "short": {"size": Decimal("0"), "entry_price": Decimal("0")}  # ← 변경!
     }
 }
-
-# TP 설정
-TP_MIN = Decimal("0.0016")
-TP_MAX = Decimal("0.0030")
-TP_DEFAULT = Decimal("0.0016")
 
 # ✅ 추가: 현재 TP 범위 (동적으로 변경됨!)
 tp_gap_min = TP_MIN
@@ -1432,8 +1426,9 @@ def market_entry_when_imbalanced():
 # =============================================================================
 def full_refresh(event_type, skip_grid=False):
     """
-    시스템 새로고침
-    skip_grid=False
+    시스템 새로고침 + 물량 누적 방지 로직
+    
+    주력 > 3배 AND TP 체결 → 반대쪽 50% 청산 (시장가)
     """
     log_event_header(f"FULL REFRESH: {event_type}")
     
@@ -1444,6 +1439,76 @@ def full_refresh(event_type, skip_grid=False):
     cancel_all_orders()
     time.sleep(0.5)
     
+    # ✅ 물량 누적 방지 로직 (TP 체결 후에만!)
+    if "TP" in event_type or "Average_TP" in event_type:
+        try:
+            with position_lock:
+                long_size = position_state[SYMBOL]["long"]["size"]
+                short_size = position_state[SYMBOL]["short"]["size"]
+            
+            with balance_lock:
+                balance = account_balance
+            
+            # 주력 포지션 결정
+            if long_size >= short_size:
+                main_size = long_size
+                counter_size = short_size
+                main_side = "long"
+            else:
+                main_size = short_size
+                counter_size = long_size
+                main_side = "short"
+            
+            # ✅ 주력 > 3배 체크
+            if main_size > balance * 3:
+                log("🚨 ACCUMULATION CHECK", f"{main_side.upper()} {main_size} > {balance * 3} (3배)")
+                
+                # ✅ 반대쪽 50% 청산
+                if counter_size > 0:
+                    close_qty = int(counter_size * Decimal("0.5"))  # 50% 청산
+                    
+                    if close_qty > 0:
+                        log("💥 CLOSE COUNTER", f"{get_counter_side(main_side).upper()} {close_qty} (50% of {counter_size})")
+                        
+                        try:
+                            # 반대쪽 시장가 청산
+                            if main_side == "long":  # LONG 주력 → SHORT 청산
+                                order = FuturesOrder(
+                                    contract=SYMBOL,
+                                    size=close_qty,  # 양수 (SHORT 청산)
+                                    price="0",
+                                    tif="ioc",
+                                    reduce_only=True,  # 청산만
+                                    text=generate_order_id()
+                                )
+                            else:  # SHORT 주력 → LONG 청산
+                                order = FuturesOrder(
+                                    contract=SYMBOL,
+                                    size=-close_qty,  # 음수 (LONG 청산)
+                                    price="0",
+                                    tif="ioc",
+                                    reduce_only=True,  # 청산만
+                                    text=generate_order_id()
+                                )
+                            
+                            api.create_futures_order(SETTLE, order)
+                            log("✅ CLOSE", f"{get_counter_side(main_side).upper()} {close_qty} closed by market")
+                            time.sleep(0.5)
+                            sync_position()
+                            
+                        except GateApiException as e:
+                            log("❌ CLOSE", f"Error: {e}")
+                    else:
+                        log("⚠️ CLOSE", f"Counter size too small ({counter_size})")
+                else:
+                    log("💬 CLOSE", f"No counter position to close (only {main_side} exists)")
+            else:
+                log("✅ ACCUMULATION OK", f"{main_side.upper()} {main_size} <= {balance * 3} (정상)")
+        
+        except Exception as e:
+            log("❌ ACCUMULATION CHECK", f"Error: {e}")
+    
+    # 기존 로직
     if not skip_grid:
         current_price = get_current_price()
         if current_price > 0:
@@ -1454,6 +1519,13 @@ def full_refresh(event_type, skip_grid=False):
     sync_position()
     log_position_state()
     log("✅ REFRESH", f"Complete: {event_type}")
+
+
+# ✅ 헬퍼 함수 추가 (이미 있으면 스킵)
+def get_counter_side(side):
+    """주력의 반대 방향 반환"""
+    return "short" if side == "long" else "long"
+
 
 # =============================================================================
 # 모니터링 스레드
