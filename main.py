@@ -341,7 +341,9 @@ def calculate_obv_macd():
         
         obv_raw = float(obv_macd_value)
         log("📊 OBV RAW", f"Raw value: {obv_raw:.8f}")  # ← 새로 추가!
-        log("📊 OBV CALC", f"OBV={obv_raw:.6f} | Display*1000={obv_raw*1000:.2f}")  # ← 새로 추가!
+        log("📊 OBV CALC", f"OBV={obv_raw:.6f} | Multiplier range check")
+        
+        log("✅ OBV", "OBV MACD calculation started!")
         
     except Exception as e:
         log("❌ OBV", f"Calculation error: {e}")
