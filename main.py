@@ -337,7 +337,7 @@ def calculate_obv_macd():
         if avg_volume > 0:
             normalized = normalized / (avg_volume / 1000000.0)
         
-        obv_macd_value = Decimal(str(normalized))
+        obv_macd_value = Decimal(str(normalized * 100))
         
         obv_raw = float(obv_macd_value)
         log("📊 OBV RAW", f"Raw value: {obv_raw:.8f}")  # ← 새로 추가!
