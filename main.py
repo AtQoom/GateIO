@@ -1492,9 +1492,9 @@ def full_refresh(event_type, skip_grid=False):
                 counter_size = long_size
                 main_side = "short"
             
-            # ✅ 주력 > 3배 체크
-            if main_size > balance * 3:
-                log("🚨 ACCUMULATION CHECK", f"{main_side.upper()} {main_size} > {balance * 3} (3배)")
+            # ✅ 주력 > 2배 체크
+            if main_size > balance * 2:
+                log("🚨 ACCUMULATION CHECK", f"{main_side.upper()} {main_size} > {balance * 2} (2배)")
                 
                 # ✅ 반대쪽 50% 청산
                 if counter_size > 0:
