@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
-SYMBOL = os.environ.get("SYMBOL", "BNB_USDT")
+SYMBOL = os.environ.get("SYMBOL", "ARB_USDT")
 SETTLE = "usdt"
 
 # Railway 환경 변수 로그
