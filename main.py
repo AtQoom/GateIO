@@ -339,7 +339,7 @@ def calculate_obv_macd():
         
         obv_macd_value = Decimal(str(normalized * 100))
         
-        obv_raw = float(obv_macd_value)
+        obv_raw = float(obv_macd_value) * 100
         log("📊 OBV RAW", f"Raw value: {obv_raw:.8f}")  # ← 새로 추가!
         log("📊 OBV CALC", f"OBV={obv_raw:.6f} | Multiplier range check")
         
@@ -800,7 +800,7 @@ def calculate_grid_qty():
             base_qty = 1
        
     # OBV MACD (tt1) 값 기준 동적 수량 조절
-    obv_value = abs(float(obv_macd_value))  # 절댓값 추가
+    obv_value = abs(float(obv_macd_value) * 100)  # 절댓값 추가
     if obv_value <= 10:
         multiplier = 1.0
     elif obv_value <= 15:
@@ -1022,7 +1022,7 @@ def initialize_grid(current_price=None):
             log("⚠️ LIMIT", "Max position reached")
             return
         
-        obv_display = float(obv_macd_value)
+        obv_display = float(obv_macd_value) * 100
         obv_multiplier = calculate_obv_macd_weight(obv_display)
         
         with balance_lock:
@@ -1106,7 +1106,7 @@ def calculate_dynamic_tp_gap():
     - 순방향(강세 방향): TP 크게 (0.26%~0.30%)
     - 역방향(약세 방향): TP 작게 (0.16%~0.21%)
     """
-    obv_display = float(obv_macd_value)
+    obv_display = float(obv_macd_value) * 100
     obv_abs = abs(obv_display)
     
     # ✅ 강도별 기본 TP 결정 (절댓값 기준)
@@ -1186,7 +1186,7 @@ def check_idle_and_enter():
             log("⚠️ IDLE", "Max position reached")
             return
         
-        obv_display = float(obv_macd_value)
+        obv_display = float(obv_macd_value) * 100
         obv_weight = calculate_obv_macd_weight(obv_display)
         
         log_event_header("IDLE ENTRY")
@@ -1334,7 +1334,7 @@ def market_entry_when_imbalanced():
         if not has_position or (has_position and not balanced):
             
             calculate_obv_macd()
-            obv_display = float(obv_macd_value)
+            obv_display = float(obv_macd_value) * 100
             obv_multiplier = calculate_obv_macd_weight(obv_display)
             
             with balance_lock:
@@ -1860,7 +1860,7 @@ def periodic_health_check():
             # ★ 4️⃣ OBV MACD 체크 후 TP % 변동시 갱신! (핵심!)
             try:
                 calculate_obv_macd()
-                current_obv = float(obv_macd_value)
+                current_obv = float(obv_macd_value) * 100
                 
                 if last_adjusted_obv == 0:
                     last_adjusted_obv = current_obv
@@ -1969,11 +1969,11 @@ def webhook():
 @app.route('/health', methods=['GET'])
 def health():
     """헬스 체크"""
-    obv_display = float(obv_macd_value)
+    obv_display = float(obv_macd_value) * 100
     return jsonify({
         "status": "running",
         "obv_macd_display": obv_display,
-        "obv_macd_internal": float(obv_macd_value),
+        "obv_macd_internal": float(obv_macd_value) * 100,
         "api_configured": bool(API_KEY and API_SECRET)
     }), 200
 
@@ -1985,12 +1985,12 @@ def status():
     with balance_lock:
         bal = float(account_balance)
     
-    obv_display = float(obv_macd_value)
+    obv_display = float(obv_macd_value) * 100
     
     return jsonify({
         "balance": bal,
         "obv_macd_display": obv_display,
-        "obv_macd_internal": float(obv_macd_value),
+        "obv_macd_internal": float(obv_macd_value) * 100,
         "position": {
             "long": {"size": float(pos["long"]["size"]), "entry_price": float(pos["long"]["entry_price"])},
             "short": {"size": float(pos["short"]["size"]), "entry_price": float(pos["short"]["entry_price"])}
