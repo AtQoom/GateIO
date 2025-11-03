@@ -495,14 +495,13 @@ def calculate_obv_macd():
 def get_obv_macd_value():
     """
     현재 OBV MACD 값 반환
-    - 전역 변수 obv_macd_value 사용
-    - fetch_kline_thread에서 1분마다 자동 업데이트
+    - None 체크 추가!
     """
     global obv_macd_value
     
-    # 값이 0이면 아직 계산 안 됨
-    if obv_macd_value == 0:
-        log("⚠️ OBV", "MACD not calculated yet, returning 0")
+    # ✅ None이면 Decimal("0") 반환
+    if obv_macd_value is None or obv_macd_value == 0:
+        return Decimal("0")
     
     return obv_macd_value
 
@@ -1260,8 +1259,16 @@ def calculate_dynamic_tp_gap():
     global last_tp_hash, tp_gap_long, tp_gap_short
     
     try:
-        obv_macd_value = calculate_obv_macd()
-        obv_display = float(obv_macd_value) * 100
+        obv_macd_value = get_obv_macd_value()  # ✅ None 체크!
+        
+        # ❌ 문제: None이면 스킵
+        if obv_macd_value is None:
+            log("⚠️ TP GAP", "OBV MACD not ready yet")
+            tp_gap_long = TP_MIN
+            tp_gap_short = TP_MIN
+            return (TP_MIN, TP_MIN, 0)
+        
+        obv_display = float(obv_macd_value) * 100  # ✅ 안전!
         
         # OBV 절댓값 기반 TP % 결정
         obv_abs = abs(obv_display)
@@ -1279,12 +1286,12 @@ def calculate_dynamic_tp_gap():
         
         # ✅ 전략대로 수정: 방향별 TP 적용
         if obv_display > 0:  # 롱 강세
-            tp_gap_long = tp_strength         # LONG: 순방향 (크게!) 0.19%~0.40%
-            tp_gap_short = TP_MIN             # SHORT: 역방향 (작게) 0.19%
+            tp_gap_long = tp_strength         # LONG: 순방향 (크게!)
+            tp_gap_short = TP_MIN             # SHORT: 역방향 (작게)
             
         elif obv_display < 0:  # 숏 강세
-            tp_gap_long = TP_MIN              # LONG: 역방향 (작게) 0.19%
-            tp_gap_short = tp_strength        # SHORT: 순방향 (크게!) 0.19%~0.40%
+            tp_gap_long = TP_MIN              # LONG: 역방향 (작게)
+            tp_gap_short = tp_strength        # SHORT: 순방향 (크게!)
             
         else:  # OBV = 0 (중립)
             tp_gap_long = TP_MIN              # 0.19%
@@ -1294,13 +1301,22 @@ def calculate_dynamic_tp_gap():
         tp_hash_new = hashlib.md5(f"{tp_gap_long}_{tp_gap_short}_{obv_display}".encode()).hexdigest()
         
         if tp_hash_new != last_tp_hash:
-            log("📊 TP GAP", f"OBV={obv_display:.2f} | LONG_TP={tp_gap_long*100:.2f}% | SHORT_TP={tp_gap_short*100:.2f}%")
+            log("📊 TP GAP", f"OBV={obv_display:.2f} | LONG_TP={float(tp_gap_long)*100:.2f}% | SHORT_TP={float(tp_gap_short)*100:.2f}%")
             last_tp_hash = tp_hash_new
         
+        return (tp_gap_long, tp_gap_short, obv_display)  # ✅ 튜플 반환!
+        
+    except TypeError as e:  # ✅ 추가: 타입 에러 처리
+        log("❌ TP GAP", f"Type error: {e}")
+        tp_gap_long = TP_MIN
+        tp_gap_short = TP_MIN
+        return (TP_MIN, TP_MIN, 0)
+    
     except Exception as e:
         log("❌ TP GAP", f"Error: {e}")
         tp_gap_long = TP_MIN
         tp_gap_short = TP_MIN
+        return (TP_MIN, TP_MIN, 0)
 
 
 # ============================================================================
