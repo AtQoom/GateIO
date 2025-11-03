@@ -1759,11 +1759,12 @@ def periodic_health_check():
     2. 주문 상태 확인 (그리드 + TP)
     3. TP 해시값 검증 (문제 감지 시 갱신)
     4. OBV MACD 모니터링 (변화 0.05 이상 시 TP % 재계산)
-    5. 단일 포지션 그리드 자동 생성
-    6. 전략 일관성 검증
-    7. 중복/오래된 주문 정리
+    5. 불균형 포지션 자동 진입 (★ SHORT 익절 → LONG 헤징)
+    6. 단일 포지션 그리드 자동 생성
+    7. 전략 일관성 검증
+    8. 중복/오래된 주문 정리
     """
-    global last_idle_check, obv_macd_value, tp_gap_min, tp_gap_max, last_adjusted_obv
+    global last_idle_check, obv_macd_value, tp_gap_min, tp_gap_max, last_adjusted_obv, tp_order_hash
     
     while True:
         try:
@@ -1875,35 +1876,42 @@ def periodic_health_check():
             
             except Exception as e:
                 log("❌ HEALTH", f"OBV MACD check error: {e}")
-
-            # ★ 추가: 불균형 포지션 시장가 진입
+            
+            # ★ 5️⃣ 불균형 포지션 자동 진입 (SHORT 익절 → LONG 헤징)
             try:
                 market_entry_when_imbalanced()
             except Exception as e:
                 log("❌ HEALTH", f"Market entry error: {e}")
-    
-            # 5️⃣ 단일 포지션 그리드 체크
+            
+            # 6️⃣ 단일 포지션 그리드 체크
             try:
                 single_position = (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0)
                 if single_position and grid_count == 0:
                     current_price = get_current_price()
                     if current_price > 0:
+                        log("⚠️ SINGLE", "Creating grid from single position...")
                         initialize_grid(current_price)
             except Exception as e:
                 log("❌ HEALTH", f"Grid error: {e}")
             
-            # 6️⃣ ~ 8️⃣ 기타 검증
+            # 7️⃣ 전략 일관성 검증
             try:
                 validate_strategy_consistency()
+            except Exception as e:
+                log("❌ HEALTH", f"Consistency error: {e}")
+            
+            # 8️⃣ 중복/오래된 주문 정리
+            try:
                 remove_duplicate_orders()
                 cancel_stale_orders()
             except Exception as e:
-                log("❌ HEALTH", f"Validation error: {e}")
+                log("❌ HEALTH", f"Order cleanup error: {e}")
             
             log("✅ HEALTH", "Health check complete")
         
         except Exception as e:
             log("❌ HEALTH", f"Health check error: {e}")
+            time.sleep(5)
             
 
 # =============================================================================
