@@ -10,7 +10,7 @@ from collections import deque
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
 import hashlib
-import json
+import jsoncalculate_dynamic
 
 try:
     from gate_api.exceptions import ApiException as GateApiException
@@ -1329,15 +1329,21 @@ def calculate_dynamic_tp_gap():
     global last_tp_hash, tp_gap_long, tp_gap_short
     
     try:
-        obv_value = get_obv_macd_value()  # ← Decimal 타입!
+        obv_value = get_obv_macd_value()
         
+        # ✅ None/0 체크
         if obv_value is None or obv_value == 0:
             tp_gap_long = TP_MIN
             tp_gap_short = TP_MIN
             return (TP_MIN, TP_MIN, 0)
         
-        # ✅ float로 변환 (계산용)
-        obv_display = float(obv_value) * 100
+        # ✅ 안전한 변환
+        try:
+            obv_float = float(obv_value)
+        except (ValueError, TypeError):
+            obv_float = 0
+        
+        obv_display = obv_float * 100
         obv_abs = abs(obv_display)
         
         # ✅ 모두 Decimal로!
@@ -1352,9 +1358,9 @@ def calculate_dynamic_tp_gap():
         else:
             tp_strength = Decimal("0.0040")
         
-        # ✅ 결과는 항상 Decimal!
+        # ✅ 부호 확인 (float로만!)
         if obv_display > 0:
-            tp_gap_long = tp_strength      # ← Decimal
+            tp_gap_long = tp_strength
             tp_gap_short = TP_MIN
         elif obv_display < 0:
             tp_gap_long = TP_MIN
@@ -1371,10 +1377,9 @@ def calculate_dynamic_tp_gap():
         
         return (tp_gap_long, tp_gap_short, obv_display)
         
-    except TypeError as e:
-        log("❌ TP GAP", f"Type error: {e}")
+    except Exception as e:
+        log("❌ TP GAP", f"Error: {e}")
         return (TP_MIN, TP_MIN, 0)
-
 
 
 # ============================================================================
