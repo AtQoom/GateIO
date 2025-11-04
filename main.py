@@ -1004,7 +1004,6 @@ def calculate_obv_macd_weight(obv_value):
     
     return multiplier
 
-
 def get_current_price():
     try:
         ticker = api.list_futures_tickers(SETTLE, contract=SYMBOL)
@@ -1043,6 +1042,29 @@ def calculate_grid_qty():
         multiplier = 2.0
     
     return max(1, int(base_qty * multiplier))
+
+def calculate_entry_ratio_by_loss(loss_pct: Decimal) -> Decimal:
+    """
+    손실도에 따른 동적 진입 비율 (loss_pct × 0.5)
+    공식: entry_ratio = loss_pct / 200
+    """
+    try:
+        entry_ratio = loss_pct / Decimal("200")
+        
+        MIN_RATIO = Decimal("0.01")
+        if entry_ratio < MIN_RATIO:
+            entry_ratio = MIN_RATIO
+        
+        MAX_RATIO = Decimal("0.5")
+        if entry_ratio > MAX_RATIO:
+            entry_ratio = MAX_RATIO
+        
+        return entry_ratio
+    
+    except Exception as e:
+        log("❌ CALC_RATIO", f"Error: {e}")
+        return Decimal("0.1")
+
 
 # =============================================================================
 # 포지션 상태
@@ -1460,16 +1482,9 @@ def check_idle_and_enter():
         
         log("📊 LOSS", f"Main position loss: {float(loss_pct):.4f}%")
         
-        # ✅ 손실에 따른 진입 수량 조정!
-        if loss_pct >= Decimal("0.3"):  # 0.3% 이상 손실
-            entry_ratio = Decimal("0.3")  # 30%
-            log("🔥 LOSS", "Loss ≥ 0.3% → Entry ratio 30%")
-        elif loss_pct >= Decimal("0.2"):  # 0.2% 이상 손실
-            entry_ratio = Decimal("0.2")  # 20%
-            log("🔥 LOSS", "Loss ≥ 0.2% → Entry ratio 20%")
-        else:  # 정상
-            entry_ratio = Decimal("0.1")  # 10% (기본)
-            log("✅ LOSS", "Loss < 0.2% → Entry ratio 10% (기본)")
+        # ✅ 손실에 따른 진입 수량 조정! (동적 함수)
+        entry_ratio = calculate_entry_ratio_by_loss(loss_pct)
+        log("📊 ENTRY_RATIO", f"Loss: {float(loss_pct):.2f}% → Ratio: {float(entry_ratio)*100:.2f}%")
         
         # ✅ 정확한 계산 (entry_ratio + OBV 가중치!)
         base_size = int(main_size * entry_ratio)
