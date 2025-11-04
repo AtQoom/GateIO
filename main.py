@@ -1407,14 +1407,18 @@ def calculate_dynamic_tp_gap():
 # check_idle_and_enter() - 아이들 진입 (중복 방지 + Order Request ID)
 # ============================================================================
 
+# ============================================================================
+# ✅ 수정된 check_idle_and_enter() - 완전한 코드 (한 줄도 생략 없음!)
+# ============================================================================
+
 def check_idle_and_enter():
     """
-    10분 아이들 진입 (손실 기반 수량 조정!)
+    10분 아이들 진입 (손실 기반 가중치 적용!)
     
-    당신의 전략:
-    - 주력포지션 손실 0.2% 이상 → 진입 수량 20%
-    - 주력포지션 손실 0.3% 이상 → 진입 수량 30%
-    - 그 외 → 기본 10%
+    당신의 요청:
+    - base_qty = account_balance × BASE_RATIO / current_price (USDT 기반)
+    - 손실도에 따른 추가 가중치: base_qty × (1 + loss_pct × 0.5 / 100)
+    - OBV 가중치: main_qty = adjusted_qty × (1 + OBV_multiplier)
     """
     global last_event_time
 
@@ -1432,14 +1436,17 @@ def check_idle_and_enter():
             long_entry_price = position_state[SYMBOL]["long"]["entry_price"]
             short_entry_price = position_state[SYMBOL]["short"]["entry_price"]
         
+        # ✅ 양방향 포지션 있는지 확인
         if long_size == 0 or short_size == 0:
             log("⚠️ IDLE", "Not both sides → Skipping")
             return
         
+        # ✅ 현재가 조회
         current_price = get_current_price()
         if current_price == 0:
             return
         
+        # ✅ 최대 포지션 한도 체크
         with balance_lock:
             max_value = account_balance * MAX_POSITION_RATIO
         
@@ -1451,6 +1458,7 @@ def check_idle_and_enter():
             log("⚠️ IDLE", "Max position reached")
             return
         
+        # ✅ OBV MACD 가중치 계산
         obv_display = float(obv_macd_value) * 100
         obv_weight = calculate_obv_macd_weight(obv_display)
         
@@ -1458,7 +1466,9 @@ def check_idle_and_enter():
         log("⏱️ IDLE", f"Entry after {elapsed:.0f}s, OBV={obv_display:.1f}")
         log("📊 POSITION", f"Long: {long_size}, Short: {short_size}")
         
-        # 주력 결정
+        # ========================================================================
+        # 1️⃣ 주력 포지션 결정
+        # ========================================================================
         if long_size >= short_size:
             main_size = long_size
             main_entry_price = long_entry_price
@@ -1470,32 +1480,62 @@ def check_idle_and_enter():
             is_long_main = False
             log("📊 MAIN", f"SHORT is main: {main_size}")
         
-        # ✅ 손실도 계산 (새로운 로직!)
+        # ========================================================================
+        # 2️⃣ 손실도 계산 (현재가 vs 평단가)
+        # ========================================================================
         loss_pct = Decimal("0")
         if main_entry_price > 0:
             if is_long_main:
-                # LONG 주력 손실
+                # LONG 주력: 평단가 > 현재가 = 손실
                 loss_pct = ((main_entry_price - current_price_dec) / main_entry_price) * Decimal("100")
             else:
-                # SHORT 주력 손실
+                # SHORT 주력: 현재가 > 평단가 = 손실
                 loss_pct = ((current_price_dec - main_entry_price) / main_entry_price) * Decimal("100")
+        
+        # 음수 손실(수익)은 0으로 처리
+        if loss_pct < 0:
+            loss_pct = Decimal("0")
         
         log("📊 LOSS", f"Main position loss: {float(loss_pct):.4f}%")
         
-        # ✅ 손실에 따른 진입 수량 조정! (동적 함수)
-        entry_ratio = calculate_entry_ratio_by_loss(loss_pct)
-        log("📊 ENTRY_RATIO", f"Loss: {float(loss_pct):.2f}% → Ratio: {float(entry_ratio)*100:.2f}%")
+        # ========================================================================
+        # 3️⃣ 기본 수량 계산 (USDT 기반!)
+        # ========================================================================
+        with balance_lock:
+            base_usdt = account_balance * BASE_RATIO  # 720 × 0.02 = 14.4 USDT
         
-        # ✅ 정확한 계산 (entry_ratio + OBV 가중치!)
-        base_size = int(main_size * entry_ratio)
-        main_qty = int(base_size * (1 + obv_weight))  # ← (1 + 가중치) 적용
-        hedge_qty = base_size
+        base_qty = int(base_usdt / current_price_dec)  # 14.4 / 0.2667 = 54개
         
-        log("📊 CALC", f"Base: {main_size} × {float(entry_ratio)} = {base_size}")
-        log("📊 CALC", f"Main: {base_size} × (1 + {float(obv_weight):.2f}) = {main_qty}")
-        log("📊 CALC", f"Hedge: {base_size}")
+        if base_qty < 1:
+            base_qty = 1
         
-        # 최소값 1
+        log("📊 BASE_QTY", f"Account {account_balance:.2f} × {BASE_RATIO} / {current_price:.4f} = {base_qty}")
+        
+        # ========================================================================
+        # 4️⃣ 손실도 기반 가중치 적용 (핵심!)
+        # ========================================================================
+        # 공식: adjusted_qty = base_qty × (1 + loss_pct × 0.5 / 100)
+        
+        loss_multiplier = Decimal("1") + (loss_pct * Decimal("0.5") / Decimal("100"))
+        adjusted_qty = int(Decimal(str(base_qty)) * loss_multiplier)
+        
+        log("📊 LOSS_WEIGHT", f"Base {base_qty} × (1 + {float(loss_pct):.2f}% × 0.5) = {adjusted_qty}")
+        
+        # ========================================================================
+        # 5️⃣ OBV 가중치 적용
+        # ========================================================================
+        # main_qty (역방향 강화): adjusted_qty × (1 + OBV)
+        # hedge_qty (주력방향): adjusted_qty
+        
+        main_qty = int(Decimal(str(adjusted_qty)) * (Decimal("1") + obv_weight))
+        hedge_qty = adjusted_qty
+        
+        log("📊 CALC", f"Main: {adjusted_qty} × (1 + {float(obv_weight):.2f} OBV) = {main_qty}")
+        log("📊 CALC", f"Hedge: {hedge_qty}")
+        
+        # ========================================================================
+        # 6️⃣ 최소값 체크
+        # ========================================================================
         if main_qty < 1:
             main_qty = 1
         if hedge_qty < 1:
@@ -1503,12 +1543,15 @@ def check_idle_and_enter():
         
         log("📊 FINAL", f"Main: {main_qty}, Hedge: {hedge_qty}")
         
-        # 진입
+        # ========================================================================
+        # 7️⃣ 양방향 진입 (시장가)
+        # ========================================================================
         try:
             if is_long_main:
+                # LONG 주력 → SHORT 역방향 강화 + LONG 헤징
                 short_order = FuturesOrder(
                     contract=SYMBOL,
-                    size=-main_qty,
+                    size=-main_qty,  # 음수 = SHORT
                     price="0",
                     tif="ioc",
                     reduce_only=False,
@@ -1520,7 +1563,7 @@ def check_idle_and_enter():
                 
                 long_order = FuturesOrder(
                     contract=SYMBOL,
-                    size=hedge_qty,
+                    size=hedge_qty,  # 양수 = LONG
                     price="0",
                     tif="ioc",
                     reduce_only=False,
@@ -1530,9 +1573,10 @@ def check_idle_and_enter():
                 log("✅ IDLE", f"LONG {hedge_qty} (주력방향)")
             
             else:
+                # SHORT 주력 → LONG 역방향 강화 + SHORT 헤징
                 long_order = FuturesOrder(
                     contract=SYMBOL,
-                    size=main_qty,
+                    size=main_qty,  # 양수 = LONG
                     price="0",
                     tif="ioc",
                     reduce_only=False,
@@ -1544,7 +1588,7 @@ def check_idle_and_enter():
                 
                 short_order = FuturesOrder(
                     contract=SYMBOL,
-                    size=-hedge_qty,
+                    size=-hedge_qty,  # 음수 = SHORT
                     price="0",
                     tif="ioc",
                     reduce_only=False,
@@ -1557,6 +1601,9 @@ def check_idle_and_enter():
             log("❌", f"IDLE entry error: {e}")
             return
         
+        # ========================================================================
+        # 8️⃣ 마무리
+        # ========================================================================
         time.sleep(0.5)
         sync_position()
         refresh_all_tp_orders()
@@ -1565,7 +1612,6 @@ def check_idle_and_enter():
         
     except Exception as e:
         log("❌", f"Idle entry error: {e}")
-
 
 def market_entry_when_imbalanced():
     """
