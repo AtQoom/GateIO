@@ -101,6 +101,8 @@ position_state = {
 # ✅ 추가: 현재 TP 범위 (동적으로 변경됨!)
 tp_gap_min = TP_MIN
 tp_gap_max = TP_MAX
+tp_gap_long = TP_MIN      # ← 신규
+tp_gap_short = TP_MIN     # ← 신규
 last_tp_hash = ""
 
 # 평단 TP 주문 ID
@@ -129,11 +131,6 @@ idle_entry_count = 0  # 아이들 진입 횟수 ← 추가
 tp_order_hash = {}  # {SYMBOL: hash_value}
 idle_entry_lock = threading.Lock()
 
-# 긴급 손절 관련
-EMERGENCY_STOP_THRESHOLD = Decimal("-0.10")  # -10% 손실
-emergency_stop_triggered = False
-emergency_stop_time = 0
-EMERGENCY_COOLDOWN = 7200  # 2시간 (초 단위)
 
 # =============================================================================
 # 주문 ID 생성
@@ -191,74 +188,15 @@ def log_position_state():
 
 
 # =============================================================================
-# 신규 함수 1: check_emergency_stop()
-# =============================================================================
-def check_emergency_stop():
-    """
-    총 자산 대비 -10% 손실 시 긴급 손절 발동
-    
-    기능:
-    1. 현재 잔고 확인
-    2. INITIAL_BALANCE 대비 손실률 계산
-    3. -10% 이상 손실 시:
-       - 모든 포지션 시장가 청산
-       - 모든 주문 취소
-       - 2시간 거래 중단
-    """
-    global emergency_stop_triggered, emergency_stop_time, account_balance
-    
-    try:
-        # 1️⃣ 현재 잔고 조회
-        with balance_lock:
-            current_balance = account_balance
-        
-        # 2️⃣ 손실률 계산
-        loss_ratio = (current_balance - INITIAL_BALANCE) / INITIAL_BALANCE
-        
-        log("💰 BALANCE", f"Current: {current_balance:.2f} | Initial: {INITIAL_BALANCE:.2f} | Loss: {loss_ratio * 100:.2f}%")
-        
-        # 3️⃣ -10% 손실 체크
-        if loss_ratio <= EMERGENCY_STOP_THRESHOLD:
-            log("🚨 EMERGENCY", f"STOP TRIGGERED! Loss: {loss_ratio * 100:.2f}%")
-            
-            # ① 모든 포지션 시장가 청산
-            emergency_close_all_positions()
-            
-            # ② 모든 주문 취소
-            cancel_all_orders()
-            
-            # ③ 2시간 거래 중단 설정
-            emergency_stop_triggered = True
-            emergency_stop_time = time.time()
-            
-            log("🛑 STOP", f"All positions closed. Trading halted for {EMERGENCY_COOLDOWN / 3600:.1f} hours.")
-            
-            return True
-        
-        return False
-        
-    except Exception as e:
-        log("❌ EMERGENCY", f"Check error: {e}")
-        return False
-
-
-# =============================================================================
 # 신규 함수 2: handle_non_main_position_tp()  ← ✅ 새로 추가!
 # =============================================================================
 
 def handle_non_main_position_tp(non_main_size_at_tp):
     """
-    비주력 포지션 TP 체결 시 주력 포지션 SL
+    비주력 TP 체결 시 주력 포지션 SL (1배/2배 2단계 전략)
     
-    로직:
-    - 비주력 TP 물량 × 1.5배 = 주력 SL 물량
-    - 주력 포지션이 계정 × 2배보다 클 때만 실행
-    
-    예시:
-    - 초기: LONG 600개 (주력), SHORT 200개 (비주력)
-    - SHORT 200개 전량 TP
-    - → LONG 300개 SL (200 × 1.5)
-    - 결과: LONG 300개, SHORT 0개
+    1배 <= 주력 < 2배: 비주력 × 0.8배 SL (새로운 전략!)
+    2배 이상: 비주력 × 1.5배 SL (기존 전략)
     """
     try:
         with position_lock:
@@ -272,38 +210,37 @@ def handle_non_main_position_tp(non_main_size_at_tp):
         if long_size >= short_size:
             main_size = long_size
             main_side = "long"
-            non_main_size = short_size
-            non_main_side = "short"
         else:
             main_size = short_size
             main_side = "short"
-            non_main_size = long_size
-            non_main_side = "long"
         
-        # ✅ 조건 1: 주력 > 2배
-        if main_size <= balance * 2:
-            log("ℹ️ TP HANDLER", f"{main_side.upper()} {main_size} ≤ {balance * 2} (2배) - 스킵")
+        # ✅ 조건 확인: 주력이 1배 미만이면 작동 안 함
+        if main_size < balance * 1:
+            log("ℹ️ TP HANDLER", f"Main {main_size} < {balance * 1} (1배) - 스킵")
             return
         
-        log("🚨 TP HANDLER", f"{main_side.upper()} {main_size} > {balance * 2} (2배 초과!)")
-        
-        # ✅ 조건 2: TP로 체결된 비주력 수량 × 1.5배 = SL 주력 수량
-        sl_qty = int(non_main_size_at_tp * Decimal("1.5"))
+        # ✅ Tier 판단
+        if balance * 1 <= main_size < balance * 2:
+            # 1배 ~ 2배 미만: 당신의 제안 (0.8배)
+            sl_qty = int(non_main_size_at_tp * Decimal("0.8"))
+            tier = "Tier-1 (0.8배)"
+        else:  # main_size >= balance * 2
+            # 2배 이상: 기존 (1.5배)
+            sl_qty = int(non_main_size_at_tp * Decimal("1.5"))
+            tier = "Tier-2 (1.5배)"
         
         if sl_qty < 1:
             sl_qty = 1
-        
-        # ✅ 주력 포지션을 초과하지 않도록 제한
         if sl_qty > main_size:
             sl_qty = int(main_size)
         
-        log("💥 TP HANDLER", f"비주력 {non_main_side.upper()} {non_main_size_at_tp}개 TP → 주력 {main_side.upper()} {sl_qty}개 SL")
+        log("💥 TP HANDLER", f"{tier}: 비주력 {non_main_size_at_tp}개 TP → 주력 {main_side.upper()} {sl_qty}개 SL")
         
-        # 주력 포지션 시장가 청산
+        # 주력 SL 실행
         if main_side == "long":
-            order_size = -sl_qty  # 음수 = LONG 청산
+            order_size = -sl_qty
         else:
-            order_size = sl_qty   # 양수 = SHORT 청산
+            order_size = sl_qty
         
         order = FuturesOrder(
             contract=SYMBOL,
@@ -313,102 +250,14 @@ def handle_non_main_position_tp(non_main_size_at_tp):
             reduce_only=True,
             text=generate_order_id()
         )
-        
         api.create_futures_order(SETTLE, order)
         log("✅ TP HANDLER", f"{main_side.upper()} {sl_qty}개 SL 처리됨!")
+        
         time.sleep(0.5)
         sync_position()
         
     except Exception as e:
         log("❌ TP HANDLER", f"Error: {e}")
-
-
-# =============================================================================
-# 신규 함수 3: emergency_close_all_positions()
-# =============================================================================
-def emergency_close_all_positions():
-    """
-    모든 포지션을 시장가로 즉시 청산
-    """
-    try:
-        sync_position()
-        
-        with position_lock:
-            long_size = position_state[SYMBOL]["long"]["size"]
-            short_size = position_state[SYMBOL]["short"]["size"]
-        
-        if long_size == 0 and short_size == 0:
-            log("✅ CLOSE", "No positions to close")
-            return
-        
-        # LONG 포지션 청산
-        if long_size > 0:
-            try:
-                order = FuturesOrder(
-                    contract=SYMBOL,
-                    size=-int(long_size),  # 마이너스 = 매도
-                    price="0",
-                    tif="ioc",
-                    text="emergency-close-long"
-                )
-                result = api.create_futures_order(SETTLE, order)
-                log("🔴 CLOSE", f"LONG {long_size} closed @ market")
-            except Exception as e:
-                log("❌ CLOSE", f"LONG close error: {e}")
-        
-        # SHORT 포지션 청산
-        if short_size > 0:
-            try:
-                order = FuturesOrder(
-                    contract=SYMBOL,
-                    size=int(short_size),  # 플러스 = 매수
-                    price="0",
-                    tif="ioc",
-                    text="emergency-close-short"
-                )
-                result = api.create_futures_order(SETTLE, order)
-                log("🔴 CLOSE", f"SHORT {short_size} closed @ market")
-            except Exception as e:
-                log("❌ CLOSE", f"SHORT close error: {e}")
-        
-        time.sleep(1)
-        sync_position()
-        log("✅ CLOSE", "Emergency close complete")
-        
-    except Exception as e:
-        log("❌ CLOSE", f"Emergency close error: {e}")
-
-
-# =============================================================================
-# 신규 함수 3: is_trading_halted()
-# =============================================================================
-def is_trading_halted():
-    """
-    긴급 손절 후 2시간 거래 중단 체크
-    
-    Returns:
-        True: 거래 중단 중
-        False: 거래 재개 가능
-    """
-    global emergency_stop_triggered, emergency_stop_time
-    
-    if not emergency_stop_triggered:
-        return False
-    
-    elapsed = time.time() - emergency_stop_time
-    remaining = EMERGENCY_COOLDOWN - elapsed
-    
-    if elapsed >= EMERGENCY_COOLDOWN:
-        # 2시간 경과 -> 거래 재개
-        emergency_stop_triggered = False
-        emergency_stop_time = 0
-        log("✅ RESUME", "Trading resumed after 2-hour cooldown")
-        return False
-    else:
-        # 아직 2시간 안 됨 -> 거래 중단 유지
-        if int(elapsed) % 600 == 0:  # 10분마다 로그
-            log("⏳ HALT", f"Trading halted. Remaining: {remaining / 60:.1f} minutes")
-        return True
 
 
 # =============================================================================
@@ -921,8 +770,8 @@ def refresh_all_tp_orders():
             long_tp = tp_result[0]
             short_tp = tp_result[1]
         else:
-            long_tp = TP_MIN
-            short_tp = TP_MAX
+            long_tp = tp_gap_long
+            short_tp = tp_gap_short
         
         # ✅ 타입 검증
         if not isinstance(long_tp, Decimal):
@@ -1228,12 +1077,8 @@ def initialize_grid(current_price=None):
     OBV > 0 (롱 강세) → SHORT 주력 (더 많이!)
     OBV < 0 (숏 강세) → LONG 주력 (더 많이!)
     """
-    global last_grid_time
-    
-    if is_trading_halted():
-        log("🛑 HALT", "Trading halted. Skipping grid initialization.")
-        return
-        
+    global last_grid_time  
+      
     if not initialize_grid_lock.acquire(blocking=False):
         log("🔵 GRID", "Already running → Skipping")
         return
@@ -1396,16 +1241,12 @@ def calculate_dynamic_tp_gap():
             log("📊 TP GAP", f"OBV={obv_display:.2f} | LONG={float(tp_gap_long)*100:.2f}% | SHORT={float(tp_gap_short)*100:.2f}%")
             last_tp_hash = tp_hash_new
         
-        return (tp_gap_long, tp_gap_short, obv_display)
+        return (tp_gap_long, tp_gap_short)
         
     except Exception as e:
         log("❌ TP GAP", f"Error: {e}")
-        return (TP_MIN, TP_MIN, 0)
+        return (TP_MIN, TP_MIN)
 
-
-# ============================================================================
-# check_idle_and_enter() - 아이들 진입 (중복 방지 + Order Request ID)
-# ============================================================================
 
 # ============================================================================
 # ✅ 수정된 check_idle_and_enter() - 완전한 코드 (한 줄도 생략 없음!)
@@ -1421,9 +1262,6 @@ def check_idle_and_enter():
     - OBV 가중치: main_qty = adjusted_qty × (1 + OBV_multiplier)
     """
     global last_event_time
-
-    if is_trading_halted():
-        return
         
     try:
         elapsed = time.time() - last_event_time
@@ -2063,14 +1901,6 @@ def periodic_health_check():
         try:
             time.sleep(120)  # 2분 대기
             log("💊 HEALTH", "Starting health check...")
-
-            # 1️⃣ 긴급 손절 체크 (최우선)
-            if check_emergency_stop():
-                continue
-            
-            # 2️⃣ 거래 중단 중이면 스킵
-            if is_trading_halted():
-                continue
             
             # 1️⃣ 포지션 동기화
             sync_position()
