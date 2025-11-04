@@ -575,15 +575,15 @@ def calculate_obv_macd():
         obv_macd_value = Decimal("0")
 
 def get_obv_macd_value():
-    """
-    현재 OBV MACD 값 반환
-    - None 체크 추가!
-    """
+    """항상 Decimal 반환!"""
     global obv_macd_value
     
-    # ✅ None이면 Decimal("0") 반환
     if obv_macd_value is None or obv_macd_value == 0:
         return Decimal("0")
+    
+    # ✅ 타입 검증
+    if not isinstance(obv_macd_value, Decimal):
+        return Decimal(str(obv_macd_value))
     
     return obv_macd_value
 
@@ -903,7 +903,6 @@ def cancel_tp_only():
 # ============================================================================
 
 def refresh_all_tp_orders():
-    """기존 TP 취소 후 새 TP 생성"""
     try:
         sync_position()
         
@@ -916,25 +915,30 @@ def refresh_all_tp_orders():
         if long_size == 0 and short_size == 0:
             return
         
-        # TP % 계산
+        # ✅ tp_gap 값 조회
         tp_result = calculate_dynamic_tp_gap()
+        
         if isinstance(tp_result, (tuple, list)) and len(tp_result) >= 2:
             long_tp = tp_result[0]
             short_tp = tp_result[1]
         else:
-            long_tp = tp_gap_min
-            short_tp = tp_gap_max
+            long_tp = TP_MIN
+            short_tp = TP_MAX
         
-        # 기존 TP 취소
+        # ✅ 타입 검증
+        if not isinstance(long_tp, Decimal):
+            long_tp = Decimal(str(long_tp))
+        if not isinstance(short_tp, Decimal):
+            short_tp = Decimal(str(short_tp))
+        
         cancel_tp_only()
         time.sleep(0.5)
         
-        # ★ LONG TP (수정됨!)
+        # ✅ LONG TP (Decimal × Decimal만!)
         if long_size > 0:
             tp_price_long = long_entry_price * (Decimal("1") + long_tp)
             tp_price_long = tp_price_long.quantize(Decimal("0.000000000001"), rounding=ROUND_DOWN)
             
-            # ✅ FuturesOrder 객체 생성
             order = FuturesOrder(
                 contract=SYMBOL,
                 size=-int(long_size),
@@ -942,19 +946,16 @@ def refresh_all_tp_orders():
                 reduce_only=True,
                 text=generate_order_id()
             )
-            # ✅ api.create_futures_order()에 객체 전달
             api.create_futures_order(SETTLE, order)
-            
             log("✅ TP LONG", f"Qty: {int(long_size)}, Price: {float(tp_price_long):.4f}")
         
         time.sleep(0.3)
         
-        # ★ SHORT TP (수정됨!)
+        # ✅ SHORT TP (Decimal × Decimal만!)
         if short_size > 0:
             tp_price_short = short_entry_price * (Decimal("1") - short_tp)
             tp_price_short = tp_price_short.quantize(Decimal("0.000000000001"), rounding=ROUND_DOWN)
             
-            # ✅ FuturesOrder 객체 생성
             order = FuturesOrder(
                 contract=SYMBOL,
                 size=int(short_size),
@@ -962,9 +963,7 @@ def refresh_all_tp_orders():
                 reduce_only=True,
                 text=generate_order_id()
             )
-            # ✅ api.create_futures_order()에 객체 전달
             api.create_futures_order(SETTLE, order)
-            
             log("✅ TP SHORT", f"Qty: {int(short_size)}, Price: {float(tp_price_short):.4f}")
         
         log("✅ TP", "All TP orders created successfully")
@@ -1327,33 +1326,21 @@ def initialize_grid(current_price=None):
 # ============================================================================
 
 def calculate_dynamic_tp_gap():
-    """
-    당신의 전략대로 수정:
-    
-    OBV > 0 (롱 강세):
-    - LONG TP: 0.19%~0.40% (순방향 - 수익성!)
-    - SHORT TP: 0.19% (역방향 - 안정화)
-    
-    OBV < 0 (숏 강세):
-    - LONG TP: 0.19% (역방향 - 안정화)
-    - SHORT TP: 0.19%~0.40% (순방향 - 수익성!)
-    """
-    global last_tp_hash, tp_gap_long, tp_gap_short  # ✅ 선언!
+    global last_tp_hash, tp_gap_long, tp_gap_short
     
     try:
-        obv_macd_value = calculate_obv_macd()
+        obv_value = get_obv_macd_value()  # ← Decimal 타입!
         
-        # ✅ None 체크
-        if obv_macd_value is None:
-            log("⚠️ TP GAP", "OBV MACD not ready yet")
+        if obv_value is None or obv_value == 0:
             tp_gap_long = TP_MIN
             tp_gap_short = TP_MIN
             return (TP_MIN, TP_MIN, 0)
         
-        obv_display = float(obv_macd_value) * 100
+        # ✅ float로 변환 (계산용)
+        obv_display = float(obv_value) * 100
         obv_abs = abs(obv_display)
         
-        # TP % 결정
+        # ✅ 모두 Decimal로!
         if obv_abs < 10:
             tp_strength = Decimal("0.0019")
         elif obv_abs < 20:
@@ -1365,9 +1352,9 @@ def calculate_dynamic_tp_gap():
         else:
             tp_strength = Decimal("0.0040")
         
-        # ✅ 전략대로 수정
+        # ✅ 결과는 항상 Decimal!
         if obv_display > 0:
-            tp_gap_long = tp_strength
+            tp_gap_long = tp_strength      # ← Decimal
             tp_gap_short = TP_MIN
         elif obv_display < 0:
             tp_gap_long = TP_MIN
@@ -1376,7 +1363,6 @@ def calculate_dynamic_tp_gap():
             tp_gap_long = TP_MIN
             tp_gap_short = TP_MIN
         
-        # ✅ 해시값 변화 감지
         tp_hash_new = hashlib.md5(f"{tp_gap_long}_{tp_gap_short}_{obv_display}".encode()).hexdigest()
         
         if tp_hash_new != last_tp_hash:
@@ -1388,9 +1374,7 @@ def calculate_dynamic_tp_gap():
     except TypeError as e:
         log("❌ TP GAP", f"Type error: {e}")
         return (TP_MIN, TP_MIN, 0)
-    except Exception as e:
-        log("❌ TP GAP", f"Error: {e}")
-        return (TP_MIN, TP_MIN, 0)
+
 
 
 # ============================================================================
