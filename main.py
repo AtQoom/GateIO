@@ -58,7 +58,7 @@ TP_MAX = Decimal("0.004")        # 0.4% (최대)
 
 # ✅ 기본 설정들
 BASE_RATIO = Decimal("0.02")       # 기본 수량 비율
-MAX_POSITION_RATIO = Decimal("5.0")    # 최대 5배
+MAX_POSITION_RATIO = Decimal("3.0")    # 최대 5배
 HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
 IDLE_TIME_SECONDS = 600  # 10분 (아이들 감지 시간)
 last_idle_check = 0 
@@ -244,7 +244,88 @@ def check_emergency_stop():
 
 
 # =============================================================================
-# 신규 함수 2: emergency_close_all_positions()
+# 신규 함수 2: handle_non_main_position_tp()  ← ✅ 새로 추가!
+# =============================================================================
+
+def handle_non_main_position_tp(non_main_size_at_tp):
+    """
+    비주력 포지션 TP 체결 시 주력 포지션 SL
+    
+    로직:
+    - 비주력 TP 물량 × 1.5배 = 주력 SL 물량
+    - 주력 포지션이 계정 × 2배보다 클 때만 실행
+    
+    예시:
+    - 초기: LONG 600개 (주력), SHORT 200개 (비주력)
+    - SHORT 200개 전량 TP
+    - → LONG 300개 SL (200 × 1.5)
+    - 결과: LONG 300개, SHORT 0개
+    """
+    try:
+        with position_lock:
+            long_size = position_state[SYMBOL]["long"]["size"]
+            short_size = position_state[SYMBOL]["short"]["size"]
+        
+        with balance_lock:
+            balance = account_balance
+        
+        # 주력 포지션 판단
+        if long_size >= short_size:
+            main_size = long_size
+            main_side = "long"
+            non_main_size = short_size
+            non_main_side = "short"
+        else:
+            main_size = short_size
+            main_side = "short"
+            non_main_size = long_size
+            non_main_side = "long"
+        
+        # ✅ 조건 1: 주력 > 2배
+        if main_size <= balance * 2:
+            log("ℹ️ TP HANDLER", f"{main_side.upper()} {main_size} ≤ {balance * 2} (2배) - 스킵")
+            return
+        
+        log("🚨 TP HANDLER", f"{main_side.upper()} {main_size} > {balance * 2} (2배 초과!)")
+        
+        # ✅ 조건 2: TP로 체결된 비주력 수량 × 1.5배 = SL 주력 수량
+        sl_qty = int(non_main_size_at_tp * Decimal("1.5"))
+        
+        if sl_qty < 1:
+            sl_qty = 1
+        
+        # ✅ 주력 포지션을 초과하지 않도록 제한
+        if sl_qty > main_size:
+            sl_qty = int(main_size)
+        
+        log("💥 TP HANDLER", f"비주력 {non_main_side.upper()} {non_main_size_at_tp}개 TP → 주력 {main_side.upper()} {sl_qty}개 SL")
+        
+        # 주력 포지션 시장가 청산
+        if main_side == "long":
+            order_size = -sl_qty  # 음수 = LONG 청산
+        else:
+            order_size = sl_qty   # 양수 = SHORT 청산
+        
+        order = FuturesOrder(
+            contract=SYMBOL,
+            size=order_size,
+            price="0",
+            tif="ioc",
+            reduce_only=True,
+            text=generate_order_id()
+        )
+        
+        api.create_futures_order(SETTLE, order)
+        log("✅ TP HANDLER", f"{main_side.upper()} {sl_qty}개 SL 처리됨!")
+        time.sleep(0.5)
+        sync_position()
+        
+    except Exception as e:
+        log("❌ TP HANDLER", f"Error: {e}")
+
+
+# =============================================================================
+# 신규 함수 3: emergency_close_all_positions()
 # =============================================================================
 def emergency_close_all_positions():
     """
@@ -1645,76 +1726,7 @@ def full_refresh(event_type, skip_grid=False):
 
     cancel_all_orders()
     time.sleep(0.5)
-    
-    # ✅ 물량 누적 방지 로직 (TP 체결 후에만!)
-    if "TP" in event_type or "Average_TP" in event_type:
-        try:
-            with position_lock:
-                long_size = position_state[SYMBOL]["long"]["size"]
-                short_size = position_state[SYMBOL]["short"]["size"]
-            
-            with balance_lock:
-                balance = account_balance
-            
-            # 주력 포지션 결정
-            if long_size >= short_size:
-                main_size = long_size
-                counter_size = short_size
-                main_side = "long"
-            else:
-                main_size = short_size
-                counter_size = long_size
-                main_side = "short"
-            
-            # ✅ 주력 > 2배 체크
-            if main_size > balance * 2:
-                log("🚨 ACCUMULATION CHECK", f"{main_side.upper()} {main_size} > {balance * 2} (2배)")
-                
-                # ✅ 반대쪽 50% 청산
-                if counter_size > 0:
-                    close_qty = int(counter_size * Decimal("0.5"))  # 50% 청산
-                    
-                    if close_qty > 0:
-                        log("💥 CLOSE COUNTER", f"{get_counter_side(main_side).upper()} {close_qty} (50% of {counter_size})")
-                        
-                        try:
-                            # 반대쪽 시장가 청산
-                            if main_side == "long":  # LONG 주력 → SHORT 청산
-                                order = FuturesOrder(
-                                    contract=SYMBOL,
-                                    size=close_qty,  # 양수 (SHORT 청산)
-                                    price="0",
-                                    tif="ioc",
-                                    reduce_only=True,  # 청산만
-                                    text=generate_order_id()
-                                )
-                            else:  # SHORT 주력 → LONG 청산
-                                order = FuturesOrder(
-                                    contract=SYMBOL,
-                                    size=-close_qty,  # 음수 (LONG 청산)
-                                    price="0",
-                                    tif="ioc",
-                                    reduce_only=True,  # 청산만
-                                    text=generate_order_id()
-                                )
-                            
-                            api.create_futures_order(SETTLE, order)
-                            log("✅ CLOSE", f"{get_counter_side(main_side).upper()} {close_qty} closed by market")
-                            time.sleep(0.5)
-                            sync_position()
-                            
-                        except GateApiException as e:
-                            log("❌ CLOSE", f"Error: {e}")
-                    else:
-                        log("⚠️ CLOSE", f"Counter size too small ({counter_size})")
-                else:
-                    log("💬 CLOSE", f"No counter position to close (only {main_side} exists)")
-            else:
-                log("✅ ACCUMULATION OK", f"{main_side.upper()} {main_size} <= {balance * 3} (정상)")
-        
-        except Exception as e:
-            log("❌ ACCUMULATION CHECK", f"Error: {e}")
-    
+      
     # 기존 로직
     if not skip_grid:
         current_price = get_current_price()
@@ -1738,11 +1750,21 @@ def get_counter_side(side):
 # 모니터링 스레드
 # =============================================================================
 async def grid_fill_monitor():
-    """WebSocket으로 TP 체결 모니터링 (그리드 제거!)"""
+    """
+    WebSocket으로 TP 체결 모니터링
+    
+    기능:
+    1. TP 체결 감지
+    2. 비주력 TP 물량 기록
+    3. handle_non_main_position_tp(tp_qty) 호출 ← 신규!
+    4. 양방향 TP 체결 → Full Refresh
+    """
     global last_grid_time, idle_entry_count
     
     uri = f"wss://fx-ws.gateio.ws/v4/ws/{SETTLE}"
     ping_count = 0
+    reconnect_attempt = 0
+    max_reconnect = 5
     
     while True:
         try:
@@ -1759,8 +1781,8 @@ async def grid_fill_monitor():
                     "payload": [API_KEY, API_SECRET, SYMBOL]
                 }
                 await ws.send(json.dumps(auth_msg))
-                log("✅ WS", "Connected to WebSocket (attempt 1)")
-                
+                log("✅ WS", f"Connected to WebSocket (attempt {reconnect_attempt + 1})")
+                reconnect_attempt = 0
                 ping_count = 0
                 
                 while True:
@@ -1799,16 +1821,25 @@ async def grid_fill_monitor():
                                 # ✅ TP 체결만 처리!
                                 if is_reduce_only:
                                     side = "long" if size < 0 else "short"
-                                    log("🎯 TP FILLED", f"{side.upper()} @ {price:.4f}")
-
+                                    tp_qty = abs(int(size))
+                                    
+                                    log("🎯 TP FILLED", f"{side.upper()} {tp_qty}개 @ {price:.4f}")
+                                    
+                                    time.sleep(0.5)
+                                    sync_position()
+                                    
+                                    # ✅ 신규: 물량 누적 방지 함수 호출!
+                                    handle_non_main_position_tp(tp_qty)
+                                    
                                     time.sleep(0.5)
                                     
                                     with position_lock:
                                         long_size = position_state[SYMBOL]["long"]["size"]
                                         short_size = position_state[SYMBOL]["short"]["size"]
                                     
+                                    # ✅ 양방향 TP 체결 감지: LONG & SHORT 모두 0
                                     if long_size == 0 and short_size == 0:
-                                        log("🎯 AVG TP", "Both sides closed → Full refresh")
+                                        log("🎯 BOTH CLOSED", "Both sides closed → Full refresh")
                                         update_event_time()
                                         
                                         threading.Thread(
@@ -1824,9 +1855,15 @@ async def grid_fill_monitor():
                         continue
         
         except Exception as e:
-            log("❌", f"WebSocket error: {e}")
-            log("⚠️ WS", "Reconnecting in 5s...")
-            await asyncio.sleep(5)
+            reconnect_attempt += 1
+            if reconnect_attempt <= max_reconnect:
+                log("❌ WS", f"Error: {e}")
+                log("⚠️ WS", f"Reconnecting in 5s (attempt {reconnect_attempt}/{max_reconnect})...")
+                await asyncio.sleep(5)
+            else:
+                log("❌ WS", f"Max reconnect attempts reached. Waiting 30s...")
+                await asyncio.sleep(30)
+                reconnect_attempt = 0
 
 def tp_monitor():
     """TP 체결 모니터링 (개별 TP + 평단 TP)"""
