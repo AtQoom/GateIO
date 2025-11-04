@@ -9,8 +9,7 @@ from decimal import Decimal, ROUND_DOWN
 from collections import deque
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
-import hashlib
-import jsoncalculate_dynamic
+import hashlib  # ← 수정: json 다음에 hashlib (순서 변경 OK)
 
 try:
     from gate_api.exceptions import ApiException as GateApiException
