@@ -1352,12 +1352,12 @@ def check_idle_and_enter():
         # ========================================================================
         # 4️⃣ 손실도 기반 가중치 적용 (핵심!)
         # ========================================================================
-        # 공식: adjusted_qty = base_qty × (1 + loss_pct × 0.5 / 100)
+        # 공식: adjusted_qty = base_qty × (1 + loss_pct × 1.0 / 100)
         
-        loss_multiplier = Decimal("1") + (loss_pct * Decimal("0.5") / Decimal("100"))
+        loss_multiplier = Decimal("1") + (loss_pct * Decimal("1.0") / Decimal("100"))
         adjusted_qty = int(Decimal(str(base_qty)) * loss_multiplier)
         
-        log("📊 LOSS_WEIGHT", f"Base {base_qty} × (1 + {float(loss_pct):.2f}% × 0.5) = {adjusted_qty}")
+        log("📊 LOSS_WEIGHT", f"Base {base_qty} × (1 + {float(loss_pct):.2f}% × 1.0) = {adjusted_qty}")
         
         # ========================================================================
         # 5️⃣ OBV 가중치 적용
