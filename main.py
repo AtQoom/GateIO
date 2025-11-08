@@ -47,7 +47,7 @@ else:
 # 기본 비율 설정
 INITIAL_BALANCE = Decimal("50")              # 초기 잔고
 BASERATIO = Decimal("0.02")                 # 기본 수량 비율 (2%)
-MAX_POSITION_RATIO = Decimal("3.0")          # 최대 포지션 비율 (3배)
+MAXPOSITIONRATIO = Decimal("3.0")          # 최대 포지션 비율 (3배)
 HEDGE_RATIO_MAIN = Decimal("0.10")           # 주력 헤지 비율 (10%)
 
 # TP 설정 (동적 TP) ← 이 부분 추가
@@ -951,7 +951,7 @@ def validate_strategy_consistency():
         
         # ✅ 검증 2: 최대 한도 초과 (완화: 20%)
         with balance_lock:
-            max_value = Decimal(str(account_balance)) * MAX_POSITION_RATIO
+            max_value = Decimal(str(account_balance)) * MAXPOSITIONRATIO
         
         if long_value > max_value * Decimal("1.2"):
             log("🚨 EMERGENCY", f"LONG {float(long_value):.2f} > {float(max_value * 1.2):.2f}")
@@ -1078,7 +1078,7 @@ def initialize_grid(current_price=None):
             short_size = position_state[SYMBOL]["short"]["size"]
         
         with balance_lock:
-            max_value = account_balance * MAX_POSITION_RATIO
+            max_value = account_balance * MAXPOSITIONRATIO
         
         current_price_dec = Decimal(str(current_price))
         long_value = Decimal(str(long_size)) * current_price_dec
@@ -1259,7 +1259,7 @@ def check_idle_and_enter():
         
         # ✅ 최대 포지션 한도 체크
         with balance_lock:
-            max_value = account_balance * MAX_POSITION_RATIO
+            max_value = account_balance * MAXPOSITIONRATIO
         
         current_price_dec = Decimal(str(current_price))
         long_value = Decimal(str(long_size)) * current_price_dec
@@ -1803,7 +1803,7 @@ def position_monitor():
             with balance_lock:
                 balance = account_balance
             
-            max_value = balance * MAX_POSITION_RATIO
+            max_value = balance * MAXPOSITIONRATIO
             long_value = long_price * long_size
             short_value = short_price * short_size
             
