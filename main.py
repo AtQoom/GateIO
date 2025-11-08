@@ -45,7 +45,7 @@ else:
 # 전략 설정 (Strategy Configuration)
 # =============================================================================
 # 기본 비율 설정
-INITIAL_BALANCE = Decimal("50")              # 초기 잔고
+INITIALBALANCE = Decimal("50")              # 초기 잔고
 BASERATIO = Decimal("0.02")                 # 기본 수량 비율 (2%)
 MAXPOSITIONRATIO = Decimal("3.0")          # 최대 포지션 비율 (3배)
 HEDGE_RATIO_MAIN = Decimal("0.10")           # 주력 헤지 비율 (10%)
@@ -96,7 +96,7 @@ idle_entry_lock = threading.Lock()
 # 전역 상태 변수 (Global State Variables)
 # =============================================================================
 # 계좌 관련
-account_balance = INITIAL_BALANCE
+account_balance = INITIALBALANCE
 
 # 포지션 상태
 position_state = {
