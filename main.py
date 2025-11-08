@@ -1856,18 +1856,7 @@ def idle_monitor():
 
 def periodic_health_check():
     """
-    2분마다 실행되는 헬스 체크 + OBV 기반 TP 동적 조정
-    
-    기능:
-    1. 계좌 잔고 조회 (Unified Account) ← ★ 추가
-    2. 포지션 동기화
-    3. 주문 상태 확인 (그리드 + TP)
-    4. TP 해시값 검증 (문제 감지 시 갱신)
-    5. OBV MACD 모니터링 (변화 0.05 이상 시 TP % 재계산)
-    6. 불균형 포지션 자동 진입 (★ SHORT 익절 → LONG 헤징)
-    7. 단일 포지션 그리드 자동 생성
-    8. 전략 일관성 검증
-    9. 중복/오래된 주문 정리
+    2분마다 실행되는 헬스 체크 + 계좌 잔고 조회
     """
     global last_idle_check, obv_macd_value, tp_gap_min, tp_gap_max, last_adjusted_obv, tp_order_hash, account_balance
     
@@ -1876,31 +1865,38 @@ def periodic_health_check():
             time.sleep(120)  # 2분 대기
             log("💊 HEALTH", "Starting health check...")
             
-            # ★ 1️⃣ 계좌 잔고 조회 (Unified Account) - 추가!
+            # ★ 계좌 잔고 조회 (Unified Account) - 수정됨!
             try:
-                # Unified Account 조회
-                unified_account = unified_api.get_unified_account()
-                if unified_account:
-                    if hasattr(unified_account, 'total'):
-                        total_value = Decimal(str(unified_account.total))
-                        if total_value > 0:
-                            with balance_lock:
-                                old_balance = account_balance
-                                account_balance = total_value
-                            
-                            if old_balance != account_balance:
-                                log("💰 BALANCE", f"{account_balance:.2f} USDT (Unified Total)")
-                            
-                            # MAX POSITION 계산
-                            max_position = account_balance * MAXPOSITIONRATIO
-                            log("📊 MAX POSITION", f"{max_position:.2f} USDT")
-                        else:
-                            log("⚠️ WARNING", "Unified Account balance is 0 - Please deposit funds")
+                # Unified Account 조회 (list_unified_accounts 사용)
+                unified_accounts = unified_api.list_unified_accounts()
+                
+                if unified_accounts:
+                    if hasattr(unified_accounts, 'total'):
+                        total_value = unified_accounts.total
+                        if total_value:
+                            balance_dec = Decimal(str(total_value))
+                            if balance_dec > 0:
+                                with balance_lock:
+                                    old_balance = account_balance
+                                    account_balance = balance_dec
+                                
+                                if old_balance != account_balance:
+                                    log("💰 BALANCE", f"{account_balance:.2f} USDT (Unified Total)")
+                                
+                                # MAX POSITION 계산
+                                max_position = account_balance * MAXPOSITIONRATIO
+                                log("📊 MAX POSITION", f"{max_position:.2f} USDT")
+                            else:
+                                log("⚠️ WARNING", "Unified Account balance is 0")
                     else:
-                        log("❌ ERROR", "Unified Account missing 'total' field")
+                        log("⚠️ WARNING", "Unified Account missing 'total' field")
                 else:
-                    log("❌ ERROR", "Could not fetch Unified Account")
-                    
+                    log("⚠️ WARNING", "Could not fetch Unified Account")
+                        
+            except GateApiException as e:
+                log("❌ ERROR", f"Balance check failed: {e.label} - {e.message}")
+                with balance_lock:
+                    log("⚠️ WARNING", f"Using current balance {account_balance:.2f} USDT")
             except Exception as e:
                 log("❌ ERROR", f"Balance check failed: {e}")
                 with balance_lock:
@@ -2143,47 +2139,55 @@ def print_startup_summary():
     log("", f"  📈 Max Position: {float(MAXPOSITIONRATIO)*100:.1f}%")
     log("divider", "-" * 80)
     
-    # ★ 계좌 잔고 조회 (Unified Account)
+    # ★ 계좌 잔고 조회 (Unified Account) - 수정됨!
     try:
         log("💰 BALANCE", "Fetching account balance...")
         
-        # Unified Account 조회
-        unified_account = unified_api.get_unified_account()
-        if unified_account:
-            if hasattr(unified_account, 'total'):
-                total_value = Decimal(str(unified_account.total))
-                if total_value > 0:
-                    with balance_lock:
-                        account_balance = total_value
-                    log("💰 BALANCE", f"{account_balance:.2f} USDT (Unified Total)")
-                    
-                    # MAX POSITION 계산
-                    max_position = account_balance * MAXPOSITIONRATIO
-                    log("📊 MAX POSITION", f"{max_position:.2f} USDT")
+        # Unified Account 조회 (list_unified_accounts 사용)
+        unified_accounts = unified_api.list_unified_accounts()
+        
+        if unified_accounts:
+            # UnifiedAccount 객체에서 total 필드 접근
+            if hasattr(unified_accounts, 'total'):
+                total_value = unified_accounts.total
+                if total_value:
+                    balance_dec = Decimal(str(total_value))
+                    if balance_dec > 0:
+                        with balance_lock:
+                            account_balance = balance_dec
+                        log("💰 BALANCE", f"{account_balance:.2f} USDT (Unified Total)")
+                        
+                        # MAX POSITION 계산
+                        max_position = account_balance * MAXPOSITIONRATIO
+                        log("📊 MAX POSITION", f"{max_position:.2f} USDT")
+                    else:
+                        log("⚠️ WARNING", "Balance is 0 - Please deposit funds to Unified Account")
+                        with balance_lock:
+                            account_balance = INITIALBALANCE
                 else:
-                    log("⚠️ WARNING", "Balance is 0 - Please deposit funds to Unified Account")
-                    log("⚠️ WARNING", f"Using default balance {INITIALBALANCE} USDT")
+                    log("⚠️ WARNING", "Total field is None")
                     with balance_lock:
                         account_balance = INITIALBALANCE
             else:
                 log("❌ ERROR", "Unified Account missing 'total' field")
-                log("⚠️ WARNING", f"Using default balance {INITIALBALANCE} USDT")
                 with balance_lock:
                     account_balance = INITIALBALANCE
         else:
             log("❌ ERROR", "Could not fetch Unified Account")
-            log("⚠️ WARNING", f"Using default balance {INITIALBALANCE} USDT")
             with balance_lock:
                 account_balance = INITIALBALANCE
     
+    except GateApiException as e:
+        log("❌ ERROR", f"Gate API Error: {e.label} - {e.message}")
+        with balance_lock:
+            account_balance = INITIALBALANCE
     except Exception as e:
         log("❌ ERROR", f"Balance check failed: {e}")
-        log("⚠️ WARNING", f"Using default balance {INITIALBALANCE} USDT")
         with balance_lock:
             account_balance = INITIALBALANCE
     
-    log("divider", "-" * 80)
-    
+    log("divider", "-" * 80)  
+   
     # 포지션 동기화
     sync_position()
     log_position_state()
