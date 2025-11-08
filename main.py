@@ -97,6 +97,8 @@ idle_entry_lock = threading.Lock()
 # =============================================================================
 # 계좌 관련
 account_balance = INITIALBALANCE
+initial_capital = Decimal("0")
+CAPITAL_FILE = "initial_capital.json"  # ★ 저장 파일명
 
 # 포지션 상태
 position_state = {
@@ -144,6 +146,58 @@ last_grid_time = 0
 pending_orders = deque(maxlen=100)
 order_sequence_id = 0
 
+
+# =============================================================================
+# Initial Capital 저장/로드 함수
+# =============================================================================
+def save_initial_capital():
+    """
+    Initial Capital을 파일에 저장
+    """
+    try:
+        data = {
+            "initial_capital": str(initial_capital),
+            "timestamp": time.time(),
+            "symbol": SYMBOL
+        }
+        with open(CAPITAL_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+        log("💾 SAVE", f"Initial Capital saved: {initial_capital:.2f} USDT")
+    except Exception as e:
+        log("❌ SAVE", f"Failed to save capital: {e}")
+
+def load_initial_capital():
+    """
+    파일에서 Initial Capital 로드
+    서버 재시작 시 호출
+    """
+    global initial_capital
+    
+    try:
+        if os.path.exists(CAPITAL_FILE):
+            with open(CAPITAL_FILE, 'r') as f:
+                data = json.load(f)
+            
+            loaded_capital = Decimal(data.get("initial_capital", "0"))
+            saved_symbol = data.get("symbol", "")
+            timestamp = data.get("timestamp", 0)
+            
+            # 심볼이 일치하고, 저장된 자본금이 유효하면 로드
+            if saved_symbol == SYMBOL and loaded_capital > 0:
+                initial_capital = loaded_capital
+                saved_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+                log("📂 LOAD", f"Initial Capital loaded: {initial_capital:.2f} USDT (saved at {saved_time})")
+                return True
+            else:
+                log("⚠️ LOAD", f"Invalid saved data (symbol mismatch or zero capital)")
+                return False
+        else:
+            log("ℹ️ LOAD", "No saved capital file found")
+            return False
+    except Exception as e:
+        log("❌ LOAD", f"Failed to load capital: {e}")
+        return False
+        
 
 # =============================================================================
 # 주문 ID 생성
@@ -1856,78 +1910,63 @@ def idle_monitor():
 
 def periodic_health_check():
     """
-    2분마다 실행되는 헬스 체크 + OBV 기반 TP 동적 조정
-    
-    기능:
-    1. 계좌 잔고 조회 (수동 Total 계산)
-    2. 포지션 동기화
-    3. 주문 상태 확인 (그리드 + TP)
-    4. TP 해시값 검증 (문제 감지 시 갱신)
-    5. OBV MACD 모니터링 (변화 10 이상 시 TP % 재계산)
-    6. 불균형 포지션 자동 진입 (SHORT 익절 → LONG 헤징)
-    7. 단일 포지션 그리드 자동 생성
-    8. 전략 일관성 검증
-    9. 중복/오래된 주문 정리
+    2분마다 실행되는 헬스 체크
     """
-    global last_idle_check, obv_macd_value, tp_gap_min, tp_gap_max, last_adjusted_obv, tp_order_hash, account_balance
+    global last_idle_check, obv_macd_value, tp_gap_min, tp_gap_max, last_adjusted_obv, tp_order_hash, account_balance, initial_capital  # ★ initial_capital 추가
     
     while True:
         try:
-            time.sleep(120)  # 2분 대기
+            time.sleep(120)
             log("💊 HEALTH", "Starting health check...")
             
-            # ★ 1️⃣ 계좌 잔고 조회 (수동 Total 계산)
+            # ★ 계좌 잔고 조회
             try:
-                # Futures Account 조회
                 futures_account = api.list_futures_accounts(SETTLE)
                 
                 if futures_account:
-                    # 각 필드 가져오기
-                    total_str = getattr(futures_account, 'total', None)
                     available_str = getattr(futures_account, 'available', None)
-                    position_margin_str = getattr(futures_account, 'position_margin', None)
-                    order_margin_str = getattr(futures_account, 'order_margin', None)
-                    unrealised_pnl_str = getattr(futures_account, 'unrealised_pnl', None)
                     
-                    # 수동 Total 계산 (Gate.io 공식: total = position_margin + order_margin + available)
-                    if total_str and total_str != "0":
-                        # total 필드가 있고 0이 아니면 사용
-                        balance_dec = Decimal(str(total_str))
-                    else:
-                        # total이 0이거나 없으면 수동 계산
-                        available = Decimal(str(available_str)) if available_str else Decimal("0")
-                        position_margin = Decimal(str(position_margin_str)) if position_margin_str else Decimal("0")
-                        order_margin = Decimal(str(order_margin_str)) if order_margin_str else Decimal("0")
+                    if available_str:
+                        current_available = Decimal(str(available_str))
                         
-                        # Gate.io 공식: total = position_margin + order_margin + available
-                        balance_dec = position_margin + order_margin + available
-                    
-                    if balance_dec > 0:
-                        with balance_lock:
-                            old_balance = account_balance
-                            account_balance = balance_dec
-                        
-                        # 잔고 변경 시에만 로그
-                        if old_balance != account_balance:
-                            log("💰 BALANCE", f"Total: {account_balance:.2f} USDT")
+                        if current_available > 0:
+                            # 포지션 동기화
+                            sync_position()
                             
-                            if available_str:
-                                available_dec = Decimal(str(available_str))
-                                log("💰 AVAILABLE", f"{available_dec:.2f} USDT")
+                            with position_lock:
+                                long_size = position_state[SYMBOL]["long"]["size"]
+                                short_size = position_state[SYMBOL]["short"]["size"]
                             
-                            if unrealised_pnl_str:
-                                pnl_dec = Decimal(str(unrealised_pnl_str))
-                                log("📊 UNREALIZED PNL", f"{pnl_dec:+.2f} USDT")
-                        
-                        # MAX POSITION 계산
-                        max_position = account_balance * MAXPOSITIONRATIO
-                        log("📊 MAX POSITION", f"{max_position:.2f} USDT")
-                    
-            except GateApiException as ex:
-                log("❌ ERROR", f"Balance check failed: {ex.label} - {ex.message}")
-            except Exception as e:
-                log("❌ ERROR", f"Balance check failed: {e}")
+                            # ★ 포지션 없으면 → Initial Capital 갱신
+                            if long_size == 0 and short_size == 0:
+                                with balance_lock:
+                                    old_initial = initial_capital
+                                    initial_capital = current_available
+                                    account_balance = initial_capital
+                                    
+                                # ★ 파일에 저장
+                                save_initial_capital()
+                                
+                                if old_initial != initial_capital and old_initial > 0:
+                                    profit = initial_capital - old_initial
+                                    profit_rate = (profit / old_initial) * 100
+                                    log("💰 BALANCE", f"{account_balance:.2f} USDT (이전: {old_initial:.2f}, 수익: {profit:+.2f}, {profit_rate:+.2f}%)")
+                                else:
+                                    log("💰 BALANCE", f"{account_balance:.2f} USDT (초기 자본금 설정)")
+                            else:
+                                # 포지션 있으면 → 저장된 초기 자본금 사용
+                                with balance_lock:
+                                    account_balance = initial_capital
+                                
+                                log("📊 CURRENT AVAILABLE", f"{current_available:.2f} USDT")
+                            
+                            # MAX POSITION 계산
+                            max_position = account_balance * MAXPOSITIONRATIO
+                            log("📊 MAX POSITION", f"{max_position:.2f} USDT")
             
+            except Exception as e:
+                log("❌ ERROR", f"Balance check: {e}")
+                
             # 2️⃣ 포지션 동기화
             sync_position()
             
@@ -2148,7 +2187,7 @@ def print_startup_summary():
     """
     서버 시작 시 요약 정보 출력 + 계좌 잔고 조회
     """
-    global account_balance
+    global account_balance, initial_capital
     
     # 스타트업 로그
     log("divider", "=" * 80)
@@ -2165,89 +2204,97 @@ def print_startup_summary():
     log("", f"  📈 Max Position: {float(MAXPOSITIONRATIO)*100:.1f}%")
     log("divider", "-" * 80)
     
-    # ★ 계좌 잔고 조회 (올바른 Total 계산)
+    # ★ 저장된 Initial Capital 로드
+    capital_loaded = load_initial_capital()
+    
+    # 계좌 잔고 조회
     try:
         log("💰 BALANCE", "Fetching account balance...")
         
-        # 1. Futures Account 조회
         futures_account = api.list_futures_accounts(SETTLE)
         
         if futures_account:
             available_str = getattr(futures_account, 'available', None)
             unrealised_pnl_str = getattr(futures_account, 'unrealised_pnl', None)
             
-            available = Decimal(str(available_str)) if available_str else Decimal("0")
-            unrealised_pnl = Decimal(str(unrealised_pnl_str)) if unrealised_pnl_str else Decimal("0")
-            
-            # 2. 포지션 조회하여 마진 계산
-            try:
-                positions = api.list_positions(SETTLE)
-                position_margin = Decimal("0")
+            if available_str:
+                current_available = Decimal(str(available_str))
                 
-                for p in positions:
-                    if p.contract == SYMBOL:
-                        # 포지션 마진 = abs(size) * entry_price / leverage
-                        size = abs(Decimal(str(p.size)))
-                        entry_price = abs(Decimal(str(p.entry_price))) if p.entry_price else Decimal("0")
-                        leverage = abs(Decimal(str(p.leverage))) if p.leverage else Decimal("1")
-                        
-                        if size > 0 and entry_price > 0 and leverage > 0:
-                            margin = (size * entry_price) / leverage
-                            position_margin += margin
-                            log("🔍 DEBUG", f"Position: size={size}, entry={entry_price}, lev={leverage}, margin={margin:.2f}")
-                
-                # ★ 올바른 Total 공식: Available + Position Margin
-                # (Available에 이미 PNL이 반영되어 있음!)
-                balance_dec = available + position_margin
-                
-                if balance_dec > 0:
-                    with balance_lock:
-                        account_balance = balance_dec
+                if current_available > 0:
+                    # 포지션 동기화
+                    sync_position()
                     
-                    log("💰 BALANCE", f"Total: {account_balance:.2f} USDT")
-                    log("💰 AVAILABLE", f"{available:.2f} USDT (PNL 반영됨)")
-                    log("📊 POSITION MARGIN", f"{position_margin:.2f} USDT")
-                    log("📊 UNREALIZED PNL", f"{unrealised_pnl:+.2f} USDT (참고용)")
+                    with position_lock:
+                        long_size = position_state[SYMBOL]["long"]["size"]
+                        short_size = position_state[SYMBOL]["short"]["size"]
+                    
+                    # ★ 포지션 없으면 → Initial Capital 갱신
+                    if long_size == 0 and short_size == 0:
+                        with balance_lock:
+                            old_capital = initial_capital
+                            initial_capital = current_available
+                            account_balance = initial_capital
+                        
+                        # 파일에 저장
+                        save_initial_capital()
+                        
+                        if old_capital > 0 and old_capital != initial_capital:
+                            profit = initial_capital - old_capital
+                            profit_rate = (profit / old_capital) * 100
+                            log("🔄 INIT CAPITAL", f"{initial_capital:.2f} USDT (이전: {old_capital:.2f}, 수익: {profit:+.2f}, {profit_rate:+.2f}%)")
+                        else:
+                            log("🔄 INIT CAPITAL", f"{initial_capital:.2f} USDT (포지션 없음 → 갱신)")
+                    else:
+                        # 포지션 있으면 → 로드된 Initial Capital 사용
+                        if capital_loaded and initial_capital > 0:
+                            with balance_lock:
+                                account_balance = initial_capital
+                            log("💰 BALANCE", f"{account_balance:.2f} USDT (저장된 초기 자본금)")
+                            log("📊 CURRENT AVAILABLE", f"{current_available:.2f} USDT")
+                        else:
+                            # 저장된 자본금이 없으면 → 현재 Available 사용 (최초 시작)
+                            with balance_lock:
+                                initial_capital = current_available
+                                account_balance = initial_capital
+                            
+                            # 파일에 저장
+                            save_initial_capital()
+                            log("🔄 INIT CAPITAL", f"{initial_capital:.2f} USDT (첫 설정)")
+                    
+                    # Unrealized PNL 표시
+                    if unrealised_pnl_str:
+                        pnl_dec = Decimal(str(unrealised_pnl_str))
+                        log("📊 UNREALIZED PNL", f"{pnl_dec:+.2f} USDT")
                     
                     # MAX POSITION 계산
                     max_position = account_balance * MAXPOSITIONRATIO
                     log("📊 MAX POSITION", f"{max_position:.2f} USDT")
                 else:
-                    log("⚠️ WARNING", f"Calculated balance is 0. Using default {INITIALBALANCE} USDT")
+                    log("⚠️ WARNING", f"Balance is 0. Using default {INITIALBALANCE} USDT")
                     with balance_lock:
                         account_balance = INITIALBALANCE
-            
-            except Exception as e:
-                log("❌ ERROR", f"Position calculation error: {e}")
-                # Fallback: Available만 사용
-                if available > 0:
-                    with balance_lock:
-                        account_balance = available
-                    log("💰 BALANCE", f"{account_balance:.2f} USDT (Available only)")
-                else:
-                    with balance_lock:
-                        account_balance = INITIALBALANCE
+                        initial_capital = INITIALBALANCE
+            else:
+                log("❌ ERROR", "Available field not found")
+                with balance_lock:
+                    account_balance = INITIALBALANCE
+                    initial_capital = INITIALBALANCE
         else:
             log("❌ ERROR", "Could not fetch Futures Account")
             with balance_lock:
                 account_balance = INITIALBALANCE
+                initial_capital = INITIALBALANCE
     
     except Exception as e:
         log("❌ ERROR", f"Balance check failed: {e}")
         with balance_lock:
             account_balance = INITIALBALANCE
+            initial_capital = INITIALBALANCE
     
     log("divider", "-" * 80)
-         
-    # 포지션 동기화
-    sync_position()
-    log_position_state()
     
-    # 포지션 동기화
-    sync_position()
-    log_position_state()
-    
-    log("divider", "-" * 80)
+    # ... 나머지 동일
+
     
     # 현재 가격 조회 및 초기 그리드 생성
     try:
