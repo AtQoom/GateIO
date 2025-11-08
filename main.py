@@ -50,9 +50,9 @@ BASE_RATIO = Decimal("0.02")                 # 기본 수량 비율 (2%)
 MAX_POSITION_RATIO = Decimal("3.0")          # 최대 포지션 비율 (3배)
 HEDGE_RATIO_MAIN = Decimal("0.10")           # 주력 헤지 비율 (10%)
 
-# TP 설정 (동적 TP)
-TP_MIN = Decimal("0.0019")                   # 최소 TP (0.19%)
-TP_MAX = Decimal("0.004")                    # 최대 TP (0.4%)
+# TP 설정 (동적 TP) ← 이 부분 추가
+TPMIN = Decimal("0.0019")                   # 최소 TP (0.19%)
+TPMAX = Decimal("0.004")                    # 최대 TP (0.4%)
 
 # 시간 설정
 IDLE_TIME_SECONDS = 600                      # 아이들 감지 시간 (10분)
