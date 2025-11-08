@@ -441,7 +441,7 @@ def get_obv_macd_value():
 # =============================================================================
 def update_balance_thread():
     global accountbalance
-    accountbalance = INITIAL_BALANCE
+    accountbalance = INITIALBALANCE
     firstrun = True
     
     while True:
@@ -458,30 +458,31 @@ def update_balance_thread():
                     if oldbalance != accountbalance:
                         log("BALANCE", f"Updated: {oldbalance:.2f} → {accountbalance:.2f} USDT (Unified Total)")
                 else:
-                    # Unified Account total 없으면 Futures Account의 total 사용
-                    futures_accounts = api.list_futures_accounts(SETTLE)
-                    if futures_accounts:
+                    # Futures Account 조회
+                    futures_account = api.list_futures_accounts(SETTLE)
+                    if futures_account:
                         oldbalance = accountbalance
                         
-                        # total 필드 우선 사용 (총 자본 = 잔고 + 미실현 손익)
-                        if hasattr(futures_accounts, 'total') and futures_accounts.total:
-                            accountbalance = Decimal(str(futures_accounts.total))
-                        elif hasattr(futures_accounts, 'available') and futures_accounts.available:
-                            # total이 없으면 available 사용 (하위 호환)
-                            accountbalance = Decimal(str(futures_accounts.available))
-                        
-                        if oldbalance != accountbalance:
+                        # total 속성 확인 (총 자본)
+                        if hasattr(futures_account, 'total'):
+                            accountbalance = Decimal(str(futures_account.total))
                             log("BALANCE", f"Futures Total: {oldbalance:.2f} → {accountbalance:.2f} USDT")
+                        elif hasattr(futures_account, 'available'):
+                            accountbalance = Decimal(str(futures_account.available))
+                            log("BALANCE", f"Futures Available: {oldbalance:.2f} → {accountbalance:.2f} USDT")
+                        else:
+                            log("BALANCE", "Could not fetch balance fields")
+                            
             except Exception as e:
-                log("⚠️", f"Balance fetch error: {e}")
+                log("", f"Balance fetch error: {e}")
                 
         except GateApiException as e:
-            log("⚠️", f"Balance update: API error - {e}")
+            log("", f"Balance update API error - {e}")
             time.sleep(60)
         except Exception as e:
-            log("❌", f"Balance update error: {e}")
+            log("", f"Balance update error: {e}")
             time.sleep(60)
-
+            
 
 # =============================================================================
 # 캔들 데이터 수집
@@ -2169,15 +2170,14 @@ def print_startup_summary():
             accountbalance = Decimal(str(accounts.total))
             log("BALANCE", f"{accountbalance:.2f} USDT (Unified Total)")
         else:
-            futures_accounts = api.list_futures_accounts(SETTLE)
-            if futures_accounts:
+            futures_account = api.list_futures_accounts(SETTLE)
+            if futures_account:
                 # total 필드 우선 사용 (총 자본)
-                if hasattr(futures_accounts, 'total') and futures_accounts.total:
-                    accountbalance = Decimal(str(futures_accounts.total))
+                if hasattr(futures_account, 'total'):
+                    accountbalance = Decimal(str(futures_account.total))
                     log("BALANCE", f"{accountbalance:.2f} USDT (Futures Total)")
-                elif hasattr(futures_accounts, 'available') and futures_accounts.available:
-                    # total이 없으면 available 사용
-                    accountbalance = Decimal(str(futures_accounts.available))
+                elif hasattr(futures_account, 'available'):
+                    accountbalance = Decimal(str(futures_account.available))
                     log("BALANCE", f"{accountbalance:.2f} USDT (Futures Available)")
                 else:
                     log("BALANCE", "Could not fetch - using default 50 USDT")
@@ -2186,10 +2186,9 @@ def print_startup_summary():
     
         log("MAX POSITION", f"{accountbalance * MAXPOSITIONRATIO:.2f} USDT")
 
-
     except Exception as e:
-        log("❌ ERROR", f"Balance check failed: {e}")
-        log("⚠️ WARNING", "Using default balance: 50 USDT")
+        log("ERROR", f"Balance check failed: {e}")
+        log("WARNING", "Using default balance 50 USDT")
     
     log_divider("-")
     
