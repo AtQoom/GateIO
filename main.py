@@ -2165,7 +2165,7 @@ def print_startup_summary():
     log("", f"  📈 Max Position: {float(MAXPOSITIONRATIO)*100:.1f}%")
     log("divider", "-" * 80)
     
-    # ★ 계좌 잔고 조회 (포지션 가치 포함 Total 계산)
+    # ★ 계좌 잔고 조회 (올바른 Total 계산)
     try:
         log("💰 BALANCE", "Fetching account balance...")
         
@@ -2182,30 +2182,32 @@ def print_startup_summary():
             # 2. 포지션 조회하여 마진 계산
             try:
                 positions = api.list_positions(SETTLE)
-                position_value = Decimal("0")
+                position_margin = Decimal("0")
                 
                 for p in positions:
                     if p.contract == SYMBOL:
-                        # 포지션 마진 = size * entry_price / leverage
+                        # 포지션 마진 = abs(size) * entry_price / leverage
                         size = abs(Decimal(str(p.size)))
-                        entry_price = Decimal(str(p.entry_price)) if p.entry_price else Decimal("0")
-                        leverage = Decimal(str(p.leverage)) if p.leverage else Decimal("1")
+                        entry_price = abs(Decimal(str(p.entry_price))) if p.entry_price else Decimal("0")
+                        leverage = abs(Decimal(str(p.leverage))) if p.leverage else Decimal("1")
                         
                         if size > 0 and entry_price > 0 and leverage > 0:
                             margin = (size * entry_price) / leverage
-                            position_value += margin
+                            position_margin += margin
+                            log("🔍 DEBUG", f"Position: size={size}, entry={entry_price}, lev={leverage}, margin={margin:.2f}")
                 
-                # Total = Available + Position Margin + Unrealized PNL
-                balance_dec = available + position_value + unrealised_pnl
+                # ★ 올바른 Total 공식: Available + Position Margin
+                # (Available에 이미 PNL이 반영되어 있음!)
+                balance_dec = available + position_margin
                 
                 if balance_dec > 0:
                     with balance_lock:
                         account_balance = balance_dec
                     
                     log("💰 BALANCE", f"Total: {account_balance:.2f} USDT")
-                    log("💰 AVAILABLE", f"{available:.2f} USDT")
-                    log("📊 POSITION VALUE", f"{position_value:.2f} USDT")
-                    log("📊 UNREALIZED PNL", f"{unrealised_pnl:+.2f} USDT")
+                    log("💰 AVAILABLE", f"{available:.2f} USDT (PNL 반영됨)")
+                    log("📊 POSITION MARGIN", f"{position_margin:.2f} USDT")
+                    log("📊 UNREALIZED PNL", f"{unrealised_pnl:+.2f} USDT (참고용)")
                     
                     # MAX POSITION 계산
                     max_position = account_balance * MAXPOSITIONRATIO
