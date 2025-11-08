@@ -2165,69 +2165,71 @@ def print_startup_summary():
     log("", f"  📈 Max Position: {float(MAXPOSITIONRATIO)*100:.1f}%")
     log("divider", "-" * 80)
     
-    # ★ 계좌 잔고 조회 (수동 Total 계산)
+    # ★ 계좌 잔고 조회 (포지션 가치 포함 Total 계산)
     try:
         log("💰 BALANCE", "Fetching account balance...")
         
-        # Futures Account 조회
+        # 1. Futures Account 조회
         futures_account = api.list_futures_accounts(SETTLE)
         
         if futures_account:
-            # 각 필드 가져오기
-            total_str = getattr(futures_account, 'total', None)
             available_str = getattr(futures_account, 'available', None)
-            position_margin_str = getattr(futures_account, 'position_margin', None)
-            order_margin_str = getattr(futures_account, 'order_margin', None)
             unrealised_pnl_str = getattr(futures_account, 'unrealised_pnl', None)
             
-            # 수동 Total 계산 (Gate.io 공식: total = position_margin + order_margin + available)
-            if total_str and total_str != "0":
-                # total 필드가 있고 0이 아니면 사용
-                balance_dec = Decimal(str(total_str))
-            else:
-                # total이 0이거나 없으면 수동 계산
-                log("ℹ️ INFO", "Total is 0 or missing. Calculating manually...")
-                
-                available = Decimal(str(available_str)) if available_str else Decimal("0")
-                position_margin = Decimal(str(position_margin_str)) if position_margin_str else Decimal("0")
-                order_margin = Decimal(str(order_margin_str)) if order_margin_str else Decimal("0")
-                
-                # Gate.io 공식: total = position_margin + order_margin + available
-                balance_dec = position_margin + order_margin + available
-                
-                log("🔢 CALC", f"Calculated Total = {position_margin:.2f} (position) + {order_margin:.2f} (order) + {available:.2f} (available)")
+            available = Decimal(str(available_str)) if available_str else Decimal("0")
+            unrealised_pnl = Decimal(str(unrealised_pnl_str)) if unrealised_pnl_str else Decimal("0")
             
-            if balance_dec > 0:
-                with balance_lock:
-                    account_balance = balance_dec
+            # 2. 포지션 조회하여 마진 계산
+            try:
+                positions = api.list_positions(SETTLE)
+                position_value = Decimal("0")
                 
-                # 상세 로그
-                log("💰 BALANCE", f"Total: {account_balance:.2f} USDT")
+                for p in positions:
+                    if p.contract == SYMBOL:
+                        # 포지션 마진 = size * entry_price / leverage
+                        size = abs(Decimal(str(p.size)))
+                        entry_price = Decimal(str(p.entry_price)) if p.entry_price else Decimal("0")
+                        leverage = Decimal(str(p.leverage)) if p.leverage else Decimal("1")
+                        
+                        if size > 0 and entry_price > 0 and leverage > 0:
+                            margin = (size * entry_price) / leverage
+                            position_value += margin
                 
-                if available_str:
-                    available_dec = Decimal(str(available_str))
-                    log("💰 AVAILABLE", f"{available_dec:.2f} USDT")
+                # Total = Available + Position Margin + Unrealized PNL
+                balance_dec = available + position_value + unrealised_pnl
                 
-                if unrealised_pnl_str:
-                    pnl_dec = Decimal(str(unrealised_pnl_str))
-                    log("📊 UNREALIZED PNL", f"{pnl_dec:+.2f} USDT")
-                
-                # MAX POSITION 계산
-                max_position = account_balance * MAXPOSITIONRATIO
-                log("📊 MAX POSITION", f"{max_position:.2f} USDT")
-            else:
-                log("⚠️ WARNING", f"Calculated balance is 0. Using default {INITIALBALANCE} USDT")
-                with balance_lock:
-                    account_balance = INITIALBALANCE
+                if balance_dec > 0:
+                    with balance_lock:
+                        account_balance = balance_dec
+                    
+                    log("💰 BALANCE", f"Total: {account_balance:.2f} USDT")
+                    log("💰 AVAILABLE", f"{available:.2f} USDT")
+                    log("📊 POSITION VALUE", f"{position_value:.2f} USDT")
+                    log("📊 UNREALIZED PNL", f"{unrealised_pnl:+.2f} USDT")
+                    
+                    # MAX POSITION 계산
+                    max_position = account_balance * MAXPOSITIONRATIO
+                    log("📊 MAX POSITION", f"{max_position:.2f} USDT")
+                else:
+                    log("⚠️ WARNING", f"Calculated balance is 0. Using default {INITIALBALANCE} USDT")
+                    with balance_lock:
+                        account_balance = INITIALBALANCE
+            
+            except Exception as e:
+                log("❌ ERROR", f"Position calculation error: {e}")
+                # Fallback: Available만 사용
+                if available > 0:
+                    with balance_lock:
+                        account_balance = available
+                    log("💰 BALANCE", f"{account_balance:.2f} USDT (Available only)")
+                else:
+                    with balance_lock:
+                        account_balance = INITIALBALANCE
         else:
             log("❌ ERROR", "Could not fetch Futures Account")
             with balance_lock:
                 account_balance = INITIALBALANCE
     
-    except GateApiException as ex:
-        log("❌ ERROR", f"Gate API Error: {ex.label} - {ex.message}")
-        with balance_lock:
-            account_balance = INITIALBALANCE
     except Exception as e:
         log("❌ ERROR", f"Balance check failed: {e}")
         with balance_lock:
