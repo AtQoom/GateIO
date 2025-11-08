@@ -441,7 +441,7 @@ def get_obv_macd_value():
 # =============================================================================
 def update_balance_thread():
     global accountbalance
-    accountbalance = INITIALBALANCE
+    accountbalance = INITIAL_BALANCE
     firstrun = True
     
     while True:
