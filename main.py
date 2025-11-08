@@ -1865,42 +1865,48 @@ def periodic_health_check():
             time.sleep(120)  # 2분 대기
             log("💊 HEALTH", "Starting health check...")
             
-            # ★ 계좌 잔고 조회 (Unified Account) - 수정됨!
+            # ★ 계좌 잔고 조회 (Unified Account)
             try:
-                # Unified Account 조회 (list_unified_accounts 사용)
-                unified_accounts = unified_api.list_unified_accounts()
+                # Unified Account 조회
+                unified_account = unified_api.list_unified_accounts()
                 
-                if unified_accounts:
-                    if hasattr(unified_accounts, 'total'):
-                        total_value = unified_accounts.total
-                        if total_value:
-                            balance_dec = Decimal(str(total_value))
+                if unified_account:
+                    # total 필드 확인
+                    total_str = getattr(unified_account, 'total', None)
+                    
+                    if total_str and total_str != "0":
+                        balance_dec = Decimal(str(total_str))
+                        if balance_dec > 0:
+                            with balance_lock:
+                                old_balance = account_balance
+                                account_balance = balance_dec
+                            
+                            if old_balance != account_balance:
+                                log("💰 BALANCE", f"{account_balance:.2f} USDT (Unified Total)")
+                            
+                            max_position = account_balance * MAXPOSITIONRATIO
+                            log("📊 MAX POSITION", f"{max_position:.2f} USDT")
+                        else:
+                            log("⚠️ WARNING", "Balance is 0")
+                    else:
+                        # total이 None → available 체크
+                        available_str = getattr(unified_account, 'available', None)
+                        if available_str and available_str != "0":
+                            balance_dec = Decimal(str(available_str))
                             if balance_dec > 0:
                                 with balance_lock:
-                                    old_balance = account_balance
                                     account_balance = balance_dec
+                                log("💰 BALANCE", f"{account_balance:.2f} USDT (Available)")
                                 
-                                if old_balance != account_balance:
-                                    log("💰 BALANCE", f"{account_balance:.2f} USDT (Unified Total)")
-                                
-                                # MAX POSITION 계산
                                 max_position = account_balance * MAXPOSITIONRATIO
                                 log("📊 MAX POSITION", f"{max_position:.2f} USDT")
-                            else:
-                                log("⚠️ WARNING", "Unified Account balance is 0")
-                    else:
-                        log("⚠️ WARNING", "Unified Account missing 'total' field")
                 else:
                     log("⚠️ WARNING", "Could not fetch Unified Account")
                         
-            except GateApiException as e:
-                log("❌ ERROR", f"Balance check failed: {e.label} - {e.message}")
-                with balance_lock:
-                    log("⚠️ WARNING", f"Using current balance {account_balance:.2f} USDT")
+            except GateApiException as ex:
+                log("❌ ERROR", f"Balance check failed: {ex.label} - {ex.message}")
             except Exception as e:
                 log("❌ ERROR", f"Balance check failed: {e}")
-                with balance_lock:
-                    log("⚠️ WARNING", f"Using current balance {account_balance:.2f} USDT")
             
             # 2️⃣ 포지션 동기화
             sync_position()
@@ -2139,46 +2145,61 @@ def print_startup_summary():
     log("", f"  📈 Max Position: {float(MAXPOSITIONRATIO)*100:.1f}%")
     log("divider", "-" * 80)
     
-    # ★ 계좌 잔고 조회 (Unified Account) - 수정됨!
+    # ★ 계좌 잔고 조회 (Unified Account) - 완전 수정
     try:
         log("💰 BALANCE", "Fetching account balance...")
         
-        # Unified Account 조회 (list_unified_accounts 사용)
-        unified_accounts = unified_api.list_unified_accounts()
+        # Unified Account 조회 (파라미터 없이 전체 계좌 조회)
+        unified_account = unified_api.list_unified_accounts()
         
-        if unified_accounts:
-            # UnifiedAccount 객체에서 total 필드 접근
-            if hasattr(unified_accounts, 'total'):
-                total_value = unified_accounts.total
-                if total_value:
-                    balance_dec = Decimal(str(total_value))
-                    if balance_dec > 0:
-                        with balance_lock:
-                            account_balance = balance_dec
-                        log("💰 BALANCE", f"{account_balance:.2f} USDT (Unified Total)")
-                        
-                        # MAX POSITION 계산
-                        max_position = account_balance * MAXPOSITIONRATIO
-                        log("📊 MAX POSITION", f"{max_position:.2f} USDT")
-                    else:
-                        log("⚠️ WARNING", "Balance is 0 - Please deposit funds to Unified Account")
-                        with balance_lock:
-                            account_balance = INITIALBALANCE
+        # UnifiedAccount 객체 확인
+        if unified_account:
+            # total 필드 확인
+            total_str = getattr(unified_account, 'total', None)
+            
+            if total_str and total_str != "0":
+                balance_dec = Decimal(str(total_str))
+                if balance_dec > 0:
+                    with balance_lock:
+                        account_balance = balance_dec
+                    log("💰 BALANCE", f"{account_balance:.2f} USDT (Unified Total)")
+                    
+                    # MAX POSITION 계산
+                    max_position = account_balance * MAXPOSITIONRATIO
+                    log("📊 MAX POSITION", f"{max_position:.2f} USDT")
                 else:
-                    log("⚠️ WARNING", "Total field is None")
+                    log("⚠️ WARNING", f"Balance is 0. Using default {INITIALBALANCE} USDT")
                     with balance_lock:
                         account_balance = INITIALBALANCE
             else:
-                log("❌ ERROR", "Unified Account missing 'total' field")
-                with balance_lock:
-                    account_balance = INITIALBALANCE
+                # total이 None이거나 "0"인 경우 → available 체크
+                log("ℹ️ INFO", "Total field is None or 0. Checking available...")
+                
+                available_str = getattr(unified_account, 'available', None)
+                if available_str and available_str != "0":
+                    balance_dec = Decimal(str(available_str))
+                    if balance_dec > 0:
+                        with balance_lock:
+                            account_balance = balance_dec
+                        log("💰 BALANCE", f"{account_balance:.2f} USDT (Unified Available)")
+                        
+                        max_position = account_balance * MAXPOSITIONRATIO
+                        log("📊 MAX POSITION", f"{max_position:.2f} USDT")
+                    else:
+                        log("⚠️ WARNING", f"Available is 0. Using default {INITIALBALANCE} USDT")
+                        with balance_lock:
+                            account_balance = INITIALBALANCE
+                else:
+                    log("⚠️ WARNING", f"No balance found. Using default {INITIALBALANCE} USDT")
+                    with balance_lock:
+                        account_balance = INITIALBALANCE
         else:
             log("❌ ERROR", "Could not fetch Unified Account")
             with balance_lock:
                 account_balance = INITIALBALANCE
     
-    except GateApiException as e:
-        log("❌ ERROR", f"Gate API Error: {e.label} - {e.message}")
+    except GateApiException as ex:
+        log("❌ ERROR", f"Gate API Error: {ex.label} - {ex.message}")
         with balance_lock:
             account_balance = INITIALBALANCE
     except Exception as e:
@@ -2186,8 +2207,8 @@ def print_startup_summary():
         with balance_lock:
             account_balance = INITIALBALANCE
     
-    log("divider", "-" * 80)  
-   
+    log("divider", "-" * 80)
+    
     # 포지션 동기화
     sync_position()
     log_position_state()
