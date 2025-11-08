@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# 환경 변수
+# 환경 변수 (Environment Variables)
 # =============================================================================
 API_KEY = os.environ.get("API_KEY", "")
 API_SECRET = os.environ.get("API_SECRET", "")
@@ -42,31 +42,35 @@ else:
 
 
 # =============================================================================
-# Lock (중복 방지)
+# 전략 설정 (Strategy Configuration)
 # =============================================================================
-initialize_grid_lock = threading.Lock()
-refresh_tp_lock = threading.Lock()
-hedge_lock = threading.Lock()
+# 기본 비율 설정
+INITIAL_BALANCE = Decimal("50")              # 초기 잔고
+BASE_RATIO = Decimal("0.02")                 # 기본 수량 비율 (2%)
+MAX_POSITION_RATIO = Decimal("3.0")          # 최대 포지션 비율 (3배)
+HEDGE_RATIO_MAIN = Decimal("0.10")           # 주력 헤지 비율 (10%)
 
-# =============================================================================
 # TP 설정 (동적 TP)
-# =============================================================================
-# ✅ 동적 TP 기본 범위
-TP_MIN = Decimal("0.0019")        # 0.19% (최소)
-TP_MAX = Decimal("0.004")        # 0.4% (최대)
+TP_MIN = Decimal("0.0019")                   # 최소 TP (0.19%)
+TP_MAX = Decimal("0.004")                    # 최대 TP (0.4%)
 
-# ✅ 기본 설정들
-BASE_RATIO = Decimal("0.02")       # 기본 수량 비율
-MAX_POSITION_RATIO = Decimal("3.0")    # 최대 3배
-HEDGE_RATIO_MAIN = Decimal("0.10")     # 주력 10%
-IDLE_TIME_SECONDS = 600  # 10분 (아이들 감지 시간)
-last_idle_check = 0 
+# 시간 설정
+IDLE_TIME_SECONDS = 600                      # 아이들 감지 시간 (10분)
+IDLE_TIMEOUT = 600                           # 아이들 타임아웃 (10분)
+IDLE_ENTRY_COOLDOWN = 10                     # 아이들 진입 쿨다운 (10초)
+
+# 임계값 설정
+OBV_CHANGE_THRESHOLD = Decimal("0.05")       # OBV 변화 임계값 (5%)
+TP_CHANGE_THRESHOLD = Decimal("0.01")        # TP 변화 임계값 (0.01%)
+
+# 기능 플래그
+ENABLE_AUTO_HEDGE = True                     # 자동 헤지 활성화
+
 
 # =============================================================================
-# API 설정
+# API 클라이언트 설정 (API Client Configuration)
 # =============================================================================
 config = Configuration(key=API_KEY, secret=API_SECRET)
-# Host 명시적 설정 및 검증 비활성화
 config.host = "https://api.gateio.ws/api/v4"
 config.verify_ssl = True
 api_client = ApiClient(config)
@@ -75,61 +79,70 @@ unified_api = UnifiedApi(api_client)
 
 app = Flask(__name__)
 
+
 # =============================================================================
-# 전역 변수
+# 스레드 동기화 (Thread Locks)
 # =============================================================================
-INITIAL_BALANCE = Decimal("50")
 balance_lock = threading.Lock()
 position_lock = threading.Lock()
-idle_entry_in_progress = False
+initialize_grid_lock = threading.Lock()
+refresh_tp_lock = threading.Lock()
+hedge_lock = threading.Lock()
 idle_entry_progress_lock = threading.Lock()
-last_idle_entry_time = 0
-IDLE_ENTRY_COOLDOWN = 10  # 10초 최소 간격
-pending_orders = deque(maxlen=100)
-order_sequence_id = 0
-last_adjusted_obv = 0  # 마지막 TP 조정 시 OBV 값
-OBV_CHANGE_THRESHOLD = Decimal("0.05")  # OBV 0.05 이상 변화시만 갱신
-TP_CHANGE_THRESHOLD = Decimal("0.01")  # 0.01% 이상 차이만 갱신
+idle_entry_lock = threading.Lock()
 
+
+# =============================================================================
+# 전역 상태 변수 (Global State Variables)
+# =============================================================================
+# 계좌 관련
+account_balance = INITIAL_BALANCE
+
+# 포지션 상태
 position_state = {
     SYMBOL: {
-        "long": {"size": Decimal("0"), "entry_price": Decimal("0")},  # ← 변경!
-        "short": {"size": Decimal("0"), "entry_price": Decimal("0")}  # ← 변경!
+        "long": {"size": Decimal("0"), "entry_price": Decimal("0")},
+        "short": {"size": Decimal("0"), "entry_price": Decimal("0")}
     }
 }
 
-# ✅ 추가: 현재 TP 범위 (동적으로 변경됨!)
+# TP 관련
 tp_gap_min = TP_MIN
 tp_gap_max = TP_MAX
-tp_gap_long = TP_MIN      # ← 신규
-tp_gap_short = TP_MIN     # ← 신규
+tp_gap_long = TP_MIN
+tp_gap_short = TP_MIN
 last_tp_hash = ""
+last_adjusted_obv = 0
+tp_order_hash = {}
 
 # 평단 TP 주문 ID
 average_tp_orders = {
     SYMBOL: {"long": None, "short": None}
 }
 
-# 최대 보유 한도 잠금
-max_position_locked = {"long": False, "short": False}
-
 # 그리드 주문 추적
 grid_orders = {SYMBOL: {"long": [], "short": []}}
 
-# OBV MACD 값 (자체 계산)
-obv_macd_value = Decimal("0")
-last_grid_time = 0
+# 최대 포지션 잠금
+max_position_locked = {"long": False, "short": False}
 
-# OBV MACD 계산용 히스토리
+# OBV MACD 관련
+obv_macd_value = Decimal("0")
 kline_history = deque(maxlen=200)
 
-account_balance = INITIAL_BALANCE  # 추가
-ENABLE_AUTO_HEDGE = True
-last_event_time = 0  # 마지막 이벤트 시간 (그리드 체결 또는 TP 체결)
-IDLE_TIMEOUT = 600  # 10분 (초 단위)
-idle_entry_count = 0  # 아이들 진입 횟수 ← 추가
-tp_order_hash = {}  # {SYMBOL: hash_value}
-idle_entry_lock = threading.Lock()
+# 아이들 진입 관련
+idle_entry_in_progress = False
+last_idle_entry_time = 0
+last_idle_check = 0
+idle_entry_count = 0
+
+# 이벤트 타임 트래킹
+last_event_time = 0
+last_grid_time = 0
+
+# 주문 관련
+pending_orders = deque(maxlen=100)
+order_sequence_id = 0
 
 
 # =============================================================================
@@ -451,6 +464,7 @@ def update_balance_thread():
             firstrun = False
             
             try:
+                # Unified Account 시도
                 accounts = unified_api.list_unified_accounts()
                 if accounts and hasattr(accounts, 'total') and accounts.total:
                     oldbalance = accountbalance
@@ -464,14 +478,21 @@ def update_balance_thread():
                         oldbalance = accountbalance
                         
                         # total 속성 확인 (총 자본)
-                        if hasattr(futures_account, 'total'):
-                            accountbalance = Decimal(str(futures_account.total))
-                            log("BALANCE", f"Futures Total: {oldbalance:.2f} → {accountbalance:.2f} USDT")
-                        elif hasattr(futures_account, 'available'):
-                            accountbalance = Decimal(str(futures_account.available))
-                            log("BALANCE", f"Futures Available: {oldbalance:.2f} → {accountbalance:.2f} USDT")
-                        else:
-                            log("BALANCE", "Could not fetch balance fields")
+                        try:
+                            total_value = getattr(futures_account, 'total', None)
+                            if total_value and total_value != "0":
+                                accountbalance = Decimal(str(total_value))
+                                log("BALANCE", f"Futures Total: {oldbalance:.2f} → {accountbalance:.2f} USDT")
+                            else:
+                                # available 속성 확인 (가용 자금)
+                                available_value = getattr(futures_account, 'available', None)
+                                if available_value and available_value != "0":
+                                    accountbalance = Decimal(str(available_value))
+                                    log("BALANCE", f"Futures Available: {oldbalance:.2f} → {accountbalance:.2f} USDT")
+                                else:
+                                    log("BALANCE", f"No valid balance found. Using default {INITIALBALANCE} USDT")
+                        except Exception as attr_error:
+                            log("BALANCE", f"Attribute access error: {attr_error}")
                             
             except Exception as e:
                 log("", f"Balance fetch error: {e}")
@@ -2165,30 +2186,39 @@ def print_startup_summary():
     
     # 초기 잔고 조회
     try:
+        # Unified Account 조회
         accounts = unified_api.list_unified_accounts()
         if accounts and hasattr(accounts, 'total') and accounts.total:
             accountbalance = Decimal(str(accounts.total))
             log("BALANCE", f"{accountbalance:.2f} USDT (Unified Total)")
         else:
+            # Futures Account 조회
             futures_account = api.list_futures_accounts(SETTLE)
             if futures_account:
-                # total 필드 우선 사용 (총 자본)
-                if hasattr(futures_account, 'total'):
-                    accountbalance = Decimal(str(futures_account.total))
-                    log("BALANCE", f"{accountbalance:.2f} USDT (Futures Total)")
-                elif hasattr(futures_account, 'available'):
-                    accountbalance = Decimal(str(futures_account.available))
-                    log("BALANCE", f"{accountbalance:.2f} USDT (Futures Available)")
-                else:
-                    log("BALANCE", "Could not fetch - using default 50 USDT")
+                # total 속성 우선 (총 자본)
+                try:
+                    total_value = getattr(futures_account, 'total', None)
+                    if total_value and total_value != "0":
+                        accountbalance = Decimal(str(total_value))
+                        log("BALANCE", f"{accountbalance:.2f} USDT (Futures Total)")
+                    else:
+                        # available 속성 (가용 자금)
+                        available_value = getattr(futures_account, 'available', None)
+                        if available_value and available_value != "0":
+                            accountbalance = Decimal(str(available_value))
+                            log("BALANCE", f"{accountbalance:.2f} USDT (Futures Available)")
+                        else:
+                            log("BALANCE", f"Could not fetch - using default {INITIALBALANCE} USDT")
+                except Exception as e:
+                    log("BALANCE", f"Attribute error: {e}. Using default {INITIALBALANCE} USDT")
             else:
-                log("BALANCE", "Could not fetch - using default 50 USDT")
+                log("BALANCE", f"Could not fetch - using default {INITIALBALANCE} USDT")
     
         log("MAX POSITION", f"{accountbalance * MAXPOSITIONRATIO:.2f} USDT")
 
     except Exception as e:
         log("ERROR", f"Balance check failed: {e}")
-        log("WARNING", "Using default balance 50 USDT")
+        log("WARNING", f"Using default balance {INITIALBALANCE} USDT")
     
     log_divider("-")
     
