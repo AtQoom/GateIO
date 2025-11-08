@@ -1856,60 +1856,78 @@ def idle_monitor():
 
 def periodic_health_check():
     """
-    2분마다 실행되는 헬스 체크
+    2분마다 실행되는 헬스 체크 + OBV 기반 TP 동적 조정
+    
+    기능:
+    1. 계좌 잔고 조회 (수동 Total 계산)
+    2. 포지션 동기화
+    3. 주문 상태 확인 (그리드 + TP)
+    4. TP 해시값 검증 (문제 감지 시 갱신)
+    5. OBV MACD 모니터링 (변화 10 이상 시 TP % 재계산)
+    6. 불균형 포지션 자동 진입 (SHORT 익절 → LONG 헤징)
+    7. 단일 포지션 그리드 자동 생성
+    8. 전략 일관성 검증
+    9. 중복/오래된 주문 정리
     """
     global last_idle_check, obv_macd_value, tp_gap_min, tp_gap_max, last_adjusted_obv, tp_order_hash, account_balance
     
     while True:
         try:
-            time.sleep(120)
+            time.sleep(120)  # 2분 대기
             log("💊 HEALTH", "Starting health check...")
             
-            # 계좌 잔고 조회
+            # ★ 1️⃣ 계좌 잔고 조회 (수동 Total 계산)
             try:
-                # 방법 1: Unified Account (USDT)
-                try:
-                    unified_account = unified_api.list_unified_accounts(currency="USDT")
-                    
-                    if unified_account and len(unified_account) > 0:
-                        usdt_account = unified_account[0]
-                        available_str = getattr(usdt_account, 'available', None)
-                        
-                        if available_str:
-                            balance_dec = Decimal(str(available_str))
-                            if balance_dec > 0:
-                                with balance_lock:
-                                    old_balance = account_balance
-                                    account_balance = balance_dec
-                                
-                                if old_balance != account_balance:
-                                    log("💰 BALANCE", f"{account_balance:.2f} USDT")
-                                
-                                max_position = account_balance * MAXPOSITIONRATIO
-                                log("📊 MAX POSITION", f"{max_position:.2f} USDT")
-                        else:
-                            raise ValueError("No available balance")
-                    else:
-                        raise ValueError("No USDT account")
+                # Futures Account 조회
+                futures_account = api.list_futures_accounts(SETTLE)
                 
-                except Exception:
-                    # 방법 2: Futures Account
-                    futures_account = api.list_futures_accounts(SETTLE)
-                    if futures_account:
-                        available_str = getattr(futures_account, 'available', None)
-                        if available_str:
-                            balance_dec = Decimal(str(available_str))
-                            if balance_dec > 0:
-                                with balance_lock:
-                                    account_balance = balance_dec
-                                log("💰 BALANCE", f"{account_balance:.2f} USDT (Futures)")
-                                
-                                max_position = account_balance * MAXPOSITIONRATIO
-                                log("📊 MAX POSITION", f"{max_position:.2f} USDT")
+                if futures_account:
+                    # 각 필드 가져오기
+                    total_str = getattr(futures_account, 'total', None)
+                    available_str = getattr(futures_account, 'available', None)
+                    position_margin_str = getattr(futures_account, 'position_margin', None)
+                    order_margin_str = getattr(futures_account, 'order_margin', None)
+                    unrealised_pnl_str = getattr(futures_account, 'unrealised_pnl', None)
+                    
+                    # 수동 Total 계산 (Gate.io 공식: total = position_margin + order_margin + available)
+                    if total_str and total_str != "0":
+                        # total 필드가 있고 0이 아니면 사용
+                        balance_dec = Decimal(str(total_str))
+                    else:
+                        # total이 0이거나 없으면 수동 계산
+                        available = Decimal(str(available_str)) if available_str else Decimal("0")
+                        position_margin = Decimal(str(position_margin_str)) if position_margin_str else Decimal("0")
+                        order_margin = Decimal(str(order_margin_str)) if order_margin_str else Decimal("0")
                         
+                        # Gate.io 공식: total = position_margin + order_margin + available
+                        balance_dec = position_margin + order_margin + available
+                    
+                    if balance_dec > 0:
+                        with balance_lock:
+                            old_balance = account_balance
+                            account_balance = balance_dec
+                        
+                        # 잔고 변경 시에만 로그
+                        if old_balance != account_balance:
+                            log("💰 BALANCE", f"Total: {account_balance:.2f} USDT")
+                            
+                            if available_str:
+                                available_dec = Decimal(str(available_str))
+                                log("💰 AVAILABLE", f"{available_dec:.2f} USDT")
+                            
+                            if unrealised_pnl_str:
+                                pnl_dec = Decimal(str(unrealised_pnl_str))
+                                log("📊 UNREALIZED PNL", f"{pnl_dec:+.2f} USDT")
+                        
+                        # MAX POSITION 계산
+                        max_position = account_balance * MAXPOSITIONRATIO
+                        log("📊 MAX POSITION", f"{max_position:.2f} USDT")
+                    
+            except GateApiException as ex:
+                log("❌ ERROR", f"Balance check failed: {ex.label} - {ex.message}")
             except Exception as e:
-                log("❌ ERROR", f"Balance check: {e}")
-                     
+                log("❌ ERROR", f"Balance check failed: {e}")
+            
             # 2️⃣ 포지션 동기화
             sync_position()
             
@@ -1988,12 +2006,12 @@ def periodic_health_check():
                                 new_tp_long = Decimal(str(tp_result))
                                 new_tp_short = new_tp_long
                             
-                            current_TPMIN = float(tp_gap_min)
-                            new_TPMIN = float(new_tp_long)
-                            TPMIN_change = abs(new_TPMIN - current_TPMIN)
+                            current_tp_min = float(tp_gap_min)
+                            new_tp_min = float(new_tp_long)
+                            tp_min_change = abs(new_tp_min - current_tp_min)
                             
-                            if TPMIN_change >= 0.0001:  # 0.01% 이상 변화
-                                log("🔄 TP ADJUST", f"OBV: {current_obv:.6f}, New TP: {new_TPMIN*100:.2f}%")
+                            if tp_min_change >= 0.0001:  # 0.01% 이상 변화
+                                log("🔄 TP ADJUST", f"OBV: {current_obv:.6f}, New TP: {new_tp_min*100:.2f}%")
                                 
                                 try:
                                     cancel_tp_only()
@@ -2051,7 +2069,7 @@ def periodic_health_check():
         except Exception as e:
             log("❌ HEALTH", f"Health check error: {e}")
             time.sleep(5)
-            
+           
 
 # =============================================================================
 # Flask 엔드포인트
@@ -2147,7 +2165,7 @@ def print_startup_summary():
     log("", f"  📈 Max Position: {float(MAXPOSITIONRATIO)*100:.1f}%")
     log("divider", "-" * 80)
     
-    # ★ 계좌 잔고 조회 (Total Balance = 가용 + 포지션 + 미실현손익)
+    # ★ 계좌 잔고 조회 (수동 Total 계산)
     try:
         log("💰 BALANCE", "Fetching account balance...")
         
@@ -2155,57 +2173,52 @@ def print_startup_summary():
         futures_account = api.list_futures_accounts(SETTLE)
         
         if futures_account:
-            # total 필드 우선 (전체 자산)
+            # 각 필드 가져오기
             total_str = getattr(futures_account, 'total', None)
+            available_str = getattr(futures_account, 'available', None)
+            position_margin_str = getattr(futures_account, 'position_margin', None)
+            order_margin_str = getattr(futures_account, 'order_margin', None)
+            unrealised_pnl_str = getattr(futures_account, 'unrealised_pnl', None)
             
-            if total_str:
+            # 수동 Total 계산 (Gate.io 공식: total = position_margin + order_margin + available)
+            if total_str and total_str != "0":
+                # total 필드가 있고 0이 아니면 사용
                 balance_dec = Decimal(str(total_str))
-                if balance_dec > 0:
-                    with balance_lock:
-                        account_balance = balance_dec
-                    
-                    # available도 표시 (참고용)
-                    available_str = getattr(futures_account, 'available', None)
-                    if available_str:
-                        available_dec = Decimal(str(available_str))
-                        log("💰 BALANCE", f"Total: {account_balance:.2f} USDT (Available: {available_dec:.2f})")
-                    else:
-                        log("💰 BALANCE", f"Total: {account_balance:.2f} USDT")
-                    
-                    # unrealized_pnl 표시 (참고용)
-                    unrealized_pnl_str = getattr(futures_account, 'unrealised_pnl', None)
-                    if unrealized_pnl_str:
-                        pnl_dec = Decimal(str(unrealized_pnl_str))
-                        log("📊 UNREALIZED PNL", f"{pnl_dec:.2f} USDT")
-                    
-                    # MAX POSITION 계산
-                    max_position = account_balance * MAXPOSITIONRATIO
-                    log("📊 MAX POSITION", f"{max_position:.2f} USDT")
-                else:
-                    log("⚠️ WARNING", f"Total balance is 0. Using default {INITIALBALANCE} USDT")
-                    with balance_lock:
-                        account_balance = INITIALBALANCE
             else:
-                # total이 없으면 available 사용 (fallback)
-                log("ℹ️ INFO", "Total field not found. Using available...")
-                available_str = getattr(futures_account, 'available', None)
+                # total이 0이거나 없으면 수동 계산
+                log("ℹ️ INFO", "Total is 0 or missing. Calculating manually...")
+                
+                available = Decimal(str(available_str)) if available_str else Decimal("0")
+                position_margin = Decimal(str(position_margin_str)) if position_margin_str else Decimal("0")
+                order_margin = Decimal(str(order_margin_str)) if order_margin_str else Decimal("0")
+                
+                # Gate.io 공식: total = position_margin + order_margin + available
+                balance_dec = position_margin + order_margin + available
+                
+                log("🔢 CALC", f"Calculated Total = {position_margin:.2f} (position) + {order_margin:.2f} (order) + {available:.2f} (available)")
+            
+            if balance_dec > 0:
+                with balance_lock:
+                    account_balance = balance_dec
+                
+                # 상세 로그
+                log("💰 BALANCE", f"Total: {account_balance:.2f} USDT")
+                
                 if available_str:
-                    balance_dec = Decimal(str(available_str))
-                    if balance_dec > 0:
-                        with balance_lock:
-                            account_balance = balance_dec
-                        log("💰 BALANCE", f"{account_balance:.2f} USDT (Available only)")
-                        
-                        max_position = account_balance * MAXPOSITIONRATIO
-                        log("📊 MAX POSITION", f"{max_position:.2f} USDT")
-                    else:
-                        log("⚠️ WARNING", f"Available balance is 0. Using default {INITIALBALANCE} USDT")
-                        with balance_lock:
-                            account_balance = INITIALBALANCE
-                else:
-                    log("❌ ERROR", "No balance fields found")
-                    with balance_lock:
-                        account_balance = INITIALBALANCE
+                    available_dec = Decimal(str(available_str))
+                    log("💰 AVAILABLE", f"{available_dec:.2f} USDT")
+                
+                if unrealised_pnl_str:
+                    pnl_dec = Decimal(str(unrealised_pnl_str))
+                    log("📊 UNREALIZED PNL", f"{pnl_dec:+.2f} USDT")
+                
+                # MAX POSITION 계산
+                max_position = account_balance * MAXPOSITIONRATIO
+                log("📊 MAX POSITION", f"{max_position:.2f} USDT")
+            else:
+                log("⚠️ WARNING", f"Calculated balance is 0. Using default {INITIALBALANCE} USDT")
+                with balance_lock:
+                    account_balance = INITIALBALANCE
         else:
             log("❌ ERROR", "Could not fetch Futures Account")
             with balance_lock:
@@ -2221,7 +2234,7 @@ def print_startup_summary():
             account_balance = INITIALBALANCE
     
     log("divider", "-" * 80)
-        
+         
     # 포지션 동기화
     sync_position()
     log_position_state()
