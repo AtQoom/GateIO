@@ -46,7 +46,7 @@ else:
 # =============================================================================
 # 기본 비율 설정
 INITIAL_BALANCE = Decimal("50")              # 초기 잔고
-BASE_RATIO = Decimal("0.02")                 # 기본 수량 비율 (2%)
+BASERATIO = Decimal("0.02")                 # 기본 수량 비율 (2%)
 MAX_POSITION_RATIO = Decimal("3.0")          # 최대 포지션 비율 (3배)
 HEDGE_RATIO_MAIN = Decimal("0.10")           # 주력 헤지 비율 (10%)
 
@@ -838,7 +838,7 @@ def get_current_price():
 
 def calculate_grid_qty():
     with balance_lock:
-        base_qty = int(Decimal(str(account_balance)) * BASE_RATIO)
+        base_qty = int(Decimal(str(account_balance)) * BASERATIO)
         if base_qty <= 0:
             base_qty = 1
        
@@ -1092,7 +1092,7 @@ def initialize_grid(current_price=None):
         obv_multiplier = calculate_obv_macd_weight(obv_display)
         
         with balance_lock:
-            base_value = account_balance * BASE_RATIO
+            base_value = account_balance * BASERATIO
         
         base_qty = int(base_value / current_price_dec)
         
@@ -1230,7 +1230,7 @@ def check_idle_and_enter():
     10분 아이들 진입 (손실 기반 가중치 적용!)
     
     당신의 요청:
-    - base_qty = account_balance × BASE_RATIO / current_price (USDT 기반)
+    - base_qty = account_balance × BASERATIO / current_price (USDT 기반)
     - 손실도에 따른 추가 가중치: base_qty × (1 + loss_pct × 0.5 / 100)
     - OBV 가중치: main_qty = adjusted_qty × (1 + OBV_multiplier)
     """
@@ -1313,14 +1313,14 @@ def check_idle_and_enter():
         # 3️⃣ 기본 수량 계산 (USDT 기반!)
         # ========================================================================
         with balance_lock:
-            base_usdt = account_balance * BASE_RATIO  # 720 × 0.02 = 14.4 USDT
+            base_usdt = account_balance * BASERATIO  # 720 × 0.02 = 14.4 USDT
         
         base_qty = int(base_usdt / current_price_dec)  # 14.4 / 0.2667 = 54개
         
         if base_qty < 1:
             base_qty = 1
         
-        log("📊 BASE_QTY", f"Account {account_balance:.2f} × {BASE_RATIO} / {current_price:.4f} = {base_qty}")
+        log("📊 BASE_QTY", f"Account {account_balance:.2f} × {BASERATIO} / {current_price:.4f} = {base_qty}")
         
         # ========================================================================
         # 4️⃣ 손실도 기반 가중치 적용 (핵심!)
@@ -1456,7 +1456,7 @@ def market_entry_when_imbalanced():
                 current_price = get_current_price()
                 if current_price == 0:
                     return
-                base_qty = int(account_balance * BASE_RATIO / current_price)
+                base_qty = int(account_balance * BASERATIO / current_price)
                 if base_qty <= 0:
                     base_qty = 1
             
