@@ -107,10 +107,10 @@ position_state = {
 }
 
 # TP 관련
-tp_gap_min = TP_MIN
-tp_gap_max = TP_MAX
-tp_gap_long = TP_MIN
-tp_gap_short = TP_MIN
+tp_gap_min = TPMIN
+tp_gap_max = TPMAX
+tp_gap_long = TPMIN
+tp_gap_short = TPMIN
 last_tp_hash = ""
 last_adjusted_obv = 0
 tp_order_hash = {}
@@ -1172,9 +1172,9 @@ def calculate_dynamic_tp_gap():
         
         # ✅ None/0 체크
         if obv_value is None or obv_value == 0:
-            tp_gap_long = TP_MIN
-            tp_gap_short = TP_MIN
-            return (TP_MIN, TP_MIN, 0)
+            tp_gap_long = TPMIN
+            tp_gap_short = TPMIN
+            return (TPMIN, TPMIN, 0)
         
         # ✅ 안전한 변환
         try:
@@ -1200,13 +1200,13 @@ def calculate_dynamic_tp_gap():
         # ✅ 부호 확인 (float로만!)
         if obv_display > 0:
             tp_gap_long = tp_strength
-            tp_gap_short = TP_MIN
+            tp_gap_short = TPMIN
         elif obv_display < 0:
-            tp_gap_long = TP_MIN
+            tp_gap_long = TPMIN
             tp_gap_short = tp_strength
         else:
-            tp_gap_long = TP_MIN
-            tp_gap_short = TP_MIN
+            tp_gap_long = TPMIN
+            tp_gap_short = TPMIN
         
         tp_hash_new = hashlib.md5(f"{tp_gap_long}_{tp_gap_short}_{obv_display}".encode()).hexdigest()
         
@@ -1218,7 +1218,7 @@ def calculate_dynamic_tp_gap():
         
     except Exception as e:
         log("❌ TP GAP", f"Error: {e}")
-        return (TP_MIN, TP_MIN)
+        return (TPMIN, TPMIN)
 
 
 # ============================================================================
@@ -1984,12 +1984,12 @@ def periodic_health_check():
                                 new_tp_long = Decimal(str(tp_result))
                                 new_tp_short = new_tp_long
                             
-                            current_tp_min = float(tp_gap_min)
-                            new_tp_min = float(new_tp_long)
-                            tp_min_change = abs(new_tp_min - current_tp_min)
+                            current_TPMIN = float(tp_gap_min)
+                            new_TPMIN = float(new_tp_long)
+                            TPMIN_change = abs(new_TPMIN - current_TPMIN)
                             
-                            if tp_min_change >= 0.0001:  # 0.01% 이상 변화
-                                log("🔄 TP ADJUST", f"OBV: {current_obv:.6f}, New TP: {new_tp_min*100:.2f}%")
+                            if TPMIN_change >= 0.0001:  # 0.01% 이상 변화
+                                log("🔄 TP ADJUST", f"OBV: {current_obv:.6f}, New TP: {new_TPMIN*100:.2f}%")
                                 
                                 try:
                                     cancel_tp_only()
