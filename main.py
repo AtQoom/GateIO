@@ -447,63 +447,7 @@ def get_obv_macd_value():
         return Decimal(str(obv_macd_value))
     
     return obv_macd_value
-
-
-# =============================================================================
-# 잔고 업데이트
-# =============================================================================
-def update_balance_thread():
-    global accountbalance
-    accountbalance = INITIALBALANCE
-    firstrun = True
-    
-    while True:
-        try:
-            if not firstrun:
-                time.sleep(3600)
-            firstrun = False
-            
-            try:
-                # Unified Account 시도
-                accounts = unified_api.list_unified_accounts()
-                if accounts and hasattr(accounts, 'total') and accounts.total:
-                    oldbalance = accountbalance
-                    accountbalance = Decimal(str(accounts.total))
-                    if oldbalance != accountbalance:
-                        log("BALANCE", f"Updated: {oldbalance:.2f} → {accountbalance:.2f} USDT (Unified Total)")
-                else:
-                    # Futures Account 조회
-                    futures_account = api.list_futures_accounts(SETTLE)
-                    if futures_account:
-                        oldbalance = accountbalance
-                        
-                        # total 속성 확인 (총 자본)
-                        try:
-                            total_value = getattr(futures_account, 'total', None)
-                            if total_value and total_value != "0":
-                                accountbalance = Decimal(str(total_value))
-                                log("BALANCE", f"Futures Total: {oldbalance:.2f} → {accountbalance:.2f} USDT")
-                            else:
-                                # available 속성 확인 (가용 자금)
-                                available_value = getattr(futures_account, 'available', None)
-                                if available_value and available_value != "0":
-                                    accountbalance = Decimal(str(available_value))
-                                    log("BALANCE", f"Futures Available: {oldbalance:.2f} → {accountbalance:.2f} USDT")
-                                else:
-                                    log("BALANCE", f"No valid balance found. Using default {INITIALBALANCE} USDT")
-                        except Exception as attr_error:
-                            log("BALANCE", f"Attribute access error: {attr_error}")
-                            
-            except Exception as e:
-                log("", f"Balance fetch error: {e}")
-                
-        except GateApiException as e:
-            log("", f"Balance update API error - {e}")
-            time.sleep(60)
-        except Exception as e:
-            log("", f"Balance update error: {e}")
-            time.sleep(60)
-            
+          
 
 # =============================================================================
 # 캔들 데이터 수집
@@ -1915,23 +1859,54 @@ def periodic_health_check():
     2분마다 실행되는 헬스 체크 + OBV 기반 TP 동적 조정
     
     기능:
-    1. 포지션 동기화
-    2. 주문 상태 확인 (그리드 + TP)
-    3. TP 해시값 검증 (문제 감지 시 갱신)
-    4. OBV MACD 모니터링 (변화 0.05 이상 시 TP % 재계산)
-    5. 불균형 포지션 자동 진입 (★ SHORT 익절 → LONG 헤징)
-    6. 단일 포지션 그리드 자동 생성
-    7. 전략 일관성 검증
-    8. 중복/오래된 주문 정리
+    1. 계좌 잔고 조회 (Unified Account) ← ★ 추가
+    2. 포지션 동기화
+    3. 주문 상태 확인 (그리드 + TP)
+    4. TP 해시값 검증 (문제 감지 시 갱신)
+    5. OBV MACD 모니터링 (변화 0.05 이상 시 TP % 재계산)
+    6. 불균형 포지션 자동 진입 (★ SHORT 익절 → LONG 헤징)
+    7. 단일 포지션 그리드 자동 생성
+    8. 전략 일관성 검증
+    9. 중복/오래된 주문 정리
     """
-    global last_idle_check, obv_macd_value, tp_gap_min, tp_gap_max, last_adjusted_obv, tp_order_hash
+    global last_idle_check, obv_macd_value, tp_gap_min, tp_gap_max, last_adjusted_obv, tp_order_hash, account_balance
     
     while True:
         try:
             time.sleep(120)  # 2분 대기
             log("💊 HEALTH", "Starting health check...")
             
-            # 1️⃣ 포지션 동기화
+            # ★ 1️⃣ 계좌 잔고 조회 (Unified Account) - 추가!
+            try:
+                # Unified Account 조회
+                unified_account = unified_api.get_unified_account()
+                if unified_account:
+                    if hasattr(unified_account, 'total'):
+                        total_value = Decimal(str(unified_account.total))
+                        if total_value > 0:
+                            with balance_lock:
+                                old_balance = account_balance
+                                account_balance = total_value
+                            
+                            if old_balance != account_balance:
+                                log("💰 BALANCE", f"{account_balance:.2f} USDT (Unified Total)")
+                            
+                            # MAX POSITION 계산
+                            max_position = account_balance * MAXPOSITIONRATIO
+                            log("📊 MAX POSITION", f"{max_position:.2f} USDT")
+                        else:
+                            log("⚠️ WARNING", "Unified Account balance is 0 - Please deposit funds")
+                    else:
+                        log("❌ ERROR", "Unified Account missing 'total' field")
+                else:
+                    log("❌ ERROR", "Could not fetch Unified Account")
+                    
+            except Exception as e:
+                log("❌ ERROR", f"Balance check failed: {e}")
+                with balance_lock:
+                    log("⚠️ WARNING", f"Using current balance {account_balance:.2f} USDT")
+            
+            # 2️⃣ 포지션 동기화
             sync_position()
             
             with position_lock:
@@ -1942,7 +1917,7 @@ def periodic_health_check():
                 log("💊 HEALTH", "No position")
                 continue
             
-            # 2️⃣ 주문 상태 확인
+            # 3️⃣ 주문 상태 확인
             try:
                 orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
                 grid_count = sum(1 for o in orders if not o.reduce_only)
@@ -1952,7 +1927,7 @@ def periodic_health_check():
                 log("❌ HEALTH", f"List orders error: {e}")
                 continue
             
-            # 3️⃣ TP 해시값 검증
+            # 4️⃣ TP 해시값 검증
             if long_size > 0 or short_size > 0:
                 tp_orders_list = [o for o in orders if o.reduce_only]
                 current_hash = get_tp_orders_hash(tp_orders_list)
@@ -1984,7 +1959,7 @@ def periodic_health_check():
                     log("✅ HEALTH", "TP orders stable")
                     tp_order_hash[SYMBOL] = current_hash
             
-            # ★ 4️⃣ OBV MACD 체크 후 TP % 변동시 갱신! (핵심!)
+            # ★ 5️⃣ OBV MACD 체크 후 TP % 변동시 갱신! (핵심!)
             try:
                 calculate_obv_macd()
                 current_obv = float(obv_macd_value) * 100
@@ -2037,13 +2012,13 @@ def periodic_health_check():
             except Exception as e:
                 log("❌ HEALTH", f"OBV MACD check error: {e}")
             
-            # ★ 5️⃣ 불균형 포지션 자동 진입 (SHORT 익절 → LONG 헤징)
+            # ★ 6️⃣ 불균형 포지션 자동 진입 (SHORT 익절 → LONG 헤징)
             try:
                 market_entry_when_imbalanced()
             except Exception as e:
                 log("❌ HEALTH", f"Market entry error: {e}")
             
-            # 6️⃣ 단일 포지션 그리드 체크
+            # 7️⃣ 단일 포지션 그리드 체크
             try:
                 single_position = (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0)
                 if single_position and grid_count == 0:
@@ -2054,13 +2029,13 @@ def periodic_health_check():
             except Exception as e:
                 log("❌ HEALTH", f"Grid error: {e}")
             
-            # 7️⃣ 전략 일관성 검증
+            # 8️⃣ 전략 일관성 검증
             try:
                 validate_strategy_consistency()
             except Exception as e:
                 log("❌ HEALTH", f"Consistency error: {e}")
             
-            # 8️⃣ 중복/오래된 주문 정리
+            # 9️⃣ 중복/오래된 주문 정리
             try:
                 remove_duplicate_orders()
                 cancel_stale_orders()
@@ -2148,20 +2123,126 @@ def reset_tracking():
 # 메인 실행
 # =============================================================================
 def print_startup_summary():
+    """
+    서버 시작 시 요약 정보 출력 + 계좌 잔고 조회
+    """
     global account_balance
     
-    log_divider("=")
+    # 스타트업 로그
+    log("divider", "=" * 80)
     log("🚀 START", "ARB Trading Bot v26.0")
-    log_divider("=")
+    log("divider", "=" * 80)
+    log("📡 API", f"Key: {API_KEY[:8]}...")
+    log("📡 API", f"Secret: {len(API_SECRET)} characters")
+    log("✅ API", "Connection test successful")
+    log("divider", "-" * 80)
+    log("⚙️ CONFIG", "Settings:")
+    log("", f"  📊 Symbol: {SYMBOL}")
+    log("", f"  🎯 TP Gap: {float(TPMIN)*100:.2f}%-{float(TPMAX)*100:.2f}% (동적)")
+    log("", f"  💰 Base Ratio: {float(BASERATIO)*100:.2f}%")
+    log("", f"  📈 Max Position: {float(MAXPOSITIONRATIO)*100:.1f}%")
+    log("divider", "-" * 80)
     
+    # ★ 계좌 잔고 조회 (Unified Account)
+    try:
+        log("💰 BALANCE", "Fetching account balance...")
+        
+        # Unified Account 조회
+        unified_account = unified_api.get_unified_account()
+        if unified_account:
+            if hasattr(unified_account, 'total'):
+                total_value = Decimal(str(unified_account.total))
+                if total_value > 0:
+                    with balance_lock:
+                        account_balance = total_value
+                    log("💰 BALANCE", f"{account_balance:.2f} USDT (Unified Total)")
+                    
+                    # MAX POSITION 계산
+                    max_position = account_balance * MAXPOSITIONRATIO
+                    log("📊 MAX POSITION", f"{max_position:.2f} USDT")
+                else:
+                    log("⚠️ WARNING", "Balance is 0 - Please deposit funds to Unified Account")
+                    log("⚠️ WARNING", f"Using default balance {INITIALBALANCE} USDT")
+                    with balance_lock:
+                        account_balance = INITIALBALANCE
+            else:
+                log("❌ ERROR", "Unified Account missing 'total' field")
+                log("⚠️ WARNING", f"Using default balance {INITIALBALANCE} USDT")
+                with balance_lock:
+                    account_balance = INITIALBALANCE
+        else:
+            log("❌ ERROR", "Could not fetch Unified Account")
+            log("⚠️ WARNING", f"Using default balance {INITIALBALANCE} USDT")
+            with balance_lock:
+                account_balance = INITIALBALANCE
+    
+    except Exception as e:
+        log("❌ ERROR", f"Balance check failed: {e}")
+        log("⚠️ WARNING", f"Using default balance {INITIALBALANCE} USDT")
+        with balance_lock:
+            account_balance = INITIALBALANCE
+    
+    log("divider", "-" * 80)
+    
+    # 포지션 동기화
+    sync_position()
+    log_position_state()
+    
+    log("divider", "-" * 80)
+    
+    # 현재 가격 조회 및 초기 그리드 생성
+    try:
+        current_price = get_current_price()
+        if current_price > 0:
+            log("💵 PRICE", f"{current_price:.4f}")
+            
+            # 기존 주문 취소
+            cancel_all_orders()
+            time.sleep(0.5)
+            
+            with position_lock:
+                long_size = position_state[SYMBOL]["long"]["size"]
+                short_size = position_state[SYMBOL]["short"]["size"]
+            
+            # 포지션이 있으면 그리드 생성
+            if long_size > 0 and short_size > 0:
+                log("🔄 INIT", "Both sides exist → TP only (No new entry)")
+                time.sleep(0.5)
+                refresh_all_tp_orders()
+            elif long_size > 0 or short_size > 0:
+                log("🔄 INIT", "Single position → Creating grids for hedging")
+                initialize_grid(current_price)
+                time.sleep(0.5)
+                refresh_all_tp_orders()
+            else:
+                log("ℹ️ INIT", "No position → Creating initial grids")
+                initialize_grid(current_price)
+        else:
+            log("❌ ERROR", "Could not fetch current price")
+    except Exception as e:
+        log("❌ ERROR", f"Initialization error: {e}")
+    
+    log("divider", "-" * 80)
+    log("✅ INIT", "Complete. Starting threads...")
+    log("divider", "-" * 80)
+
+def start_grid_monitor():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(grid_fill_monitor())
+    
+if __name__ == '__main__':
     # API 키 확인
     if not API_KEY or not API_SECRET:
-        log("❌ ERROR", "API_KEY or API_SECRET not set!")
-        log("ℹ️ INFO", "Set environment variables: API_KEY, API_SECRET")
-        return
+        log("❌ FATAL", "Cannot start without API credentials!")
+        log("ℹ️ INFO", "Set Railway environment variables:")
+        log("", "  - API_KEY")
+        log("", "  - API_SECRET")
+        log("", "  - SYMBOL (optional, default: ARB_USDT)")
+        exit(1)
     
-    log("✅ API", f"Key: {API_KEY[:8]}...")
-    log("✅ API", f"Secret: {API_SECRET[:8]}...")
+    # 이벤트 타임 초기화
+    update_event_time()
     
     # API 연결 테스트
     try:
@@ -2171,137 +2252,32 @@ def print_startup_summary():
     except GateApiException as e:
         log("❌ API", f"Connection test failed: {e}")
         log("⚠️ WARNING", "Check API key permissions:")
-        log("  ", "- Futures: Read + Trade")
-        log("  ", "- Unified Account: Read")
+        log("", "  - Futures: Read + Trade")
+        log("", "  - Unified Account: Read")
     except Exception as e:
         log("❌ API", f"Connection test error: {e}")
     
-    log_divider("-")
-    log("📜 CONFIG", "Settings:")
-    log("  ├─", f"Symbol: {SYMBOL}")
-    log(" |-", f"TP Gap: {float(TP_MIN)*100:.2f}%~{float(TP_MAX)*100:.2f}% (동적)")
-    log("  ├─", f"Base Ratio: {BASE_RATIO * 100}%")
-    log("  ├─", f"Max Position: {MAX_POSITION_RATIO * 100}%")
-    log_divider("-")
-    
-    # 초기 잔고 조회
-    try:
-        # Unified Account 조회
-        accounts = unified_api.list_unified_accounts()
-        if accounts and hasattr(accounts, 'total') and accounts.total:
-            accountbalance = Decimal(str(accounts.total))
-            log("BALANCE", f"{accountbalance:.2f} USDT (Unified Total)")
-        else:
-            # Futures Account 조회
-            futures_account = api.list_futures_accounts(SETTLE)
-            if futures_account:
-                # total 속성 우선 (총 자본)
-                try:
-                    total_value = getattr(futures_account, 'total', None)
-                    if total_value and total_value != "0":
-                        accountbalance = Decimal(str(total_value))
-                        log("BALANCE", f"{accountbalance:.2f} USDT (Futures Total)")
-                    else:
-                        # available 속성 (가용 자금)
-                        available_value = getattr(futures_account, 'available', None)
-                        if available_value and available_value != "0":
-                            accountbalance = Decimal(str(available_value))
-                            log("BALANCE", f"{accountbalance:.2f} USDT (Futures Available)")
-                        else:
-                            log("BALANCE", f"Could not fetch - using default {INITIALBALANCE} USDT")
-                except Exception as e:
-                    log("BALANCE", f"Attribute error: {e}. Using default {INITIALBALANCE} USDT")
-            else:
-                log("BALANCE", f"Could not fetch - using default {INITIALBALANCE} USDT")
-    
-        log("MAX POSITION", f"{accountbalance * MAXPOSITIONRATIO:.2f} USDT")
-
-    except Exception as e:
-        log("ERROR", f"Balance check failed: {e}")
-        log("WARNING", f"Using default balance {INITIALBALANCE} USDT")
-    
-    log_divider("-")
-    
-    # 기존 포지션 확인
-    sync_position()
-    log_position_state()
-    log_divider("-")
-    
-    # 초기화
-    try:
-        current_price = get_current_price()
-        if current_price > 0:
-            log("💹 PRICE", f"{current_price:.4f}")
-            cancel_all_orders()
-            time.sleep(0.5)
-            
-            # ✅ 현재 포지션 확인!
-            sync_position()
-            with position_lock:
-                long_size = position_state[SYMBOL]["long"]["size"]
-                short_size = position_state[SYMBOL]["short"]["size"]
-        
-            # ✅ 포지션 상태에 따른 초기화!
-            if long_size > 0 and short_size > 0:
-                # 롱/숏 모두 있으면: TP만 생성
-                log("✅ INIT", f"Both sides exist → TP only (No new entry)")
-                time.sleep(0.5)
-                refresh_all_tp_orders()
-        
-            elif long_size > 0 or short_size > 0:
-                # 단일 포지션이면: 그리드 진입 (헤징)
-                log("✅ INIT", f"Single position → Creating grids for hedging")
-                initialize_grid(current_price)
-        
-            else:
-                # 포지션 없으면: 그리드 진입 (새로 시작)
-                log("✅ INIT", f"No position → Creating grids")
-                initialize_grid(current_price)
-    
-        else:
-            log("⚠️", "Could not fetch current price")
-
-    except Exception as e:
-        log("❌", f"Initialization error: {e}")
-
-    log_divider("=")
-    log("✅ INIT", "Complete. Starting threads...")
-    log_divider("=")
-
-def start_grid_monitor():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(grid_fill_monitor())
-    
-if __name__ == '__main__':
+    # 스타트업 요약 출력 (잔고 조회 + 포지션 동기화 + 초기화)
     print_startup_summary()
     
-    # API 키 최종 확인
-    if not API_KEY or not API_SECRET:
-        log("❌ FATAL", "Cannot start without API credentials!")
-        log("ℹ️ INFO", "Set Railway environment variables:")
-        log("  ", "- API_KEY")
-        log("  ", "- API_SECRET")
-        log("  ", "- SYMBOL (optional, default: ARB_USDT)")
-        exit(1)
-    
-    update_event_time()  # ← 기존
-    
-    # 모든 모니터링 스레드 시작
-    threading.Thread(target=update_balance_thread, daemon=True).start()
+    # 스레드 시작
+    log("🧵 THREADS", "Starting monitoring threads...")
     threading.Thread(target=fetch_kline_thread, daemon=True).start()
     threading.Thread(target=start_websocket, daemon=True).start()
     threading.Thread(target=position_monitor, daemon=True).start()
     threading.Thread(target=start_grid_monitor, daemon=True).start()
     threading.Thread(target=tp_monitor, daemon=True).start()
     threading.Thread(target=idle_monitor, daemon=True).start()
-    threading.Thread(target=periodic_health_check, daemon=True).start()  # ✅ 추가
+    threading.Thread(target=periodic_health_check, daemon=True).start()
     
     log("✅ THREADS", "All monitoring threads started")
     log("🌐 FLASK", "Starting server on port 8080...")
     log("📊 OBV MACD", "Self-calculating from 3min candles")
-    log("📨 WEBHOOK", "Optional: TradingView webhook at /webhook")
-    log("🔍 HEALTH", "Health check every 2 minutes")  # ✅ 추가
+    log("📡 WEBHOOK", "Optional: TradingView webhook at /webhook")
+    log("💊 HEALTH", "Health check every 2 minutes")
     
-    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
+    log("divider", "=" * 80)
+    
+    # Flask 서버 시작
+    app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
 
