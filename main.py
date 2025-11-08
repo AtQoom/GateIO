@@ -2147,83 +2147,81 @@ def print_startup_summary():
     log("", f"  📈 Max Position: {float(MAXPOSITIONRATIO)*100:.1f}%")
     log("divider", "-" * 80)
     
-    # ★ 계좌 잔고 조회 (Unified Account) - 완전 수정
+    # ★ 계좌 잔고 조회 (Total Balance = 가용 + 포지션 + 미실현손익)
     try:
         log("💰 BALANCE", "Fetching account balance...")
         
-        # 방법 1: Unified Account 조회 (currency 파라미터로 USDT 지정)
-        try:
-            unified_account = unified_api.list_unified_accounts(currency="USDT")
-            
-            if unified_account and len(unified_account) > 0:
-                # 리스트의 첫 번째 항목 (USDT)
-                usdt_account = unified_account[0]
-                
-                # available 필드 우선 확인 (실제 사용 가능 금액)
-                available_str = getattr(usdt_account, 'available', None)
-                if available_str:
-                    balance_dec = Decimal(str(available_str))
-                    if balance_dec > 0:
-                        with balance_lock:
-                            account_balance = balance_dec
-                        log("💰 BALANCE", f"{account_balance:.2f} USDT (Unified Available)")
-                        
-                        max_position = account_balance * MAXPOSITIONRATIO
-                        log("📊 MAX POSITION", f"{max_position:.2f} USDT")
-                    else:
-                        raise ValueError("Available balance is 0")
-                else:
-                    raise ValueError("Available field not found")
-            else:
-                raise ValueError("No USDT account found")
+        # Futures Account 조회
+        futures_account = api.list_futures_accounts(SETTLE)
         
-        except Exception as unified_error:
-            log("ℹ️ INFO", f"Unified API issue: {unified_error}. Trying Futures Account...")
+        if futures_account:
+            # total 필드 우선 (전체 자산)
+            total_str = getattr(futures_account, 'total', None)
             
-            # 방법 2: Futures Account 조회 (fallback)
-            futures_account = api.list_futures_accounts(SETTLE)
-            
-            if futures_account:
-                # available 필드 확인
+            if total_str:
+                balance_dec = Decimal(str(total_str))
+                if balance_dec > 0:
+                    with balance_lock:
+                        account_balance = balance_dec
+                    
+                    # available도 표시 (참고용)
+                    available_str = getattr(futures_account, 'available', None)
+                    if available_str:
+                        available_dec = Decimal(str(available_str))
+                        log("💰 BALANCE", f"Total: {account_balance:.2f} USDT (Available: {available_dec:.2f})")
+                    else:
+                        log("💰 BALANCE", f"Total: {account_balance:.2f} USDT")
+                    
+                    # unrealized_pnl 표시 (참고용)
+                    unrealized_pnl_str = getattr(futures_account, 'unrealised_pnl', None)
+                    if unrealized_pnl_str:
+                        pnl_dec = Decimal(str(unrealized_pnl_str))
+                        log("📊 UNREALIZED PNL", f"{pnl_dec:.2f} USDT")
+                    
+                    # MAX POSITION 계산
+                    max_position = account_balance * MAXPOSITIONRATIO
+                    log("📊 MAX POSITION", f"{max_position:.2f} USDT")
+                else:
+                    log("⚠️ WARNING", f"Total balance is 0. Using default {INITIALBALANCE} USDT")
+                    with balance_lock:
+                        account_balance = INITIALBALANCE
+            else:
+                # total이 없으면 available 사용 (fallback)
+                log("ℹ️ INFO", "Total field not found. Using available...")
                 available_str = getattr(futures_account, 'available', None)
                 if available_str:
                     balance_dec = Decimal(str(available_str))
                     if balance_dec > 0:
                         with balance_lock:
                             account_balance = balance_dec
-                        log("💰 BALANCE", f"{account_balance:.2f} USDT (Futures Available)")
+                        log("💰 BALANCE", f"{account_balance:.2f} USDT (Available only)")
                         
                         max_position = account_balance * MAXPOSITIONRATIO
                         log("📊 MAX POSITION", f"{max_position:.2f} USDT")
                     else:
-                        # total 체크
-                        total_str = getattr(futures_account, 'total', None)
-                        if total_str:
-                            balance_dec = Decimal(str(total_str))
-                            if balance_dec > 0:
-                                with balance_lock:
-                                    account_balance = balance_dec
-                                log("💰 BALANCE", f"{account_balance:.2f} USDT (Futures Total)")
-                                
-                                max_position = account_balance * MAXPOSITIONRATIO
-                                log("📊 MAX POSITION", f"{max_position:.2f} USDT")
-                            else:
-                                raise ValueError("Total balance is 0")
-                        else:
-                            raise ValueError("Total field not found")
+                        log("⚠️ WARNING", f"Available balance is 0. Using default {INITIALBALANCE} USDT")
+                        with balance_lock:
+                            account_balance = INITIALBALANCE
                 else:
-                    raise ValueError("Available field not found in Futures")
-            else:
-                raise ValueError("Could not fetch Futures Account")
+                    log("❌ ERROR", "No balance fields found")
+                    with balance_lock:
+                        account_balance = INITIALBALANCE
+        else:
+            log("❌ ERROR", "Could not fetch Futures Account")
+            with balance_lock:
+                account_balance = INITIALBALANCE
     
+    except GateApiException as ex:
+        log("❌ ERROR", f"Gate API Error: {ex.label} - {ex.message}")
+        with balance_lock:
+            account_balance = INITIALBALANCE
     except Exception as e:
         log("❌ ERROR", f"Balance check failed: {e}")
-        log("⚠️ WARNING", f"Using default balance {INITIALBALANCE} USDT")
         with balance_lock:
             account_balance = INITIALBALANCE
     
     log("divider", "-" * 80)
-    
+        
     # 포지션 동기화
     sync_position()
     log_position_state()
