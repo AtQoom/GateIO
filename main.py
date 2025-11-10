@@ -51,7 +51,7 @@ MAXPOSITIONRATIO = Decimal("3.0")          # 최대 포지션 비율 (3배)
 HEDGE_RATIO_MAIN = Decimal("0.10")           # 주력 헤지 비율 (10%)
 
 # TP 설정 (동적 TP) ← 이 부분 추가
-TPMIN = Decimal("0.0019")                   # 최소 TP (0.19%)
+TPMIN = Decimal("0.0021")                   # 최소 TP (0.21%)
 TPMAX = Decimal("0.004")                    # 최대 TP (0.4%)
 
 # 시간 설정
@@ -1251,7 +1251,7 @@ def calculate_dynamic_tp_gap():
         
         # ✅ 모두 Decimal로!
         if obv_abs < 10:
-            tp_strength = Decimal("0.0019")
+            tp_strength = Decimal("0.0021")
         elif obv_abs < 20:
             tp_strength = Decimal("0.0026")
         elif obv_abs < 30:
