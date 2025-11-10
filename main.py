@@ -260,10 +260,9 @@ def log_position_state():
 
 def handle_non_main_position_tp(non_main_size_at_tp):
     """
-    비주력 TP 체결 시 주력 포지션 SL (1배/2배 2단계 전략)
-    
-    1배 <= 주력 < 2배: 비주력 × 0.8배 SL (새로운 전략!)
-    2배 이상: 비주력 × 1.5배 SL (기존 전략)
+    TP 체결 완료 시 물량 누적 방지 (Tier-1/2)
+    - Tier-1 (1배~2배): 비주력 × 0.8배 SL
+    - Tier-2 (2배 이상): 비주력 × 1.5배 SL
     """
     try:
         with position_lock:
@@ -273,37 +272,47 @@ def handle_non_main_position_tp(non_main_size_at_tp):
         with balance_lock:
             balance = account_balance
         
-        # 주력 포지션 판단
-        if long_size >= short_size:
+        # 주력/비주력 판정
+        if long_size > short_size:
             main_size = long_size
             main_side = "long"
         else:
             main_size = short_size
             main_side = "short"
         
-        # ✅ 조건 확인: 주력이 1배 미만이면 작동 안 함
-        if main_size < balance * 1:
-            log("ℹ️ TP HANDLER", f"Main {main_size} < {balance * 1} (1배) - 스킵")
+        # ★ 현재 가격 조회하여 포지션 가치 계산
+        current_price = get_current_price()
+        if current_price == 0:
+            log("❌ TP HANDLER", "Price fetch failed")
             return
         
-        # ✅ Tier 판단
-        if balance * 1 <= main_size < balance * 2:
-            # 1배 ~ 2배 미만: 당신의 제안 (0.8배)
+        # 주력 포지션 가치 계산
+        main_position_value = Decimal(str(main_size)) * current_price
+        
+        # ★ 1배 미만이면 리턴 (Tier-1/2 불필요)
+        if main_position_value < balance * Decimal("1.0"):
+            log("💊 TP HANDLER", f"Main {main_position_value:.2f} < {balance:.2f} (1배 미만) - return")
+            return
+        
+        # ★ Tier-1 판정 (1배 ≤ 주력 < 2배)
+        if balance * Decimal("1.0") <= main_position_value < balance * Decimal("2.0"):
             sl_qty = int(non_main_size_at_tp * Decimal("0.8"))
             tier = "Tier-1 (0.8배)"
-        else:  # main_size >= balance * 2
-            # 2배 이상: 기존 (1.5배)
+        
+        # ★ Tier-2 판정 (주력 ≥ 2배)
+        else:  # main_position_value >= balance * 2
             sl_qty = int(non_main_size_at_tp * Decimal("1.5"))
             tier = "Tier-2 (1.5배)"
         
+        # 안전장치
         if sl_qty < 1:
             sl_qty = 1
         if sl_qty > main_size:
             sl_qty = int(main_size)
         
-        log("💥 TP HANDLER", f"{tier}: 비주력 {non_main_size_at_tp}개 TP → 주력 {main_side.upper()} {sl_qty}개 SL")
+        log("💊 TP HANDLER", f"{tier}: {non_main_size_at_tp}개 TP → {main_side.upper()} {sl_qty}개 SL")
         
-        # 주력 SL 실행
+        # 시장가 청산
         if main_side == "long":
             order_size = -sl_qty
         else:
@@ -317,12 +326,13 @@ def handle_non_main_position_tp(non_main_size_at_tp):
             reduce_only=True,
             text=generate_order_id()
         )
+        
         api.create_futures_order(SETTLE, order)
-        log("✅ TP HANDLER", f"{main_side.upper()} {sl_qty}개 SL 처리됨!")
+        log("✅ TP HANDLER", f"{main_side.upper()} {sl_qty}개 SL 완료!")
         
         time.sleep(0.5)
         sync_position()
-        
+    
     except Exception as e:
         log("❌ TP HANDLER", f"Error: {e}")
 
