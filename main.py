@@ -265,14 +265,17 @@ def handle_non_main_position_tp(non_main_size_at_tp):
     - Tier-2 (2배 이상): 비주력 × 1.5배 SL
     """
     try:
+        # 1. 포지션 동기화
+        sync_position()
+        
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
         
         with balance_lock:
-            balance = account_balance
+            balance = account_balance  # Initial Capital 사용
         
-        # 주력/비주력 판정
+        # 2. 주력/비주력 판정
         if long_size > short_size:
             main_size = long_size
             main_side = "long"
@@ -280,31 +283,31 @@ def handle_non_main_position_tp(non_main_size_at_tp):
             main_size = short_size
             main_side = "short"
         
-        # ★ 현재 가격 조회하여 포지션 가치 계산
+        # 3. 현재 가격 조회
         current_price = get_current_price()
         if current_price == 0:
             log("❌ TP HANDLER", "Price fetch failed")
             return
         
-        # 주력 포지션 가치 계산
+        # 4. 주력 포지션 가치 계산 (USDT)
         main_position_value = Decimal(str(main_size)) * current_price
         
-        # ★ 1배 미만이면 리턴 (Tier-1/2 불필요)
+        # 5. 1배 미만이면 리턴 (Tier-1/2 불필요)
         if main_position_value < balance * Decimal("1.0"):
-            log("💊 TP HANDLER", f"Main {main_position_value:.2f} < {balance:.2f} (1배 미만) - return")
+            log("💊 TP HANDLER", f"Main {main_position_value:.2f} < {balance:.2f} (1배 미만) - skip")
             return
         
-        # ★ Tier-1 판정 (1배 ≤ 주력 < 2배)
+        # 6. Tier 판정
         if balance * Decimal("1.0") <= main_position_value < balance * Decimal("2.0"):
+            # Tier-1: 1배 ~ 2배
             sl_qty = int(non_main_size_at_tp * Decimal("0.8"))
-            tier = "Tier-1 (0.8배)"
-        
-        # ★ Tier-2 판정 (주력 ≥ 2배)
-        else:  # main_position_value >= balance * 2
+            tier = "Tier-1 (0.8x)"
+        else:
+            # Tier-2: 2배 이상
             sl_qty = int(non_main_size_at_tp * Decimal("1.5"))
-            tier = "Tier-2 (1.5배)"
+            tier = "Tier-2 (1.5x)"
         
-        # 안전장치
+        # 7. 안전장치
         if sl_qty < 1:
             sl_qty = 1
         if sl_qty > main_size:
@@ -312,16 +315,16 @@ def handle_non_main_position_tp(non_main_size_at_tp):
         
         log("💊 TP HANDLER", f"{tier}: {non_main_size_at_tp}개 TP → {main_side.upper()} {sl_qty}개 SL")
         
-        # 시장가 청산
+        # 8. 시장가 청산 실행
         if main_side == "long":
-            order_size = -sl_qty
+            order_size = -sl_qty  # 롱 청산 (음수)
         else:
-            order_size = sl_qty
+            order_size = sl_qty  # 숏 청산 (양수)
         
         order = FuturesOrder(
             contract=SYMBOL,
             size=order_size,
-            price="0",
+            price="0",  # 시장가
             tif="ioc",
             reduce_only=True,
             text=generate_order_id()
@@ -330,8 +333,10 @@ def handle_non_main_position_tp(non_main_size_at_tp):
         api.create_futures_order(SETTLE, order)
         log("✅ TP HANDLER", f"{main_side.upper()} {sl_qty}개 SL 완료!")
         
+        # 9. 포지션 재동기화
         time.sleep(0.5)
         sync_position()
+        log_position_state()
     
     except Exception as e:
         log("❌ TP HANDLER", f"Error: {e}")
@@ -1744,17 +1749,21 @@ async def grid_fill_monitor():
                                 
                                 # ✅ TP 체결만 처리!
                                 if is_reduce_only:
-                                    side = "long" if size < 0 else "short"
+                                    side = "long" if size > 0 else "short"
                                     tp_qty = abs(int(size))
                                     
-                                    log("🎯 TP FILLED", f"{side.upper()} {tp_qty}개 @ {price:.4f}")
+                                    log("✅ TP FILLED", f"{side.upper()} {tp_qty} @ {price:.4f}"
                                     
                                     time.sleep(0.5)
                                     sync_position()
                                     
                                     # ✅ 신규: 물량 누적 방지 함수 호출!
-                                    handle_non_main_position_tp(tp_qty)
-                                    
+                                    try:
+                                        handle_non_main_position_tp(tp_qty)
+                                        log("💊 TP HANDLER", "Tier check completed")
+                                    except Exception as e:
+                                        log("❌ TP HANDLER", f"Failed: {e}")
+                                        
                                     time.sleep(0.5)
                                     
                                     with position_lock:
