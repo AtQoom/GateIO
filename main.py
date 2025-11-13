@@ -1752,7 +1752,7 @@ async def grid_fill_monitor():
                                     side = "long" if size > 0 else "short"
                                     tp_qty = abs(int(size))
                                     
-                                    log("✅ TP FILLED", f"{side.upper()} {tp_qty} @ {price:.4f}"
+                                    log("✅ TP FILLED", f"{side.upper()} {tp_qty} @ {price:.4f}")
                                     
                                     time.sleep(0.5)
                                     sync_position()
