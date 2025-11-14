@@ -873,25 +873,25 @@ def calculate_obv_macd_weight(obv_value):
     """
     obv_abs = abs(obv_value)
     
-    # ★ 사용자 지정 가중치
+    # ★ 추가 진입 비율
     if obv_abs <= 20:
-        multiplier = Decimal("0.1")
+        multiplier = Decimal("0.1")   # +10%
     elif obv_abs <= 25:
-        multiplier = Decimal("0.11")
+        multiplier = Decimal("0.11")  # +11%
     elif obv_abs <= 30:
-        multiplier = Decimal("0.12")
+        multiplier = Decimal("0.12")  # +12%
     elif obv_abs <= 40:
-        multiplier = Decimal("0.13")
+        multiplier = Decimal("0.13")  # +13%
     elif obv_abs <= 50:
-        multiplier = Decimal("0.15")
+        multiplier = Decimal("0.15")  # +15%
     elif obv_abs <= 60:
-        multiplier = Decimal("0.16")
+        multiplier = Decimal("0.16")  # +16%
     elif obv_abs <= 70:
-        multiplier = Decimal("0.17")
+        multiplier = Decimal("0.17")  # +17%
     elif obv_abs <= 100:
-        multiplier = Decimal("0.19")
+        multiplier = Decimal("0.19")  # +19%
     else:
-        multiplier = Decimal("0.2")
+        multiplier = Decimal("0.2")   # +20%
     
     return multiplier
 
@@ -933,28 +933,6 @@ def calculate_grid_qty():
         multiplier = 2.0
     
     return max(1, int(base_qty * multiplier))
-
-def calculate_entry_ratio_by_loss(loss_pct: Decimal) -> Decimal:
-    """
-    손실도에 따른 동적 진입 비율 (loss_pct × 0.5)
-    공식: entry_ratio = loss_pct / 200
-    """
-    try:
-        entry_ratio = loss_pct / Decimal("200")
-        
-        MIN_RATIO = Decimal("0.01")
-        if entry_ratio < MIN_RATIO:
-            entry_ratio = MIN_RATIO
-        
-        MAX_RATIO = Decimal("0.5")
-        if entry_ratio > MAX_RATIO:
-            entry_ratio = MAX_RATIO
-        
-        return entry_ratio
-    
-    except Exception as e:
-        log("❌ CALC_RATIO", f"Error: {e}")
-        return Decimal("0.1")
 
 
 # =============================================================================
@@ -1393,13 +1371,18 @@ def check_idle_and_enter():
         
         # ========================================================================
         # 4️⃣ 손실도 기반 가중치 적용 (핵심!)
-        # ========================================================================
-        # 공식: adjusted_qty = base_qty × (1 + loss_pct × 2.0 / 100)
+        # ========================================================================       
+        # 공식: adjusted_qty = base_qty × (1 + loss_pct / 100)
+        # 예시:
+        # - 손실 0% → 1.0배
+        # - 손실 1% → 1.01배
+        # - 손실 2% → 1.02배
+        # - 손실 10% → 1.1배
         
-        loss_multiplier = Decimal("1") + (loss_pct * Decimal("2.0") / Decimal("100"))
+        loss_multiplier = Decimal("1") + (loss_pct / Decimal("100"))
         adjusted_qty = int(Decimal(str(base_qty)) * loss_multiplier)
         
-        log("📊 LOSS_WEIGHT", f"Base {base_qty} × (1 + {float(loss_pct):.2f}% × 2.0) = {adjusted_qty}")
+        log("📊 LOSS_WEIGHT", f"Base {base_qty} × (1 + {float(loss_pct):.2f}%) = {adjusted_qty}")
         
         # ========================================================================
         # 5️⃣ OBV 가중치 적용
