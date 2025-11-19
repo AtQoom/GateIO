@@ -66,11 +66,6 @@ SYMBOL_CONFIG = {
     }
 }
 
-CONTRACT_MULTIPLIER = {
-    "ARB_USDT": 1,       # 1 계약 = 1 ARB
-    "PAXG_USDT": 0.001   # 1 계약 = 0.001 PAXG
-}
-
 # 공통 설정
 INITIALBALANCE = Decimal("50")               # 초기 잔고
 MAXPOSITIONRATIO = Decimal("3.0")           # 최대 포지션 비율 (3배)
@@ -597,7 +592,7 @@ def handle_non_main_position_tp(symbol, non_main_size_at_tp):
         log("🔁 TIER", f"{symbol} {tier}: {non_main_side} TP {non_main_size_at_tp} → {main_side} SL {sl_qty_rounded}")
         
         # 주력 청산
-        contract_qty = int(get_contract_size(symbol, sl_qty_rounded))
+        contract_qty = get_contract_size(symbol, sl_qty_rounded)
         order_size = -contract_qty if main_side == "LONG" else contract_qty
         
         order = FuturesOrder(
@@ -673,8 +668,7 @@ def refresh_all_tp_orders(symbol):
                 tp_price_long = long_entry * (Decimal("1") + tp_gap_long[symbol])
                 tp_price_long_rounded = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
                 
-                contract_qty_long = int(get_contract_size(symbol, float(long_size)))
-                tp_size_long = -contract_qty_long
+                tp_size_long = -get_contract_size(symbol, float(long_size))
                 
                 order = FuturesOrder(
                     contract=symbol,
@@ -702,8 +696,7 @@ def refresh_all_tp_orders(symbol):
                 tp_price_short = short_entry * (Decimal("1") - tp_gap_short[symbol])
                 tp_price_short_rounded = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
                 
-                contract_qty_short = int(get_contract_size(symbol, float(short_size)))
-                tp_size_short = contract_qty_short
+                tp_size_short = get_contract_size(symbol, float(short_size))
                 
                 order = FuturesOrder(
                     contract=symbol,
@@ -794,82 +787,82 @@ def cancel_tp_only(symbol):
 # =============================================================================
 
 def initialize_grid(symbol, current_price=None):
-    """초기 그리드 생성 (역추세 진입)"""
-    
-    if not initialize_grid_lock.acquire(blocking=False):
-        log("⚠️ GRID", f"{symbol}: Already running")
-        return
+    """그리드 초기화 (완전판)"""
     
     try:
-        now = time.time()
-        if now - last_grid_time.get(symbol, 0) < 10:
-            log("⚠️ GRID", f"{symbol}: Too soon")
-            return
-        last_grid_time[symbol] = now
-        
-        if current_price is None or current_price <= 0:
-            current_price = get_current_price(symbol)
-            if current_price <= 0:
-                log("❌ GRID", f"{symbol}: Invalid price")
-                return
-        
         sync_position(symbol)
         
         with position_lock:
             long_size = position_state[symbol]["long"]["size"]
             short_size = position_state[symbol]["short"]["size"]
         
-        # 최대 한도 체크
-        with balance_lock:
-            max_value = initial_capital * MAXPOSITIONRATIO
-        
-        current_price_dec = Decimal(str(current_price))
-        long_value = long_size * current_price_dec
-        short_value = short_size * current_price_dec
-        
-        if long_value >= max_value or short_value >= max_value:
-            log("⚠️ LIMIT", f"{symbol}: Max position reached (L:{long_value:.2f}, S:{short_value:.2f}, Max:{max_value:.2f})")
+        if long_size > 0 or short_size > 0:
+            log("⚠️ GRID", f"{symbol}: Already has positions (L={long_size}, S={short_size})")
             return
         
-        # OBV 기반 수량 계산
+        if current_price is None:
+            current_price = get_current_price(symbol)
+        
+        if current_price <= 0:
+            log("❌ GRID", f"{symbol}: Invalid price ({current_price})")
+            return
+        
+        current_price_dec = Decimal(str(current_price))
+        
+        calculate_dynamic_tp_gap(symbol)
+        
+        # OBV 가중
         obv_display = float(obv_macd_value[symbol]) * 100
         obv_abs = abs(obv_display)
-        obv_weight = calculate_obv_macd_weight(obv_abs)
+        obv_weight = Decimal(str(calculate_obv_macd_weight(obv_abs)))
         
-        # 기본 수량
+        # 기본 수량 (✅ int 제거!)
         base_ratio = get_symbol_config(symbol, "base_ratio")
         with balance_lock:
             base_value = initial_capital * base_ratio
         
-        base_qty = int(base_value / current_price_dec)
-        if base_qty < 1:
-            log("❌ GRID", f"{symbol}: Insufficient quantity (base_qty={base_qty})")
-            return
+        base_qty = base_value / current_price_dec  # ✅ Decimal 유지!
         
-        # 역추세 진입
+        # ✅ 최소 수량 보장
+        if base_qty < Decimal("0.001"):
+            base_qty = Decimal("0.001")
+        
+        # 역추세 진입 (✅ int 제거!)
         if obv_display > 0:
-            # 롱 강세 → SHORT 주력
-            short_qty = int(base_qty * (1 + obv_weight))
-            long_qty = int(base_qty * HEDGE_RATIO_MAIN) if ENABLE_AUTO_HEDGE else base_qty
-            log("📊 ENTRY", f"{symbol} OBV+{obv_display:.1f}: SHORT {short_qty} (주력), LONG {long_qty} (헤지)")
+            short_qty = base_qty * (Decimal("1") + obv_weight)
+            long_qty = base_qty * HEDGE_RATIO_MAIN if ENABLE_AUTO_HEDGE else base_qty
         elif obv_display < 0:
-            # 숏 강세 → LONG 주력
-            long_qty = int(base_qty * (1 + obv_weight))
-            short_qty = int(base_qty * HEDGE_RATIO_MAIN) if ENABLE_AUTO_HEDGE else base_qty
-            log("📊 ENTRY", f"{symbol} OBV{obv_display:.1f}: LONG {long_qty} (주력), SHORT {short_qty} (헤지)")
+            long_qty = base_qty * (Decimal("1") + obv_weight)
+            short_qty = base_qty * HEDGE_RATIO_MAIN if ENABLE_AUTO_HEDGE else base_qty
         else:
             long_qty = base_qty
             short_qty = base_qty
-            log("📊 ENTRY", f"{symbol} OBV=0: LONG={long_qty}, SHORT={short_qty}")
         
-        # LONG 진입
+        # ✅ 최소 수량 보장 (다시 한번!)
+        if long_qty < Decimal("0.001"):
+            long_qty = Decimal("0.001")
+        if short_qty < Decimal("0.001"):
+            short_qty = Decimal("0.001")
+        
+        with balance_lock:
+            long_value = long_qty * current_price_dec
+            short_value = short_qty * current_price_dec
+            max_value = initial_capital * MAXPOSITIONRATIO
+        
+        if long_value >= max_value or short_value >= max_value:
+            log("⚠️ GRID", f"{symbol}: Exceeds max position (L:{long_value:.2f}, S:{short_value:.2f}, Max:{max_value:.2f})")
+            return
+        
+        log("🔷 GRID", f"{symbol} OBV={obv_display:.2f}%, LONG={long_qty}, SHORT={short_qty}")
+        
+        # LONG 진입 (✅ int 제거!)
         if long_qty > 0:
             try:
-                contract_qty = int(get_contract_size(symbol, long_qty))
+                contract_qty = get_contract_size(symbol, float(long_qty))  # ✅ int 제거!
                 
                 order = FuturesOrder(
                     contract=symbol,
-                    size=contract_qty,
+                    size=contract_qty,  # ✅ float 지원!
                     price=0,
                     tif="ioc",
                     reduce_only=False,
@@ -883,14 +876,14 @@ def initialize_grid(symbol, current_price=None):
         
         time.sleep(0.1)
         
-        # SHORT 진입
+        # SHORT 진입 (✅ int 제거!)
         if short_qty > 0:
             try:
-                contract_qty = int(get_contract_size(symbol, short_qty))
+                contract_qty = get_contract_size(symbol, float(short_qty))  # ✅ int 제거!
                 
                 order = FuturesOrder(
                     contract=symbol,
-                    size=-contract_qty,
+                    size=-contract_qty,  # ✅ float 지원!
                     price=0,
                     tif="ioc",
                     reduce_only=False,
@@ -907,10 +900,9 @@ def initialize_grid(symbol, current_price=None):
         refresh_all_tp_orders(symbol)
         
         last_event_time[symbol] = time.time()
-        log("✅ GRID", f"{symbol}: Market entry complete!")
     
-    finally:
-        initialize_grid_lock.release()
+    except Exception as e:
+        log("❌ GRID", f"{symbol} error: {e}")
 
 
 # =============================================================================
@@ -918,7 +910,7 @@ def initialize_grid(symbol, current_price=None):
 # =============================================================================
 
 def market_entry_when_imbalanced(symbol):
-    """불균형 포지션 시 자동 헤징"""
+    """불균형 발생 시 자동 헤징 (멀티 심볼 지원)"""
     
     if not ENABLE_AUTO_HEDGE:
         return
@@ -929,47 +921,55 @@ def market_entry_when_imbalanced(symbol):
         with position_lock:
             long_size = position_state[symbol]["long"]["size"]
             short_size = position_state[symbol]["short"]["size"]
+            long_price = position_state[symbol]["long"]["entry_price"]
+            short_price = position_state[symbol]["short"]["entry_price"]
         
         if long_size == 0 and short_size == 0:
             return
         
-        # 불균형 판단
-        if long_size > 0 and short_size == 0:
+        # 불균형 체크
+        long_value = long_size * long_price
+        short_value = short_size * short_price
+        
+        total_value = long_value + short_value
+        if total_value == 0:
+            return
+        
+        long_ratio = float(long_value / total_value)
+        short_ratio = float(short_value / total_value)
+        
+        imbalance_threshold = 0.60  # 60:40 이상 차이
+        
+        if abs(long_ratio - short_ratio) < (imbalance_threshold - 0.5) * 2:
+            return
+        
+        # 부족한 쪽 판단
+        if long_value > short_value:
             missing_side = "SHORT"
-            missing_qty = int(long_size * HEDGE_RATIO_MAIN)
-        elif short_size > 0 and long_size == 0:
+            missing_qty = long_size - short_size
+        else:
             missing_side = "LONG"
-            missing_qty = int(short_size * HEDGE_RATIO_MAIN)
-        else:
-            return
+            missing_qty = short_size - long_size
         
-        if missing_qty < 1:
-            missing_qty = 1
+        # 헤징 수량 계산
+        hedge_ratio = get_symbol_config(symbol, "hedge_ratio_main")
+        hedge_qty = abs(missing_qty) * hedge_ratio
         
-        # 최대 한도 체크
-        current_price = get_current_price(symbol)
-        if current_price <= 0:
-            return
+        # ✅ 최소 수량 보장
+        if hedge_qty < Decimal("0.001"):
+            hedge_qty = Decimal("0.001")
         
-        current_price_dec = Decimal(str(current_price))
+        # ✅ 소수점 3자리로 반올림
+        hedge_qty_rounded = round(float(hedge_qty), 3)
         
-        with balance_lock:
-            max_value = initial_capital * MAXPOSITIONRATIO
+        # ✅ 최소값 재확인
+        if hedge_qty_rounded < 0.001:
+            hedge_qty_rounded = 0.001
         
-        if missing_side == "LONG":
-            if long_size * current_price_dec >= max_value:
-                log("⚠️ HEDGE", f"{symbol}: Max position reached for LONG")
-                return
-        else:
-            if short_size * current_price_dec >= max_value:
-                log("⚠️ HEDGE", f"{symbol}: Max position reached for SHORT")
-                return
-        
-        log("⚖️ HEDGE", f"{symbol}: Imbalanced, adding {missing_side} {missing_qty}")
+        log("🔁 HEDGE", f"{symbol}: Imbalanced, adding {missing_side} {hedge_qty_rounded}")
         
         # 헤징 진입
-        contract_qty = int(get_contract_size(symbol, missing_qty))
-        order_size = contract_qty if missing_side == "LONG" else -contract_qty
+        order_size = hedge_qty_rounded if missing_side == "LONG" else -hedge_qty_rounded
         
         order = FuturesOrder(
             contract=symbol,
@@ -981,7 +981,7 @@ def market_entry_when_imbalanced(symbol):
         )
         
         api.create_futures_order(SETTLE, order)
-        log("✅ HEDGE", f"{symbol} {missing_side} {missing_qty} executed")
+        log("✅ HEDGE", f"{symbol} {missing_side} {hedge_qty_rounded} executed")
         
         time.sleep(0.2)
         sync_position(symbol)
@@ -1001,6 +1001,7 @@ def check_idle_and_enter(symbol):
     """10분 무활동 시 아이들 진입"""
     
     if idle_entry_in_progress[symbol]:
+        log("⚠️ IDLE", f"{symbol}: Entry in progress")
         return
     
     try:
@@ -1010,7 +1011,6 @@ def check_idle_and_enter(symbol):
             return
         last_idle_check[symbol] = now
         
-        # 최대 진입 횟수 체크
         if idle_entry_count[symbol] >= MAX_IDLE_ENTRIES:
             return
         
@@ -1022,18 +1022,17 @@ def check_idle_and_enter(symbol):
             long_price = position_state[symbol]["long"]["entry_price"]
             short_price = position_state[symbol]["short"]["entry_price"]
         
-        if long_size == 0 or short_size == 0:
+        if long_size == 0 and short_size == 0:
             return
         
         time_since_last = now - last_event_time.get(symbol, now)
+        
         log("🔍 IDLE_CHECK", f"{symbol}: L={long_size}, S={short_size}, Last={time_since_last:.1f}s, Need={IDLE_TIMEOUT}s")
         
         if time_since_last < IDLE_TIMEOUT:
             log("⏳ IDLE", f"{symbol}: Waiting {IDLE_TIMEOUT - time_since_last:.1f}s more")
-            
             return
         
-        # 최대 한도 체크
         with balance_lock:
             max_value = initial_capital * MAXPOSITIONRATIO
         
@@ -1045,8 +1044,6 @@ def check_idle_and_enter(symbol):
         
         long_value = long_size * long_price
         short_value = short_size * short_price
-
-        max_value = initial_capital * MAXPOSITIONRATIO
         
         if long_value >= max_value or short_value >= max_value:
             log("⚠️ IDLE", f"{symbol}: Max position reached (L:{long_value:.2f}, S:{short_value:.2f}, Max:{max_value:.2f})")
@@ -1064,31 +1061,37 @@ def check_idle_and_enter(symbol):
         
         loss_pct = (float(total_pnl) / float(balance)) * 100 if balance > 0 else 0
         
-        # 손실 가중
+        # 기본 수량 (✅ int 제거!)
         base_ratio = get_symbol_config(symbol, "base_ratio")
         with balance_lock:
             base_value = initial_capital * base_ratio
         
-        base_qty = int(base_value / current_price_dec)
-        adjusted_qty = int(base_qty * (1 + loss_pct / 100))
+        base_qty = base_value / current_price_dec  # ✅ Decimal 유지!
+        
+        # ✅ 최소 수량 보장
+        if base_qty < Decimal("0.001"):
+            base_qty = Decimal("0.001")
+        
+        # 손실 가중 (✅ int 제거!)
+        adjusted_qty = base_qty * (Decimal("1") + Decimal(str(loss_pct)) / Decimal("100"))
         
         # OBV 가중
         obv_display = float(obv_macd_value[symbol]) * 100
         obv_abs = abs(obv_display)
-        obv_weight = calculate_obv_macd_weight(obv_abs)
+        obv_weight = Decimal(str(calculate_obv_macd_weight(obv_abs)))
         
-        # 수량 배분
+        # 수량 배분 (✅ int 제거!)
         if obv_display > 0:
-            short_qty = int(adjusted_qty * (1 + obv_weight))
+            short_qty = adjusted_qty * (Decimal("1") + obv_weight)
             long_qty = adjusted_qty
         elif obv_display < 0:
-            long_qty = int(adjusted_qty * (1 + obv_weight))
+            long_qty = adjusted_qty * (Decimal("1") + obv_weight)
             short_qty = adjusted_qty
         else:
             long_qty = adjusted_qty
             short_qty = adjusted_qty
-
-        # ✅ 추가: 최소 수량 보장 (다시 한번!)
+        
+        # ✅ 최소 수량 보장 (다시 한번!)
         if long_qty < Decimal("0.001"):
             long_qty = Decimal("0.001")
         if short_qty < Decimal("0.001"):
@@ -1097,46 +1100,49 @@ def check_idle_and_enter(symbol):
         idle_entry_count[symbol] += 1
         log("⏰ IDLE", f"{symbol} #{idle_entry_count[symbol]}: Loss={loss_pct:.2f}%, LONG={long_qty}, SHORT={short_qty}")
         
-        # 진입
+        # LONG 진입 (✅ int 제거!)
         try:
-            if long_qty > 0:
-                contract_qty = int(get_contract_size(symbol, long_qty))
+            if float(long_qty) > 0:
+                contract_qty = get_contract_size(symbol, float(long_qty))  # ✅ int 제거!
                 
-                if contract_qty < 1:
-                    contract_qty = 1
+                if contract_qty < 0.001:  # ✅ 0.001!
+                    contract_qty = 0.001
                 
                 order = FuturesOrder(
                     contract=symbol,
-                    size=contract_qty,
+                    size=contract_qty,  # ✅ float 지원!
                     price=0,
                     tif="ioc",
                     reduce_only=False,
                     text=generate_order_id()
                 )
                 api.create_futures_order(SETTLE, order)
-        except:
-            pass
+                log("✅ IDLE_LONG", f"{symbol}: {long_qty} ({contract_qty} qty)")
+        except Exception as e:
+            log("❌ IDLE", f"{symbol} LONG error: {e}")
         
         time.sleep(0.1)
         
+        # SHORT 진입 (✅ int 제거!)
         try:
-            if short_qty > 0:
-                contract_qty = int(get_contract_size(symbol, short_qty))
-
-                if contract_qty < 1:
-                    contract_qty = 1
-                    
+            if float(short_qty) > 0:
+                contract_qty = get_contract_size(symbol, float(short_qty))  # ✅ int 제거!
+                
+                if contract_qty < 0.001:  # ✅ 0.001!
+                    contract_qty = 0.001
+                
                 order = FuturesOrder(
                     contract=symbol,
-                    size=contract_qty,
+                    size=-contract_qty,  # ✅ float 지원!
                     price=0,
                     tif="ioc",
                     reduce_only=False,
                     text=generate_order_id()
                 )
                 api.create_futures_order(SETTLE, order)
-        except:
-            pass
+                log("✅ IDLE_SHORT", f"{symbol}: {short_qty} ({contract_qty} qty)")
+        except Exception as e:
+            log("❌ IDLE", f"{symbol} SHORT error: {e}")
         
         time.sleep(0.2)
         sync_position(symbol)
@@ -1146,17 +1152,7 @@ def check_idle_and_enter(symbol):
     
     except Exception as e:
         log("❌ IDLE", f"{symbol} error: {e}")
-
-    # ✅ 디버그 로그
-    log("🔍 DEBUG", f"{symbol} base_qty={base_qty}, adjusted={adjusted_qty}, obv_weight={obv_weight}")
-    log("🔍 DEBUG", f"{symbol} long_qty={long_qty}, short_qty={short_qty}")
     
-    # 진입
-    try:
-        if float(long_qty) > 0:
-            contract_qty = int(get_contract_size(symbol, float(long_qty)))
-            log("🔍 DEBUG", f"{symbol} LONG contract_qty={contract_qty}")  # ✅ 디버그!
-            
     finally:
         idle_entry_in_progress[symbol] = False
 
