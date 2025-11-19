@@ -254,7 +254,7 @@ def sync_position(symbol=None, max_retries=3, retry_delay=2):
     
     for attempt in range(max_retries):
         try:
-            positions = api.list_futures_positions(SETTLE)
+            positions = api.list_positions(SETTLE)
             
             # 초기화
             for sym in symbols_to_sync:
