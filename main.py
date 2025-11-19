@@ -425,8 +425,8 @@ def calculate_obv_macd(symbol):
         # 4. DEMA 계산 (OBV → DEMA)
         ma_fast = dema_np(obvema, 9)
         
-        # 5. EMA 계산 (OBV → EMA) ✅ 수정!
-        ma_slow = ema_np(obvema, 26)  # ✅ closes → obvema
+        # 5. EMA 계산 (OBV → EMA)
+        ma_slow = ema_np(obvema, 26)
         
         # 6. MACD 계산 (길이 맞추기)
         min_len = min(len(ma_fast), len(ma_slow))
@@ -466,19 +466,35 @@ def sma(data, period):
 
 
 def ema_np(data, period):
-    """Exponential Moving Average"""
+    """Exponential Moving Average (길이 보존)"""
+    if len(data) < period:
+        return np.array([np.mean(data)])
+    
     k = 2 / (period + 1)
-    ema = [np.mean(data[:period])]
-    for price in data[period:]:
-        ema.append(price * k + ema[-1] * (1 - k))
-    return np.array(ema)
+    ema_values = []
+    
+    # 초기 SMA
+    sma = np.mean(data[:period])
+    ema_values.append(sma)
+    
+    # EMA 계산
+    for i in range(period, len(data)):
+        ema = data[i] * k + ema_values[-1] * (1 - k)
+        ema_values.append(ema)
+    
+    return np.array(ema_values)
 
 
 def dema_np(data, period):
     """Double Exponential Moving Average"""
     ema1 = ema_np(data, period)
     ema2 = ema_np(ema1, period)
-    return 2 * ema1 - ema2
+    
+    # 길이 맞추기
+    min_len = min(len(ema1), len(ema2))
+    dema = 2 * ema1[-min_len:] - ema2[-min_len:]
+    
+    return dema
 
 
 def calc_slope(src, length):
