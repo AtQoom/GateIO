@@ -1026,7 +1026,11 @@ def check_idle_and_enter(symbol):
             return
         
         time_since_last = now - last_event_time.get(symbol, now)
+        log("🔍 IDLE_CHECK", f"{symbol}: L={long_size}, S={short_size}, Last={time_since_last:.1f}s, Need={IDLE_TIMEOUT}s")
+        
         if time_since_last < IDLE_TIMEOUT:
+            log("⏳ IDLE", f"{symbol}: Waiting {IDLE_TIMEOUT - time_since_last:.1f}s more")
+            
             return
         
         # 최대 한도 체크
