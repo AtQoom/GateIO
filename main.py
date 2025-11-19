@@ -1144,13 +1144,14 @@ def remove_duplicate_orders(symbol):
             if len(group) > 1:
                 for order in group[1:]:
                     try:
-                       api.cancel_order(SETTLE, order.id)
+                        api.cancel_order(order.id, SETTLE)
                         log("🗑️ DUP", f"{symbol}: Removed duplicate @ {price}")
                     except:
                         pass
     
     except Exception as e:
         log("❌ DUP", f"{symbol} error: {e}")
+
 
 
 def check_tp_hash_and_refresh(symbol):
