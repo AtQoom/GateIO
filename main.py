@@ -10,6 +10,8 @@ from collections import deque
 from flask import Flask, request, jsonify
 from gate_api import ApiClient, Configuration, FuturesApi, FuturesOrder, UnifiedApi
 import hashlib
+import numpy as np
+from collections import deque
 
 try:
     from gate_api.exceptions import ApiException as GateApiException
@@ -144,6 +146,10 @@ max_position_locked = {symbol: {"long": False, "short": False} for symbol in SYM
 position_lock = threading.Lock()
 balance_lock = threading.Lock()
 initialize_grid_lock = threading.Lock()
+
+# 전역 변수
+obv_history = {symbol: deque(maxlen=200) for symbol in SYMBOLS}
+obv_macd_value = {symbol: Decimal("0") for symbol in SYMBOLS}
 
 # =============================================================================
 # 헬퍼 함수 (Helper Functions)
@@ -361,57 +367,185 @@ def get_current_price(symbol):
 # =============================================================================
 
 def calculate_obv_macd(symbol):
-    """OBV MACD 자체 계산 (3분봉 기준)"""
+    """OBV MACD 계산 (파인스크립트 완전 구현)"""
+    
     global obv_macd_value
     
     try:
         if len(kline_history[symbol]) < 60:
-            log("⏳ OBV", f"{symbol}: Not enough data ({len(kline_history[symbol])}/60)")
+            log("❌ OBV", f"{symbol}: Not enough data ({len(kline_history[symbol])}/60)")
             return
         
         klines = list(kline_history[symbol])
         
-        # OBV 계산
-        obv = [0.0]
-        for i in range(1, len(klines)):
-            close_prev = float(klines[i-1][2])
-            close_curr = float(klines[i][2])
-            volume = float(klines[i][5])
-            
-            if close_curr > close_prev:
-                obv.append(obv[-1] + volume)
-            elif close_curr < close_prev:
-                obv.append(obv[-1] - volume)
-            else:
-                obv.append(obv[-1])
+        # 1. 기본 데이터 추출
+        closes = np.array([float(k[2]) for k in klines])
+        highs = np.array([float(k[3]) for k in klines])
+        lows = np.array([float(k[4]) for k in klines])
+        volumes = np.array([float(k[5]) for k in klines])
         
-        # EMA 계산
-        def ema(data, period):
-            k = 2 / (period + 1)
-            ema_values = [sum(data[:period]) / period]
-            for price in data[period:]:
-                ema_values.append(price * k + ema_values[-1] * (1 - k))
-            return ema_values
+        # 2. OBV 계산 (파인스크립트 방식)
+        window_len = 28
+        v_len = 14
         
-        # MACD 계산
-        ema_fast = ema(obv, 12)
-        ema_slow = ema(obv, 26)
+        # Price spread (volatility)
+        price_spread_arr = highs - lows
+        if len(price_spread_arr) >= window_len:
+            price_spread = np.std(price_spread_arr[-window_len:])
+        else:
+            price_spread = np.std(price_spread_arr)
         
-        macd_line = [ema_fast[i] - ema_slow[i] for i in range(len(ema_slow))]
-        signal_line = ema(macd_line, 9)
+        # 누적 OBV
+        v = np.zeros(len(closes))
+        for i in range(1, len(closes)):
+            sign = 1 if closes[i] > closes[i-1] else -1 if closes[i] < closes[i-1] else 0
+            v[i] = v[i-1] + sign * volumes[i]
         
-        # OBV MACD
-        obv_macd = macd_line[-1] - signal_line[-1]
+        # OBV smoothing
+        smooth = sma(v, v_len)
+        v_spread = np.std(v - smooth)
         
-        # 정규화 (×1000)
-        obv_macd_normalized = obv_macd / 1000.0
+        if v_spread == 0:
+            v_spread = 1  # ✅ 0 방지!
+        
+        # Shadow 계산
+        shadow = (v - smooth) / v_spread * price_spread
+        
+        # Out 계산
+        out = np.where(shadow > 0, highs + shadow, lows + shadow)
+        
+        # 3. OBV EMA (len=1, 거의 그대로)
+        obvema = out  # ✅ len=1이므로 원본 사용!
+        
+        # 4. DEMA 계산 (MACD Fast Line)
+        ma_fast = dema_np(obvema, 9)
+        
+        # 5. EMA 계산 (MACD Slow Line)
+        ma_slow = ema_np(closes, 26)
+        
+        # 6. MACD 계산 (배열로!)
+        macd_array = ma_fast - ma_slow  # ✅ 배열!
+        
+        # 7. Slope 계산 (Linear Regression)
+        slope_len = 2
+        slope, intercept = calc_slope(macd_array, slope_len)  # ✅ 배열 전달!
+        tt1 = intercept + slope * (slope_len - 1)
+        
+        # 8. T-Channel 계산 (Trend Following)
+        b = t_channel(tt1, symbol)  # ✅ symbol 추가!
+        
+        # 9. 심볼별 스케일링
+        if symbol == "ARB_USDT":
+            obv_macd_normalized = b * 1000.0  # ✅ ARB는 *1000
+        else:  # PAXG_USDT
+            obv_macd_normalized = b  # ✅ PAXG는 그대로
         
         obv_macd_value[symbol] = Decimal(str(obv_macd_normalized))
         
-        log("📈 OBV", f"{symbol}: {float(obv_macd_value[symbol]):.6f} (×100: {float(obv_macd_value[symbol])*100:.2f})")
+        log("📊 OBV", f"{symbol}: {float(obv_macd_value[symbol]):.6f} (×100: {float(obv_macd_value[symbol])*100:.2f})")
     
     except Exception as e:
         log("❌ OBV", f"{symbol} calculation error: {e}")
+
+
+def sma(data, period):
+    """Simple Moving Average"""
+    result = []
+    for i in range(len(data)):
+        if i < period - 1:
+            result.append(np.mean(data[:i+1]))
+        else:
+            result.append(np.mean(data[i-period+1:i+1]))
+    return np.array(result)
+
+
+def ema_np(data, period):
+    """Exponential Moving Average"""
+    k = 2 / (period + 1)
+    ema = [np.mean(data[:period])]
+    for price in data[period:]:
+        ema.append(price * k + ema[-1] * (1 - k))
+    return np.array(ema)
+
+
+def dema_np(data, period):
+    """Double Exponential Moving Average"""
+    ema1 = ema_np(data, period)
+    ema2 = ema_np(ema1, period)
+    return 2 * ema1 - ema2
+
+
+def calc_slope(src, length):
+    """Linear Regression Slope"""
+    x = np.arange(1, length + 1)
+    y = src[-length:] if len(src) >= length else src
+    
+    if len(y) < 2:
+        return 0, src[-1] if len(src) > 0 else 0
+    
+    x = x[-len(y):]
+    
+    # 선형 회귀
+    sum_x = np.sum(x)
+    sum_y = np.sum(y)
+    sum_x_sqr = np.sum(x * x)
+    sum_xy = np.sum(x * y)
+    
+    n = len(y)
+    slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x_sqr - sum_x * sum_x)
+    average = sum_y / n
+    intercept = average - slope * sum_x / n + slope
+    
+    return slope, intercept
+
+
+# 전역 변수 (T-Channel)
+t_channel_b = {symbol: 0.0 for symbol in SYMBOLS}
+t_channel_dev = {symbol: 0.0 for symbol in SYMBOLS}
+t_channel_oc = {symbol: 0 for symbol in SYMBOLS}
+t_channel_n = {symbol: 0 for symbol in SYMBOLS}
+
+
+def t_channel(src, symbol, p=1):
+    """T-Channel (Trend Following)"""
+    
+    global t_channel_b, t_channel_dev, t_channel_oc, t_channel_n
+    
+    # 초기화
+    if t_channel_n[symbol] == 0:
+        t_channel_b[symbol] = src
+        t_channel_n[symbol] = 1
+        return src
+    
+    # 누적 카운트
+    t_channel_n[symbol] += 1
+    n = t_channel_n[symbol]
+    
+    # Average deviation
+    a = abs(src - t_channel_b[symbol]) / n * p
+    
+    # Base update
+    if src > t_channel_b[symbol] + a:
+        t_channel_b[symbol] = src
+    elif src < t_channel_b[symbol] - a:
+        t_channel_b[symbol] = src
+    
+    # Deviation
+    if t_channel_b[symbol] != t_channel_b.get(f"{symbol}_prev", t_channel_b[symbol]):
+        t_channel_dev[symbol] = a
+    
+    t_channel_b[f"{symbol}_prev"] = t_channel_b[symbol]
+    
+    # Order change
+    change_b = t_channel_b[symbol] - t_channel_b.get(f"{symbol}_prev2", t_channel_b[symbol])
+    if change_b > 0:
+        t_channel_oc[symbol] = 1
+    elif change_b < 0:
+        t_channel_oc[symbol] = -1
+    
+    t_channel_b[f"{symbol}_prev2"] = t_channel_b[symbol]
+    
+    return t_channel_b[symbol]
 
 
 def fetch_kline_thread():
