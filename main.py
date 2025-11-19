@@ -599,7 +599,7 @@ def refresh_all_tp_orders(symbol):
     """TP 주문 갱신 (완전판)"""
     
     try:
-        # 1. 포지션 동기화 및 동적 TP 계산
+        # 1. 포지션 동기화
         sync_position(symbol)
         calculate_dynamic_tp_gap(symbol)
         
@@ -609,35 +609,34 @@ def refresh_all_tp_orders(symbol):
             long_entry = position_state[symbol]["long"]["entry_price"]
             short_entry = position_state[symbol]["short"]["entry_price"]
         
-        # 포지션 없으면 종료
         if long_size == 0 and short_size == 0:
             return
         
-        # 2. 기존 TP 완전 제거 (강화판)
+        # 2. 기존 TP 완전 제거
         cancel_tp_only(symbol)
-        time.sleep(0.3)
+        time.sleep(0.5)
         
-        # 3. 추가 안전장치: 모든 reduce_only 주문 확인 후 제거
-        try:
-            orders = api.list_orders(SETTLE, contract=symbol, status="open")
-            for order in orders:
-                # reduce_only 체크 (여러 방식 지원)
-                is_reduce = False
-                if hasattr(order, 'reduce_only'):
-                    is_reduce = order.reduce_only
-                elif hasattr(order, 'is_reduce_only'):
-                    is_reduce = order.is_reduce_only
+        # 3. 추가 확인 (3회 반복)
+        for attempt in range(3):
+            try:
+                orders = api.list_futures_orders(SETTLE, contract=symbol, status='open')  # ✅ 수정!
+                has_tp = False
+                for order in orders:
+                    is_reduce = getattr(order, 'reduce_only', False) or getattr(order, 'is_reduce_only', False)
+                    if is_reduce:
+                        has_tp = True
+                        try:
+                            api.cancel_futures_order(SETTLE, order.id)  # ✅ 수정!
+                            log("🗑️ TP_RETRY", f"{symbol}: Removed pending TP {order.id} (attempt {attempt+1})")
+                        except:
+                            pass
                 
-                if is_reduce:
-                    try:
-                        api.cancel_order(order.id, SETTLE)
-                        log("🗑️ TP_CLEAN", f"{symbol}: Removed pending TP order {order.id}")
-                    except:
-                        pass
-            
-            time.sleep(0.3)
-        except Exception as e:
-            log("⚠️ TP_CLEAN", f"{symbol}: Cleanup error: {e}")
+                if not has_tp:
+                    break
+                
+                time.sleep(0.5)
+            except:
+                break
         
         # 4. LONG TP 생성
         if long_size > 0 and long_entry > 0:
@@ -698,7 +697,7 @@ def refresh_all_tp_orders(symbol):
 def cancel_all_orders(symbol):
     """모든 주문 취소"""
     try:
-        orders = api.list_orders(SETTLE, contract=symbol, status='open')
+        orders = api.list_futures_orders(SETTLE, contract=symbol, status='open')
         for order in orders:
             try:
                api.cancel_order(order.id, SETTLE)
@@ -716,31 +715,39 @@ def cancel_all_orders(symbol):
 
 
 def cancel_tp_only(symbol):
-    """TP 주문만 취소 (강화판)"""
+    """TP 주문만 취소 (완전판)"""
     try:
         # 1. 메모리 ID로 취소
         for side in ["long", "short"]:
             tp_id = average_tp_orders[symbol].get(side)
             if tp_id:
                 try:
-                    api.cancel_order(tp_id, SETTLE)  # ✅ 수정!
+                    api.cancel_futures_order(SETTLE, tp_id)  # ✅ 수정!
                     average_tp_orders[symbol][side] = None
                 except:
                     pass
         
-        time.sleep(0.3)  # 0.1 → 0.3초
+        time.sleep(0.5)  # 0.3 → 0.5초로 증가
         
-        # 2. 모든 reduce_only 주문 제거
+        # 2. 모든 reduce_only 주문 제거 (완전히!)
         try:
-            orders = api.list_orders(SETTLE, contract=symbol, status="open")  # ✅ 수정!
+            orders = api.list_futures_orders(SETTLE, contract=symbol, status='open')  # ✅ 수정!
             for order in orders:
-                is_tp = order.reduce_only or getattr(order, 'is_reduce_only', False)
-                if is_tp:
+                # reduce_only 체크
+                is_reduce = False
+                if hasattr(order, 'reduce_only'):
+                    is_reduce = order.reduce_only
+                elif hasattr(order, 'is_reduce_only'):
+                    is_reduce = order.is_reduce_only
+                
+                if is_reduce:
                     try:
-                        api.cancel_order(order.id, SETTLE)  # ✅ 수정!
-                        log("🗑️ TP", f"{symbol}: Removed pending TP {order.id}")
+                        api.cancel_futures_order(SETTLE, order.id)  # ✅ 수정!
+                        log("🗑️ TP_REMOVE", f"{symbol}: Removed pending TP {order.id}")
                     except:
                         pass
+            
+            time.sleep(0.5)  # 추가 대기
         except:
             pass
     
@@ -1113,7 +1120,7 @@ def validate_strategy_consistency(symbol):
                
         # 단일 포지션 + 주문 없음 → 헤징 또는 그리드 생성
         if (long_size > 0 and short_size == 0) or (long_size == 0 and short_size > 0):
-            orders = api.list_orders(SETTLE, contract=symbol, status='open')
+            orders = api.list_futures_orders(SETTLE, contract=symbol, status='open')
             if len(orders) == 0:
                 if ENABLE_AUTO_HEDGE:
                     log("⚠️ VALIDATE", f"{symbol}: Single position detected, hedging")
@@ -1129,7 +1136,7 @@ def validate_strategy_consistency(symbol):
 def remove_duplicate_orders(symbol):
     """중복 주문 제거"""
     try:
-        orders = api.list_orders(SETTLE, contract=symbol, status='open')
+        orders = api.list_futures_orders(SETTLE, contract=symbol, status='open')
         
         # 가격별 주문 그룹화
         price_groups = {}
@@ -1157,7 +1164,7 @@ def remove_duplicate_orders(symbol):
 def check_tp_hash_and_refresh(symbol):
     """TP 주문 해시 확인 및 갱신"""
     try:
-        orders = api.list_orders(SETTLE, contract=symbol, status='open')
+        orders = api.list_futures_orders(SETTLE, contract=symbol, status='open')
         
         # TP 주문만 필터
         tp_orders = [o for o in orders if o.reduce_only]
