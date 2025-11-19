@@ -52,6 +52,7 @@ logger.info(f"📌 Environment: {TITLE}")
 SYMBOL_CONFIG = {
     "ARB_USDT": {
         "base_ratio": Decimal("0.02"),      # 2%
+        "hedge_ratio_main": Decimal("0.10"),  # ✅ 추가!
         "tier1_min": Decimal("1.0"),        # Tier-1 시작
         "tier1_max": Decimal("2.0"),        # Tier-1 종료
         "tier1_multiplier": Decimal("0.8"), # Tier-1 청산 배수
@@ -59,6 +60,7 @@ SYMBOL_CONFIG = {
     },
     "PAXG_USDT": {
         "base_ratio": Decimal("0.10"),  # 3% → 10% 증가!
+        "hedge_ratio_main": Decimal("0.10"),  # ✅ 추가!
         # 1052 * 0.10 = 105.2 USDT
         # 105.2 / 4086 = 0.0257개 → 25 계약!
         "tier1_min": Decimal("2"),
@@ -161,12 +163,22 @@ def log(tag, message):
 
 
 def get_contract_size(symbol, actual_size):
-    """실제 수량 → 계약 수 변환 (Gate.io는 1:1)"""
-    return round(float(actual_size), 3)  # 소수점 3자리
+    """실제 수량 → 계약 수 변환"""
+    if symbol == "ARB_USDT":
+        # ARB: 1 계약 = 1 ARB (정수)
+        return int(round(float(actual_size)))
+    else:  # PAXG_USDT
+        # PAXG: 1 계약 = 0.001 PAXG
+        return int(round(float(actual_size) / 0.001))  # 0.001 → 1 계약
 
 def get_actual_size(symbol, contract_size):
-    """계약 수 → 실제 수량 변환 (Gate.io는 1:1)"""
-    return round(float(contract_size), 3)  # 소수점 3자리
+    """계약 수 → 실제 수량 변환"""
+    if symbol == "ARB_USDT":
+        # ARB: 1 계약 = 1 ARB
+        return float(contract_size)
+    else:  # PAXG_USDT
+        # PAXG: 1 계약 = 0.001 PAXG
+        return round(float(contract_size) * 0.001, 3)  # 1 계약 → 0.001
 
 def generate_order_id():
     """고유 주문 ID 생성"""
