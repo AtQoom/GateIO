@@ -56,11 +56,13 @@ SYMBOL_CONFIG = {
         "tier2_multiplier": Decimal("1.5")  # Tier-2 청산 배수
     },
     "PAXG_USDT": {
-        "base_ratio": Decimal("0.03"),      # 3%
-        "tier1_min": Decimal("2"),        # Tier-1 시작
-        "tier1_max": Decimal("3.0"),        # Tier-1 종료
-        "tier1_multiplier": Decimal("0.8"), # Tier-1 청산 배수
-        "tier2_multiplier": Decimal("1.5")  # Tier-2 청산 배수
+        "base_ratio": Decimal("0.10"),  # 3% → 10% 증가!
+        # 1052 * 0.10 = 105.2 USDT
+        # 105.2 / 4086 = 0.0257개 → 25 계약!
+        "tier1_min": Decimal("2"),
+        "tier1_max": Decimal("3.0"),
+        "tier1_multiplier": Decimal("1.6"),
+        "tier2_multiplier": Decimal("2.2")
     }
 }
 
@@ -1081,6 +1083,12 @@ def check_idle_and_enter(symbol):
         else:
             long_qty = adjusted_qty
             short_qty = adjusted_qty
+
+        # ✅ 추가: 최소 수량 보장 (다시 한번!)
+        if long_qty < Decimal("0.001"):
+            long_qty = Decimal("0.001")
+        if short_qty < Decimal("0.001"):
+            short_qty = Decimal("0.001")
         
         idle_entry_count[symbol] += 1
         log("⏰ IDLE", f"{symbol} #{idle_entry_count[symbol]}: Loss={loss_pct:.2f}%, LONG={long_qty}, SHORT={short_qty}")
@@ -1089,6 +1097,9 @@ def check_idle_and_enter(symbol):
         try:
             if long_qty > 0:
                 contract_qty = int(get_contract_size(symbol, long_qty))
+                
+                if contract_qty < 1:
+                    contract_qty = 1
                 
                 order = FuturesOrder(
                     contract=symbol,
@@ -1107,7 +1118,10 @@ def check_idle_and_enter(symbol):
         try:
             if short_qty > 0:
                 contract_qty = int(get_contract_size(symbol, short_qty))
-                
+
+                if contract_qty < 1:
+                    contract_qty = 1
+                    
                 order = FuturesOrder(
                     contract=symbol,
                     size=contract_qty,
@@ -1132,6 +1146,15 @@ def check_idle_and_enter(symbol):
     finally:
         idle_entry_in_progress[symbol] = False
 
+    # ✅ 디버그 로그
+    log("🔍 DEBUG", f"{symbol} base_qty={base_qty}, adjusted={adjusted_qty}, obv_weight={obv_weight}")
+    log("🔍 DEBUG", f"{symbol} long_qty={long_qty}, short_qty={short_qty}")
+    
+    # 진입
+    try:
+        if float(long_qty) > 0:
+            contract_qty = int(get_contract_size(symbol, float(long_qty)))
+            log("🔍 DEBUG", f"{symbol} LONG contract_qty={contract_qty}")  # ✅ 디버그!
 
 # =============================================================================
 # 검증 및 헬스 체크
