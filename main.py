@@ -155,18 +155,12 @@ def log(tag, message):
 
 
 def get_contract_size(symbol, actual_size):
-    """실제 수량 → 계약 수 변환"""
-    multiplier = CONTRACT_MULTIPLIER.get(symbol, 1)
-    contract_size = actual_size / multiplier
-    return contract_size
-
+    """실제 수량 → 계약 수 변환 (Gate.io는 1:1)"""
+    return round(float(actual_size), 3)  # 소수점 3자리
 
 def get_actual_size(symbol, contract_size):
-    """계약 수 → 실제 수량 변환"""
-    multiplier = CONTRACT_MULTIPLIER.get(symbol, 1)
-    actual_size = contract_size * multiplier
-    return actual_size
-
+    """계약 수 → 실제 수량 변환 (Gate.io는 1:1)"""
+    return round(float(contract_size), 3)  # 소수점 3자리
 
 def generate_order_id():
     """고유 주문 ID 생성"""
