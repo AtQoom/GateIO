@@ -59,7 +59,7 @@ SYMBOL_CONFIG = {
         "tier2_multiplier": Decimal("1.5")  # Tier-2 청산 배수
     },
     "PAXG_USDT": {
-        "base_ratio": Decimal("0.10"),  # 3% → 10% 증가!
+        "base_ratio": Decimal("0.05"),  # 3% → 5% 증가!
         "hedge_ratio_main": Decimal("0.10"),  # ✅ 추가!
         # 1052 * 0.10 = 105.2 USDT
         # 105.2 / 4086 = 0.0257개 → 25 계약!
