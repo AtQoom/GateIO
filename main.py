@@ -1142,9 +1142,6 @@ def check_idle_and_enter(symbol):
     
     except Exception as e:
         log("❌ IDLE", f"{symbol} error: {e}")
-    
-    finally:
-        idle_entry_in_progress[symbol] = False
 
     # ✅ 디버그 로그
     log("🔍 DEBUG", f"{symbol} base_qty={base_qty}, adjusted={adjusted_qty}, obv_weight={obv_weight}")
@@ -1155,6 +1152,10 @@ def check_idle_and_enter(symbol):
         if float(long_qty) > 0:
             contract_qty = int(get_contract_size(symbol, float(long_qty)))
             log("🔍 DEBUG", f"{symbol} LONG contract_qty={contract_qty}")  # ✅ 디버그!
+            
+    finally:
+        idle_entry_in_progress[symbol] = False
+
 
 # =============================================================================
 # 검증 및 헬스 체크
