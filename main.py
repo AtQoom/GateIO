@@ -384,61 +384,55 @@ def calculate_obv_macd(symbol):
         lows = np.array([float(k[4]) for k in klines])
         volumes = np.array([float(k[5]) for k in klines])
         
-        # 2. OBV 계산 (파인스크립트 방식)
+        # 2. OBV 계산
         window_len = 28
         v_len = 14
         
-        # Price spread (volatility)
         price_spread_arr = highs - lows
         if len(price_spread_arr) >= window_len:
             price_spread = np.std(price_spread_arr[-window_len:])
         else:
             price_spread = np.std(price_spread_arr)
         
-        # 누적 OBV
         v = np.zeros(len(closes))
         for i in range(1, len(closes)):
             sign = 1 if closes[i] > closes[i-1] else -1 if closes[i] < closes[i-1] else 0
             v[i] = v[i-1] + sign * volumes[i]
         
-        # OBV smoothing
         smooth = sma(v, v_len)
         v_spread = np.std(v - smooth)
         
         if v_spread == 0:
-            v_spread = 1  # ✅ 0 방지!
+            v_spread = 1
         
-        # Shadow 계산
         shadow = (v - smooth) / v_spread * price_spread
-        
-        # Out 계산
         out = np.where(shadow > 0, highs + shadow, lows + shadow)
         
-        # 3. OBV EMA (len=1, 거의 그대로)
-        obvema = out  # ✅ len=1이므로 원본 사용!
+        obvema = out
         
-        # 4. DEMA 계산 (MACD Fast Line)
+        # 4. DEMA 계산 (OBV → DEMA)
         ma_fast = dema_np(obvema, 9)
         
-        # 5. EMA 계산 (MACD Slow Line)
-        ma_slow = ema_np(closes, 26)
+        # 5. EMA 계산 (OBV → EMA) ✅ 수정!
+        ma_slow = ema_np(obvema, 26)  # ✅ closes → obvema
         
-        # 6. MACD 계산 (배열로!)
-        macd_array = ma_fast - ma_slow  # ✅ 배열!
+        # 6. MACD 계산 (길이 맞추기)
+        min_len = min(len(ma_fast), len(ma_slow))
+        macd_array = ma_fast[-min_len:] - ma_slow[-min_len:]
         
-        # 7. Slope 계산 (Linear Regression)
+        # 7. Slope 계산
         slope_len = 2
-        slope, intercept = calc_slope(macd_array, slope_len)  # ✅ 배열 전달!
+        slope, intercept = calc_slope(macd_array, slope_len)
         tt1 = intercept + slope * (slope_len - 1)
         
-        # 8. T-Channel 계산 (Trend Following)
-        b = t_channel(tt1, symbol)  # ✅ symbol 추가!
+        # 8. T-Channel
+        b = t_channel(tt1, symbol)
         
         # 9. 심볼별 스케일링
         if symbol == "ARB_USDT":
-            obv_macd_normalized = b * 1000.0  # ✅ ARB는 *1000
-        else:  # PAXG_USDT
-            obv_macd_normalized = b  # ✅ PAXG는 그대로
+            obv_macd_normalized = b * 1000.0
+        else:
+            obv_macd_normalized = b
         
         obv_macd_value[symbol] = Decimal(str(obv_macd_normalized))
         
