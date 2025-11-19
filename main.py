@@ -270,7 +270,8 @@ def sync_position(symbol=None, max_retries=3, retry_delay=2):
                 if contract not in symbols_to_sync:
                     continue
                 
-                size = int(pos.size)
+                # ✅ 수정: int 제거! 소수점 그대로 사용
+                size = float(pos.size) if pos.size else 0  # int → float!
                 entry_price = Decimal(str(pos.entry_price)) if pos.entry_price else Decimal("0")
                 
                 with position_lock:
@@ -554,26 +555,29 @@ def handle_non_main_position_tp(symbol, non_main_size_at_tp):
         
         # Tier 판정
         if balance * tier1_min <= main_position_value < balance * tier1_max:
-            sl_qty = int(non_main_size_at_tp * tier1_mult)
+            sl_qty = non_main_size_at_tp * tier1_mult  # ✅ int 제거!
             tier = f"Tier-1 ({float(tier1_min)}~{float(tier1_max)}배, {float(tier1_mult)}x)"
         else:
-            sl_qty = int(non_main_size_at_tp * tier2_mult)
+            sl_qty = non_main_size_at_tp * tier2_mult  # ✅ int 제거!
             tier = f"Tier-2 ({float(tier1_max)}배+, {float(tier2_mult)}x)"
         
-        # 안전장치
-        if sl_qty < 1:
-            sl_qty = 1
+        # ✅ 소수점 처리
+        if sl_qty < Decimal("0.001"):
+            sl_qty = Decimal("0.001")
         
         if sl_qty > main_position_size:
-            sl_qty = int(main_position_size)
+            sl_qty = main_position_size
         
-        log("🔁 TIER", f"{symbol} {tier}: {non_main_side} TP {non_main_size_at_tp} → {main_side} SL {sl_qty}")
+        # ✅ 소수점 3자리로 반올림 (Gate.io 지원)
+        sl_qty_rounded = round(float(sl_qty), 3)
+        
+        log("🔁 TIER", f"{symbol} {tier}: {non_main_side} TP {non_main_size_at_tp} → {main_side} SL {sl_qty_rounded}")
         
         # 주력 청산
-        order_size = -sl_qty if main_side == "LONG" else sl_qty
+        order_size = -sl_qty_rounded if main_side == "LONG" else sl_qty_rounded
         order = FuturesOrder(
             contract=symbol,
-            size=order_size,
+            size=order_size,  # ✅ float 지원!
             price=0,
             tif="ioc",
             reduce_only=True,
@@ -581,7 +585,7 @@ def handle_non_main_position_tp(symbol, non_main_size_at_tp):
         )
         
         api.create_futures_order(SETTLE, order)
-        log("✅ SL", f"{symbol} {main_side} {sl_qty} executed")
+        log("✅ SL", f"{symbol} {main_side} {sl_qty_rounded} executed")
         
         time.sleep(0.2)
         sync_position(symbol)
@@ -644,9 +648,12 @@ def refresh_all_tp_orders(symbol):
                 tp_price_long = long_entry * (Decimal("1") + tp_gap_long[symbol])
                 tp_price_long_rounded = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
                 
+                # ✅ 수정: int 제거! float 그대로 사용
+                tp_size_long = -float(long_size)  # int → float!
+                
                 order = FuturesOrder(
                     contract=symbol,
-                    size=-int(long_size),
+                    size=tp_size_long,  # ✅ float!
                     price=str(tp_price_long_rounded),
                     tif="gtc",
                     reduce_only=True,
@@ -670,9 +677,12 @@ def refresh_all_tp_orders(symbol):
                 tp_price_short = short_entry * (Decimal("1") - tp_gap_short[symbol])
                 tp_price_short_rounded = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
                 
+                # ✅ 수정: int 제거! float 그대로 사용
+                tp_size_short = float(short_size)  # int → float!
+                
                 order = FuturesOrder(
                     contract=symbol,
-                    size=int(short_size),
+                    size=tp_size_short,  # ✅ float!
                     price=str(tp_price_short_rounded),
                     tif="gtc",
                     reduce_only=True,
@@ -693,14 +703,13 @@ def refresh_all_tp_orders(symbol):
     except Exception as e:
         log("❌ TP", f"{symbol} refresh error: {e}")
 
-
 def cancel_all_orders(symbol):
     """모든 주문 취소"""
     try:
         orders = api.list_futures_orders(SETTLE, contract=symbol, status='open')
         for order in orders:
             try:
-               api.cancel_order(order.id, SETTLE)
+               api.cancel_futures_order(SETTLE, order.id)
             except:
                 pass
         
@@ -999,11 +1008,13 @@ def check_idle_and_enter(symbol):
         
         current_price_dec = Decimal(str(current_price))
         
-        long_value = long_size * current_price_dec
-        short_value = short_size * current_price_dec
+        long_value = long_size * long_price
+        short_value = short_size * short_price
+
+        max_value = initial_capital * MAXPOSITIONRATIO
         
         if long_value >= max_value or short_value >= max_value:
-            log("⚠️ IDLE", f"{symbol}: Max position reached")
+            log("⚠️ IDLE", f"{symbol}: Max position reached (L:{long_value:.2f}, S:{short_value:.2f}, Max:{max_value:.2f})")
             return
         
         idle_entry_in_progress[symbol] = True
@@ -1151,7 +1162,7 @@ def remove_duplicate_orders(symbol):
             if len(group) > 1:
                 for order in group[1:]:
                     try:
-                        api.cancel_order(order.id, SETTLE)
+                        api.cancel_futures_order(SETTLE, order.id)
                         log("🗑️ DUP", f"{symbol}: Removed duplicate @ {price}")
                     except:
                         pass
