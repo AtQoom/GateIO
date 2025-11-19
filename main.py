@@ -64,6 +64,11 @@ SYMBOL_CONFIG = {
     }
 }
 
+CONTRACT_MULTIPLIER = {
+    "ARB_USDT": 1,       # 1 계약 = 1 ARB
+    "PAXG_USDT": 0.001   # 1 계약 = 0.001 PAXG
+}
+
 # 공통 설정
 INITIALBALANCE = Decimal("50")               # 초기 잔고
 MAXPOSITIONRATIO = Decimal("3.0")           # 최대 포지션 비율 (3배)
@@ -150,6 +155,20 @@ initialize_grid_lock = threading.Lock()
 def log(tag, message):
     """통합 로그 함수"""
     logger.info(f"[{tag}] {message}")
+
+
+def get_contract_size(symbol, actual_size):
+    """실제 수량 → 계약 수 변환"""
+    multiplier = CONTRACT_MULTIPLIER.get(symbol, 1)
+    contract_size = actual_size / multiplier
+    return contract_size
+
+
+def get_actual_size(symbol, contract_size):
+    """계약 수 → 실제 수량 변환"""
+    multiplier = CONTRACT_MULTIPLIER.get(symbol, 1)
+    actual_size = contract_size * multiplier
+    return actual_size
 
 
 def generate_order_id():
@@ -270,16 +289,18 @@ def sync_position(symbol=None, max_retries=3, retry_delay=2):
                 if contract not in symbols_to_sync:
                     continue
                 
-                # ✅ 수정: int 제거! 소수점 그대로 사용
-                size = float(pos.size) if pos.size else 0  # int → float!
+                # ✅ 수정: 계약 수 → 실제 수량 변환
+                contract_size = float(pos.size) if pos.size else 0
+                actual_size = get_actual_size(contract, contract_size)  # 1 * 0.001 = 0.001
+                
                 entry_price = Decimal(str(pos.entry_price)) if pos.entry_price else Decimal("0")
                 
                 with position_lock:
-                    if size > 0:
-                        position_state[contract]["long"]["size"] = Decimal(str(size))
+                    if actual_size > 0:
+                        position_state[contract]["long"]["size"] = Decimal(str(actual_size))
                         position_state[contract]["long"]["entry_price"] = entry_price
-                    elif size < 0:
-                        position_state[contract]["short"]["size"] = Decimal(str(abs(size)))
+                    elif actual_size < 0:
+                        position_state[contract]["short"]["size"] = Decimal(str(abs(actual_size)))
                         position_state[contract]["short"]["entry_price"] = entry_price
             
             # 로그
@@ -574,7 +595,9 @@ def handle_non_main_position_tp(symbol, non_main_size_at_tp):
         log("🔁 TIER", f"{symbol} {tier}: {non_main_side} TP {non_main_size_at_tp} → {main_side} SL {sl_qty_rounded}")
         
         # 주력 청산
-        order_size = -sl_qty_rounded if main_side == "LONG" else sl_qty_rounded
+        contract_qty = int(get_contract_size(symbol, sl_qty_rounded))
+        order_size = -contract_qty if main_side == "LONG" else contract_qty
+        
         order = FuturesOrder(
             contract=symbol,
             size=order_size,  # ✅ float 지원!
@@ -648,12 +671,12 @@ def refresh_all_tp_orders(symbol):
                 tp_price_long = long_entry * (Decimal("1") + tp_gap_long[symbol])
                 tp_price_long_rounded = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
                 
-                # ✅ 수정: int 제거! float 그대로 사용
-                tp_size_long = -float(long_size)  # int → float!
+                contract_qty_long = int(get_contract_size(symbol, float(long_size)))
+                tp_size_long = -contract_qty_long
                 
                 order = FuturesOrder(
                     contract=symbol,
-                    size=tp_size_long,  # ✅ float!
+                    size=tp_size_long,  
                     price=str(tp_price_long_rounded),
                     tif="gtc",
                     reduce_only=True,
@@ -677,12 +700,12 @@ def refresh_all_tp_orders(symbol):
                 tp_price_short = short_entry * (Decimal("1") - tp_gap_short[symbol])
                 tp_price_short_rounded = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
                 
-                # ✅ 수정: int 제거! float 그대로 사용
-                tp_size_short = float(short_size)  # int → float!
+                contract_qty_short = int(get_contract_size(symbol, float(short_size)))
+                tp_size_short = contract_qty_short
                 
                 order = FuturesOrder(
                     contract=symbol,
-                    size=tp_size_short,  # ✅ float!
+                    size=tp_size_short,
                     price=str(tp_price_short_rounded),
                     tif="gtc",
                     reduce_only=True,
@@ -840,16 +863,18 @@ def initialize_grid(symbol, current_price=None):
         # LONG 진입
         if long_qty > 0:
             try:
+                contract_qty = int(get_contract_size(symbol, long_qty))
+                
                 order = FuturesOrder(
                     contract=symbol,
-                    size=long_qty,
+                    size=contract_qty,
                     price=0,
                     tif="ioc",
                     reduce_only=False,
                     text=generate_order_id()
                 )
                 api.create_futures_order(SETTLE, order)
-                log("✅ ENTRY", f"{symbol} LONG {long_qty} market")
+                log("✅ ENTRY", f"{symbol} LONG {long_qty} (Contract: {contract_qty})")
             except GateApiException as e:
                 log("❌ ENTRY", f"{symbol} LONG error: {e}")
                 return
@@ -859,16 +884,18 @@ def initialize_grid(symbol, current_price=None):
         # SHORT 진입
         if short_qty > 0:
             try:
+                contract_qty = int(get_contract_size(symbol, short_qty))
+                
                 order = FuturesOrder(
                     contract=symbol,
-                    size=-short_qty,
+                    size=-contract_qty,
                     price=0,
                     tif="ioc",
                     reduce_only=False,
                     text=generate_order_id()
                 )
                 api.create_futures_order(SETTLE, order)
-                log("✅ ENTRY", f"{symbol} SHORT {short_qty} market")
+                log("✅ ENTRY", f"{symbol} SHORT {short_qty} (Contract: {contract_qty})")
             except GateApiException as e:
                 log("❌ ENTRY", f"{symbol} SHORT error: {e}")
                 return
@@ -939,7 +966,9 @@ def market_entry_when_imbalanced(symbol):
         log("⚖️ HEDGE", f"{symbol}: Imbalanced, adding {missing_side} {missing_qty}")
         
         # 헤징 진입
-        order_size = missing_qty if missing_side == "LONG" else -missing_qty
+        contract_qty = int(get_contract_size(symbol, missing_qty))
+        order_size = contract_qty if missing_side == "LONG" else -contract_qty
+        
         order = FuturesOrder(
             contract=symbol,
             size=order_size,
@@ -1059,9 +1088,11 @@ def check_idle_and_enter(symbol):
         # 진입
         try:
             if long_qty > 0:
+                contract_qty = int(get_contract_size(symbol, long_qty))
+                
                 order = FuturesOrder(
                     contract=symbol,
-                    size=long_qty,
+                    size=contract_qty,
                     price=0,
                     tif="ioc",
                     reduce_only=False,
@@ -1075,9 +1106,11 @@ def check_idle_and_enter(symbol):
         
         try:
             if short_qty > 0:
+                contract_qty = int(get_contract_size(symbol, short_qty))
+                
                 order = FuturesOrder(
                     contract=symbol,
-                    size=-short_qty,
+                    size=contract_qty,
                     price=0,
                     tif="ioc",
                     reduce_only=False,
