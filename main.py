@@ -444,7 +444,7 @@ def calculate_obv_macd(symbol):
         if symbol == "ARB_USDT":
             obv_macd_normalized = b * 1000.0
         else:
-            obv_macd_normalized = b
+            obv_macd_normalized = b * 0.1
         
         obv_macd_value[symbol] = Decimal(str(obv_macd_normalized))
         
