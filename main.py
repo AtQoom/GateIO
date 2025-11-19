@@ -921,7 +921,7 @@ def cancel_tp_only(symbol):
 # =============================================================================
 
 def initialize_grid(symbol, current_price=None):
-    """그리드 초기화 (완전판)"""
+    """그리드 초기화 (단일 포지션 처리 포함)"""
     
     try:
         sync_position(symbol)
@@ -930,10 +930,119 @@ def initialize_grid(symbol, current_price=None):
             long_size = position_state[symbol]["long"]["size"]
             short_size = position_state[symbol]["short"]["size"]
         
-        if long_size > 0 or short_size > 0:
-            log("⚠️ GRID", f"{symbol}: Already has positions (L={long_size}, S={short_size})")
+        # ✅ 단일 포지션이면 반대편만 진입!
+        if (long_size > 0 and short_size == 0) or (long_size == 0 and short_size > 0):
+            if current_price is None:
+                current_price = get_current_price(symbol)
+            
+            if current_price <= 0:
+                log("❌ GRID", f"{symbol}: Invalid price ({current_price})")
+                return
+            
+            current_price_dec = Decimal(str(current_price))
+            calculate_dynamic_tp_gap(symbol)
+            
+            # OBV 가중
+            obv_display = float(obv_macd_value[symbol]) * 100
+            obv_abs = abs(obv_display)
+            obv_weight = Decimal(str(calculate_obv_macd_weight(obv_abs)))
+            
+            # 기본 수량
+            base_ratio = get_symbol_config(symbol, "base_ratio")
+            with balance_lock:
+                base_value = initial_capital * base_ratio
+            
+            base_qty = base_value / current_price_dec
+            
+            if base_qty < Decimal("0.001"):
+                base_qty = Decimal("0.001")
+            
+            # 역추세 진입 (반대편만!)
+            if long_size > 0:  # LONG만 있음 → SHORT 진입!
+                if obv_display > 0:  # LONG 강세
+                    short_qty = base_qty * (Decimal("1") + obv_weight)  # 주력
+                else:
+                    short_qty = base_qty * HEDGE_RATIO_MAIN if ENABLE_AUTO_HEDGE else base_qty  # 헤징
+                
+                if short_qty < Decimal("0.001"):
+                    short_qty = Decimal("0.001")
+                
+                with balance_lock:
+                    short_value = short_qty * current_price_dec
+                    max_value = initial_capital * MAX_POSITION_RATIO
+                
+                if short_value >= max_value:
+                    log("⚠️ GRID", f"{symbol}: Exceeds max position (SHORT:{short_value:.2f}, Max:{max_value:.2f})")
+                    return
+                
+                log("🔷 GRID", f"{symbol} OBV={obv_display:.2f}%, SHORT={short_qty}")
+                
+                try:
+                    contract_qty = get_contract_size(symbol, float(short_qty))
+                    
+                    order = FuturesOrder(
+                        contract=symbol,
+                        size=-contract_qty,  # SHORT
+                        price=0,
+                        tif="ioc",
+                        reduce_only=False,
+                        text=generate_order_id()
+                    )
+                    api.create_futures_order(SETTLE, order)
+                    log("✅ ENTRY", f"{symbol} SHORT {short_qty} (Contract: {contract_qty})")
+                except GateApiException as e:
+                    log("❌ ENTRY", f"{symbol} SHORT error: {e}")
+                    return
+            
+            else:  # SHORT만 있음 → LONG 진입!
+                if obv_display < 0:  # SHORT 강세
+                    long_qty = base_qty * (Decimal("1") + obv_weight)  # 주력
+                else:
+                    long_qty = base_qty * HEDGE_RATIO_MAIN if ENABLE_AUTO_HEDGE else base_qty  # 헤징
+                
+                if long_qty < Decimal("0.001"):
+                    long_qty = Decimal("0.001")
+                
+                with balance_lock:
+                    long_value = long_qty * current_price_dec
+                    max_value = initial_capital * MAX_POSITION_RATIO
+                
+                if long_value >= max_value:
+                    log("⚠️ GRID", f"{symbol}: Exceeds max position (LONG:{long_value:.2f}, Max:{max_value:.2f})")
+                    return
+                
+                log("🔷 GRID", f"{symbol} OBV={obv_display:.2f}%, LONG={long_qty}")
+                
+                try:
+                    contract_qty = get_contract_size(symbol, float(long_qty))
+                    
+                    order = FuturesOrder(
+                        contract=symbol,
+                        size=contract_qty,  # LONG
+                        price=0,
+                        tif="ioc",
+                        reduce_only=False,
+                        text=generate_order_id()
+                    )
+                    api.create_futures_order(SETTLE, order)
+                    log("✅ ENTRY", f"{symbol} LONG {long_qty} (Contract: {contract_qty})")
+                except GateApiException as e:
+                    log("❌ ENTRY", f"{symbol} LONG error: {e}")
+                    return
+            
+            time.sleep(0.2)
+            sync_position(symbol)
+            refresh_all_tp_orders(symbol)
+            
+            last_event_time[symbol] = time.time()
             return
         
+        # ✅ 양방향 모두 있으면 종료
+        if long_size > 0 and short_size > 0:
+            log("⚠️ GRID", f"{symbol}: Already has both positions (L={long_size}, S={short_size})")
+            return
+        
+        # ✅ 포지션 없을 때만 그리드 생성 (양방향 동시 진입)
         if current_price is None:
             current_price = get_current_price(symbol)
         
@@ -950,18 +1059,17 @@ def initialize_grid(symbol, current_price=None):
         obv_abs = abs(obv_display)
         obv_weight = Decimal(str(calculate_obv_macd_weight(obv_abs)))
         
-        # 기본 수량 (✅ int 제거!)
+        # 기본 수량
         base_ratio = get_symbol_config(symbol, "base_ratio")
         with balance_lock:
             base_value = initial_capital * base_ratio
         
-        base_qty = base_value / current_price_dec  # ✅ Decimal 유지!
+        base_qty = base_value / current_price_dec
         
-        # ✅ 최소 수량 보장
         if base_qty < Decimal("0.001"):
             base_qty = Decimal("0.001")
         
-        # 역추세 진입 (✅ int 제거!)
+        # 역추세 진입
         if obv_display > 0:
             short_qty = base_qty * (Decimal("1") + obv_weight)
             long_qty = base_qty * HEDGE_RATIO_MAIN if ENABLE_AUTO_HEDGE else base_qty
@@ -972,7 +1080,6 @@ def initialize_grid(symbol, current_price=None):
             long_qty = base_qty
             short_qty = base_qty
         
-        # ✅ 최소 수량 보장 (다시 한번!)
         if long_qty < Decimal("0.001"):
             long_qty = Decimal("0.001")
         if short_qty < Decimal("0.001"):
@@ -981,7 +1088,7 @@ def initialize_grid(symbol, current_price=None):
         with balance_lock:
             long_value = long_qty * current_price_dec
             short_value = short_qty * current_price_dec
-            max_value = initial_capital * MAXPOSITIONRATIO
+            max_value = initial_capital * MAX_POSITION_RATIO
         
         if long_value >= max_value or short_value >= max_value:
             log("⚠️ GRID", f"{symbol}: Exceeds max position (L:{long_value:.2f}, S:{short_value:.2f}, Max:{max_value:.2f})")
@@ -989,14 +1096,14 @@ def initialize_grid(symbol, current_price=None):
         
         log("🔷 GRID", f"{symbol} OBV={obv_display:.2f}%, LONG={long_qty}, SHORT={short_qty}")
         
-        # LONG 진입 (✅ int 제거!)
+        # LONG 진입
         if long_qty > 0:
             try:
-                contract_qty = get_contract_size(symbol, float(long_qty))  # ✅ int 제거!
+                contract_qty = get_contract_size(symbol, float(long_qty))
                 
                 order = FuturesOrder(
                     contract=symbol,
-                    size=contract_qty,  # ✅ float 지원!
+                    size=contract_qty,
                     price=0,
                     tif="ioc",
                     reduce_only=False,
@@ -1010,14 +1117,14 @@ def initialize_grid(symbol, current_price=None):
         
         time.sleep(0.1)
         
-        # SHORT 진입 (✅ int 제거!)
+        # SHORT 진입
         if short_qty > 0:
             try:
-                contract_qty = get_contract_size(symbol, float(short_qty))  # ✅ int 제거!
+                contract_qty = get_contract_size(symbol, float(short_qty))
                 
                 order = FuturesOrder(
                     contract=symbol,
-                    size=-contract_qty,  # ✅ float 지원!
+                    size=-contract_qty,
                     price=0,
                     tif="ioc",
                     reduce_only=False,
@@ -1039,12 +1146,13 @@ def initialize_grid(symbol, current_price=None):
         log("❌ GRID", f"{symbol} error: {e}")
 
 
+
 # =============================================================================
 # 불균형 헤징 (심볼별)
 # =============================================================================
 
 def market_entry_when_imbalanced(symbol):
-    """불균형 발생 시 자동 헤징 (멀티 심볼 지원)"""
+    """불균형 발생 시 자동 헤징 (단일 포지션 우선)"""
     
     if not ENABLE_AUTO_HEDGE:
         return
@@ -1061,7 +1169,47 @@ def market_entry_when_imbalanced(symbol):
         if long_size == 0 and short_size == 0:
             return
         
-        # 불균형 체크
+        # ✅ 단일 포지션이면 즉시 헤징!
+        if long_size == 0 or short_size == 0:
+            missing_side = "SHORT" if long_size > 0 else "LONG"
+            existing_size = long_size if long_size > 0 else short_size
+            
+            hedge_ratio = get_symbol_config(symbol, "hedge_ratio_main")
+            if hedge_ratio is None:
+                hedge_ratio = HEDGE_RATIO_MAIN
+            
+            hedge_qty = existing_size * hedge_ratio
+            
+            if hedge_qty < Decimal("0.001"):
+                hedge_qty = Decimal("0.001")
+            
+            hedge_qty_rounded = round(float(hedge_qty), 3)
+            
+            log("🔁 HEDGE", f"{symbol}: Single position, adding {missing_side} {hedge_qty_rounded}")
+            
+            contract_qty = get_contract_size(symbol, hedge_qty_rounded)
+            order_size = contract_qty if missing_side == "LONG" else -contract_qty
+            
+            order = FuturesOrder(
+                contract=symbol,
+                size=order_size,
+                price=0,
+                tif="ioc",
+                reduce_only=False,
+                text=generate_order_id()
+            )
+            
+            api.create_futures_order(SETTLE, order)
+            log("✅ HEDGE", f"{symbol} {missing_side} {hedge_qty_rounded} executed")
+            
+            time.sleep(0.2)
+            sync_position(symbol)
+            refresh_all_tp_orders(symbol)
+            
+            last_event_time[symbol] = time.time()
+            return
+        
+        # 불균형 체크 (양방향 모두 있을 때)
         long_value = long_size * long_price
         short_value = short_size * short_price
         
@@ -1072,7 +1220,7 @@ def market_entry_when_imbalanced(symbol):
         long_ratio = float(long_value / total_value)
         short_ratio = float(short_value / total_value)
         
-        imbalance_threshold = 0.60  # 60:40 이상 차이
+        imbalance_threshold = 0.60  # 60:40
         
         if abs(long_ratio - short_ratio) < (imbalance_threshold - 0.5) * 2:
             return
@@ -1087,23 +1235,24 @@ def market_entry_when_imbalanced(symbol):
         
         # 헤징 수량 계산
         hedge_ratio = get_symbol_config(symbol, "hedge_ratio_main")
+        if hedge_ratio is None:
+            hedge_ratio = HEDGE_RATIO_MAIN
+        
         hedge_qty = abs(missing_qty) * hedge_ratio
         
-        # ✅ 최소 수량 보장
         if hedge_qty < Decimal("0.001"):
             hedge_qty = Decimal("0.001")
         
-        # ✅ 소수점 3자리로 반올림
         hedge_qty_rounded = round(float(hedge_qty), 3)
         
-        # ✅ 최소값 재확인
         if hedge_qty_rounded < 0.001:
             hedge_qty_rounded = 0.001
         
         log("🔁 HEDGE", f"{symbol}: Imbalanced, adding {missing_side} {hedge_qty_rounded}")
         
         # 헤징 진입
-        order_size = hedge_qty_rounded if missing_side == "LONG" else -hedge_qty_rounded
+        contract_qty = get_contract_size(symbol, hedge_qty_rounded)
+        order_size = contract_qty if missing_side == "LONG" else -contract_qty
         
         order = FuturesOrder(
             contract=symbol,
