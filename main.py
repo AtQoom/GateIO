@@ -52,17 +52,17 @@ logger.info(f"📌 Environment: {TITLE}")
 SYMBOL_CONFIG = {
     "ARB_USDT": {
         "base_ratio": Decimal("0.02"),      # 2%
-        "hedge_ratio_main": Decimal("0.10"),  # ✅ 추가!
-        "tier1_min": Decimal("1.0"),        # Tier-1 시작
-        "tier1_max": Decimal("2.0"),        # Tier-1 종료
-        "tier1_multiplier": Decimal("0.8"), # Tier-1 청산 배수
-        "tier2_multiplier": Decimal("1.5")  # Tier-2 청산 배수
+        "hedge_ratio_main": Decimal("0.10"),
+        "max_position_ratio": Decimal("3.0"),  # ✅ 추가! 3배
+        "tier1_min": Decimal("1.0"),
+        "tier1_max": Decimal("2.0"),
+        "tier1_multiplier": Decimal("0.8"),
+        "tier2_multiplier": Decimal("1.5")
     },
     "PAXG_USDT": {
-        "base_ratio": Decimal("0.05"),  # 3% → 5% 증가!
-        "hedge_ratio_main": Decimal("0.10"),  # ✅ 추가!
-        # 1052 * 0.10 = 105.2 USDT
-        # 105.2 / 4086 = 0.0257개 → 25 계약!
+        "base_ratio": Decimal("0.05"),      # 5%
+        "hedge_ratio_main": Decimal("0.10"),
+        "max_position_ratio": Decimal("5.0"),  # ✅ 추가! 5배
         "tier1_min": Decimal("2"),
         "tier1_max": Decimal("3.0"),
         "tier1_multiplier": Decimal("1.6"),
@@ -72,7 +72,6 @@ SYMBOL_CONFIG = {
 
 # 공통 설정
 INITIALBALANCE = Decimal("50")               # 초기 잔고
-MAXPOSITIONRATIO = Decimal("3.0")           # 최대 포지션 비율 (3배)
 HEDGE_RATIO_MAIN = Decimal("0.10")          # 주력 헤지 비율 (10%)
 ENABLE_AUTO_HEDGE = True                    # 자동 헤징 활성화
 
@@ -725,8 +724,10 @@ def handle_non_main_position_tp(symbol, non_main_size_at_tp):
             return
         
         current_price_dec = Decimal(str(current_price))
-        long_value = long_size * long_price
-        short_value = short_size * short_price
+        
+        # ✅ 수정: 현재 가격 기준 가치 계산!
+        long_value = long_size * current_price_dec
+        short_value = short_size * current_price_dec
         
         if long_value > short_value:
             main_side = "LONG"
@@ -748,13 +749,21 @@ def handle_non_main_position_tp(symbol, non_main_size_at_tp):
         with balance_lock:
             balance = initial_capital
         
-        # Tier 판정
-        if balance * tier1_min <= main_position_value < balance * tier1_max:
+        # ✅ 수정: Tier 판정 (현재 가격 기준!)
+        tier1_min_value = balance * tier1_min
+        tier1_max_value = balance * tier1_max
+        
+        log("🔍 TIER_CHECK", f"{symbol}: Main={float(main_position_value):.2f}, Min={float(tier1_min_value):.2f}, Max={float(tier1_max_value):.2f}")
+        
+        if tier1_min_value <= main_position_value < tier1_max_value:
             sl_qty = non_main_size_at_tp * tier1_mult
             tier = f"Tier-1 ({float(tier1_min)}~{float(tier1_max)}배, {float(tier1_mult)}x)"
-        else:
+        elif main_position_value >= tier1_max_value:
             sl_qty = non_main_size_at_tp * tier2_mult
             tier = f"Tier-2 ({float(tier1_max)}배+, {float(tier2_mult)}x)"
+        else:
+            log("⚠️ TIER", f"{symbol}: Below minimum threshold ({float(main_position_value):.2f} < {float(tier1_min_value):.2f})")
+            return
         
         # 소수점 처리
         if sl_qty < Decimal("0.001"):
@@ -1010,9 +1019,13 @@ def initialize_grid(symbol, current_price=None):
                 if short_qty < Decimal("0.001"):
                     short_qty = Decimal("0.001")
                 
+                max_position_ratio = get_symbol_config(symbol, "max_position_ratio")
+                if max_position_ratio is None:
+                    max_position_ratio = MAX_POSITION_RATIO
+
                 with balance_lock:
                     short_value = short_qty * current_price_dec
-                    max_value = initial_capital * MAX_POSITION_RATIO
+                    max_value = initial_capital * max_position_ratio 
                 
                 if short_value >= max_value:
                     log("⚠️ GRID", f"{symbol}: Exceeds max position (SHORT:{short_value:.2f}, Max:{max_value:.2f})")
@@ -1047,9 +1060,13 @@ def initialize_grid(symbol, current_price=None):
                 if long_qty < Decimal("0.001"):
                     long_qty = Decimal("0.001")
                 
+                max_position_ratio = get_symbol_config(symbol, "max_position_ratio")
+                if max_position_ratio is None:
+                    max_position_ratio = MAX_POSITION_RATIO
+
                 with balance_lock:
                     long_value = long_qty * current_price_dec
-                    max_value = initial_capital * MAX_POSITION_RATIO
+                    max_value = initial_capital * max_position_ratio
                 
                 if long_value >= max_value:
                     log("⚠️ GRID", f"{symbol}: Exceeds max position (LONG:{long_value:.2f}, Max:{max_value:.2f})")
@@ -1130,10 +1147,14 @@ def initialize_grid(symbol, current_price=None):
         if short_qty < Decimal("0.001"):
             short_qty = Decimal("0.001")
         
+        max_position_ratio = get_symbol_config(symbol, "max_position_ratio")
+        if max_position_ratio is None:
+            max_position_ratio = MAX_POSITION_RATIO
+
         with balance_lock:
             long_value = long_qty * current_price_dec
             short_value = short_qty * current_price_dec
-            max_value = initial_capital * MAX_POSITION_RATIO
+            max_value = initial_capital * max_position_ratio
         
         if long_value >= max_value or short_value >= max_value:
             log("⚠️ GRID", f"{symbol}: Exceeds max position (L:{long_value:.2f}, S:{short_value:.2f}, Max:{max_value:.2f})")
@@ -1463,8 +1484,12 @@ def check_idle_and_enter(symbol):
             log("⏳ IDLE", f"{symbol}: Waiting {IDLE_TIMEOUT - time_since_last:.1f}s more")
             return
         
+        max_position_ratio = get_symbol_config(symbol, "max_position_ratio")
+        if max_position_ratio is None:
+            max_position_ratio = MAX_POSITION_RATIO
+
         with balance_lock:
-            max_value = initial_capital * MAXPOSITIONRATIO
+            max_value = initial_capital * max_position_ratio
         
         current_price = get_current_price(symbol)
         if current_price <= 0:
@@ -1880,7 +1905,7 @@ def status():
         status_data = {
             "symbols": SYMBOLS,
             "initial_capital": float(initial_capital),
-            "max_position_ratio": float(MAXPOSITIONRATIO),
+            "max_position_ratio": "심볼별 설정 참조",
             "positions": {}
         }
         
@@ -1960,7 +1985,7 @@ def print_startup_summary():
     log("=" * 70, "")
     log("📊 SYMBOLS", f"{', '.join(SYMBOLS)}")
     log("💰 CAPITAL", f"{initial_capital} USDT")
-    log("📏 MAX POSITION", f"{float(MAXPOSITIONRATIO)}배 (계정 전체 기준)")
+    log("📏 MAX POSITION", "심볼별 설정 참조")
     log("⚙️ AUTO HEDGE", f"{'Enabled' if ENABLE_AUTO_HEDGE else 'Disabled'} ({float(HEDGE_RATIO_MAIN)*100}%)")
     log("=" * 70, "")
     
@@ -1968,6 +1993,7 @@ def print_startup_summary():
         config = SYMBOL_CONFIG[symbol]
         log("⚙️ CONFIG", f"{symbol}:")
         log("  ", f"  Base Ratio: {float(config['base_ratio'])*100}%")
+        log("  ", f"  Max Position: {float(config['max_position_ratio'])}배")  # ✅ 추가!
         log("  ", f"  Tier-1: {float(config['tier1_min'])}~{float(config['tier1_max'])}배 ({float(config['tier1_multiplier'])}x)")
         log("  ", f"  Tier-2: {float(config['tier1_max'])}배+ ({float(config['tier2_multiplier'])}x)")
     
