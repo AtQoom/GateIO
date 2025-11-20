@@ -1037,9 +1037,9 @@ def initialize_grid(symbol, current_price=None):
                 log("⚠️ GRID", f"{symbol}: Exceeds max position (L:{long_value:.2f}, S:{short_value:.2f}, Max:{max_value:.2f})")
                 return
             
-            log("🔷 GRID", f"{symbol} OBV={obv_display:.2f}%, LONG={long_qty} (헤징), SHORT={short_qty} (주력)")
+            log("🔷 GRID", f"{symbol} OBV={obv_display:.2f}%, LONG={long_qty}, SHORT={short_qty}")
             
-            # ✅ SHORT 주력 진입
+            # ✅ SHORT 진입
             try:
                 contract_qty = get_contract_size(symbol, float(short_qty))
                 
@@ -1052,7 +1052,7 @@ def initialize_grid(symbol, current_price=None):
                     text=generate_order_id()
                 )
                 api.create_futures_order(SETTLE, order)
-                log("✅ ENTRY", f"{symbol} SHORT {short_qty} (Contract: {contract_qty}) - 주력")
+                log("✅ ENTRY", f"{symbol} SHORT {short_qty} (Contract: {contract_qty})")
                 track_position_entry(symbol, "short")
             except GateApiException as e:
                 log("❌ ENTRY", f"{symbol} SHORT error: {e}")
@@ -1060,7 +1060,7 @@ def initialize_grid(symbol, current_price=None):
             
             time.sleep(0.1)
             
-            # ✅ LONG 헤징 진입
+            # ✅ LONG 진입
             try:
                 contract_qty = get_contract_size(symbol, float(long_qty))
                 
@@ -1073,10 +1073,10 @@ def initialize_grid(symbol, current_price=None):
                     text=generate_order_id()
                 )
                 api.create_futures_order(SETTLE, order)
-                log("✅ ENTRY", f"{symbol} LONG {long_qty} (Contract: {contract_qty}) - 헤징")
+                log("✅ ENTRY", f"{symbol} LONG {long_qty} (Contract: {contract_qty})")
                 track_position_entry(symbol, "long")
             except GateApiException as e:
-                log("❌ ENTRY", f"{symbol} LONG hedge error: {e}")
+                log("❌ ENTRY", f"{symbol} LONG error: {e}")
             
             time.sleep(0.2)
             sync_position(symbol)
@@ -1117,13 +1117,13 @@ def initialize_grid(symbol, current_price=None):
         if base_qty < Decimal("0.001"):
             base_qty = Decimal("0.001")
         
-        # ✅ 역추세 진입 (양방향 동시)
+        # ✅ 역추세 진입 (양방향 동시) - 수정됨!
         if obv_display > 0:  # LONG 강세
             short_qty = base_qty * (Decimal("1") + obv_weight)  # SHORT 주력
-            long_qty = base_qty * HEDGE_RATIO_MAIN if ENABLE_AUTO_HEDGE else base_qty  # LONG 헤징
+            long_qty = base_qty  # ✅ LONG 헤징 (기본 수량)
         elif obv_display < 0:  # SHORT 강세
             long_qty = base_qty * (Decimal("1") + obv_weight)  # LONG 주력
-            short_qty = base_qty * HEDGE_RATIO_MAIN if ENABLE_AUTO_HEDGE else base_qty  # SHORT 헤징
+            short_qty = base_qty  # ✅ SHORT 헤징 (기본 수량)
         else:
             long_qty = base_qty
             short_qty = base_qty
