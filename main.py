@@ -982,7 +982,7 @@ def initialize_grid(symbol, current_price=None):
             long_size = position_state[symbol]["long"]["size"]
             short_size = position_state[symbol]["short"]["size"]
         
-        # ✅ 단일 포지션이면 양방향 진입! (주력 + 헤징)
+        # ✅ 단일 포지션이면 양방향 진입! (OBV 무관)
         if (long_size > 0 and short_size == 0) or (long_size == 0 and short_size > 0):
             if current_price is None:
                 current_price = get_current_price(symbol)
@@ -1009,11 +1009,11 @@ def initialize_grid(symbol, current_price=None):
             if base_qty < Decimal("0.001"):
                 base_qty = Decimal("0.001")
             
-            # ✅ 단일 포지션: 주력 + 헤징 양방향 진입!
-            if long_size > 0:  # LONG만 있음 → SHORT 주력 + LONG 헤징!
+            # ✅ 단일 포지션: 주력 + 헤징 (OBV 무관!)
+            if long_size > 0:  # LONG만 있음 → SHORT 주력 + LONG 헤징
                 short_qty = base_qty * (Decimal("1") + obv_weight)  # SHORT 주력
                 long_qty = base_qty  # LONG 헤징
-            else:  # SHORT만 있음 → LONG 주력 + SHORT 헤징!
+            else:  # SHORT만 있음 → LONG 주력 + SHORT 헤징
                 long_qty = base_qty * (Decimal("1") + obv_weight)  # LONG 주력
                 short_qty = base_qty  # SHORT 헤징
             
@@ -1039,44 +1039,46 @@ def initialize_grid(symbol, current_price=None):
             
             log("🔷 GRID", f"{symbol} OBV={obv_display:.2f}%, LONG={long_qty}, SHORT={short_qty}")
             
-            # ✅ SHORT 진입
-            try:
-                contract_qty = get_contract_size(symbol, float(short_qty))
+            # SHORT 진입
+            if short_size == 0:  # SHORT 없을 때만
+                try:
+                    contract_qty = get_contract_size(symbol, float(short_qty))
+                    
+                    order = FuturesOrder(
+                        contract=symbol,
+                        size=-contract_qty,  # SHORT
+                        price="0",
+                        tif="ioc",
+                        reduce_only=False,
+                        text=generate_order_id()
+                    )
+                    api.create_futures_order(SETTLE, order)
+                    log("✅ ENTRY", f"{symbol} SHORT {short_qty} (Contract: {contract_qty})")
+                    track_position_entry(symbol, "short")
+                except GateApiException as e:
+                    log("❌ ENTRY", f"{symbol} SHORT error: {e}")
+                    return
                 
-                order = FuturesOrder(
-                    contract=symbol,
-                    size=-contract_qty,  # SHORT
-                    price="0",
-                    tif="ioc",
-                    reduce_only=False,
-                    text=generate_order_id()
-                )
-                api.create_futures_order(SETTLE, order)
-                log("✅ ENTRY", f"{symbol} SHORT {short_qty} (Contract: {contract_qty})")
-                track_position_entry(symbol, "short")
-            except GateApiException as e:
-                log("❌ ENTRY", f"{symbol} SHORT error: {e}")
-                return
+                time.sleep(0.1)
             
-            time.sleep(0.1)
-            
-            # ✅ LONG 진입
-            try:
-                contract_qty = get_contract_size(symbol, float(long_qty))
-                
-                order = FuturesOrder(
-                    contract=symbol,
-                    size=contract_qty,  # LONG
-                    price="0",
-                    tif="ioc",
-                    reduce_only=False,
-                    text=generate_order_id()
-                )
-                api.create_futures_order(SETTLE, order)
-                log("✅ ENTRY", f"{symbol} LONG {long_qty} (Contract: {contract_qty})")
-                track_position_entry(symbol, "long")
-            except GateApiException as e:
-                log("❌ ENTRY", f"{symbol} LONG error: {e}")
+            # LONG 진입
+            if long_size == 0:  # LONG 없을 때만
+                try:
+                    contract_qty = get_contract_size(symbol, float(long_qty))
+                    
+                    order = FuturesOrder(
+                        contract=symbol,
+                        size=contract_qty,  # LONG
+                        price="0",
+                        tif="ioc",
+                        reduce_only=False,
+                        text=generate_order_id()
+                    )
+                    api.create_futures_order(SETTLE, order)
+                    log("✅ ENTRY", f"{symbol} LONG {long_qty} (Contract: {contract_qty})")
+                    track_position_entry(symbol, "long")
+                except GateApiException as e:
+                    log("❌ ENTRY", f"{symbol} LONG error: {e}")
             
             time.sleep(0.2)
             sync_position(symbol)
@@ -1117,13 +1119,13 @@ def initialize_grid(symbol, current_price=None):
         if base_qty < Decimal("0.001"):
             base_qty = Decimal("0.001")
         
-        # ✅ 역추세 진입 (양방향 동시) - 수정됨!
+        # ✅ 역추세 진입 (양방향 동시)
         if obv_display > 0:  # LONG 강세
             short_qty = base_qty * (Decimal("1") + obv_weight)  # SHORT 주력
-            long_qty = base_qty  # ✅ LONG 헤징 (기본 수량)
+            long_qty = base_qty  # LONG 헤징
         elif obv_display < 0:  # SHORT 강세
             long_qty = base_qty * (Decimal("1") + obv_weight)  # LONG 주력
-            short_qty = base_qty  # ✅ SHORT 헤징 (기본 수량)
+            short_qty = base_qty  # SHORT 헤징
         else:
             long_qty = base_qty
             short_qty = base_qty
