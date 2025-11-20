@@ -634,16 +634,17 @@ def calculate_obv_macd_weight(obv_display_abs):
 # =============================================================================
 
 def calculate_dynamic_tp_gap(symbol):
-    """동적 TP 계산 (OBV MACD 기반)"""
+    """동적 TP 갭 계산 (OBV MACD 기반, 심볼별 조정)"""
+    
     global tp_gap_long, tp_gap_short
     
     try:
         obv_display = float(obv_macd_value[symbol]) * 100
         obv_abs = abs(obv_display)
         
-        # OBV에 따른 TP 강도
+        # OBV 기반 TP 강도 계산
         if obv_abs < 10:
-            tp_strength = TPMIN
+            tp_strength = TP_MIN
         elif obv_abs < 20:
             tp_strength = Decimal("0.0026")
         elif obv_abs < 30:
@@ -651,20 +652,25 @@ def calculate_dynamic_tp_gap(symbol):
         elif obv_abs < 40:
             tp_strength = Decimal("0.0036")
         else:
-            tp_strength = TPMAX
+            tp_strength = TP_MAX
         
-        # 방향별 TP 적용
-        if obv_display > 0:
-            # 롱 강세 → SHORT 주력
-            tp_gap_long[symbol] = tp_strength  # LONG은 순방향 TP
-            tp_gap_short[symbol] = TPMIN       # SHORT은 안정화 TP
-        elif obv_display < 0:
-            # 숏 강세 → LONG 주력
-            tp_gap_long[symbol] = TPMIN        # LONG은 안정화 TP
-            tp_gap_short[symbol] = tp_strength # SHORT은 순방향 TP
+        # ✅ 심볼별 TP 조정
+        if symbol == "PAXG_USDT":
+            tp_strength = tp_strength * Decimal("0.9")  # PAXG는 90%
+            tp_min_adjusted = TP_MIN * Decimal("0.9")
         else:
-            tp_gap_long[symbol] = TPMIN
-            tp_gap_short[symbol] = TPMIN
+            tp_min_adjusted = TP_MIN
+        
+        # 역추세 TP 적용
+        if obv_display > 0:  # LONG 강세
+            tp_gap_long[symbol] = tp_strength  # 순방향
+            tp_gap_short[symbol] = tp_min_adjusted  # 역방향
+        elif obv_display < 0:  # SHORT 강세
+            tp_gap_long[symbol] = tp_min_adjusted  # 역방향
+            tp_gap_short[symbol] = tp_strength  # 순방향
+        else:
+            tp_gap_long[symbol] = tp_min_adjusted
+            tp_gap_short[symbol] = tp_min_adjusted
         
         log("🎯 TP", f"{symbol}: LONG={float(tp_gap_long[symbol])*100:.2f}%, SHORT={float(tp_gap_short[symbol])*100:.2f}%")
     
