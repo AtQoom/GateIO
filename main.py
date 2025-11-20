@@ -84,6 +84,9 @@ TPMAX = Decimal("0.004")                    # 최대 TP (0.4%)
 IDLE_TIMEOUT = 600  # 10분
 MAX_IDLE_ENTRIES = 100  # 최대 아이들 진입 횟수
 
+# ✅ 리밸런싱 설정 추가
+REBALANCE_TIME_THRESHOLD = 12 * 3600  # 12시간
+
 # OBV MACD 변화 감지 임계값
 OBV_CHANGE_THRESHOLD = 10.0  # ×100 정규화 기준
 
@@ -141,6 +144,10 @@ last_idle_check = {symbol: 0.0 for symbol in SYMBOLS}
 last_grid_time = {symbol: 0.0 for symbol in SYMBOLS}
 
 kline_history = {symbol: deque(maxlen=200) for symbol in SYMBOLS}
+
+# ✅ 리밸런싱 추적 변수 추가
+last_long_entry_time = {symbol: 0.0 for symbol in SYMBOLS}
+last_short_entry_time = {symbol: 0.0 for symbol in SYMBOLS}
 
 max_position_locked = {symbol: {"long": False, "short": False} for symbol in SYMBOLS}
 
@@ -644,7 +651,7 @@ def calculate_dynamic_tp_gap(symbol):
         
         # OBV 기반 TP 강도 계산
         if obv_abs < 10:
-            tp_strength = tpmin  # ✅ 전역 변수 사용!
+            tp_strength = TPMIN  # ✅ 수정!
         elif obv_abs < 20:
             tp_strength = Decimal("0.0026")
         elif obv_abs < 30:
@@ -652,25 +659,25 @@ def calculate_dynamic_tp_gap(symbol):
         elif obv_abs < 40:
             tp_strength = Decimal("0.0036")
         else:
-            tp_strength = tpmax  # ✅ 전역 변수 사용!
+            tp_strength = TPMAX  # ✅ 수정!
         
         # ✅ 심볼별 TP 조정
         if symbol == "PAXG_USDT":
             tp_strength = tp_strength * Decimal("0.9")  # PAXG는 90%
-            tpmin_adjusted = tpmin * Decimal("0.9")
+            TPMIN_adjusted = TPMIN * Decimal("0.9")  # ✅ 수정!
         else:
-            tpmin_adjusted = tpmin
+            TPMIN_adjusted = TPMIN  # ✅ 수정!
         
         # 역추세 TP 적용
         if obv_display > 0:  # LONG 강세
             tp_gap_long[symbol] = tp_strength  # 순방향
-            tp_gap_short[symbol] = tpmin_adjusted  # 역방향
+            tp_gap_short[symbol] = TPMIN_adjusted  # 역방향
         elif obv_display < 0:  # SHORT 강세
-            tp_gap_long[symbol] = tpmin_adjusted  # 역방향
+            tp_gap_long[symbol] = TPMIN_adjusted  # 역방향
             tp_gap_short[symbol] = tp_strength  # 순방향
         else:
-            tp_gap_long[symbol] = tpmin_adjusted
-            tp_gap_short[symbol] = tpmin_adjusted
+            tp_gap_long[symbol] = TPMIN_adjusted
+            tp_gap_short[symbol] = TPMIN_adjusted
         
         log("🎯 TP", f"{symbol}: LONG={float(tp_gap_long[symbol])*100:.2f}%, SHORT={float(tp_gap_short[symbol])*100:.2f}%")
     
@@ -683,7 +690,7 @@ def calculate_dynamic_tp_gap(symbol):
 # =============================================================================
 
 def handle_non_main_position_tp(symbol, non_main_size_at_tp):
-    """비주력 TP 체결 시 주력 청산 (Tier 전략)"""
+    """비주력 TP 체결 시 주력 청산 (Tier 전략) + 리밸런싱 체크"""
     
     try:
         sync_position(symbol)
@@ -693,6 +700,20 @@ def handle_non_main_position_tp(symbol, non_main_size_at_tp):
             short_size = position_state[symbol]["short"]["size"]
             long_price = position_state[symbol]["long"]["entry_price"]
             short_price = position_state[symbol]["short"]["entry_price"]
+        
+        # ✅ 리밸런싱 체크 (Tier 전에!)
+        if long_size > short_size:  # LONG 주력
+            tp_side = "short"  # SHORT TP 체결
+            current_price = get_current_price(symbol)
+            if check_rebalance_on_tp(symbol, tp_side, float(non_main_size_at_tp), current_price):
+                log("🔄 REBALANCE", f"{symbol}: Rebalancing completed, skipping Tier")
+                return
+        elif short_size > long_size:  # SHORT 주력
+            tp_side = "long"  # LONG TP 체결
+            current_price = get_current_price(symbol)
+            if check_rebalance_on_tp(symbol, tp_side, float(non_main_size_at_tp), current_price):
+                log("🔄 REBALANCE", f"{symbol}: Rebalancing completed, skipping Tier")
+                return
         
         if long_size == 0 and short_size == 0:
             log("⚠️ TIER", f"{symbol}: No positions")
@@ -729,20 +750,20 @@ def handle_non_main_position_tp(symbol, non_main_size_at_tp):
         
         # Tier 판정
         if balance * tier1_min <= main_position_value < balance * tier1_max:
-            sl_qty = non_main_size_at_tp * tier1_mult  # ✅ int 제거!
+            sl_qty = non_main_size_at_tp * tier1_mult
             tier = f"Tier-1 ({float(tier1_min)}~{float(tier1_max)}배, {float(tier1_mult)}x)"
         else:
-            sl_qty = non_main_size_at_tp * tier2_mult  # ✅ int 제거!
+            sl_qty = non_main_size_at_tp * tier2_mult
             tier = f"Tier-2 ({float(tier1_max)}배+, {float(tier2_mult)}x)"
         
-        # ✅ 소수점 처리
+        # 소수점 처리
         if sl_qty < Decimal("0.001"):
             sl_qty = Decimal("0.001")
         
         if sl_qty > main_position_size:
             sl_qty = main_position_size
         
-        # ✅ 소수점 3자리로 반올림 (Gate.io 지원)
+        # 소수점 3자리로 반올림
         sl_qty_rounded = round(float(sl_qty), 3)
         
         log("🔁 TIER", f"{symbol} {tier}: {non_main_side} TP {non_main_size_at_tp} → {main_side} SL {sl_qty_rounded}")
@@ -753,7 +774,7 @@ def handle_non_main_position_tp(symbol, non_main_size_at_tp):
         
         order = FuturesOrder(
             contract=symbol,
-            size=order_size,  # ✅ float 지원!
+            size=order_size,
             price=0,
             tif="ioc",
             reduce_only=True,
@@ -1012,6 +1033,7 @@ def initialize_grid(symbol, current_price=None):
                     )
                     api.create_futures_order(SETTLE, order)
                     log("✅ ENTRY", f"{symbol} SHORT {short_qty} (Contract: {contract_qty})")
+                    track_position_entry(symbol, "short")
                 except GateApiException as e:
                     log("❌ ENTRY", f"{symbol} SHORT error: {e}")
                     return
@@ -1048,6 +1070,7 @@ def initialize_grid(symbol, current_price=None):
                     )
                     api.create_futures_order(SETTLE, order)
                     log("✅ ENTRY", f"{symbol} LONG {long_qty} (Contract: {contract_qty})")
+                    track_position_entry(symbol, "long")
                 except GateApiException as e:
                     log("❌ ENTRY", f"{symbol} LONG error: {e}")
                     return
@@ -1133,6 +1156,7 @@ def initialize_grid(symbol, current_price=None):
                 )
                 api.create_futures_order(SETTLE, order)
                 log("✅ ENTRY", f"{symbol} LONG {long_qty} (Contract: {contract_qty})")
+                track_position_entry(symbol, "long")
             except GateApiException as e:
                 log("❌ ENTRY", f"{symbol} LONG error: {e}")
                 return
@@ -1154,6 +1178,7 @@ def initialize_grid(symbol, current_price=None):
                 )
                 api.create_futures_order(SETTLE, order)
                 log("✅ ENTRY", f"{symbol} SHORT {short_qty} (Contract: {contract_qty})")
+                track_position_entry(symbol, "short")
             except GateApiException as e:
                 log("❌ ENTRY", f"{symbol} SHORT error: {e}")
                 return
@@ -1167,6 +1192,106 @@ def initialize_grid(symbol, current_price=None):
     except Exception as e:
         log("❌ GRID", f"{symbol} error: {e}")
 
+
+# =============================================================================
+# 시간 기반 리밸런싱 (심볼별)
+# =============================================================================
+
+def track_position_entry(symbol, side):
+    """포지션 진입 시간 추적"""
+    
+    global last_long_entry_time, last_short_entry_time
+    
+    if side == "long":
+        last_long_entry_time[symbol] = time.time()
+        log("⏰ TRACK", f"{symbol}: LONG entry tracked")
+    else:
+        last_short_entry_time[symbol] = time.time()
+        log("⏰ TRACK", f"{symbol}: SHORT entry tracked")
+
+
+def check_rebalance_on_tp(symbol, tp_side, tp_qty, tp_price):
+    """TP 체결 시 리밸런싱 체크 (12시간 기반)"""
+    
+    try:
+        # 1. TP 수익 계산
+        tp_gap = tp_gap_long[symbol] if tp_side == "long" else tp_gap_short[symbol]
+        tp_profit = float(tp_qty) * float(tp_price) * float(tp_gap)
+        
+        # 2. 시간 체크 (해당 방향 진입 후 12시간)
+        if tp_side == "long":
+            entry_time = last_long_entry_time[symbol]
+        else:
+            entry_time = last_short_entry_time[symbol]
+        
+        time_elapsed = time.time() - entry_time
+        
+        if time_elapsed < REBALANCE_TIME_THRESHOLD:
+            return False  # 12시간 미경과
+        
+        # 3. 반대쪽 손실 계산
+        opposite_side = "short" if tp_side == "long" else "long"
+        
+        with position_lock:
+            opp_size = position_state[symbol][opposite_side]["size"]
+            opp_entry = position_state[symbol][opposite_side]["entry_price"]
+        
+        if opp_size == 0:
+            return False  # 반대쪽 없음
+        
+        current_price = get_current_price(symbol)
+        
+        if opposite_side == "long":
+            opp_pnl = (Decimal(str(current_price)) - opp_entry) * opp_size
+        else:
+            opp_pnl = (opp_entry - Decimal(str(current_price))) * opp_size
+        
+        # 4. 손실 조건 체크
+        if opp_pnl >= 0:
+            return False  # 손실 아님
+        
+        opp_loss = abs(float(opp_pnl))
+        
+        # 조건: 손실 < TP 수익
+        if opp_loss > tp_profit:
+            log("⚠️ REBALANCE", f"{symbol}: Loss too large ({opp_loss:.2f} > {tp_profit:.2f})")
+            return False
+        
+        # ✅ 리밸런싱 실행!
+        log("🔄 REBALANCE", f"{symbol}: TP={tp_profit:.2f}, Loss={opp_loss:.2f}, Time={time_elapsed/3600:.1f}h")
+        
+        # 반대쪽 전량 SL
+        contract_qty = get_contract_size(symbol, float(opp_size))
+        order_size = contract_qty if opposite_side == "long" else -contract_qty
+        
+        order = FuturesOrder(
+            contract=symbol,
+            size=order_size,
+            price=0,
+            tif="ioc",
+            reduce_only=True,
+            text=generate_order_id()
+        )
+        
+        try:
+            api.create_futures_order(SETTLE, order)
+            log("✅ REBALANCE", f"{symbol}: {opposite_side.upper()} {opp_size} closed (Loss: {opp_pnl:.2f})")
+        except GateApiException as e:
+            log("❌ REBALANCE", f"{symbol}: Failed to close {opposite_side}: {e}")
+            return False
+        
+        time.sleep(0.5)
+        sync_position(symbol)
+        
+        # ✅ 기본 수량으로 재진입
+        log("🔄 REBALANCE", f"{symbol}: Re-entering with base quantity")
+        initialize_grid(symbol, current_price)
+        
+        return True
+    
+    except Exception as e:
+        log("❌ REBALANCE", f"{symbol}: Error: {e}")
+        return False
 
 
 # =============================================================================
