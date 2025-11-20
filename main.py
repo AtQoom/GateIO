@@ -1759,13 +1759,24 @@ def periodic_health_check():
         try:
             time.sleep(120)  # 2분
             
-            # 계정 잔고 갱신 (공유)
             update_account_balance()
             
-            # 각 심볼별 헬스 체크
             for symbol in SYMBOLS:
                 try:
                     sync_position(symbol)
+                    
+                    with position_lock:
+                        long_size = position_state[symbol]["long"]["size"]
+                        short_size = position_state[symbol]["short"]["size"]
+                    
+                    # ✅ 추가: 무포지션 시 그리드 생성!
+                    if long_size == 0 and short_size == 0:
+                        log("⚠️ HEALTH", f"{symbol}: No positions, initializing grid")
+                        current_price = get_current_price(symbol)
+                        if current_price > 0:
+                            initialize_grid(symbol, current_price)
+                    
+                    # 기존 로직
                     check_tp_hash_and_refresh(symbol)
                     check_obv_change_and_refresh_tp(symbol)
                     validate_strategy_consistency(symbol)
