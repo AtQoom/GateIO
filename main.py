@@ -644,7 +644,7 @@ def calculate_dynamic_tp_gap(symbol):
         
         # OBV 기반 TP 강도 계산
         if obv_abs < 10:
-            tp_strength = TP_MIN
+            tp_strength = tpmin  # ✅ 전역 변수 사용!
         elif obv_abs < 20:
             tp_strength = Decimal("0.0026")
         elif obv_abs < 30:
@@ -652,25 +652,25 @@ def calculate_dynamic_tp_gap(symbol):
         elif obv_abs < 40:
             tp_strength = Decimal("0.0036")
         else:
-            tp_strength = TP_MAX
+            tp_strength = tpmax  # ✅ 전역 변수 사용!
         
         # ✅ 심볼별 TP 조정
         if symbol == "PAXG_USDT":
             tp_strength = tp_strength * Decimal("0.9")  # PAXG는 90%
-            tp_min_adjusted = TP_MIN * Decimal("0.9")
+            tpmin_adjusted = tpmin * Decimal("0.9")
         else:
-            tp_min_adjusted = TP_MIN
+            tpmin_adjusted = tpmin
         
         # 역추세 TP 적용
         if obv_display > 0:  # LONG 강세
             tp_gap_long[symbol] = tp_strength  # 순방향
-            tp_gap_short[symbol] = tp_min_adjusted  # 역방향
+            tp_gap_short[symbol] = tpmin_adjusted  # 역방향
         elif obv_display < 0:  # SHORT 강세
-            tp_gap_long[symbol] = tp_min_adjusted  # 역방향
+            tp_gap_long[symbol] = tpmin_adjusted  # 역방향
             tp_gap_short[symbol] = tp_strength  # 순방향
         else:
-            tp_gap_long[symbol] = tp_min_adjusted
-            tp_gap_short[symbol] = tp_min_adjusted
+            tp_gap_long[symbol] = tpmin_adjusted
+            tp_gap_short[symbol] = tpmin_adjusted
         
         log("🎯 TP", f"{symbol}: LONG={float(tp_gap_long[symbol])*100:.2f}%, SHORT={float(tp_gap_short[symbol])*100:.2f}%")
     
@@ -1620,7 +1620,6 @@ def periodic_health_check():
                     check_obv_change_and_refresh_tp(symbol)
                     validate_strategy_consistency(symbol)
                     remove_duplicate_orders(symbol)
-                    market_entry_when_imbalanced(symbol)
                     check_idle_and_enter(symbol)
                     log_position_state(symbol)
                 except Exception as e:
