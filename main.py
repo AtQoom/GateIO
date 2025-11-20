@@ -51,7 +51,7 @@ logger.info(f"📌 Environment: {TITLE}")
 # 심볼별 진입 비율 및 Tier 설정
 SYMBOL_CONFIG = {
     "ARB_USDT": {
-        "base_ratio": Decimal("0.02"),      # 2%
+        "base_ratio": Decimal("0.01"),      # 1%
         "hedge_ratio_main": Decimal("0.10"),
         "max_position_ratio": Decimal("3.0"),  # ✅ 추가! 3배
         "tier1_min": Decimal("1.0"),
@@ -60,7 +60,7 @@ SYMBOL_CONFIG = {
         "tier2_multiplier": Decimal("1.5")
     },
     "PAXG_USDT": {
-        "base_ratio": Decimal("0.05"),      # 5%
+        "base_ratio": Decimal("0.02"),      # 2%
         "hedge_ratio_main": Decimal("0.10"),
         "max_position_ratio": Decimal("5.0"),  # ✅ 추가! 5배
         "tier1_min": Decimal("2"),
@@ -616,23 +616,23 @@ def fetch_kline_thread():
 def calculate_obv_macd_weight(obv_display_abs):
     """OBV 추가 진입 비율 계산 (절댓값 기준)"""
     if obv_display_abs <= 20:
-        return 0.10
-    elif obv_display_abs <= 25:
-        return 0.11
-    elif obv_display_abs <= 30:
-        return 0.12
-    elif obv_display_abs <= 40:
-        return 0.13
-    elif obv_display_abs <= 50:
-        return 0.15
-    elif obv_display_abs <= 60:
-        return 0.16
-    elif obv_display_abs <= 70:
-        return 0.17
-    elif obv_display_abs <= 100:
-        return 0.19
-    else:
         return 0.20
+    elif obv_display_abs <= 25:
+        return 0.25
+    elif obv_display_abs <= 30:
+        return 0.3
+    elif obv_display_abs <= 40:
+        return 0.35
+    elif obv_display_abs <= 50:
+        return 0.4
+    elif obv_display_abs <= 60:
+        return 0.5
+    elif obv_display_abs <= 70:
+        return 0.6
+    elif obv_display_abs <= 100:
+        return 0.8
+    else:
+        return 1.0
 
 
 # =============================================================================
@@ -1514,7 +1514,7 @@ def check_idle_and_enter(symbol):
             base_qty = Decimal("0.001")
         
         # 손실 가중 (✅ int 제거!)
-        adjusted_qty = base_qty * (Decimal("1") + Decimal(str(loss_pct)) / Decimal("50"))
+        adjusted_qty = base_qty * (Decimal("1") + Decimal(str(loss_pct)) / Decimal("25"))
         
         # OBV 가중
         obv_display = float(obv_macd_value[symbol]) * 100
@@ -1716,14 +1716,13 @@ def check_tp_hash_and_refresh(symbol):
 
 
 def check_obv_change_and_refresh_tp(symbol):
-    """OBV 변화 감지 및 TP 갱신"""
+    """OBV 변화 감지 후 동적 TP 갭 재계산 + TP 갱신"""
     try:
         obv_display = float(obv_macd_value[symbol]) * 100
         last_obv = last_adjusted_obv[symbol]
-        
         obv_change = abs(obv_display - last_obv)
         
-        if obv_change >= OBV_CHANGE_THRESHOLD:
+        if obv_change >= OBV_CHANGE_THRESHOLD:  # 10 이상
             log("🔄 OBV_CHANGE", f"{symbol}: {last_obv:.1f} → {obv_display:.1f} (Δ{obv_change:.1f})")
             
             with position_lock:
@@ -1731,12 +1730,16 @@ def check_obv_change_and_refresh_tp(symbol):
                 short_size = position_state[symbol]["short"]["size"]
             
             if long_size > 0 or short_size > 0:
+                # ✅ 동적 TP 갭 재계산!
+                calculate_dynamic_tp_gap(symbol)
+                log("📊 TP_UPDATE", f"{symbol}: LONG={tp_gap_long[symbol]*100:.2f}%, SHORT={tp_gap_short[symbol]*100:.2f}%")
+                
+                # TP 주문 갱신
                 refresh_all_tp_orders(symbol)
                 last_adjusted_obv[symbol] = obv_display
-    
     except Exception as e:
         log("❌ OBV_CHANGE", f"{symbol} error: {e}")
-
+        
 
 def periodic_health_check():
     """2분마다 헬스 체크 (모든 심볼)"""
