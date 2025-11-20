@@ -1372,7 +1372,7 @@ def check_idle_and_enter(symbol):
             base_qty = Decimal("0.001")
         
         # 손실 가중 (✅ int 제거!)
-        adjusted_qty = base_qty * (Decimal("1") + Decimal(str(loss_pct)) / Decimal("100"))
+        adjusted_qty = base_qty * (Decimal("1") + Decimal(str(loss_pct)) / Decimal("50"))
         
         # OBV 가중
         obv_display = float(obv_macd_value[symbol]) * 100
@@ -1461,7 +1461,7 @@ def check_idle_and_enter(symbol):
 # =============================================================================
 
 def validate_strategy_consistency(symbol):
-    """전략 일관성 검증"""
+    """전략 일관성 검증 (불균형 헤징 제거)"""
     
     try:
         sync_position(symbol)
@@ -1469,32 +1469,47 @@ def validate_strategy_consistency(symbol):
         with position_lock:
             long_size = position_state[symbol]["long"]["size"]
             short_size = position_state[symbol]["short"]["size"]
-            long_price = position_state[symbol]["long"]["entry_price"]
-            short_price = position_state[symbol]["short"]["entry_price"]
         
-        current_price = get_current_price(symbol)
-        if current_price <= 0:
-            return
-        
-        current_price_dec = Decimal(str(current_price))
-        
-        long_value = long_size * long_price
-        short_value = short_size * short_price
-        
-        # 최대 한도 초과 체크
-        with balance_lock:
-            max_value = initial_capital * MAXPOSITIONRATIO
-               
-        # 단일 포지션 + 주문 없음 → 헤징 또는 그리드 생성
+        # ✅ 단일 포지션만 헤징
         if (long_size > 0 and short_size == 0) or (long_size == 0 and short_size > 0):
-            orders = api.list_futures_orders(SETTLE, contract=symbol, status='open')
-            if len(orders) == 0:
-                if ENABLE_AUTO_HEDGE:
-                    log("⚠️ VALIDATE", f"{symbol}: Single position detected, hedging")
-                    market_entry_when_imbalanced(symbol)
-                else:
-                    log("⚠️ VALIDATE", f"{symbol}: Single position detected, creating grid")
-                    initialize_grid(symbol, current_price)
+            if ENABLE_AUTO_HEDGE:
+                log("⚠️ VALIDATE", f"{symbol}: Single position, hedging")
+                # 단일 포지션 처리
+                missing_side = "SHORT" if long_size > 0 else "LONG"
+                existing_size = long_size if long_size > 0 else short_size
+                
+                hedge_ratio = get_symbol_config(symbol, "hedge_ratio_main")
+                if hedge_ratio is None:
+                    hedge_ratio = HEDGE_RATIO_MAIN
+                
+                hedge_qty = existing_size * hedge_ratio
+                
+                if hedge_qty < Decimal("0.001"):
+                    hedge_qty = Decimal("0.001")
+                
+                hedge_qty_rounded = round(float(hedge_qty), 3)
+                
+                contract_qty = get_contract_size(symbol, hedge_qty_rounded)
+                order_size = contract_qty if missing_side == "LONG" else -contract_qty
+                
+                order = FuturesOrder(
+                    contract=symbol,
+                    size=order_size,
+                    price=0,
+                    tif="ioc",
+                    reduce_only=False,
+                    text=generate_order_id()
+                )
+                
+                api.create_futures_order(SETTLE, order)
+                log("✅ HEDGE", f"{symbol} {missing_side} {hedge_qty_rounded} executed")
+                
+                time.sleep(0.2)
+                sync_position(symbol)
+                refresh_all_tp_orders(symbol)
+            else:
+                current_price = get_current_price(symbol)
+                initialize_grid(symbol, current_price)
     
     except Exception as e:
         log("❌ VALIDATE", f"{symbol} error: {e}")
