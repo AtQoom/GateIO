@@ -446,15 +446,17 @@ def calculate_obv_macd(symbol):
         # 8. T-Channel
         b = t_channel(tt1, symbol)
         
-        # 9. 심볼별 스케일링
+        # 9. 심볼별 스케일링 + 표시 값 조정
         if symbol == "ARB_USDT":
             obv_macd_normalized = b * 1000.0
+            obv_display_value = obv_macd_normalized  # ✅ 2.04 그대로
         else:
             obv_macd_normalized = b * 0.1
+            obv_display_value = obv_macd_normalized * 10  # ✅ 0.42 → 4.2
         
-        obv_macd_value[symbol] = Decimal(str(obv_macd_normalized))
+        obv_macd_value[symbol] = Decimal(str(obv_display_value))  # ✅ 수정!
         
-        log("📊 OBV", f"{symbol}: {float(obv_macd_value[symbol]):.6f} (×100: {float(obv_macd_value[symbol])*100:.2f})")
+        log("📊 OBV", f"{symbol}: {float(obv_macd_value[symbol]):.2f}")  # ✅ 수정!
     
     except Exception as e:
         log("❌ OBV", f"{symbol} calculation error: {e}")
@@ -640,17 +642,17 @@ def calculate_obv_macd_weight(obv_display_abs):
 # =============================================================================
 
 def calculate_dynamic_tp_gap(symbol):
-    """동적 TP 갭 계산 (OBV MACD 기반, 심볼별 조정)"""
+    """동적 TP 갭 계산"""
     
     global tp_gap_long, tp_gap_short
     
     try:
-        obv_display = float(obv_macd_value[symbol])
+        obv_display = float(obv_macd_value[symbol])  # ✅ ×100 제거!
         obv_abs = abs(obv_display)
         
         # OBV 기반 TP 강도 계산
         if obv_abs < 10:
-            tp_strength = TPMIN  # ✅ 수정!
+            tp_strength = TPMIN
         elif obv_abs < 20:
             tp_strength = Decimal("0.0026")
         elif obv_abs < 30:
@@ -995,7 +997,7 @@ def initialize_grid(symbol, current_price=None):
             calculate_dynamic_tp_gap(symbol)
             
             # OBV 가중
-            obv_display = float(obv_macd_value[symbol]) * 100
+            obv_display = float(obv_macd_value[symbol])  # ✅ ×100 제거!
             obv_abs = abs(obv_display)
             obv_weight = Decimal(str(calculate_obv_macd_weight(obv_abs)))
             
@@ -1037,7 +1039,7 @@ def initialize_grid(symbol, current_price=None):
                 log("⚠️ GRID", f"{symbol}: Exceeds max position (L:{long_value:.2f}, S:{short_value:.2f}, Max:{max_value:.2f})")
                 return
             
-            log("🔷 GRID", f"{symbol} OBV={obv_display:.2f}%, LONG={long_qty}, SHORT={short_qty}")
+            log("🔷 GRID", f"{symbol} OBV={obv_display:.2f}, LONG={long_qty}, SHORT={short_qty}")  # ✅ 수정!
             
             # SHORT 진입
             if short_size == 0:  # SHORT 없을 때만
@@ -1105,7 +1107,7 @@ def initialize_grid(symbol, current_price=None):
         calculate_dynamic_tp_gap(symbol)
         
         # OBV 가중
-        obv_display = float(obv_macd_value[symbol]) * 100
+        obv_display = float(obv_macd_value[symbol])
         obv_abs = abs(obv_display)
         obv_weight = Decimal(str(calculate_obv_macd_weight(obv_abs)))
         
@@ -1519,7 +1521,7 @@ def check_idle_and_enter(symbol):
         adjusted_qty = base_qty * (Decimal("1") + Decimal(str(loss_pct)) / Decimal("25"))
         
         # OBV 가중
-        obv_display = float(obv_macd_value[symbol]) * 100
+        obv_display = float(obv_macd_value[symbol])  # ✅ ×100 제거!
         obv_abs = abs(obv_display)
         obv_weight = Decimal(str(calculate_obv_macd_weight(obv_abs)))
         
@@ -1541,7 +1543,7 @@ def check_idle_and_enter(symbol):
             short_qty = Decimal("0.001")
         
         idle_entry_count[symbol] += 1
-        log("⏰ IDLE", f"{symbol} #{idle_entry_count[symbol]}: Loss={loss_pct:.2f}%, LONG={long_qty}, SHORT={short_qty}")
+        log("⏰ IDLE", f"{symbol} #{idle_entry_count[symbol]}: Loss={loss_pct:.2f}%, OBV={obv_display:.2f}, LONG={long_qty}, SHORT={short_qty}")  # ✅ 추가!
         
         # LONG 진입 (✅ int 제거!)
         try:
@@ -1718,9 +1720,9 @@ def check_tp_hash_and_refresh(symbol):
 
 
 def check_obv_change_and_refresh_tp(symbol):
-    """OBV 변화 감지 후 동적 TP 갭 재계산 + TP 갱신"""
+    """OBV 변화 감지"""
     try:
-        obv_display = float(obv_macd_value[symbol]) * 100
+        obv_display = float(obv_macd_value[symbol])  # ✅ ×100 제거!
         last_obv = last_adjusted_obv[symbol]
         obv_change = abs(obv_display - last_obv)
         
