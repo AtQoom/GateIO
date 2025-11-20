@@ -662,8 +662,8 @@ def calculate_dynamic_tp_gap(symbol):
         
         # ✅ 심볼별 TP 조정
         if symbol == "PAXG_USDT":
-            tp_strength = tp_strength * Decimal("0.9")  # PAXG는 90%
-            TPMIN_adjusted = TPMIN * Decimal("0.9")  # ✅ 수정!
+            tp_strength = tp_strength * Decimal("0.8")  # PAXG는 90%
+            TPMIN_adjusted = TPMIN * Decimal("0.8")  # ✅ 수정!
         else:
             TPMIN_adjusted = TPMIN  # ✅ 수정!
         
