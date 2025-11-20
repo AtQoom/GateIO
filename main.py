@@ -645,7 +645,7 @@ def calculate_dynamic_tp_gap(symbol):
     global tp_gap_long, tp_gap_short
     
     try:
-        obv_display = float(obv_macd_value[symbol]) * 100
+        obv_display = float(obv_macd_value[symbol])
         obv_abs = abs(obv_display)
         
         # OBV 기반 TP 강도 계산
