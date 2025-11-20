@@ -692,7 +692,6 @@ def calculate_dynamic_tp_gap(symbol):
 
 def handle_non_main_position_tp(symbol, non_main_size_at_tp):
     """비주력 TP 체결 시 주력 청산 (Tier 전략) + 리밸런싱 체크"""
-    
     try:
         sync_position(symbol)
         
@@ -702,7 +701,7 @@ def handle_non_main_position_tp(symbol, non_main_size_at_tp):
             long_price = position_state[symbol]["long"]["entry_price"]
             short_price = position_state[symbol]["short"]["entry_price"]
         
-        # ✅ 리밸런싱 체크 (Tier 전에!)
+        # 리밸런싱 체크 (Tier 전에!)
         if long_size > short_size:  # LONG 주력
             tp_side = "short"  # SHORT TP 체결
             current_price = get_current_price(symbol)
@@ -727,7 +726,7 @@ def handle_non_main_position_tp(symbol, non_main_size_at_tp):
         
         current_price_dec = Decimal(str(current_price))
         
-        # ✅ 수정: 현재 가격 기준 가치 계산!
+        # 현재 가격 기준 가치 계산!
         long_value = long_size * current_price_dec
         short_value = short_size * current_price_dec
         
@@ -751,7 +750,7 @@ def handle_non_main_position_tp(symbol, non_main_size_at_tp):
         with balance_lock:
             balance = initial_capital
         
-        # ✅ 수정: Tier 판정 (현재 가격 기준!)
+        # Tier 판정 (현재 가격 기준!)
         tier1_min_value = balance * tier1_min
         tier1_max_value = balance * tier1_max
         
