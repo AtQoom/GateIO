@@ -1432,7 +1432,7 @@ def periodic_health_check():
             time.sleep(120)
             log("💊 HEALTH", "Starting health check...")
            
-            # ★ 계좌 잔고 조회
+            # 1️⃣ 계좌 잔고 조회 및 Initial Capital 갱신
             try:
                 futures_account = api.list_futures_accounts(SETTLE)
                
@@ -1489,6 +1489,7 @@ def periodic_health_check():
            
             if long_size == 0 and short_size == 0:
                 log("💊 HEALTH", "No position")
+                # 포지션이 없으면 아래 TP/전략 체크 불필요
                 continue
            
             # 3️⃣ 주문 상태 확인
@@ -1533,7 +1534,7 @@ def periodic_health_check():
                     log("✅ HEALTH", "TP orders stable")
                     tp_order_hash[SYMBOL] = current_hash
            
-            # ★ 5️⃣ OBV MACD 체크 후 TP % 변동시 갱신! (핵심!)
+            # 5️⃣ OBV MACD 체크 후 TP % 변동시 갱신!
             try:
                 calculate_obv_macd()
                 current_obv = float(obv_macd_value) * 100
@@ -1544,7 +1545,7 @@ def periodic_health_check():
                 else:
                     obv_change = abs(current_obv - last_adjusted_obv)
                    
-                    if obv_change >= 10:  # OBV 변화 감지!
+                    if obv_change >= 10:
                         log("🔔 HEALTH", f"OBV changed: {obv_change:.6f} → Recalculating TP...")
                        
                         tp_result = calculate_dynamic_tp_gap()
@@ -1562,14 +1563,13 @@ def periodic_health_check():
                             new_tp_min = float(new_tp_long)
                             tp_min_change = abs(new_tp_min - current_tp_min)
                            
-                            if tp_min_change >= 0.0001:  # 0.01% 이상 변화
+                            if tp_min_change >= 0.0001:
                                 log("🔄 TP ADJUST", f"OBV: {current_obv:.6f}, New TP: {new_tp_min*100:.2f}%")
                                
                                 try:
                                     cancel_tp_only()
                                     time.sleep(0.5)
                                    
-                                    # ✅ 핵심: position_lock 없음!
                                     tp_gap_min = new_tp_long
                                     tp_gap_max = new_tp_short
                                    
@@ -1586,15 +1586,13 @@ def periodic_health_check():
             except Exception as e:
                 log("❌ HEALTH", f"OBV MACD check error: {e}")
            
-            # ★ 6️⃣ 불균형 포지션 자동 진입 (SHORT 익절 → LONG 헤징)
-            try:
-                market_entry_when_imbalanced()
-            except Exception as e:
-                log("❌ HEALTH", f"Market entry error: {e}")
+            # ❌ 삭제됨: market_entry_when_imbalanced() 호출 제거!
+            # (아이들 모니터와 충돌 방지)
            
             # 7️⃣ 단일 포지션 그리드 체크
             try:
                 single_position = (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0)
+                # ★ 수정: 그리드가 아예 없을 때만 생성 (중복 방지)
                 if single_position and grid_count == 0:
                     current_price = get_current_price()
                     if current_price > 0:
@@ -1621,6 +1619,7 @@ def periodic_health_check():
         except Exception as e:
             log("❌ HEALTH", f"Health check error: {e}")
             time.sleep(5)
+
 
 def full_refresh(event_type, skip_grid=False):
     """
