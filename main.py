@@ -922,7 +922,7 @@ def initialize_grid(current_price=None):
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=str(-short_qty),     # 반드시 str
+                size=f"-{str(short_qty)},     # 반드시 str
                 price="0",
                 tif="ioc",
                 reduce_only=False,
@@ -1777,7 +1777,7 @@ def market_entry_when_imbalanced():
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=str(-short_qty),
+                size=f"-{str(short_qty)},
                 price="0",
                 tif="ioc",
                 reduce_only=False,
