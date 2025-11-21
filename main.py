@@ -41,18 +41,6 @@ if API_SECRET:
 else:
     logger.error("API_SECRET not found in environment variables!")
 
-def fetch_min_lot(symbol):
-    contracts = api.list_futures_contracts(SETTLE)
-    for c in contracts:
-        if c.name == symbol:
-            return Decimal(str(c.min_base_amount)), int(c.amount_precision)
-    # fallback 기본값:
-    return Decimal('0.001'), 3
-
-# 초기 세팅부:
-MIN_QUANTITY, step_precision = fetch_min_lot("BNB_USDT")
-QUANTITY_STEP = Decimal(str(10 ** -step_precision))
-
 
 # =============================================================================
 # 전략 설정 (Strategy Configuration)
@@ -92,6 +80,19 @@ api = FuturesApi(api_client)
 unified_api = UnifiedApi(api_client)
 
 app = Flask(__name__)
+
+
+def fetch_min_lot(symbol):
+    contracts = api.list_futures_contracts(SETTLE)
+    for c in contracts:
+        if c.name == symbol:
+            return Decimal(str(c.min_base_amount)), int(c.amount_precision)
+    # fallback 기본값:
+    return Decimal('0.001'), 3
+
+# 초기 세팅부:
+MIN_QUANTITY, step_precision = fetch_min_lot("BNB_USDT")
+QUANTITY_STEP = Decimal(str(10 ** -step_precision))
 
 
 # =============================================================================
