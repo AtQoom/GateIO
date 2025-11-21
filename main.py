@@ -41,6 +41,18 @@ if API_SECRET:
 else:
     logger.error("API_SECRET not found in environment variables!")
 
+def fetch_min_lot(symbol):
+    contracts = api.list_futures_contracts(SETTLE)
+    for c in contracts:
+        if c.name == symbol:
+            return Decimal(str(c.min_base_amount)), int(c.amount_precision)
+    # fallback 기본값:
+    return Decimal('0.001'), 3
+
+# 초기 세팅부:
+MIN_QUANTITY, step_precision = fetch_min_lot("BNB_USDT")
+QUANTITY_STEP = Decimal(str(10 ** -step_precision))
+
 
 # =============================================================================
 # 전략 설정 (Strategy Configuration)
@@ -52,7 +64,7 @@ MAXPOSITIONRATIO = Decimal("3.0")          # 최대 포지션 비율 (3배)
 HEDGE_RATIO_MAIN = Decimal("0.10")           # 주력 헤지 비율 (10%)
 
 # BNB 최소 수량 설정
-MIN_QUANTITY = Decimal("0.01")              # ← BNB 최소 주문 수량
+MIN_QUANTITY = Decimal("0.001")              # ← BNB 최소 주문 수량
 QUANTITY_STEP = Decimal("0.001")             # ← BNB 주문 단위
 
 # TP 설정 (동적 TP)
@@ -529,7 +541,7 @@ def safe_order_qty(qty):
         return 0.01
 
 
-def adjust_quantity_step(qty, step=0.001, min_qty=0.01):
+def adjust_quantity_step(qty, step=0.001, min_qty=0.001):
     qty_dec = Decimal(str(qty))
     step_dec = Decimal(str(step))
     floored = (qty_dec // step_dec) * step_dec
