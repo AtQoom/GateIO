@@ -455,8 +455,9 @@ def cancel_tp_only():
 # ============================================================================
 
 def refresh_all_tp_orders():
-    """TP 주문 새로고침 (동적 TP 적용)"""
+    """TP 주문 새로고침 (동적 TP 적용, 안정성 강화)"""
     try:
+        # 1. 포지션 최신화
         sync_position()
        
         with position_lock:
@@ -468,6 +469,7 @@ def refresh_all_tp_orders():
         if long_size == 0 and short_size == 0:
             return
        
+        # 2. 동적 TP 계산
         tp_result = calculate_dynamic_tp_gap()
        
         if isinstance(tp_result, (tuple, list)) and len(tp_result) >= 2:
@@ -477,58 +479,68 @@ def refresh_all_tp_orders():
             long_tp = TPMIN
             short_tp = TPMIN
        
+        # Decimal 변환
         if not isinstance(long_tp, Decimal):
             long_tp = Decimal(str(long_tp))
         if not isinstance(short_tp, Decimal):
             short_tp = Decimal(str(short_tp))
        
+        # 3. 기존 TP 취소
         cancel_tp_only()
-        time.sleep(0.5)
+        time.sleep(1.0)  # 취소 후 충분한 대기 시간 (0.5 -> 1.0)
        
-        # LONG TP
+        # 4. LONG TP 생성
         if long_size > 0 and long_entry_price > 0:
             tp_price_long = long_entry_price * (Decimal("1") + long_tp)
             tp_price_long = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
             
-            # ✅ 수정: long_size 사용, adjust_quantity_step 적용
+            # 수량 조정
             long_qty = adjust_quantity_step(long_size)
             
-            order = FuturesOrder(
-                contract=SYMBOL,
-                size=str(-long_qty),  # TP는 마이너스
-                price=str(tp_price_long),
-                tif="gtc",
-                reduce_only=True,
-                text=generate_order_id()
-            )
-            api.create_futures_order(SETTLE, order)
-            log("✅ TP LONG", f"Qty: {long_qty}, Price: {float(tp_price_long):.4f}")
+            if long_qty > 0:
+                try:
+                    order = FuturesOrder(
+                        contract=SYMBOL,
+                        size=str(-long_qty),  # TP는 마이너스
+                        price=str(tp_price_long),
+                        tif="gtc",
+                        reduce_only=True,
+                        text=generate_order_id()
+                    )
+                    api.create_futures_order(SETTLE, order)
+                    log("✅ TP LONG", f"Qty: {long_qty}, Price: {float(tp_price_long):.4f}")
+                except Exception as e:
+                    log("❌ TP LONG FAIL", f"Qty: {long_qty}, Error: {e}")
        
-        time.sleep(0.3)
+        time.sleep(0.5)  # 주문 사이 대기 시간 증가 (0.3 -> 0.5)
        
-        # SHORT TP
+        # 5. SHORT TP 생성
         if short_size > 0 and short_entry_price > 0:
             tp_price_short = short_entry_price * (Decimal("1") - short_tp)
             tp_price_short = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
             
-            # ✅ 수정: short_size 사용, adjust_quantity_step 적용
+            # 수량 조정
             short_qty = adjust_quantity_step(short_size)
             
-            order = FuturesOrder(
-                contract=SYMBOL,
-                size=str(short_qty),  # SHORT TP는 플러스
-                price=str(tp_price_short),
-                tif="gtc",
-                reduce_only=True,
-                text=generate_order_id()
-            )
-            api.create_futures_order(SETTLE, order)
-            log("✅ TP SHORT", f"Qty: {short_qty}, Price: {float(tp_price_short):.4f}")
+            if short_qty > 0:
+                try:
+                    order = FuturesOrder(
+                        contract=SYMBOL,
+                        size=str(short_qty),  # SHORT TP는 플러스
+                        price=str(tp_price_short),
+                        tif="gtc",
+                        reduce_only=True,
+                        text=generate_order_id()
+                    )
+                    api.create_futures_order(SETTLE, order)
+                    log("✅ TP SHORT", f"Qty: {short_qty}, Price: {float(tp_price_short):.4f}")
+                except Exception as e:
+                    log("❌ TP SHORT FAIL", f"Qty: {short_qty}, Error: {e}")
        
-        log("✅ TP", "All TP orders created successfully")
+        log("✅ TP", "TP refresh process completed")
    
     except Exception as e:
-        log("❌ TP REFRESH", f"Error: {e}")
+        log("❌ TP REFRESH", f"Critical Error: {e}")
 
 
 # =============================================================================
@@ -1502,32 +1514,41 @@ def periodic_health_check():
                 log("❌ HEALTH", f"List orders error: {e}")
                 continue
            
-            # 4️⃣ TP 해시값 검증
+            # 4️⃣ TP 상태 정밀 검증 (해시값 + 개수 체크)
             if long_size > 0 or short_size > 0:
                 tp_orders_list = [o for o in orders if o.reduce_only]
                 current_hash = get_tp_orders_hash(tp_orders_list)
                 previous_hash = tp_order_hash.get(SYMBOL)
                
-                tp_long_qty = sum(abs(o.size) for o in tp_orders_list if o.size > 0)
-                tp_short_qty = sum(abs(o.size) for o in tp_orders_list if o.size < 0)
+                tp_long_qty = sum(abs(o.size) for o in tp_orders_list if o.size > 0)  # Short 포지션의 TP(매수)
+                tp_short_qty = sum(abs(o.size) for o in tp_orders_list if o.size < 0) # Long 포지션의 TP(매도)
                
                 tp_mismatch = False
+                
+                # TP 개수 체크: 양방향 포지션인데 TP가 2개 미만이면 문제!
+                if long_size > 0 and short_size > 0 and len(tp_orders_list) < 2:
+                    log("🔧 HEALTH", f"❌ TP COUNT MISMATCH: Pos=2, TP={len(tp_orders_list)}")
+                    tp_mismatch = True
+                
+                # TP 수량 체크
+                elif long_size > 0 and tp_short_qty < long_size * Decimal("0.9"): # 90% 이상 커버 확인
+                    log("🔧 HEALTH", f"❌ LONG TP MISSING: Pos={long_size}, TP={tp_short_qty}")
+                    tp_mismatch = True
+                elif short_size > 0 and tp_long_qty < short_size * Decimal("0.9"):
+                    log("🔧 HEALTH", f"❌ SHORT TP MISSING: Pos={short_size}, TP={tp_long_qty}")
+                    tp_mismatch = True
                
-                if tp_count == 0 and (long_size > 0 or short_size > 0):
-                    log("🔧 HEALTH", "❌ TP CRITICAL: No TP at all!")
-                    tp_mismatch = True
-                elif long_size > 0 and tp_long_qty < long_size * 0.3:
-                    tp_mismatch = True
-                elif short_size > 0 and tp_short_qty < short_size * 0.3:
-                    tp_mismatch = True
-               
-                if tp_mismatch and current_hash != previous_hash:
-                    log("🔧 HEALTH", "⚠️ TP changed + problem detected → Refreshing!")
+                if tp_mismatch or (current_hash != previous_hash):
+                    if tp_mismatch:
+                        log("🔧 HEALTH", "⚠️ TP Mismatch detected → Force Refreshing!")
+                    else:
+                        log("🔧 HEALTH", "⚠️ TP Hash changed → Updating!")
+                        
                     time.sleep(0.5)
                     try:
                         refresh_all_tp_orders()
                         tp_order_hash[SYMBOL] = current_hash
-                        log("✅ HEALTH", "TP refreshed and hash updated")
+                        log("✅ HEALTH", "TP refreshed successfully")
                     except Exception as e:
                         log("❌ HEALTH", f"TP refresh error: {e}")
                 else:
