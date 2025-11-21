@@ -86,8 +86,23 @@ def fetch_min_lot(symbol):
     contracts = api.list_futures_contracts(SETTLE)
     for c in contracts:
         if c.name == symbol:
-            # Gate API의 실제 속성명 사용
-            return Decimal(str(c.order_size_min)), int(c.order_size_digits)
+            # 가장 먼저 시도 (최신 기준)
+            try:
+                return Decimal(str(c.size_min)), int(c.size_digits)
+            except AttributeError:
+                pass
+            # 대안: order_size_min, order_size_digits
+            try:
+                return Decimal(str(c.order_size_min)), int(c.order_size_digits)
+            except AttributeError:
+                pass
+            # 대안2: min_size, precision
+            try:
+                return Decimal(str(c.min_size)), int(c.precision)
+            except AttributeError:
+                pass
+            # 마지막: 가능한 속성 프린트 후 fallback
+            print(f"Available attributes: {dir(c)}")
     # fallback 기본값
     return Decimal("0.001"), 3
 
