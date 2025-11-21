@@ -52,7 +52,7 @@ MAXPOSITIONRATIO = Decimal("3.0")          # 최대 포지션 비율 (3배)
 HEDGE_RATIO_MAIN = Decimal("0.10")           # 주력 헤지 비율 (10%)
 
 # BNB 최소 수량 설정
-MIN_QUANTITY = Decimal("0.001")              # ← BNB 최소 주문 수량
+MIN_QUANTITY = Decimal("0.01")              # ← BNB 최소 주문 수량
 QUANTITY_STEP = Decimal("0.001")             # ← BNB 주문 단위
 
 # TP 설정 (동적 TP)
@@ -529,16 +529,14 @@ def safe_order_qty(qty):
         return 0.01
 
 
-def adjust_quantity_step(qty, step=0.001):
-    """
-    qty를 step의 정수배(0.001)로 버림 처리하여 무조건 Decimal 반환
-    """
+def adjust_quantity_step(qty, step=0.001, min_qty=0.01):
     qty_dec = Decimal(str(qty))
     step_dec = Decimal(str(step))
     floored = (qty_dec // step_dec) * step_dec
     floored = floored.quantize(step_dec)
+    if floored < Decimal(str(min_qty)):
+        floored = Decimal(str(min_qty))
     return floored
-
 
 
 def calculate_grid_qty():
