@@ -531,15 +531,14 @@ def safe_order_qty(qty):
 
 def adjust_quantity_step(qty, step=0.001):
     """
-    주문수량(예: BNB) 값을 거래소 요구 단위(step, 최소값 등)에 맞게 내림(버림) 처리
-    Gate.io BNBUSDT 기준: step=0.001, 최소 0.001
+    qty를 step의 정수배(0.001)로 버림 처리하여 무조건 Decimal 반환
     """
     qty_dec = Decimal(str(qty))
     step_dec = Decimal(str(step))
-    # 내림 처리
     floored = (qty_dec // step_dec) * step_dec
-    floored = floored.quantize(step_dec)  # 소수점자리정확히 맞춤
-    return float(max(floored, step_dec))  # 최소값 보장
+    floored = floored.quantize(step_dec)
+    return floored
+
 
 
 def calculate_grid_qty():
@@ -858,26 +857,26 @@ def initialize_grid(current_price=None):
     최초/리셋 시 양방향 grid진입 (0.001 단위 안전처리 포함)
     """
     global last_grid_time
-    
+
     if not initialize_grid_lock.acquire(blocking=False):
         log("🔒 GRID", "Already running → skip")
         return
-    
+
     try:
         now = time.time()
         if now - last_grid_time < 10:
             log("⏱️ GRID", f"Too soon ({now-last_grid_time:.1f}s) → skip")
             return
-        
+
         last_grid_time = now
-        
+
         price = current_price if current_price and current_price > 0 else get_current_price()
         if price == 0:
             log("❌ GRID", "Cannot get price")
             return
 
         sync_position()
-        
+
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
@@ -888,7 +887,6 @@ def initialize_grid(current_price=None):
         obv_display = float(obv_macd_value) * 100
         obv_multiplier = float(calculate_obv_macd_weight(obv_display))
 
-        # 기존 안전처리
         if obv_display > 0:
             short_qty = safe_order_qty(base_qty * (1 + obv_multiplier))
             long_qty = safe_order_qty(base_qty)
@@ -899,17 +897,17 @@ def initialize_grid(current_price=None):
             long_qty = safe_order_qty(base_qty)
             short_qty = safe_order_qty(base_qty)
 
-        # **추가: 0.001 단위로 내림 처리**
+        # **여기 추가: 0.001 단위로 버림 처리**
         long_qty = adjust_quantity_step(long_qty)
         short_qty = adjust_quantity_step(short_qty)
 
         log("INFO", f"[GRID] init, LONG={long_qty}, SHORT={short_qty}, OBV={obv_macd_value}, mult={obv_multiplier}")
 
-        # 주문 진입(0.001 단위 안전 적용)
+        # 주문 진입(Decimal, string으로 전달)
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=long_qty,
+                size=str(long_qty),       # 반드시 str
                 price="0",
                 tif="ioc",
                 reduce_only=False,
@@ -924,7 +922,7 @@ def initialize_grid(current_price=None):
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=-short_qty,
+                size=str(-short_qty),     # 반드시 str
                 price="0",
                 tif="ioc",
                 reduce_only=False,
@@ -937,7 +935,7 @@ def initialize_grid(current_price=None):
 
         sync_position()
         log("✅ GRID", "Grid orders entry completed")
-        
+
     except Exception as e:
         log("❌ GRID", f"Init error: {e}")
     finally:
@@ -1729,7 +1727,7 @@ def market_entry_when_imbalanced():
     """
     try:
         sync_position()
-        
+
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
@@ -1738,7 +1736,7 @@ def market_entry_when_imbalanced():
         if current_price <= 0:
             log("❌ ENTRY", "Price fetch failed")
             return
-        
+
         base_qty = float(account_balance * BASERATIO / current_price)
         base_qty = safe_order_qty(base_qty)
 
@@ -1755,7 +1753,7 @@ def market_entry_when_imbalanced():
             long_qty = safe_order_qty(base_qty)
             short_qty = safe_order_qty(base_qty)
 
-        # **여기도 추가: 0.001 단위 내림 처리**
+        # **여기 추가: 0.001 단위로 버림 처리**
         long_qty = adjust_quantity_step(long_qty)
         short_qty = adjust_quantity_step(short_qty)
 
@@ -1764,7 +1762,7 @@ def market_entry_when_imbalanced():
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=long_qty,
+                size=str(long_qty),
                 price="0",
                 tif="ioc",
                 reduce_only=False,
@@ -1779,7 +1777,7 @@ def market_entry_when_imbalanced():
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=-short_qty,
+                size=str(-short_qty),
                 price="0",
                 tif="ioc",
                 reduce_only=False,
@@ -1791,7 +1789,7 @@ def market_entry_when_imbalanced():
             log("❌", f"short entry error: {e}")
 
         log("✅ ENTRY", "Market entry completed")
-        
+
     except Exception as e:
         log("❌ ENTRY", f"Imbalanced entry error: {e}")
 
