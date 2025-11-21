@@ -83,27 +83,45 @@ app = Flask(__name__)
 
 
 def fetch_min_lot(symbol):
-    contracts = api.list_futures_contracts(SETTLE)
-    for c in contracts:
-        if c.name == symbol:
-            # 가장 먼저 시도 (최신 기준)
-            try:
-                return Decimal(str(c.size_min)), int(c.size_digits)
-            except AttributeError:
-                pass
-            # 대안: order_size_min, order_size_digits
-            try:
-                return Decimal(str(c.order_size_min)), int(c.order_size_digits)
-            except AttributeError:
-                pass
-            # 대안2: min_size, precision
-            try:
-                return Decimal(str(c.min_size)), int(c.precision)
-            except AttributeError:
-                pass
-            # 마지막: 가능한 속성 프린트 후 fallback
-            print(f"Available attributes: {dir(c)}")
-    # fallback 기본값
+    """
+    Gate.io 마켓 정보로부터 최소 주문 수량과 정밀도(Precision)를 가져옴
+    """
+    try:
+        contracts = api.list_futures_contracts(SETTLE)
+        for c in contracts:
+            if c.name == symbol:
+                # 디버깅을 위해 가능한 모든 속성을 로그로 출력 (한번만)
+                # log("DEBUG", f"Contract attributes: {dir(c)}") 
+                
+                # 1. order_size_min / order_size_max (가장 흔한 패턴)
+                # 정밀도(precision)는 보통 주문 단위의 소수점 자리수임
+                # 예: min=0.001 -> precision=3
+                
+                min_qty_str = "0.001" # 기본값
+                
+                # 가능한 속성명 우선순위 검색
+                if hasattr(c, 'order_size_min'):
+                    min_qty_str = str(c.order_size_min)
+                elif hasattr(c, 'min_base_amount'):
+                    min_qty_str = str(c.min_base_amount)
+                elif hasattr(c, 'size_min'):
+                    min_qty_str = str(c.size_min)
+                
+                min_qty = Decimal(min_qty_str)
+                
+                # 정밀도 계산 (문자열 길이 기반)
+                if "." in min_qty_str:
+                    precision = len(min_qty_str.split(".")[1])
+                else:
+                    precision = 0
+                
+                return min_qty, precision
+                
+    except Exception as e:
+        log("❌ FETCH_MIN_LOT", f"Error fetching contract info: {e}")
+    
+    # Fallback (안전장치)
+    log("⚠️ FETCH_MIN_LOT", "Using default fallback values (0.001, 3)")
     return Decimal("0.001"), 3
 
 
