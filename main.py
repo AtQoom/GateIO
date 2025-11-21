@@ -529,6 +529,19 @@ def safe_order_qty(qty):
         return 0.01
 
 
+def adjust_quantity_step(qty, step=0.001):
+    """
+    주문수량(예: BNB) 값을 거래소 요구 단위(step, 최소값 등)에 맞게 내림(버림) 처리
+    Gate.io BNBUSDT 기준: step=0.001, 최소 0.001
+    """
+    qty_dec = Decimal(str(qty))
+    step_dec = Decimal(str(step))
+    # 내림 처리
+    floored = (qty_dec // step_dec) * step_dec
+    floored = floored.quantize(step_dec)  # 소수점자리정확히 맞춤
+    return float(max(floored, step_dec))  # 최소값 보장
+
+
 def calculate_grid_qty():
     """BNB 수량 계산 (최소 단위 적용)"""
     with balance_lock:
@@ -842,7 +855,7 @@ def cancel_stale_orders():
 
 def initialize_grid(current_price=None):
     """
-    최초/리셋 시 양방향 진입 (최소 수량 검증)
+    최초/리셋 시 양방향 grid진입 (0.001 단위 안전처리 포함)
     """
     global last_grid_time
     
@@ -858,7 +871,6 @@ def initialize_grid(current_price=None):
         
         last_grid_time = now
         
-        # 현재 가격 확인 및 base_qty 계산
         price = current_price if current_price and current_price > 0 else get_current_price()
         if price == 0:
             log("❌ GRID", "Cannot get price")
@@ -870,14 +882,13 @@ def initialize_grid(current_price=None):
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
 
-        # 기본 진입 금액(USDT) 설정 및 최소 단위 BNB 변환
         base_value = Decimal(str(account_balance)) * BASERATIO
         base_qty = float(Decimal(str(base_value)) / Decimal(str(price)))
 
-        # 가중치 적용
         obv_display = float(obv_macd_value) * 100
         obv_multiplier = float(calculate_obv_macd_weight(obv_display))
 
+        # 기존 안전처리
         if obv_display > 0:
             short_qty = safe_order_qty(base_qty * (1 + obv_multiplier))
             long_qty = safe_order_qty(base_qty)
@@ -888,13 +899,17 @@ def initialize_grid(current_price=None):
             long_qty = safe_order_qty(base_qty)
             short_qty = safe_order_qty(base_qty)
 
+        # **추가: 0.001 단위로 내림 처리**
+        long_qty = adjust_quantity_step(long_qty)
+        short_qty = adjust_quantity_step(short_qty)
+
         log("INFO", f"[GRID] init, LONG={long_qty}, SHORT={short_qty}, OBV={obv_macd_value}, mult={obv_multiplier}")
 
-        # 실제 진입주문 실행
+        # 주문 진입(0.001 단위 안전 적용)
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=long_qty,   # 최소 단위 이상, float
+                size=long_qty,
                 price="0",
                 tif="ioc",
                 reduce_only=False,
@@ -905,11 +920,11 @@ def initialize_grid(current_price=None):
         except Exception as e:
             log("❌", f"long grid entry error: {e}")
 
-        time.sleep(0.3)
+        time.sleep(0.2)
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=-short_qty,  # 최소 단위 이상, float
+                size=-short_qty,
                 price="0",
                 tif="ioc",
                 reduce_only=False,
@@ -921,7 +936,6 @@ def initialize_grid(current_price=None):
             log("❌", f"short grid entry error: {e}")
 
         sync_position()
-        
         log("✅ GRID", "Grid orders entry completed")
         
     except Exception as e:
@@ -1711,7 +1725,7 @@ async def grid_fill_monitor():
 
 def market_entry_when_imbalanced():
     """
-    포지션 불균형 시 OBV 가중치로 시장가 진입 (최소 수량 검증)
+    포지션 불균형 시 OBV 가중치로 시장가 진입 (0.001 단위 안정화)
     """
     try:
         sync_position()
@@ -1725,7 +1739,6 @@ def market_entry_when_imbalanced():
             log("❌ ENTRY", "Price fetch failed")
             return
         
-        # 진입 수량 계산 + 최소 주문단위 보장
         base_qty = float(account_balance * BASERATIO / current_price)
         base_qty = safe_order_qty(base_qty)
 
@@ -1741,6 +1754,10 @@ def market_entry_when_imbalanced():
         else:
             long_qty = safe_order_qty(base_qty)
             short_qty = safe_order_qty(base_qty)
+
+        # **여기도 추가: 0.001 단위 내림 처리**
+        long_qty = adjust_quantity_step(long_qty)
+        short_qty = adjust_quantity_step(short_qty)
 
         log("INFO", f"[IMBALANCED ENTRY] LONG={long_qty}, SHORT={short_qty}")
 
