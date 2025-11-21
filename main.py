@@ -91,14 +91,14 @@ def fetch_min_lot(symbol):
         for c in contracts:
             if c.name == symbol:
                 # 디버깅을 위해 가능한 모든 속성을 로그로 출력 (한번만)
-                # log("DEBUG", f"Contract attributes: {dir(c)}") 
-                
+                # log("DEBUG", f"Contract attributes: {dir(c)}")
+               
                 # 1. order_size_min / order_size_max (가장 흔한 패턴)
                 # 정밀도(precision)는 보통 주문 단위의 소수점 자리수임
                 # 예: min=0.001 -> precision=3
-                
+               
                 min_qty_str = "0.001" # 기본값
-                
+               
                 # 가능한 속성명 우선순위 검색
                 if hasattr(c, 'order_size_min'):
                     min_qty_str = str(c.order_size_min)
@@ -106,24 +106,23 @@ def fetch_min_lot(symbol):
                     min_qty_str = str(c.min_base_amount)
                 elif hasattr(c, 'size_min'):
                     min_qty_str = str(c.size_min)
-                
+               
                 min_qty = Decimal(min_qty_str)
-                
+               
                 # 정밀도 계산 (문자열 길이 기반)
                 if "." in min_qty_str:
                     precision = len(min_qty_str.split(".")[1])
                 else:
                     precision = 0
-                
+               
                 return min_qty, precision
-                
+               
     except Exception as e:
         log("❌ FETCH_MIN_LOT", f"Error fetching contract info: {e}")
-    
+   
     # Fallback (안전장치)
     log("⚠️ FETCH_MIN_LOT", "Using default fallback values (0.001, 3)")
     return Decimal("0.001"), 3
-
 
 # 초기 세팅부:
 MIN_QUANTITY, step_precision = fetch_min_lot("BNB_USDT")
@@ -267,7 +266,6 @@ def generate_order_id():
    
     return unique_id
 
-
 # =============================================================================
 # 로그
 # =============================================================================
@@ -292,7 +290,7 @@ def get_main_side():
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
-        
+       
         if long_size > short_size:
             return "long"
         elif short_size > long_size:
@@ -342,13 +340,15 @@ def sync_position(max_retries=3, retry_delay=2):
             if positions:
                 for p in positions:
                     if p.contract == SYMBOL:
-                        # ★ 디버깅 로그: API 원본 데이터 확인
-                        # log("🐛 DEBUG", f"Raw Size: {p.size}, Type: {type(p.size)}")
-                        
-                        # 사이즈 파싱
+                        # ★ 사이즈 보정 로직 (중요)
                         try:
                             raw_size = float(p.size)
-                            size_dec = Decimal(str(raw_size))
+                            # 만약 사이즈가 너무 크면 (예: 16) -> 0.001 곱해서 보정 (Contract Unit 이슈 대응)
+                            if abs(raw_size) >= 10:
+                                size_dec = Decimal(str(raw_size * 0.001))
+                                log("⚠️ SYNC", f"Size corrected: {raw_size} -> {size_dec}")
+                            else:
+                                size_dec = Decimal(str(raw_size))
                         except:
                             size_dec = Decimal("0")
 
@@ -363,14 +363,7 @@ def sync_position(max_retries=3, retry_delay=2):
                                 # ★ 숏 사이즈는 절대값으로 저장
                                 position_state[SYMBOL]["short"]["size"] = abs(size_dec)
                                 position_state[SYMBOL]["short"]["entry_price"] = entry_price
-            
-            # 동기화 후 검증 로그 (비정상적으로 크면 경고)
-            with position_lock:
-                l_s = position_state[SYMBOL]["long"]["size"]
-                s_s = position_state[SYMBOL]["short"]["size"]
-                if l_s > 1000 or s_s > 1000: # BNB가 1000개 이상일 리 없음 (현재 잔고 기준)
-                     log("⚠️ SYNC WARNING", f"Position size unusually large! L:{l_s}, S:{s_s}")
-
+           
             return True
            
         except GateApiException as e:
@@ -444,7 +437,7 @@ def cancel_tp_only():
         tp_orders = [o for o in orders if o.is_reduce_only]
        
         if len(tp_orders) == 0:
-            log("ℹ️ TP", "No TP orders to cancel")
+            # log("ℹ️ TP", "No TP orders to cancel")
             return
        
         log("🗑️ TP", f"Cancelling {len(tp_orders)} TP orders")
@@ -466,7 +459,6 @@ def cancel_tp_only():
             log("❌", f"TP cancel error: {e}")
     except Exception as e:
         log("❌", f"TP cancel error: {e}")
-
 
 # ============================================================================
 # TP 새로고침 (동적 TP)
@@ -505,16 +497,16 @@ def refresh_all_tp_orders():
        
         # 3. 기존 TP 취소
         cancel_tp_only()
-        time.sleep(1.0)  # 취소 후 충분한 대기 시간 (0.5 -> 1.0)
+        time.sleep(1.0)  # 취소 후 충분한 대기 시간
        
         # 4. LONG TP 생성
         if long_size > 0 and long_entry_price > 0:
             tp_price_long = long_entry_price * (Decimal("1") + long_tp)
             tp_price_long = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-            
+           
             # 수량 조정
             long_qty = adjust_quantity_step(long_size)
-            
+           
             if long_qty > 0:
                 try:
                     order = FuturesOrder(
@@ -530,16 +522,16 @@ def refresh_all_tp_orders():
                 except Exception as e:
                     log("❌ TP LONG FAIL", f"Qty: {long_qty}, Error: {e}")
        
-        time.sleep(0.5)  # 주문 사이 대기 시간 증가 (0.3 -> 0.5)
+        time.sleep(0.5)  # 주문 사이 대기 시간 증가
        
         # 5. SHORT TP 생성
         if short_size > 0 and short_entry_price > 0:
             tp_price_short = short_entry_price * (Decimal("1") - short_tp)
             tp_price_short = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-            
+           
             # 수량 조정
             short_qty = adjust_quantity_step(short_size)
-            
+           
             if short_qty > 0:
                 try:
                     order = FuturesOrder(
@@ -571,21 +563,21 @@ def calculate_obv_macd_weight(obv_value):
     """
     obv_abs = abs(obv_value)
    
-    # ★ 가중치 강화 (20 이상일 때 1.1부터 시작, 최대 2.0)
+    # ★ 가중치 강화
     if obv_abs < 20:
-        multiplier = Decimal("1.0")
+        multiplier = Decimal("1.1")
     elif obv_abs < 30:
-        multiplier = Decimal("1.1")   # ← 추가!
+        multiplier = Decimal("1.2")
     elif obv_abs < 40:
         multiplier = Decimal("1.3")
     elif obv_abs < 50:
-        multiplier = Decimal("1.5")
+        multiplier = Decimal("1.4")
     elif obv_abs < 60:
-        multiplier = Decimal("1.6")
+        multiplier = Decimal("1.5")
     elif obv_abs < 70:
-        multiplier = Decimal("1.7")
+        multiplier = Decimal("1.6")
     elif obv_abs < 100:
-        multiplier = Decimal("1.9")
+        multiplier = Decimal("1.8")
     else:
         multiplier = Decimal("2.0")
    
@@ -619,40 +611,82 @@ def adjust_quantity_step(qty, step=QUANTITY_STEP, min_qty=MIN_QUANTITY):
 
 def calculate_grid_qty():
     """
-    BNB 수량 계산 (자산의 1% 기준)
+    BNB 수량 계산 (기본 1% + OBV 가중치 + ★손실률 기반 가중치 추가)
     """
-    global BASERATIO # 전역 변수 사용 확인
+    global BASERATIO
     
-    # 1️⃣ 자산 대비 진입 금액 계산
+    # 1️⃣ 기본 수량 계산
     with balance_lock:
-        # 만약 BASERATIO가 0.001로 되어있다면 0.01(1%)로 강제 수정하거나 환경변수 확인 필요
-        target_ratio = Decimal("0.01")  # ★ 여기를 0.01 (1%)로 명시적 설정
-        
+        target_ratio = Decimal("0.01")  # 1%
         base_value = Decimal(str(account_balance)) * target_ratio
-        
         current_price = get_current_price()
+        
         if current_price <= 0:
             return MIN_QUANTITY
 
-        # 수량 = 목표금액 / 현재가
         base_qty = base_value / current_price
         
-        # 로그로 계산 과정 출력 (디버깅용)
-        log("🧮 QTY CALC", f"Balance: {account_balance}, Ratio: {target_ratio}, Val: {base_value:.2f}u, Price: {current_price}, RawQty: {base_qty:.4f}")
-
-    # 2️⃣ OBV MACD 가중치 적용 (기존 로직 유지)
+    # 2️⃣ OBV MACD 가중치
     obv_value = abs(float(obv_macd_value) * 100)
-    multiplier = calculate_obv_macd_weight(obv_value)
-   
-    final_qty = base_qty * multiplier
+    obv_multiplier = calculate_obv_macd_weight(obv_value)
     
-    # 3️⃣ 최소/단위 조정
+    # 3️⃣ ★ [수정] 손실 가중치 (Loss Multiplier) 로직
+    # 기본값은 1.0 (가중치 없음)
+    loss_multiplier = Decimal("1.0")
+    
+    try:
+        with position_lock:
+            long_size = position_state[SYMBOL]["long"]["size"]
+            short_size = position_state[SYMBOL]["short"]["size"]
+            long_entry = position_state[SYMBOL]["long"]["entry_price"]
+            short_entry = position_state[SYMBOL]["short"]["entry_price"]
+            
+        # 주력 포지션 판별 (수량이 더 많은 쪽)
+        main_side = "none"
+        if long_size > short_size:
+            main_side = "long"
+        elif short_size > long_size:
+            main_side = "short"
+            
+        # 주력 포지션이 손실 중일 때만 가중치 적용
+        if main_side == "long" and current_price < long_entry:
+            # 롱 손실률 계산 (예: 1% 하락 = 0.01)
+            loss_rate = (long_entry - current_price) / long_entry
+            
+            # ★ 요청 로직: 손실률 * 2 만큼 추가
+            # 예: 1% 손실 -> 1.0 + (0.01 * 2) = 1.02배 (2% 증액)
+            # 예: 10% 손실 -> 1.0 + (0.10 * 2) = 1.20배 (20% 증액)
+            loss_multiplier = Decimal("1.0") + (loss_rate * Decimal("2"))
+            
+            log("📉 LOSS WEIGHT", f"Main(LONG) Loss {loss_rate*100:.2f}% -> Multiplier {loss_multiplier:.2f}")
+
+        elif main_side == "short" and current_price > short_entry:
+            # 숏 손실률 계산
+            loss_rate = (current_price - short_entry) / short_entry
+            
+            # ★ 요청 로직: 손실률 * 2 만큼 추가
+            loss_multiplier = Decimal("1.0") + (loss_rate * Decimal("2"))
+            
+            log("📉 LOSS WEIGHT", f"Main(SHORT) Loss {loss_rate*100:.2f}% -> Multiplier {loss_multiplier:.2f}")
+            
+        # 안전장치: 가중치가 너무 커지지 않도록 제한 (예: 최대 3배)
+        if loss_multiplier > Decimal("3.0"):
+            loss_multiplier = Decimal("3.0")
+            
+    except Exception as e:
+        log("⚠️ QTY", f"Loss multiplier error: {e}")
+        loss_multiplier = Decimal("1.0")
+
+    # 4️⃣ 최종 수량 계산
+    # 기본수량 * OBV가중치 * 손실가중치
+    final_qty = base_qty * obv_multiplier * loss_multiplier
+    
+    # 최소 단위 조정
     final_qty = adjust_quantity_step(final_qty)
     
-    # 최종 안전장치
     if final_qty < MIN_QUANTITY:
         final_qty = MIN_QUANTITY
-    
+        
     return final_qty
 
 
@@ -673,28 +707,28 @@ def check_rebalancing_condition(tp_profit, current_loss):
     """
     리밸런싱 조건 체크:
     - 무포(리밸런싱 포함) 이후 최초 진입 5시간 경과
-    - TP 체결 시 TP 수익 > 현재 손실
+    - TP 수익 > 현재 손실
     → SL 시장가 처리
     """
     global last_no_position_time
-    
+   
     try:
         if last_no_position_time == 0:
             return False
-            
+           
         elapsed = time.time() - last_no_position_time
-        
+       
         # 5시간 경과 여부
         if elapsed < REBALANCE_SECONDS:
             return False
-            
+           
         # TP 수익 > 현재 손실
         if tp_profit > current_loss:
             log("🔔 REBALANCE", f"Condition met: TP {tp_profit:.2f} > Loss {current_loss:.2f} after {elapsed/3600:.1f}h")
             return True
-            
+           
         return False
-        
+       
     except Exception as e:
         log("❌ REBALANCE", f"Check error: {e}")
         return False
@@ -703,21 +737,21 @@ def execute_rebalancing_sl():
     """리밸런싱 SL 시장가 주문 실행"""
     try:
         sync_position()
-        
+       
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
-            
+           
         if long_size == 0 and short_size == 0:
             return
-            
+           
         log("🔔 REBALANCE", "Executing SL market orders...")
-        
+       
         # 롱 포지션 청산
         if long_size > 0:
             # ✅ adjust_quantity_step 적용
             close_qty = adjust_quantity_step(long_size)
-            
+           
             order = FuturesOrder(
                 contract=SYMBOL,
                 size=f"-{str(close_qty)}",
@@ -728,14 +762,14 @@ def execute_rebalancing_sl():
             )
             api.create_futures_order(SETTLE, order)
             log("✅ REBALANCE", f"LONG {close_qty} SL executed")
-            
+           
         time.sleep(0.3)
-        
+       
         # 숏 포지션 청산
         if short_size > 0:
             # ✅ adjust_quantity_step 적용
             close_qty = adjust_quantity_step(short_size)
-            
+           
             order = FuturesOrder(
                 contract=SYMBOL,
                 size=str(close_qty),
@@ -746,11 +780,11 @@ def execute_rebalancing_sl():
             )
             api.create_futures_order(SETTLE, order)
             log("✅ REBALANCE", f"SHORT {close_qty} SL executed")
-            
+           
         time.sleep(0.5)
         sync_position()
         log("✅ REBALANCE", "Complete!")
-        
+       
     except Exception as e:
         log("❌ REBALANCE", f"Execution error: {e}")
 
@@ -798,7 +832,7 @@ def handle_non_main_position_tp(non_main_size_at_tp):
        
         # ✅ adjust_quantity_step 적용
         sl_qty = adjust_quantity_step(sl_qty)
-        
+       
         if sl_qty < MIN_QUANTITY:
             sl_qty = MIN_QUANTITY
         if sl_qty > main_size:
@@ -831,18 +865,17 @@ def handle_non_main_position_tp(non_main_size_at_tp):
     except Exception as e:
         log("❌ TP HANDLER", f"Error: {e}")
 
-
 # =============================================================================
 # 무포 시점 기록 (리밸런싱용)
 # =============================================================================
 def update_no_position_time():
     """양방향 포지션이 모두 0일 때 시간 기록"""
     global last_no_position_time
-    
+   
     with position_lock:
         long_size = position_state[SYMBOL]["long"]["size"]
         short_size = position_state[SYMBOL]["short"]["size"]
-    
+   
     if long_size == 0 and short_size == 0:
         if last_no_position_time == 0:
             last_no_position_time = time.time()
@@ -863,25 +896,25 @@ def validate_strategy_consistency():
     """전략 일관성 검증 + 그리드 생성"""
     try:
         sync_position()
-        
+       
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
-        
+       
         current_price = get_current_price()
         if current_price == 0:
             return
-        
+       
         try:
             orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
             grid_count = sum(1 for o in orders if not o.reduce_only)
         except Exception as e:
             log("❌", f"List orders error: {e}")
             return
-        
+       
         # ✅ 단일 포지션 + 그리드 없음 → 그리드 생성
         single_position = (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0)
-        
+       
         if single_position and grid_count == 0:
             log("🔧 VALIDATE", "Single position without grids → Creating grids!")
             initialize_grid(current_price)
@@ -1029,7 +1062,7 @@ def initialize_grid(current_price=None):
             log("❌", f"short grid entry error: {e}")
 
         log("✅ GRID", "Grid orders entry completed")
-        
+       
         # ★★★ [추가] 진입 후 즉시 TP 생성! ★★★
         time.sleep(1.0)  # 체결 대기
         sync_position()  # 포지션 갱신
@@ -1041,6 +1074,34 @@ def initialize_grid(current_price=None):
     finally:
         initialize_grid_lock.release()
 
+def full_refresh(event_type, skip_grid=False):
+    """
+    시스템 새로고침 + 리밸런싱 체크
+    """
+    log_event_header(f"FULL REFRESH: {event_type}")
+   
+    log("🔄 SYNC", "Syncing position...")
+    sync_position()
+   
+    # ★ 무포 시점 기록
+    update_no_position_time()
+   
+    log_position_state()
+
+    cancel_all_orders()
+    time.sleep(0.5)
+     
+    if not skip_grid:
+        current_price = get_current_price()
+        if current_price > 0:
+            initialize_grid(current_price)
+   
+    refresh_all_tp_orders()
+   
+    sync_position()
+    log_position_state()
+    log("✅ REFRESH", f"Complete: {event_type}")
+
 
 # =============================================================================
 # OBV MACD 계산
@@ -1050,14 +1111,14 @@ def calculate_obv_macd():
     OBV-MACD 계산 (3분봉 기준)
     """
     global obv_macd_value
-    
+   
     try:
         if len(kline_history) < 60:
             return
-        
+       
         closes = [k['close'] for k in kline_history]
         volumes = [k['volume'] for k in kline_history]
-        
+       
         # OBV 계산
         obv = [0]
         for i in range(1, len(closes)):
@@ -1067,7 +1128,7 @@ def calculate_obv_macd():
                 obv.append(obv[-1] - volumes[i])
             else:
                 obv.append(obv[-1])
-        
+       
         # EMA 계산 함수
         def ema(data, period):
             ema_vals = []
@@ -1076,26 +1137,26 @@ def calculate_obv_macd():
             for price in data[period:]:
                 ema_vals.append(price * k + ema_vals[-1] * (1 - k))
             return ema_vals
-        
+       
         # MACD 계산
         if len(obv) >= 60:
             ema_12 = ema(obv[-60:], 12)
             ema_26 = ema(obv[-60:], 26)
-            
+           
             if len(ema_12) > 0 and len(ema_26) > 0:
                 macd_line = ema_12[-1] - ema_26[-1]
-                
+               
                 # 정규화 (-0.01 ~ 0.01 범위)
                 max_obv = max(abs(max(obv[-60:])), abs(min(obv[-60:])))
                 if max_obv > 0:
                     normalized = macd_line / max_obv / 100
                     obv_macd_value = Decimal(str(normalized))
-                    
+                   
                     # 로그 (100배 스케일로 표시)
                     display_value = float(obv_macd_value) * 100
                     if abs(display_value) > 0.1:
                         log("📊 OBV-MACD", f"{display_value:.2f}")
-        
+       
     except Exception as e:
         log("❌ OBV-MACD", f"Calculation error: {e}")
 
@@ -1108,7 +1169,7 @@ def calculate_dynamic_tp_gap():
     try:
         obv_display = float(obv_macd_value) * 100
         obv_abs = abs(obv_display)
-        
+       
         # OBV 값에 따라 TP 조정
         if obv_abs < 10:
             tp_ratio = Decimal("0.3")  # 30%
@@ -1120,18 +1181,17 @@ def calculate_dynamic_tp_gap():
             tp_ratio = Decimal("0.85")  # 85%
         else:
             tp_ratio = Decimal("1.0")  # 100%
-        
+       
         # TP 범위 내에서 조정
         tp_range = TPMAX - TPMIN
         dynamic_tp = TPMIN + (tp_range * tp_ratio)
-        
+       
         # LONG과 SHORT에 동일 적용
         return (dynamic_tp, dynamic_tp)
-        
+       
     except Exception as e:
         log("❌ TP GAP", f"Calculation error: {e}")
         return (TPMIN, TPMIN)
-
 
 def fetch_kline_thread():
     global obv_macd_value
@@ -1311,18 +1371,151 @@ def position_monitor():
             if long_value < max_value and max_position_locked["long"]:
                 log("✅ UNLOCK", f"LONG ${long_value:.2f} < ${max_value:.2f}")
                 max_position_locked["long"] = False
-                full_refresh("Max_Unlock_Long")
-                continue
+                # full_refresh 호출 제거
            
             if short_value < max_value and max_position_locked["short"]:
                 log("✅ UNLOCK", f"SHORT ${short_value:.2f} < ${max_value:.2f}")
                 max_position_locked["short"] = False
-                full_refresh("Max_Unlock_Short")
-                continue
+                # full_refresh 호출 제거
        
         except Exception as e:
             log("❌", f"Position monitor error: {e}")
             time.sleep(5)
+
+async def grid_fill_monitor():
+    """
+    WebSocket으로 TP 체결 모니터링
+    + 리밸런싱 조건 체크
+    + 한쪽 TP 체결 시에도 그리드 재설정 (핵심 수정!)
+    """
+    global last_grid_time, idle_entry_count
+   
+    uri = f"wss://fx-ws.gateio.ws/v4/ws/{SETTLE}"
+    ping_count = 0
+    reconnect_attempt = 0
+    max_reconnect = 5
+   
+    while True:
+        try:
+            async with websockets.connect(
+                uri,
+                ping_interval=60,
+                ping_timeout=120,
+                close_timeout=10
+            ) as ws:
+                auth_msg = {
+                    "time": int(time.time()),
+                    "channel": "futures.orders",
+                    "event": "subscribe",
+                    "payload": [API_KEY, API_SECRET, SYMBOL]
+                }
+                await ws.send(json.dumps(auth_msg))
+                log("✅ WS", f"Connected to WebSocket (attempt {reconnect_attempt + 1})")
+                reconnect_attempt = 0
+                ping_count = 0
+               
+                while True:
+                    try:
+                        msg = await asyncio.wait_for(ws.recv(), timeout=150)
+                        data = json.loads(msg)
+                       
+                        if data.get("event") == "update" and data.get("channel") == "futures.orders":
+                            ping_count = 0
+                           
+                            for order_data in data.get("result", []):
+                                contract = order_data.get("contract")
+                                if contract != SYMBOL:
+                                    continue
+                               \
+                                finish_as = order_data.get("finish_as", "")
+                                status = order_data.get("status", "")
+                               
+                                is_filled = (
+                                    finish_as in ["filled", "ioc"] or
+                                    status in ["finished", "closed"]
+                                )
+                               
+                                if not is_filled:
+                                    continue
+                               
+                                is_reduce_only = order_data.get("is_reduce_only", False)
+                                size = order_data.get("size", 0)
+                                price = float(order_data.get("price", 0))
+                               
+                                # TP 체결 처리
+                                if is_reduce_only:
+                                    side = "long" if size > 0 else "short"
+                                    tp_qty = abs(int(size))
+                                    tp_profit = Decimal(str(tp_qty)) * Decimal(str(price))
+                                   
+                                    log("✅ TP FILLED", f"{side.upper()} {tp_qty} @ {price:.4f}")
+                                   
+                                    time.sleep(0.5)
+                                    sync_position()
+                                   
+                                    # ★ 리밸런싱 조건 체크
+                                    with position_lock:
+                                        if side == "long":
+                                            remaining_loss = position_state[SYMBOL]["short"]["size"] * get_current_price()
+                                        else:
+                                            remaining_loss = position_state[SYMBOL]["long"]["size"] * get_current_price()
+                                   
+                                    if check_rebalancing_condition(tp_profit, remaining_loss):
+                                        execute_rebalancing_sl()
+                                   
+                                    # 물량 누적 방지
+                                    try:
+                                        handle_non_main_position_tp(tp_qty)
+                                        log("💊 TP HANDLER", "Tier check completed")
+                                    except Exception as e:
+                                        log("❌ TP HANDLER", f"Failed: {e}")
+                                       
+                                    time.sleep(0.5)
+                                   
+                                    with position_lock:
+                                        long_size = position_state[SYMBOL]["long"]["size"]
+                                        short_size = position_state[SYMBOL]["short"]["size"]
+                                   
+                                    # ✅ 수정된 로직: 포지션 상태에 따라 대응
+                                    update_event_time()
+                                   
+                                    if long_size == 0 and short_size == 0:
+                                        # 양방향 모두 종료됨 -> 완전 초기화 (그리드 포함)
+                                        log("🎯 BOTH CLOSED", "Both sides closed → Full refresh")
+                                        update_no_position_time()
+                                       
+                                        threading.Thread(
+                                            target=full_refresh,
+                                            args=("Average_TP", False), # skip_grid=False
+                                            daemon=True
+                                        ).start()
+                                       
+                                    else:
+                                        # ★ 한쪽만 종료됨 (단일 포지션 상태) -> 즉시 그리드/헷징 재진입!
+                                        log("🎯 SIDE CLOSED", "One side closed → Re-initializing Grid/Hedge")
+                                       
+                                        threading.Thread(
+                                            target=full_refresh,
+                                            args=("Side_TP", False), # skip_grid=False (그리드 생성 필수!)
+                                            daemon=True
+                                        ).start()
+                   
+                    except asyncio.TimeoutError:
+                        ping_count += 1
+                        if ping_count % 40 == 1:
+                            log("⚠️ WS", f"No order update for {ping_count * 150}s")
+                        continue
+       
+        except Exception as e:
+            reconnect_attempt += 1
+            if reconnect_attempt <= max_reconnect:
+                log("❌ WS", f"Error: {e}")
+                log("⚠️ WS", f"Reconnecting in 5s (attempt {reconnect_attempt}/{max_reconnect})...")
+                await asyncio.sleep(5)
+            else:
+                log("❌ WS", f"Max reconnect attempts reached. Waiting 30s...")
+                await asyncio.sleep(30)
+                reconnect_attempt = 0
 
 def start_grid_monitor():
     loop = asyncio.new_event_loop()
@@ -1367,63 +1560,62 @@ def tp_monitor():
             log("❌", f"TP monitor error: {e}")
             time.sleep(1)
 
-
 def check_idle_and_enter():
     """
     무포지션 아이들 상태 체크 및 진입
     - 최근 이벤트 없고, 포지션 없으면 시장가 진입
     """
     global idle_entry_in_progress, last_idle_entry_time, idle_entry_count
-    
+   
     try:
         # 이미 진행 중이면 스킵
         with idle_entry_progress_lock:
             if idle_entry_in_progress:
                 return
-        
+       
         current_time = time.time()
-        
+       
         # 쿨다운 체크 (최근 진입 후 10초 이내면 스킵)
         if current_time - last_idle_entry_time < IDLE_ENTRY_COOLDOWN:
             return
-        
+       
         # 최근 이벤트 시간 체크
         elapsed = current_time - last_event_time
-        
+       
         if elapsed < IDLE_TIME_SECONDS:
             return
-        
+       
         # 포지션 확인
         sync_position()
-        
+       
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
-        
+       
         # 포지션이 있으면 리턴
         if long_size > 0 or short_size > 0:
             return
-        
+       
         # 아이들 진입 시작
         with idle_entry_progress_lock:
             idle_entry_in_progress = True
-        
+       
         try:
             idle_entry_count += 1
             log_event_header(f"IDLE ENTRY #{idle_entry_count}")
             log("⏰ IDLE", f"No activity for {elapsed/60:.1f} min → Market entry")
-            
+           
             # 시장가 양방향 진입
             current_price = get_current_price()
             if current_price > 0:
                 initialize_grid(current_price)
                 last_idle_entry_time = current_time
                 update_event_time()
-                
+               
         finally:
             with idle_entry_progress_lock:
                 idle_entry_in_progress = False
-        
+       
     except Exception as e:
         log("❌ IDLE", f"Error: {e}")
         with idle_entry_progress_lock:
@@ -1452,23 +1644,22 @@ def get_tp_orders_hash(tp_orders):
     try:
         if not tp_orders:
             return ""
-        
+       
         # 주문 정보를 문자열로 변환
         order_strings = []
         for o in tp_orders:
             order_str = f"{o.size}_{o.price}_{o.reduce_only}"
             order_strings.append(order_str)
-        
+       
         # 정렬 후 해시
         order_strings.sort()
         combined = "_".join(order_strings)
-        
+       
         return hashlib.md5(combined.encode()).hexdigest()
-        
+       
     except Exception as e:
         log("❌ HASH", f"Error: {e}")
         return ""
-
 
 def periodic_health_check():
     """2분마다 실행되는 헬스 체크"""
@@ -1560,12 +1751,12 @@ def periodic_health_check():
                 tp_short_qty = sum(abs(o.size) for o in tp_orders_list if o.size < 0) # Long 포지션의 TP(매도)
                
                 tp_mismatch = False
-                
+               
                 # TP 개수 체크: 양방향 포지션인데 TP가 2개 미만이면 문제!
                 if long_size > 0 and short_size > 0 and len(tp_orders_list) < 2:
                     log("🔧 HEALTH", f"❌ TP COUNT MISMATCH: Pos=2, TP={len(tp_orders_list)}")
                     tp_mismatch = True
-                
+               
                 # TP 수량 체크
                 elif long_size > 0 and tp_short_qty < long_size * Decimal("0.9"): # 90% 이상 커버 확인
                     log("🔧 HEALTH", f"❌ LONG TP MISSING: Pos={long_size}, TP={tp_short_qty}")
@@ -1579,7 +1770,7 @@ def periodic_health_check():
                         log("🔧 HEALTH", "⚠️ TP Mismatch detected → Force Refreshing!")
                     else:
                         log("🔧 HEALTH", "⚠️ TP Hash changed → Updating!")
-                        
+                       
                     time.sleep(0.5)
                     try:
                         refresh_all_tp_orders()
@@ -1676,244 +1867,6 @@ def periodic_health_check():
         except Exception as e:
             log("❌ HEALTH", f"Health check error: {e}")
             time.sleep(5)
-
-
-def full_refresh(event_type, skip_grid=False):
-    """
-    시스템 새로고침 + 리밸런싱 체크
-    """
-    log_event_header(f"FULL REFRESH: {event_type}")
-   
-    log("🔄 SYNC", "Syncing position...")
-    sync_position()
-    
-    # ★ 무포 시점 기록
-    update_no_position_time()
-    
-    log_position_state()
-
-    cancel_all_orders()
-    time.sleep(0.5)
-     
-    if not skip_grid:
-        current_price = get_current_price()
-        if current_price > 0:
-            initialize_grid(current_price)
-   
-    refresh_all_tp_orders()
-   
-    sync_position()
-    log_position_state()
-    log("✅ REFRESH", f"Complete: {event_type}")
-
-
-async def grid_fill_monitor():
-    """
-    WebSocket으로 TP 체결 모니터링
-    + 리밸런싱 조건 체크
-    + 한쪽 TP 체결 시에도 그리드 재설정 (핵심 수정!)
-    """
-    global last_grid_time, idle_entry_count
-   
-    uri = f"wss://fx-ws.gateio.ws/v4/ws/{SETTLE}"
-    ping_count = 0
-    reconnect_attempt = 0
-    max_reconnect = 5
-   
-    while True:
-        try:
-            async with websockets.connect(
-                uri,
-                ping_interval=60,
-                ping_timeout=120,
-                close_timeout=10
-            ) as ws:
-                auth_msg = {
-                    "time": int(time.time()),
-                    "channel": "futures.orders",
-                    "event": "subscribe",
-                    "payload": [API_KEY, API_SECRET, SYMBOL]
-                }
-                await ws.send(json.dumps(auth_msg))
-                log("✅ WS", f"Connected to WebSocket (attempt {reconnect_attempt + 1})")
-                reconnect_attempt = 0
-                ping_count = 0
-               
-                while True:
-                    try:
-                        msg = await asyncio.wait_for(ws.recv(), timeout=150)
-                        data = json.loads(msg)
-                       
-                        if data.get("event") == "update" and data.get("channel") == "futures.orders":
-                            ping_count = 0
-                           
-                            for order_data in data.get("result", []):
-                                contract = order_data.get("contract")
-                                if contract != SYMBOL:
-                                    continue
-                               
-                                finish_as = order_data.get("finish_as", "")
-                                status = order_data.get("status", "")
-                               
-                                is_filled = (
-                                    finish_as in ["filled", "ioc"] or
-                                    status in ["finished", "closed"]
-                                )
-                               
-                                if not is_filled:
-                                    continue
-                               
-                                is_reduce_only = order_data.get("is_reduce_only", False)
-                                size = order_data.get("size", 0)
-                                price = float(order_data.get("price", 0))
-                               
-                                # TP 체결 처리
-                                if is_reduce_only:
-                                    side = "long" if size > 0 else "short"
-                                    tp_qty = abs(int(size))
-                                    tp_profit = Decimal(str(tp_qty)) * Decimal(str(price))
-                                   
-                                    log("✅ TP FILLED", f"{side.upper()} {tp_qty} @ {price:.4f}")
-                                   
-                                    time.sleep(0.5)
-                                    sync_position()
-                                   
-                                    # ★ 리밸런싱 조건 체크
-                                    with position_lock:
-                                        if side == "long":
-                                            remaining_loss = position_state[SYMBOL]["short"]["size"] * get_current_price()
-                                        else:
-                                            remaining_loss = position_state[SYMBOL]["long"]["size"] * get_current_price()
-                                    
-                                    if check_rebalancing_condition(tp_profit, remaining_loss):
-                                        execute_rebalancing_sl()
-                                   
-                                    # 물량 누적 방지
-                                    try:
-                                        handle_non_main_position_tp(tp_qty)
-                                        log("💊 TP HANDLER", "Tier check completed")
-                                    except Exception as e:
-                                        log("❌ TP HANDLER", f"Failed: {e}")
-                                       
-                                    time.sleep(0.5)
-                                   
-                                    with position_lock:
-                                        long_size = position_state[SYMBOL]["long"]["size"]
-                                        short_size = position_state[SYMBOL]["short"]["size"]
-                                   
-                                    # ✅ 수정된 로직: 포지션 상태에 따라 대응
-                                    update_event_time()
-                                    
-                                    if long_size == 0 and short_size == 0:
-                                        # 양방향 모두 종료됨 -> 완전 초기화 (그리드 포함)
-                                        log("🎯 BOTH CLOSED", "Both sides closed → Full refresh")
-                                        update_no_position_time()
-                                        
-                                        threading.Thread(
-                                            target=full_refresh,
-                                            args=("Average_TP", False), # skip_grid=False
-                                            daemon=True
-                                        ).start()
-                                        
-                                    else:
-                                        # ★ 한쪽만 종료됨 (단일 포지션 상태) -> 즉시 그리드/헷징 재진입!
-                                        log("🎯 SIDE CLOSED", "One side closed → Re-initializing Grid/Hedge")
-                                        
-                                        threading.Thread(
-                                            target=full_refresh,
-                                            args=("Side_TP", False), # skip_grid=False (그리드 생성 필수!)
-                                            daemon=True
-                                        ).start()
-                   
-                    except asyncio.TimeoutError:
-                        ping_count += 1
-                        if ping_count % 40 == 1:
-                            log("⚠️ WS", f"No order update for {ping_count * 150}s")
-                        continue
-       
-        except Exception as e:
-            reconnect_attempt += 1
-            if reconnect_attempt <= max_reconnect:
-                log("❌ WS", f"Error: {e}")
-                log("⚠️ WS", f"Reconnecting in 5s (attempt {reconnect_attempt}/{max_reconnect})...")
-                await asyncio.sleep(5)
-            else:
-                log("❌ WS", f"Max reconnect attempts reached. Waiting 30s...")
-                await asyncio.sleep(30)
-                reconnect_attempt = 0
-
-def market_entry_when_imbalanced():
-    """
-    포지션 불균형 시 OBV 가중치로 시장가 진입 (0.001 단위 안정화)
-    """
-    try:
-        sync_position()
-
-        with position_lock:
-            long_size = position_state[SYMBOL]["long"]["size"]
-            short_size = position_state[SYMBOL]["short"]["size"]
-
-        current_price = get_current_price()
-        if current_price <= 0:
-            log("❌ ENTRY", "Price fetch failed")
-            return
-
-        base_qty = float(account_balance * BASERATIO / current_price)
-        base_qty = safe_order_qty(base_qty)
-
-        obv_display = float(obv_macd_value) * 100
-        obv_multiplier = float(calculate_obv_macd_weight(obv_display))
-
-        if obv_display > 0:
-            short_qty = safe_order_qty(base_qty * (1 + obv_multiplier))
-            long_qty = safe_order_qty(base_qty)
-        elif obv_display < 0:
-            long_qty = safe_order_qty(base_qty * (1 + obv_multiplier))
-            short_qty = safe_order_qty(base_qty)
-        else:
-            long_qty = safe_order_qty(base_qty)
-            short_qty = safe_order_qty(base_qty)
-
-        # **여기 추가: 0.001 단위로 버림 처리**
-        long_qty = adjust_quantity_step(long_qty)
-        short_qty = adjust_quantity_step(short_qty)
-
-        log("INFO", f"[IMBALANCED ENTRY] LONG={long_qty}, SHORT={short_qty}")
-
-        try:
-            order = FuturesOrder(
-                contract=SYMBOL,
-                size=str(long_qty),
-                price="0",
-                tif="ioc",
-                reduce_only=False,
-                text=generate_order_id()
-            )
-            api.create_futures_order(SETTLE, order)
-            log("✅ENTRY", f"long {long_qty}")
-        except Exception as e:
-            log("❌", f"long entry error: {e}")
-
-        time.sleep(0.2)
-        try:
-            order = FuturesOrder(
-                contract=SYMBOL,
-                size=f"-{str(short_qty)}",
-                price="0",
-                tif="ioc",
-                reduce_only=False,
-                text=generate_order_id()
-            )
-            api.create_futures_order(SETTLE, order)
-            log("✅ENTRY", f"short {short_qty}")
-        except Exception as e:
-            log("❌", f"short entry error: {e}")
-
-        log("✅ ENTRY", "Market entry completed")
-
-    except Exception as e:
-        log("❌ ENTRY", f"Imbalanced entry error: {e}")
-
 
 # =============================================================================
 # Flask 엔드포인트
@@ -2097,8 +2050,8 @@ def print_startup_summary():
             initial_capital = INITIALBALANCE
    
     log("divider", "-" * 80)
-
-# 현재 가격 조회 및 초기 그리드 생성
+   
+    # 현재 가격 조회 및 초기 그리드 생성
     try:
         current_price = get_current_price()
         if current_price > 0:
