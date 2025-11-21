@@ -1674,7 +1674,8 @@ def full_refresh(event_type, skip_grid=False):
 async def grid_fill_monitor():
     """
     WebSocket으로 TP 체결 모니터링
-    + 리밸런싱 조건 체크 추가!
+    + 리밸런싱 조건 체크
+    + 한쪽 TP 체결 시에도 그리드 재설정 (핵심 수정!)
     """
     global last_grid_time, idle_entry_count
    
@@ -1730,7 +1731,7 @@ async def grid_fill_monitor():
                                 size = order_data.get("size", 0)
                                 price = float(order_data.get("price", 0))
                                
-                                # TP 체결만 처리
+                                # TP 체결 처리
                                 if is_reduce_only:
                                     side = "long" if size > 0 else "short"
                                     tp_qty = abs(int(size))
@@ -1741,7 +1742,7 @@ async def grid_fill_monitor():
                                     time.sleep(0.5)
                                     sync_position()
                                    
-                                    # ★ 리밸런싱 조건 체크!
+                                    # ★ 리밸런싱 조건 체크
                                     with position_lock:
                                         if side == "long":
                                             remaining_loss = position_state[SYMBOL]["short"]["size"] * get_current_price()
@@ -1764,15 +1765,27 @@ async def grid_fill_monitor():
                                         long_size = position_state[SYMBOL]["long"]["size"]
                                         short_size = position_state[SYMBOL]["short"]["size"]
                                    
-                                    # 양방향 TP 체결
+                                    # ✅ 수정된 로직: 포지션 상태에 따라 대응
+                                    update_event_time()
+                                    
                                     if long_size == 0 and short_size == 0:
+                                        # 양방향 모두 종료됨 -> 완전 초기화 (그리드 포함)
                                         log("🎯 BOTH CLOSED", "Both sides closed → Full refresh")
-                                        update_event_time()
-                                        update_no_position_time()  # ★ 무포 시점 기록
-                                       
+                                        update_no_position_time()
+                                        
                                         threading.Thread(
                                             target=full_refresh,
-                                            args=("Average_TP",),
+                                            args=("Average_TP", False), # skip_grid=False
+                                            daemon=True
+                                        ).start()
+                                        
+                                    else:
+                                        # ★ 한쪽만 종료됨 (단일 포지션 상태) -> 즉시 그리드/헷징 재진입!
+                                        log("🎯 SIDE CLOSED", "One side closed → Re-initializing Grid/Hedge")
+                                        
+                                        threading.Thread(
+                                            target=full_refresh,
+                                            args=("Side_TP", False), # skip_grid=False (그리드 생성 필수!)
                                             daemon=True
                                         ).start()
                    
