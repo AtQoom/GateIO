@@ -1426,7 +1426,7 @@ async def grid_fill_monitor():
                                 contract = order_data.get("contract")
                                 if contract != SYMBOL:
                                     continue
-                               \
+                               
                                 finish_as = order_data.get("finish_as", "")
                                 status = order_data.get("status", "")
                                
