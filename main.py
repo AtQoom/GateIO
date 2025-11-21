@@ -131,8 +131,8 @@ grid_orders = {SYMBOL: {"long": [], "short": []}}
 # 최대 포지션 잠금
 max_position_locked = {"long": False, "short": False}
 
-base_qty = account_balance * BASERATIO / current_price
-base_qty = max(round(base_qty, 3), 0.001)
+base_qty = None
+entry_qty = None
 
 # OBV, 헷지 등의 비율 적용 후에도 동일
 entry_qty = base_qty * (1 + obv_multiplier)
@@ -1059,117 +1059,81 @@ def cancel_stale_orders():
 
 def initialize_grid(current_price=None):
     """
-    역추세 전략 (수정됨!)
-   
-    OBV > 0 (롱 강세) → SHORT 주력 (더 많이!)
-    OBV < 0 (숏 강세) → LONG 주력 (더 많이!)
+    그리드/양방향 최초 시장가 엔트리
+    OBV > 0 (롱 강세) → SHORT 주력 (더 많이)
+    OBV < 0 (숏 강세) → LONG 주력 (더 많이)
     """
-    global last_grid_time  
-     
+    global last_grid_time
     if not initialize_grid_lock.acquire(blocking=False):
         log("🔵 GRID", "Already running → Skipping")
         return
-   
     try:
         now = time.time()
         if now - last_grid_time < 10:
             log("🔵 GRID", f"Too soon ({now - last_grid_time:.1f}s) → Skipping")
             return
-       
         last_grid_time = now
-       
+
         if current_price is None or current_price == 0:
             current_price = get_current_price()
-       
         if current_price == 0:
             log("❌", "Cannot get current price")
             return
-       
+
         sync_position()
-       
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
-       
-        with balance_lock:
-            max_value = account_balance * MAXPOSITIONRATIO
-       
-        current_price_dec = Decimal(str(current_price))
-        long_value = Decimal(str(long_size)) * current_price_dec
-        short_value = Decimal(str(short_size)) * current_price_dec
-       
-        if long_value >= max_value or short_value >= max_value:
-            log("⚠️ LIMIT", "Max position reached")
-            return
-       
-        obv_display = float(obv_macd_value) * 100
-        obv_multiplier = calculate_obv_macd_weight(obv_display)
-       
+
         with balance_lock:
             base_value = account_balance * BASERATIO
-       
-        base_qty = int(base_value / current_price_dec)
-       
-        if base_qty < 1:
-            log("❌", f"Insufficient quantity")
-            return
-       
-        # ✅ 수정: 강세 방향의 반대를 (1 + 배수)배로!
-        if obv_display > 0:  # 롱 강세 → SHORT 주력 (더 많이!)
-            short_qty = int(base_qty * (1 + obv_multiplier))  # ← 수정!
+        base_qty = base_value / Decimal(str(current_price))
+        base_qty = max(round(float(base_qty), 3), 0.001)
+
+        obv_display = float(obv_macd_value) * 100
+        obv_multiplier = float(calculate_obv_macd_weight(obv_display))
+
+        if obv_display > 0:  # 롱 강세 → SHORT 주력
+            short_qty = max(round(base_qty * (1 + obv_multiplier), 3), 0.001)
             long_qty = base_qty
-            log("📊", f"OBV+ (롱 강세): SHORT {short_qty} (주력 x{float(1+obv_multiplier):.2f}) | LONG {long_qty} (헤징)")
-       
-        elif obv_display < 0:  # 숏 강세 → LONG 주력 (더 많이!)
-            long_qty = int(base_qty * (1 + obv_multiplier))  # ← 수정!
+            log("📊", f"OBV+ (롱 강세): SHORT {short_qty} (주력 x{1+obv_multiplier:.2f}) | LONG {long_qty} (헷지)")
+        elif obv_display < 0:  # 숏 강세 → LONG 주력
+            long_qty = max(round(base_qty * (1 + obv_multiplier), 3), 0.001)
             short_qty = base_qty
-            log("📊", f"OBV- (숏 강세): LONG {long_qty} (주력 x{float(1+obv_multiplier):.2f}) | SHORT {short_qty} (헤징)")
-       
-        else:  # 중립
+            log("📊", f"OBV- (숏 강세): LONG {long_qty} (주력 x{1+obv_multiplier:.2f}) | SHORT {short_qty} (헷지)")
+        else:
             long_qty = base_qty
             short_qty = base_qty
             log("📊", f"OBV 중립: LONG {long_qty} | SHORT {short_qty}")
-       
-        log("📊 QUANTITY", f"Long: {long_qty}, Short: {short_qty}, OBV={obv_display:.1f}, Multiplier={float(obv_multiplier):.2f}")
-       
+
+        log("📊 QUANTITY", f"Long: {long_qty}, Short: {short_qty}, OBV={obv_display:.1f}, Multiplier={obv_multiplier:.2f}")
         try:
             order = FuturesOrder(
-                contract=SYMBOL,
-                size=long_qty,
-                price="0",
-                tif="ioc",
-                reduce_only=False,
-                text=generate_order_id()
+                contract=SYMBOL, size=long_qty, price="0", tif="ioc",
+                reduce_only=False, text=generate_order_id()
             )
             api.create_futures_order(SETTLE, order)
             log("✅ ENTRY", f"LONG {long_qty} market")
-        except GateApiException as e:
+        except Exception as e:
             log("❌", f"LONG entry error: {e}")
             return
-       
+
         time.sleep(0.1)
-       
         try:
             order = FuturesOrder(
-                contract=SYMBOL,
-                size=-short_qty,
-                price="0",
-                tif="ioc",
-                reduce_only=False,
-                text=generate_order_id()
+                contract=SYMBOL, size=-short_qty, price="0", tif="ioc",
+                reduce_only=False, text=generate_order_id()
             )
             api.create_futures_order(SETTLE, order)
             log("✅ ENTRY", f"SHORT {short_qty} market")
-        except GateApiException as e:
+        except Exception as e:
             log("❌", f"SHORT entry error: {e}")
             return
-       
+
         time.sleep(0.2)
         sync_position()
         refresh_all_tp_orders()
-       
         log("🎉 GRID", "Market entry complete!")
-       
     finally:
         initialize_grid_lock.release()
 
@@ -1330,7 +1294,8 @@ def check_rebalance():
 # ============================================================================
 
 def check_idle_and_enter():
-    '''10초 무활동 시 진입 로직
+    '''
+    10초 무활동 시 진입 로직
     - 양방향 포지션 모두 없을 때: 역추세 전략으로 신규 진입
     - 단방향 포지션만 있을 때: 손실도 + OBV 가중치로 반대편 진입
     '''
@@ -1341,10 +1306,10 @@ def check_idle_and_enter():
             return
 
         with position_lock:
-            long_size = position_state[SYMBOL]["long_size"]
-            short_size = position_state[SYMBOL]["short_size"]
-            long_entry_price = position_state[SYMBOL]["long_entry_price"]
-            short_entry_price = position_state[SYMBOL]["short_entry_price"]
+            long_size = position_state[SYMBOL]["long"]["size"]
+            short_size = position_state[SYMBOL]["short"]["size"]
+            long_entry_price = position_state[SYMBOL]["long"]["entry_price"]
+            short_entry_price = position_state[SYMBOL]["short"]["entry_price"]
 
         current_price = get_current_price()
         if current_price == 0:
@@ -1352,7 +1317,7 @@ def check_idle_and_enter():
 
         # MAX_POSITION_RATIO 체크
         with balance_lock:
-            max_value = account_balance * MAX_POSITION_RATIO
+            max_value = account_balance * MAXPOSITIONRATIO
 
         current_price_dec = Decimal(str(current_price))
         long_value = Decimal(str(long_size)) * current_price_dec
@@ -1364,72 +1329,54 @@ def check_idle_and_enter():
 
         # OBV 가중치 계산
         obv_display = float(obv_macd_value) * 100
-        obv_weight = calculate_obv_macd_weight(obv_display)
+        obv_weight = float(calculate_obv_macd_weight(obv_display))
 
         log_event_header("IDLE ENTRY")
         log("IDLE", f"Entry after {elapsed:.0f}s | OBV={obv_display:.1f}")
         log("POSITION", f"Long {long_size}, Short {short_size}")
 
-        # 케이스 1: 양방향 포지션 모두 없음 → 역추세 진입
+        # 1. 양방향 포지션 모두 없음 → 역추세 진입
         if long_size == 0 and short_size == 0:
             log("IDLE", "No positions → Counter-trend entry with OBV weight")
-
             with balance_lock:
-                base_usdt = account_balance * BASE_RATIO
-
-            base_qty = int(base_usdt / current_price_dec)
-            if base_qty < 1:
+                base_usdt = account_balance * BASERATIO
+            base_qty = base_usdt / current_price
+            base_qty = max(round(float(base_qty), 3), 0.001)
+            if base_qty < 0.001:
                 log("IDLE", "Insufficient quantity")
                 return
 
             if obv_display > 0:  # 롱 강세 → SHORT 주력
-                short_qty = int(base_qty * (1 + obv_weight))
+                short_qty = max(round(base_qty * (1 + obv_weight), 3), 0.001)
                 long_qty = base_qty
-                log("IDLE CALC", f"OBV={obv_display:.2f} → SHORT main")
-                log("IDLE CALC", f"SHORT: {short_qty} (base {base_qty} * {1+float(obv_weight):.2f})")
-                log("IDLE CALC", f"LONG: {long_qty} (base)")
             elif obv_display < 0:  # 숏 강세 → LONG 주력
-                long_qty = int(base_qty * (1 + obv_weight))
+                long_qty = max(round(base_qty * (1 + obv_weight), 3), 0.001)
                 short_qty = base_qty
-                log("IDLE CALC", f"OBV={obv_display:.2f} → LONG main")
-                log("IDLE CALC", f"LONG: {long_qty} (base {base_qty} * {1+float(obv_weight):.2f})")
-                log("IDLE CALC", f"SHORT: {short_qty} (base)")
             else:
                 long_qty = base_qty
                 short_qty = base_qty
-                log("IDLE CALC", f"OBV={obv_display:.2f} → Neutral")
-                log("IDLE CALC", f"LONG: {long_qty} | SHORT: {short_qty}")
 
-            # 주문 실행
+            log("IDLE CALC", f"OBV={obv_display:.2f}, LONG={long_qty}, SHORT={short_qty}")
+
             try:
                 order = FuturesOrder(
-                    contract=SYMBOL,
-                    size=long_qty,
-                    price="0",
-                    tif="ioc",
-                    reduce_only=False,
-                    text=generate_order_id()
-                )
+                    contract=SYMBOL, size=long_qty, price="0", tif="ioc",
+                    reduce_only=False, text=generate_order_id())
                 api.create_futures_order(SETTLE, order)
                 log("IDLE ENTRY", f"LONG {long_qty} market")
                 time.sleep(0.1)
-            except GateApiException as e:
+            except Exception as e:
                 log("❌", f"LONG entry error: {e}")
                 return
 
             try:
                 order = FuturesOrder(
-                    contract=SYMBOL,
-                    size=-short_qty,
-                    price="0",
-                    tif="ioc",
-                    reduce_only=False,
-                    text=generate_order_id()
-                )
+                    contract=SYMBOL, size=-short_qty, price="0", tif="ioc",
+                    reduce_only=False, text=generate_order_id())
                 api.create_futures_order(SETTLE, order)
                 log("IDLE ENTRY", f"SHORT {short_qty} market")
                 time.sleep(0.2)
-            except GateApiException as e:
+            except Exception as e:
                 log("❌", f"SHORT entry error: {e}")
                 return
 
@@ -1439,100 +1386,72 @@ def check_idle_and_enter():
             update_event_time()
             return
 
-        # 케이스 2: 단방향 포지션만 있을 때 (기존 로직 유지)
+        # 2. 단방향만 있을 때 (헤지/가중치)
         if long_size == 0 or short_size == 0:
             log("IDLE", "Single position → Adding hedge with loss+OBV weight")
-
             if long_size > short_size:
-                main_size = long_size
-                main_entry_price = long_entry_price
                 is_long_main = True
-                log("MAIN", f"LONG is main: {main_size}")
+                main_entry_price = long_entry_price
             else:
-                main_size = short_size
-                main_entry_price = short_entry_price
                 is_long_main = False
-                log("MAIN", f"SHORT is main: {main_size}")
+                main_entry_price = short_entry_price
 
-            if is_long_main:
-                loss_pct = ((main_entry_price - current_price_dec) / main_entry_price) * Decimal("50")
-            else:
-                loss_pct = ((current_price_dec - main_entry_price) / main_entry_price) * Decimal("50")
-
-            if loss_pct < 0:
-                loss_pct = Decimal("0")
+            loss_pct = ((main_entry_price - current_price) / main_entry_price) * 50 if is_long_main \
+                else ((current_price - main_entry_price) / main_entry_price) * 50
+            loss_pct = max(loss_pct, 0)
+            loss_multiplier = 1 + (loss_pct / 100)
 
             with balance_lock:
-                base_usdt = account_balance * BASE_RATIO
+                base_usdt = account_balance * BASERATIO
+            base_qty = base_usdt / current_price
+            base_qty = max(round(float(base_qty), 3), 0.001)
+            adjusted_qty = max(round(base_qty * loss_multiplier, 3), 0.001)
+            main_qty = max(round(adjusted_qty * (1 + obv_weight), 3), 0.001)
 
-            base_qty = int(base_usdt / current_price_dec)
-            if base_qty < 1:
-                log("IDLE", "Insufficient quantity")
-                return
-
-            loss_multiplier = Decimal("1") + (loss_pct / Decimal("100"))
-            adjusted_qty = int(Decimal(str(base_qty)) * loss_multiplier)
-
-            main_qty = int(Decimal(str(adjusted_qty)) * (Decimal("1") + obv_weight))
-            hedge_qty = adjusted_qty
-
+            # OBV 방향에 따라 order side 및 수량 할당(block)
             if obv_display > 0:
                 if is_long_main:
-                    long_qty = hedge_qty
+                    long_qty = adjusted_qty
                     short_qty = main_qty
                 else:
-                    short_qty = hedge_qty
+                    short_qty = adjusted_qty
                     long_qty = main_qty
             elif obv_display < 0:
                 if is_long_main:
-                    long_qty = hedge_qty
+                    long_qty = adjusted_qty
                     short_qty = main_qty
                 else:
-                    short_qty = hedge_qty
+                    short_qty = adjusted_qty
                     long_qty = main_qty
             else:
-                long_qty = hedge_qty
-                short_qty = hedge_qty
+                long_qty = adjusted_qty
+                short_qty = adjusted_qty
 
-            log("IDLE CALC", f"OBV={obv_display:.2f} | OBV Weight={float(obv_weight):.2f}")
-            log("IDLE CALC", f"Loss={float(loss_pct):.2f}% | Loss Mult={float(loss_multiplier):.3f}")
+            log("IDLE CALC", f"OBV={obv_display:.2f} | OBV Weight={obv_weight:.2f}")
+            log("IDLE CALC", f"Loss={loss_pct:.2f}% | Loss Mult={loss_multiplier:.3f}")
             log("IDLE CALC", f"Qty: base({base_qty}) → adjusted({adjusted_qty}) → main({main_qty})")
             log("IDLE CALC", f"Entry: LONG={long_qty} | SHORT={short_qty}")
 
-            current_long = long_size
-            current_short = short_size
-
-            if current_long == 0 and long_qty > 0:
+            if long_size == 0 and long_qty > 0.001:
                 try:
                     order = FuturesOrder(
-                        contract=SYMBOL,
-                        size=long_qty,
-                        price="0",
-                        tif="ioc",
-                        reduce_only=False,
-                        text=generate_order_id()
-                    )
+                        contract=SYMBOL, size=long_qty, price="0", tif="ioc",
+                        reduce_only=False, text=generate_order_id())
                     api.create_futures_order(SETTLE, order)
                     log("IDLE ENTRY", f"LONG {long_qty} market")
                     time.sleep(0.1)
-                except GateApiException as e:
+                except Exception as e:
                     log("❌", f"LONG entry error: {e}")
                     return
-
-            if current_short == 0 and short_qty > 0:
+            if short_size == 0 and short_qty > 0.001:
                 try:
                     order = FuturesOrder(
-                        contract=SYMBOL,
-                        size=-short_qty,
-                        price="0",
-                        tif="ioc",
-                        reduce_only=False,
-                        text=generate_order_id()
-                    )
+                        contract=SYMBOL, size=-short_qty, price="0", tif="ioc",
+                        reduce_only=False, text=generate_order_id())
                     api.create_futures_order(SETTLE, order)
                     log("IDLE ENTRY", f"SHORT {short_qty} market")
                     time.sleep(0.2)
-                except GateApiException as e:
+                except Exception as e:
                     log("❌", f"SHORT entry error: {e}")
                     return
 
