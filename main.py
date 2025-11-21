@@ -618,27 +618,39 @@ def adjust_quantity_step(qty, step=QUANTITY_STEP, min_qty=MIN_QUANTITY):
 
 
 def calculate_grid_qty():
-    """BNB 수량 계산 (최소 단위 적용)"""
+    """
+    BNB 수량 계산 (자산의 1% 기준)
+    """
+    global BASERATIO # 전역 변수 사용 확인
+    
+    # 1️⃣ 자산 대비 진입 금액 계산
     with balance_lock:
-        base_value = Decimal(str(account_balance)) * BASERATIO
-        base_qty = base_value / get_current_price() if get_current_price() > 0 else Decimal("0")
+        # 만약 BASERATIO가 0.001로 되어있다면 0.01(1%)로 강제 수정하거나 환경변수 확인 필요
+        target_ratio = Decimal("0.01")  # ★ 여기를 0.01 (1%)로 명시적 설정
         
-        if base_qty < MIN_QUANTITY:
-            base_qty = MIN_QUANTITY
-   
-    # OBV MACD 값 기준 동적 수량 조절
+        base_value = Decimal(str(account_balance)) * target_ratio
+        
+        current_price = get_current_price()
+        if current_price <= 0:
+            return MIN_QUANTITY
+
+        # 수량 = 목표금액 / 현재가
+        base_qty = base_value / current_price
+        
+        # 로그로 계산 과정 출력 (디버깅용)
+        log("🧮 QTY CALC", f"Balance: {account_balance}, Ratio: {target_ratio}, Val: {base_value:.2f}u, Price: {current_price}, RawQty: {base_qty:.4f}")
+
+    # 2️⃣ OBV MACD 가중치 적용 (기존 로직 유지)
     obv_value = abs(float(obv_macd_value) * 100)
     multiplier = calculate_obv_macd_weight(obv_value)
    
-    # ✅ Decimal 연산 유지
     final_qty = base_qty * multiplier
     
-    # ✅ adjust_quantity_step 적용
+    # 3️⃣ 최소/단위 조정
     final_qty = adjust_quantity_step(final_qty)
     
-    # 최종 검증
+    # 최종 안전장치
     if final_qty < MIN_QUANTITY:
-        log("⚠️ QTY", f"Calculated qty {final_qty} < MIN {MIN_QUANTITY}, using MIN")
         final_qty = MIN_QUANTITY
     
     return final_qty
@@ -937,6 +949,7 @@ def cancel_stale_orders():
 def initialize_grid(current_price=None):
     """
     최초/리셋 시 양방향 grid진입 (0.001 단위 안전처리 포함)
+    + 진입 후 즉시 TP 생성 추가!
     """
     global last_grid_time
 
@@ -979,7 +992,7 @@ def initialize_grid(current_price=None):
             long_qty = safe_order_qty(base_qty)
             short_qty = safe_order_qty(base_qty)
 
-        # **여기 추가: 0.001 단위로 버림 처리**
+        # ** 0.001 단위로 버림 처리 **
         long_qty = adjust_quantity_step(long_qty)
         short_qty = adjust_quantity_step(short_qty)
 
@@ -1015,8 +1028,13 @@ def initialize_grid(current_price=None):
         except Exception as e:
             log("❌", f"short grid entry error: {e}")
 
-        sync_position()
         log("✅ GRID", "Grid orders entry completed")
+        
+        # ★★★ [추가] 진입 후 즉시 TP 생성! ★★★
+        time.sleep(1.0)  # 체결 대기
+        sync_position()  # 포지션 갱신
+        refresh_all_tp_orders()  # TP 주문 생성
+        log("✅ GRID", "Initial TP orders created")
 
     except Exception as e:
         log("❌ GRID", f"Init error: {e}")
