@@ -327,12 +327,13 @@ def log_position_state():
 # 포지션 동기화 - 에러 시 재시도 간격 증가
 # =============================================================================
 def sync_position(max_retries=3, retry_delay=2):
-    """포지션 동기화 (재시도 로직 포함)"""
+    """포지션 동기화 (재시도 로직 포함 + 사이즈 디버깅 및 보정)"""
     for attempt in range(max_retries):
         try:
             positions = api.list_positions(SETTLE)
            
             with position_lock:
+                # 초기화
                 position_state[SYMBOL]["long"]["size"] = Decimal("0")
                 position_state[SYMBOL]["long"]["entry_price"] = Decimal("0")
                 position_state[SYMBOL]["short"]["size"] = Decimal("0")
@@ -341,7 +342,16 @@ def sync_position(max_retries=3, retry_delay=2):
             if positions:
                 for p in positions:
                     if p.contract == SYMBOL:
-                        size_dec = Decimal(str(p.size))
+                        # ★ 디버깅 로그: API 원본 데이터 확인
+                        # log("🐛 DEBUG", f"Raw Size: {p.size}, Type: {type(p.size)}")
+                        
+                        # 사이즈 파싱
+                        try:
+                            raw_size = float(p.size)
+                            size_dec = Decimal(str(raw_size))
+                        except:
+                            size_dec = Decimal("0")
+
                         entry_price = abs(Decimal(str(p.entry_price))) if p.entry_price else Decimal("0")
                        
                         if size_dec > 0:
@@ -350,13 +360,21 @@ def sync_position(max_retries=3, retry_delay=2):
                                 position_state[SYMBOL]["long"]["entry_price"] = entry_price
                         elif size_dec < 0:
                             with position_lock:
+                                # ★ 숏 사이즈는 절대값으로 저장
                                 position_state[SYMBOL]["short"]["size"] = abs(size_dec)
                                 position_state[SYMBOL]["short"]["entry_price"] = entry_price
-           
+            
+            # 동기화 후 검증 로그 (비정상적으로 크면 경고)
+            with position_lock:
+                l_s = position_state[SYMBOL]["long"]["size"]
+                s_s = position_state[SYMBOL]["short"]["size"]
+                if l_s > 1000 or s_s > 1000: # BNB가 1000개 이상일 리 없음 (현재 잔고 기준)
+                     log("⚠️ SYNC WARNING", f"Position size unusually large! L:{l_s}, S:{s_s}")
+
             return True
            
         except GateApiException as e:
-            if "INVALID_PARAM_VALUE" in str(e):  # ← 명확한 오류 구분
+            if "INVALID_PARAM_VALUE" in str(e):
                 log("❌ SYNC", f"API parameter error: {e}")
                 return False
             elif attempt < max_retries - 1:
