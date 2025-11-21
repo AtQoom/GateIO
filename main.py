@@ -63,10 +63,6 @@ BASERATIO = Decimal("0.01")                 # ← 기본 수량 비율 (1%로 �
 MAXPOSITIONRATIO = Decimal("3.0")          # 최대 포지션 비율 (3배)
 HEDGE_RATIO_MAIN = Decimal("0.10")           # 주력 헤지 비율 (10%)
 
-# BNB 최소 수량 설정
-MIN_QUANTITY = Decimal("0.001")              # ← BNB 최소 주문 수량
-QUANTITY_STEP = Decimal("0.001")             # ← BNB 주문 단위
-
 # TP 설정 (동적 TP)
 TPMIN = Decimal("0.0021")                   # 최소 TP (0.21%)
 TPMAX = Decimal("0.004")                    # 최대 TP (0.4%)
@@ -430,13 +426,12 @@ def refresh_all_tp_orders():
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
-            long_entry_price = position_state[SYMBOL]["long"]["entry_price"]  # ← entry_price로 통일!
+            long_entry_price = position_state[SYMBOL]["long"]["entry_price"]
             short_entry_price = position_state[SYMBOL]["short"]["entry_price"]
        
         if long_size == 0 and short_size == 0:
             return
        
-        # TP 갭 계산
         tp_result = calculate_dynamic_tp_gap()
        
         if isinstance(tp_result, (tuple, list)) and len(tp_result) >= 2:
@@ -446,7 +441,6 @@ def refresh_all_tp_orders():
             long_tp = TPMIN
             short_tp = TPMIN
        
-        # Decimal 타입 확인
         if not isinstance(long_tp, Decimal):
             long_tp = Decimal(str(long_tp))
         if not isinstance(short_tp, Decimal):
@@ -459,17 +453,20 @@ def refresh_all_tp_orders():
         if long_size > 0 and long_entry_price > 0:
             tp_price_long = long_entry_price * (Decimal("1") + long_tp)
             tp_price_long = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-           
+            
+            # ✅ 수정: long_size 사용, adjust_quantity_step 적용
+            long_qty = adjust_quantity_step(long_size)
+            
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=long_qty,  # ← float 그대로 전달 (Gate.io가 자동 처리)
-                price="0",
-                tif="ioc",
-                reduce_only=False,
+                size=str(-long_qty),  # TP는 마이너스
+                price=str(tp_price_long),
+                tif="gtc",
+                reduce_only=True,
                 text=generate_order_id()
             )
             api.create_futures_order(SETTLE, order)
-            log("✅ TP LONG", f"Qty: {int(long_size)}, Price: {float(tp_price_long):.4f}")
+            log("✅ TP LONG", f"Qty: {long_qty}, Price: {float(tp_price_long):.4f}")
        
         time.sleep(0.3)
        
@@ -477,17 +474,20 @@ def refresh_all_tp_orders():
         if short_size > 0 and short_entry_price > 0:
             tp_price_short = short_entry_price * (Decimal("1") - short_tp)
             tp_price_short = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-           
+            
+            # ✅ 수정: short_size 사용, adjust_quantity_step 적용
+            short_qty = adjust_quantity_step(short_size)
+            
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=long_qty,  # ← float 그대로 전달 (Gate.io가 자동 처리)
-                price="0",
-                tif="ioc",
-                reduce_only=False,
+                size=str(short_qty),  # SHORT TP는 플러스
+                price=str(tp_price_short),
+                tif="gtc",
+                reduce_only=True,
                 text=generate_order_id()
             )
             api.create_futures_order(SETTLE, order)
-            log("✅ TP SHORT", f"Qty: {int(short_size)}, Price: {float(tp_price_short):.4f}")
+            log("✅ TP SHORT", f"Qty: {short_qty}, Price: {float(tp_price_short):.4f}")
        
         log("✅ TP", "All TP orders created successfully")
    
@@ -526,22 +526,22 @@ def calculate_obv_macd_weight(obv_value):
     return multiplier
 
 
-def safe_order_qty(qty):
+def safe_order_qty(qty, min_qty=MIN_QUANTITY):
     """
     Gate.io BNBUSDT 선물에서 주문 수량을 최소 단위 이상으로 변환
-    마켓 규칙에 따라 소수점 2자리(0.01), 최소 진입 0.01 등으로 제한
+    마켓 규칙에 따라 step/min_qty 반영
     """
     try:
         qty_float = float(qty)
-        # 0.01 미만 방지, 2자리 반올림
-        safe = max(round(qty_float, 3), 0.001)
+        # min_qty 이상, 3자리 반올림(실거래에선 반내림·내림 권장→adjust_quantity_step 병행)
+        safe = max(round(qty_float, 3), float(min_qty))
         return safe
     except Exception as e:
         log("❌ QTY", f"safe_order_qty Exception: {e}")
-        return 0.01
+        return float(min_qty)
 
 
-def adjust_quantity_step(qty, step=0.001, min_qty=0.001):
+def adjust_quantity_step(qty, step=QUANTITY_STEP, min_qty=MIN_QUANTITY):
     qty_dec = Decimal(str(qty))
     step_dec = Decimal(str(step))
     floored = (qty_dec // step_dec) * step_dec
@@ -554,20 +554,26 @@ def adjust_quantity_step(qty, step=0.001, min_qty=0.001):
 def calculate_grid_qty():
     """BNB 수량 계산 (최소 단위 적용)"""
     with balance_lock:
-        base_qty = int(Decimal(str(account_balance)) * BASERATIO)
-        if base_qty < int(MIN_QUANTITY):
-            base_qty = int(MIN_QUANTITY)
-       
+        base_value = Decimal(str(account_balance)) * BASERATIO
+        base_qty = base_value / get_current_price() if get_current_price() > 0 else Decimal("0")
+        
+        if base_qty < MIN_QUANTITY:
+            base_qty = MIN_QUANTITY
+   
     # OBV MACD 값 기준 동적 수량 조절
     obv_value = abs(float(obv_macd_value) * 100)
-    multiplier = float(calculate_obv_macd_weight(obv_value))
+    multiplier = calculate_obv_macd_weight(obv_value)
    
-    final_qty = max(int(MIN_QUANTITY), int(base_qty * multiplier))
+    # ✅ Decimal 연산 유지
+    final_qty = base_qty * multiplier
     
-    # ✅ 추가: 최종 검증
-    if final_qty < int(MIN_QUANTITY):
+    # ✅ adjust_quantity_step 적용
+    final_qty = adjust_quantity_step(final_qty)
+    
+    # 최종 검증
+    if final_qty < MIN_QUANTITY:
         log("⚠️ QTY", f"Calculated qty {final_qty} < MIN {MIN_QUANTITY}, using MIN")
-        final_qty = int(MIN_QUANTITY)
+        final_qty = MIN_QUANTITY
     
     return final_qty
 
@@ -631,31 +637,37 @@ def execute_rebalancing_sl():
         
         # 롱 포지션 청산
         if long_size > 0:
+            # ✅ adjust_quantity_step 적용
+            close_qty = adjust_quantity_step(long_size)
+            
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=-int(long_size),
+                size=f"-{str(close_qty)}",
                 price="0",
                 tif="ioc",
                 reduce_only=True,
                 text=generate_order_id()
             )
             api.create_futures_order(SETTLE, order)
-            log("✅ REBALANCE", f"LONG {int(long_size)} SL executed")
+            log("✅ REBALANCE", f"LONG {close_qty} SL executed")
             
         time.sleep(0.3)
         
         # 숏 포지션 청산
         if short_size > 0:
+            # ✅ adjust_quantity_step 적용
+            close_qty = adjust_quantity_step(short_size)
+            
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=int(short_size),
+                size=str(close_qty),
                 price="0",
                 tif="ioc",
                 reduce_only=True,
                 text=generate_order_id()
             )
             api.create_futures_order(SETTLE, order)
-            log("✅ REBALANCE", f"SHORT {int(short_size)} SL executed")
+            log("✅ REBALANCE", f"SHORT {close_qty} SL executed")
             
         time.sleep(0.5)
         sync_position()
@@ -664,16 +676,12 @@ def execute_rebalancing_sl():
     except Exception as e:
         log("❌ REBALANCE", f"Execution error: {e}")
 
+
 # =============================================================================
 # 티어 계산 수정 (Initial Capital 기반 명확화)
 # =============================================================================
 def handle_non_main_position_tp(non_main_size_at_tp):
-    """
-    TP 체결 완료 시 물량 누적 방지 (Tier-1/2)
-    ← Initial Capital 기반 배율 계산 수정!
-    - Tier-1 (1배~2배): 비주력 × 0.8배 SL
-    - Tier-2 (2배 이상): 비주력 × 1.5배 SL
-    """
+    """TP 체결 완료 시 물량 누적 방지 (Tier-1/2)"""
     try:
         sync_position()
        
@@ -681,11 +689,9 @@ def handle_non_main_position_tp(non_main_size_at_tp):
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
        
-        # ★ Initial Capital 사용!
         with balance_lock:
             capital = initial_capital if initial_capital > 0 else account_balance
        
-        # 주력/비주력 판정
         if long_size > short_size:
             main_size = long_size
             main_side = "long"
@@ -698,40 +704,39 @@ def handle_non_main_position_tp(non_main_size_at_tp):
             log("❌ TP HANDLER", "Price fetch failed")
             return
        
-        # ★ 주력 포지션 가치 계산 (Initial Capital 대비!)
         main_position_value = Decimal(str(main_size)) * current_price
        
-        # 1배 미만이면 리턴
         if main_position_value < capital * Decimal("1.0"):
             log("💊 TP HANDLER", f"Main {main_position_value:.2f} < {capital:.2f} (1배 미만) - skip")
             return
        
         # Tier 판정
         if capital * Decimal("1.0") <= main_position_value < capital * Decimal("2.0"):
-            # Tier-1: 1배 ~ 2배
-            sl_qty = int(non_main_size_at_tp * Decimal("0.8"))
+            sl_qty = Decimal(str(non_main_size_at_tp)) * Decimal("0.8")
             tier = "Tier-1 (0.8x)"
         else:
-            # Tier-2: 2배 이상
-            sl_qty = int(non_main_size_at_tp * Decimal("1.5"))
+            sl_qty = Decimal(str(non_main_size_at_tp)) * Decimal("1.5")
             tier = "Tier-2 (1.5x)"
        
-        if sl_qty < 1:
-            sl_qty = 1
+        # ✅ adjust_quantity_step 적용
+        sl_qty = adjust_quantity_step(sl_qty)
+        
+        if sl_qty < MIN_QUANTITY:
+            sl_qty = MIN_QUANTITY
         if sl_qty > main_size:
-            sl_qty = int(main_size)
+            sl_qty = main_size
        
-        log("💊 TP HANDLER", f"{tier}: {non_main_size_at_tp}개 TP → {main_side.upper()} {sl_qty}개 SL")
+        log("💊 TP HANDLER", f"{tier}: {non_main_size_at_tp} TP → {main_side.upper()} {sl_qty} SL")
        
         # 시장가 청산 실행
         if main_side == "long":
-            order_size = -sl_qty
+            order_size_str = f"-{str(sl_qty)}"
         else:
-            order_size = sl_qty
+            order_size_str = str(sl_qty)
        
         order = FuturesOrder(
             contract=SYMBOL,
-            size=order_size,
+            size=order_size_str,
             price="0",
             tif="ioc",
             reduce_only=True,
@@ -739,7 +744,7 @@ def handle_non_main_position_tp(non_main_size_at_tp):
         )
        
         api.create_futures_order(SETTLE, order)
-        log("✅ TP HANDLER", f"{main_side.upper()} {sl_qty}개 SL 완료!")
+        log("✅ TP HANDLER", f"{main_side.upper()} {sl_qty} SL 완료!")
        
         time.sleep(0.5)
         sync_position()
@@ -747,6 +752,7 @@ def handle_non_main_position_tp(non_main_size_at_tp):
    
     except Exception as e:
         log("❌ TP HANDLER", f"Error: {e}")
+
 
 # =============================================================================
 # 무포 시점 기록 (리밸런싱용)
