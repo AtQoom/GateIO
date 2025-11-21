@@ -86,9 +86,11 @@ def fetch_min_lot(symbol):
     contracts = api.list_futures_contracts(SETTLE)
     for c in contracts:
         if c.name == symbol:
-            return Decimal(str(c.min_base_amount)), int(c.amount_precision)
-    # fallback 기본값:
-    return Decimal('0.001'), 3
+            # Gate API의 실제 속성명 사용
+            return Decimal(str(c.order_size_min)), int(c.order_size_digits)
+    # fallback 기본값
+    return Decimal("0.001"), 3
+
 
 # 초기 세팅부:
 MIN_QUANTITY, step_precision = fetch_min_lot("BNB_USDT")
