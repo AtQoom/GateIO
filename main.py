@@ -52,8 +52,8 @@ MAXPOSITIONRATIO = Decimal("3.0")          # 최대 포지션 비율 (3배)
 HEDGE_RATIO_MAIN = Decimal("0.10")           # 주력 헤지 비율 (10%)
 
 # BNB 최소 수량 설정
-MIN_QUANTITY = Decimal("0.01")              # ← BNB 최소 주문 수량
-QUANTITY_STEP = Decimal("0.01")             # ← BNB 주문 단위
+MIN_QUANTITY = Decimal("0.001")              # ← BNB 최소 주문 수량
+QUANTITY_STEP = Decimal("0.001")             # ← BNB 주문 단위
 
 # TP 설정 (동적 TP)
 TPMIN = Decimal("0.0021")                   # 최소 TP (0.21%)
@@ -513,6 +513,22 @@ def calculate_obv_macd_weight(obv_value):
    
     return multiplier
 
+
+def safe_order_qty(qty):
+    """
+    Gate.io BNBUSDT 선물에서 주문 수량을 최소 단위 이상으로 변환
+    마켓 규칙에 따라 소수점 2자리(0.01), 최소 진입 0.01 등으로 제한
+    """
+    try:
+        qty_float = float(qty)
+        # 0.01 미만 방지, 2자리 반올림
+        safe = max(round(qty_float, 3), 0.001)
+        return safe
+    except Exception as e:
+        log("❌ QTY", f"safe_order_qty Exception: {e}")
+        return 0.01
+
+
 def calculate_grid_qty():
     """BNB 수량 계산 (최소 단위 적용)"""
     with balance_lock:
@@ -825,20 +841,24 @@ def cancel_stale_orders():
 # ============================================================================
 
 def initialize_grid(current_price=None):
-    '''
-    업그레이드: 최초/리셋 시 양방향 진입 (OBV/그리드 배수/최초 시장가)
-    '''
+    """
+    최초/리셋 시 양방향 진입 (최소 수량 검증)
+    """
     global last_grid_time
+    
     if not initialize_grid_lock.acquire(blocking=False):
-        log("GRID", "already running → skip")
+        log("🔒 GRID", "Already running → skip")
         return
+    
     try:
         now = time.time()
         if now - last_grid_time < 10:
-            log("GRID", f"too soon ({now-last_grid_time:.1f}s) → skip")
+            log("⏱️ GRID", f"Too soon ({now-last_grid_time:.1f}s) → skip")
             return
+        
         last_grid_time = now
-
+        
+        # 현재 가격 확인 및 base_qty 계산
         price = current_price if current_price and current_price > 0 else get_current_price()
         if price == 0:
             log("❌ GRID", "Cannot get price")
@@ -850,30 +870,31 @@ def initialize_grid(current_price=None):
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
 
-        with balance_lock:
-            base_value = account_balance * BASERATIO
-        base_qty = Decimal(str(base_value)) / Decimal(str(price))
-        base_qty = float(max(round(base_qty, 3), 0.001))
+        # 기본 진입 금액(USDT) 설정 및 최소 단위 BNB 변환
+        base_value = Decimal(str(account_balance)) * BASERATIO
+        base_qty = float(Decimal(str(base_value)) / Decimal(str(price)))
 
+        # 가중치 적용
         obv_display = float(obv_macd_value) * 100
         obv_multiplier = float(calculate_obv_macd_weight(obv_display))
 
         if obv_display > 0:
-            short_qty = max(round(base_qty * (1 + obv_multiplier), 3), 0.001)
-            long_qty = base_qty
+            short_qty = safe_order_qty(base_qty * (1 + obv_multiplier))
+            long_qty = safe_order_qty(base_qty)
         elif obv_display < 0:
-            long_qty = max(round(base_qty * (1 + obv_multiplier), 3), 0.001)
-            short_qty = base_qty
+            long_qty = safe_order_qty(base_qty * (1 + obv_multiplier))
+            short_qty = safe_order_qty(base_qty)
         else:
-            long_qty = base_qty
-            short_qty = base_qty
+            long_qty = safe_order_qty(base_qty)
+            short_qty = safe_order_qty(base_qty)
 
-        log("GRID", f"init, LONG={long_qty}, SHORT={short_qty}, OBV={obv_display:.1f}, mult={obv_multiplier}")
+        log("INFO", f"[GRID] init, LONG={long_qty}, SHORT={short_qty}, OBV={obv_macd_value}, mult={obv_multiplier}")
 
+        # 실제 진입주문 실행
         try:
             order = FuturesOrder(
                 contract=SYMBOL,
-                size=int(long_qty),  # ← BNB는 정수로 처리 (Gate.io 내부 단위)
+                size=long_qty,   # 최소 단위 이상, float
                 price="0",
                 tif="ioc",
                 reduce_only=False,
@@ -883,21 +904,28 @@ def initialize_grid(current_price=None):
             log("✅GRID", f"long {long_qty}")
         except Exception as e:
             log("❌", f"long grid entry error: {e}")
-            return
-        
-        time.sleep(0.1)
+
+        time.sleep(0.3)
         try:
-            order = FuturesOrder(contract=SYMBOL, size=-short_qty, price="0", tif="ioc",
-                                reduce_only=False, text=generate_order_id())
+            order = FuturesOrder(
+                contract=SYMBOL,
+                size=-short_qty,  # 최소 단위 이상, float
+                price="0",
+                tif="ioc",
+                reduce_only=False,
+                text=generate_order_id()
+            )
             api.create_futures_order(SETTLE, order)
             log("✅GRID", f"short {short_qty}")
         except Exception as e:
             log("❌", f"short grid entry error: {e}")
-            return
-        time.sleep(0.1)
+
         sync_position()
-        refresh_all_tp_orders()
-        log("GRID", "Init finished!")
+        
+        log("✅ GRID", "Grid orders entry completed")
+        
+    except Exception as e:
+        log("❌ GRID", f"Init error: {e}")
     finally:
         initialize_grid_lock.release()
 
@@ -1683,104 +1711,73 @@ async def grid_fill_monitor():
 
 def market_entry_when_imbalanced():
     """
-    포지션 불균형 시 OBV 가중치로 시장가 진입
-    1️⃣ 포지션 없음 (L=0, S=0) → 양방향 진입 (역추세로 주력+헷지)
-    2️⃣ LONG만 있음 → SHORT 헤징
-    3️⃣ SHORT만 있음 → LONG 헤징
+    포지션 불균형 시 OBV 가중치로 시장가 진입 (최소 수량 검증)
     """
     try:
         sync_position()
-
+        
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
 
-        has_position = long_size > 0 or short_size > 0
-        balanced = long_size > 0 and short_size > 0
+        current_price = get_current_price()
+        if current_price <= 0:
+            log("❌ ENTRY", "Price fetch failed")
+            return
+        
+        # 진입 수량 계산 + 최소 주문단위 보장
+        base_qty = float(account_balance * BASERATIO / current_price)
+        base_qty = safe_order_qty(base_qty)
 
-        if not has_position or (has_position and not balanced):
-            calculate_obv_macd()
-            obv_display = float(obv_macd_value) * 100
-            obv_multiplier = calculate_obv_macd_weight(obv_display)
+        obv_display = float(obv_macd_value) * 100
+        obv_multiplier = float(calculate_obv_macd_weight(obv_display))
 
-            with balance_lock:
-                current_price = get_current_price()
-                if current_price == 0:
-                    return
-                base_qty = int(account_balance * BASERATIO / current_price)
-                if base_qty <= 0:
-                    base_qty = 1
+        if obv_display > 0:
+            short_qty = safe_order_qty(base_qty * (1 + obv_multiplier))
+            long_qty = safe_order_qty(base_qty)
+        elif obv_display < 0:
+            long_qty = safe_order_qty(base_qty * (1 + obv_multiplier))
+            short_qty = safe_order_qty(base_qty)
+        else:
+            long_qty = safe_order_qty(base_qty)
+            short_qty = safe_order_qty(base_qty)
 
-            # 무포지션: 역추세 주력+헷지로 양방향 진입
-            if not has_position:
-                if obv_display > 0:   # 롱강세 → SHORT 주력
-                    short_qty = int(base_qty * float(1 + obv_multiplier))  # 명시적 float 변환
-                    long_qty = base_qty
-                elif obv_display < 0: # 숏강세 → LONG 주력
-                    long_qty = int(base_qty * (1 + obv_multiplier))
-                    short_qty = base_qty
-                else:
-                    long_qty = base_qty
-                    short_qty = base_qty
+        log("INFO", f"[IMBALANCED ENTRY] LONG={long_qty}, SHORT={short_qty}")
 
-                log("💰 MARKET", f"No position → LONG {long_qty}, SHORT {short_qty}")
+        try:
+            order = FuturesOrder(
+                contract=SYMBOL,
+                size=long_qty,
+                price="0",
+                tif="ioc",
+                reduce_only=False,
+                text=generate_order_id()
+            )
+            api.create_futures_order(SETTLE, order)
+            log("✅ENTRY", f"long {long_qty}")
+        except Exception as e:
+            log("❌", f"long entry error: {e}")
 
-                try:
-                    long_order = FuturesOrder(
-                        contract=SYMBOL, size=long_qty, price="0", tif="ioc",
-                        reduce_only=False, text=generate_order_id()
-                    )
-                    api.create_futures_order(SETTLE, long_order)
-                    log("✅ LONG", f"Market: {long_qty}")
-                    time.sleep(0.5)
-                    short_order = FuturesOrder(
-                        contract=SYMBOL, size=-short_qty, price="0", tif="ioc",
-                        reduce_only=False, text=generate_order_id()
-                    )
-                    api.create_futures_order(SETTLE, short_order)
-                    log("✅ SHORT", f"Market: {short_qty}")
-                except Exception as e:
-                    log("❌ MARKET", f"Entry error: {e}")
-                    return
+        time.sleep(0.2)
+        try:
+            order = FuturesOrder(
+                contract=SYMBOL,
+                size=-short_qty,
+                price="0",
+                tif="ioc",
+                reduce_only=False,
+                text=generate_order_id()
+            )
+            api.create_futures_order(SETTLE, order)
+            log("✅ENTRY", f"short {short_qty}")
+        except Exception as e:
+            log("❌", f"short entry error: {e}")
 
-                sync_position()
-                refresh_all_tp_orders()
-                return
-
-            # LONG만 있음: SHORT 헤진
-            elif long_size > 0 and short_size == 0:
-                hedge_qty = int(base_qty * obv_multiplier)
-                if hedge_qty < base_qty:
-                    hedge_qty = base_qty
-                try:
-                    short_order = FuturesOrder(
-                        contract=SYMBOL, size=-hedge_qty, price="0", tif="ioc",
-                        reduce_only=False, text=generate_order_id()
-                    )
-                    api.create_futures_order(SETTLE, short_order)
-                    log("✅ SHORT", f"Hedge: {hedge_qty}")
-                except Exception as e:
-                    log("❌ MARKET", f"SHORT hedge error: {e}")
-
-            # SHORT만 있음: LONG 헤진
-            elif short_size > 0 and long_size == 0:
-                hedge_qty = int(base_qty * obv_multiplier)
-                if hedge_qty < base_qty:
-                    hedge_qty = base_qty
-                try:
-                    long_order = FuturesOrder(
-                        contract=SYMBOL, size=hedge_qty, price="0", tif="ioc",
-                        reduce_only=False, text=generate_order_id()
-                    )
-                    api.create_futures_order(SETTLE, long_order)
-                    log("✅ LONG", f"Hedge: {hedge_qty}")
-                except Exception as e:
-                    log("❌ MARKET", f"LONG hedge error: {e}")
-
-                sync_position()
-                refresh_all_tp_orders()
+        log("✅ ENTRY", "Market entry completed")
+        
     except Exception as e:
-        log("❌ MARKET", f"Imbalanced entry error: {e}")
+        log("❌ ENTRY", f"Imbalanced entry error: {e}")
+
 
 # =============================================================================
 # Flask 엔드포인트
