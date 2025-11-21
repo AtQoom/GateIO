@@ -1541,32 +1541,26 @@ def check_idle_and_enter():
 
 def market_entry_when_imbalanced():
     """
-    포지션 불균형 시 OBV MACD 가중치로 시장가 진입
-   
-    상황:
-    1️⃣ 포지션 없음 (L=0, S=0) → 양방향 진입
+    포지션 불균형 시 OBV 가중치로 시장가 진입
+    1️⃣ 포지션 없음 (L=0, S=0) → 양방향 진입 (역추세로 주력+헷지)
     2️⃣ LONG만 있음 → SHORT 헤징
     3️⃣ SHORT만 있음 → LONG 헤징
     """
-    global obv_macd_value
-   
     try:
         sync_position()
-       
+
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
-       
+
         has_position = long_size > 0 or short_size > 0
         balanced = long_size > 0 and short_size > 0
-       
-        # 불균형만 처리
+
         if not has_position or (has_position and not balanced):
-           
             calculate_obv_macd()
             obv_display = float(obv_macd_value) * 100
             obv_multiplier = calculate_obv_macd_weight(obv_display)
-           
+
             with balance_lock:
                 current_price = get_current_price()
                 if current_price == 0:
@@ -1574,112 +1568,75 @@ def market_entry_when_imbalanced():
                 base_qty = int(account_balance * BASERATIO / current_price)
                 if base_qty <= 0:
                     base_qty = 1
-           
-            log("📊 MARKET", f"Imbalanced - Long: {long_size}, Short: {short_size}, OBV: {obv_display:.1f}")
-           
-            # ════════════════════════════════════════════════════════════════
-            # 1️⃣ 포지션 없음: 양방향 진입
-            # ════════════════════════════════════════════════════════════════
+
+            # 무포지션: 역추세 주력+헷지로 양방향 진입
             if not has_position:
-                log("💰 MARKET", "No position → Entering both sides!")
-               
-                # ✅ OBV 가중치 기본 적용
-                entry_qty = int(base_qty * obv_multiplier)
-               
-                log("📊 QTY", f"LONG {entry_qty} | SHORT {entry_qty} (OBV x{float(obv_multiplier):.2f})")
-               
+                if obv_display > 0:   # 롱강세 → SHORT 주력
+                    short_qty = int(base_qty * (1 + obv_multiplier))
+                    long_qty = base_qty
+                elif obv_display < 0: # 숏강세 → LONG 주력
+                    long_qty = int(base_qty * (1 + obv_multiplier))
+                    short_qty = base_qty
+                else:
+                    long_qty = base_qty
+                    short_qty = base_qty
+
+                log("💰 MARKET", f"No position → LONG {long_qty}, SHORT {short_qty}")
+
                 try:
-                    # ✅ LONG 진입
                     long_order = FuturesOrder(
-                        contract=SYMBOL,
-                        size=entry_qty,
-                        price="0",
-                        tif="ioc",
-                        reduce_only=False,  # ← 추가: 새로 진입
-                        text=generate_order_id()
+                        contract=SYMBOL, size=long_qty, price="0", tif="ioc",
+                        reduce_only=False, text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, long_order)
-                    log("✅ LONG", f"Market: {entry_qty}")
+                    log("✅ LONG", f"Market: {long_qty}")
                     time.sleep(0.5)
-                   
-                    # ✅ SHORT 진입 (수정!)
                     short_order = FuturesOrder(
-                        contract=SYMBOL,
-                        size=-entry_qty,  # ← 음수 (SHORT)
-                        price="0",
-                        tif="ioc",
-                        reduce_only=False,  # ← 추가: 새로 진입
-                        text=generate_order_id()
+                        contract=SYMBOL, size=-short_qty, price="0", tif="ioc",
+                        reduce_only=False, text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, short_order)
-                    log("✅ SHORT", f"Market: {entry_qty}")
-               
-                except GateApiException as e:
+                    log("✅ SHORT", f"Market: {short_qty}")
+                except Exception as e:
                     log("❌ MARKET", f"Entry error: {e}")
                     return
-           
-            # ════════════════════════════════════════════════════════════════
-            # 2️⃣ LONG만 있음: SHORT 헤징
-            # ════════════════════════════════════════════════════════════════
+
+                sync_position()
+                refresh_all_tp_orders()
+                return
+
+            # LONG만 있음: SHORT 헤진
             elif long_size > 0 and short_size == 0:
-                log("💰 MARKET", "Only LONG → Adding SHORT hedge!")
-               
-                # ✅ OBV 가중치로 헤징 수량 결정
                 hedge_qty = int(base_qty * obv_multiplier)
-               
-                # ✅ 기본 수량보다 작으면 조정
                 if hedge_qty < base_qty:
-                    log("📊 ADJUST", f"Hedge qty {hedge_qty} < base {base_qty} → Using base qty")
                     hedge_qty = base_qty
-               
-                log("📊 QTY", f"SHORT {hedge_qty} (OBV x{float(obv_multiplier):.2f})")
-               
                 try:
                     short_order = FuturesOrder(
-                        contract=SYMBOL,
-                        size=-hedge_qty,  # ← 음수 (SHORT)
-                        price="0",
-                        tif="ioc",
-                        reduce_only=False,  # ← 추가: 새로 진입
-                        text=generate_order_id()
+                        contract=SYMBOL, size=-hedge_qty, price="0", tif="ioc",
+                        reduce_only=False, text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, short_order)
                     log("✅ SHORT", f"Hedge: {hedge_qty}")
-                except GateApiException as e:
-                    log("❌ MARKET", f"SHORT error: {e}")
-                    return
-           
-            # ════════════════════════════════════════════════════════════════
-            # 3️⃣ SHORT만 있음: LONG 헤징
-            # ════════════════════════════════════════════════════════════════
+                except Exception as e:
+                    log("❌ MARKET", f"SHORT hedge error: {e}")
+
+            # SHORT만 있음: LONG 헤진
             elif short_size > 0 and long_size == 0:
-                log("💰 MARKET", "Only SHORT → Adding LONG hedge!")
-               
-                # ✅ OBV 가중치로 헤징 수량 결정
                 hedge_qty = int(base_qty * obv_multiplier)
-               
-                # ✅ 기본 수량보다 작으면 조정
                 if hedge_qty < base_qty:
-                    log("📊 ADJUST", f"Hedge qty {hedge_qty} < base {base_qty} → Using base qty")
                     hedge_qty = base_qty
-               
-                log("📊 QTY", f"LONG {hedge_qty} (OBV x{float(obv_multiplier):.2f})")
-               
                 try:
                     long_order = FuturesOrder(
-                        contract=SYMBOL,
-                        size=hedge_qty,  # ← 양수 (LONG)
-                        price="0",
-                        tif="ioc",
-                        reduce_only=False,  # ← 추가: 새로 진입
-                        text=generate_order_id()
+                        contract=SYMBOL, size=hedge_qty, price="0", tif="ioc",
+                        reduce_only=False, text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, long_order)
                     log("✅ LONG", f"Hedge: {hedge_qty}")
-                except GateApiException as e:
-                    log("❌ MARKET", f"LONG error: {e}")
-                    return
-   
+                except Exception as e:
+                    log("❌ MARKET", f"LONG hedge error: {e}")
+
+                sync_position()
+                refresh_all_tp_orders()
     except Exception as e:
         log("❌ MARKET", f"Imbalanced entry error: {e}")
 
