@@ -296,17 +296,13 @@ def log_position_state():
 # =============================================================================
 def sync_position(max_retries=3, retry_delay=2):
     """
-    포지션 정보를 동기화합니다. (수량 보정 로직 수정됨)
-    Gate.io는 size를 '계약 수(장)'로 줄 때가 많으므로,
-    BNB_USDT 기준 1계약 = 0.001 BNB 등으로 변환이 필요할 수 있습니다.
-    여기서는 안전하게 모든 값을 0.001 단위로 봅니다.
+    포지션 정보를 동기화합니다. (디버깅 로그 제거)
     """
     for attempt in range(max_retries):
         try:
             positions = api.list_positions(SETTLE)
            
             with position_lock:
-                # 초기화
                 position_state[SYMBOL]["long"]["size"] = Decimal("0")
                 position_state[SYMBOL]["long"]["entry_price"] = Decimal("0")
                 position_state[SYMBOL]["short"]["size"] = Decimal("0")
@@ -316,25 +312,11 @@ def sync_position(max_retries=3, retry_delay=2):
                 for p in positions:
                     if p.contract == SYMBOL:
                         try:
-                            raw_size = float(p.size) # 예: 6 (계약 수)
-                            
-                            # ★ [수정] BNB_USDT는 1계약이 작으므로, 정수로 들어온 값을 코인 개수로 변환
-                            # 만약 raw_size가 6인데 실제 0.006 BNB라면 0.001을 곱해야 함.
-                            # Gate.io API 특성상 대부분 정수(계약수)로 옴.
-                            
-                            # 안전 장치: 만약 API가 이미 0.006 처럼 소수로 준다면?
-                            # 보통 정수로 오지만, 소수점 체크
+                            raw_size = float(p.size)
                             if abs(raw_size) < 0.1 and raw_size != 0:
-                                # 이미 소수점 단위로 온 경우 (매우 드묾)
                                 size_dec = Decimal(str(raw_size))
                             else:
-                                # 정수(계약수)로 온 경우 -> 0.001 곱해서 BNB 개수로 변환
-                                # (주의: 심볼마다 다를 수 있으나 BNB는 보통 0.001 or 0.01)
-                                # 여기서는 사용자의 0.006 BNB = 6 contract 가정하에 0.001 적용
                                 size_dec = Decimal(str(raw_size)) * Decimal("0.001")
-                                
-                            log("⚠️ SYNC", f"Raw: {raw_size} -> Corrected: {size_dec}")
-
                         except Exception as e:
                             log("❌ SYNC", f"Size parse error: {e}")
                             size_dec = Decimal("0")
@@ -1115,22 +1097,28 @@ def get_tp_orders_hash(tp_orders):
     except: return ""
 
 def periodic_health_check():
-    """2분마다 실행되는 헬스 체크 (아이들 시간 디버그 포함)"""
+    """
+    2분마다 실행되는 통합 헬스 체크
+    (기존 position_monitor의 최대 포지션 체크 기능 포함)
+    """
     global last_adjusted_obv, tp_gap_min, tp_gap_max, last_event_time
     while True:
         try:
             time.sleep(120)
             
-            # ★ 아이들 시간 디버그 로그 (소수점 정리)
+            # --- 함수 시작 시점, Sync 1회 ---
+            sync_position()
+            
             current_time = time.time()
             idle_time = current_time - last_event_time
             log("💊 HEALTH", f"Starting check... (Idle: {idle_time:.1f}s / {IDLE_TIME_SECONDS}s)")
+            log_position_state() # 현재 포지션 상태 로그
             
+            # --- 잔고 및 초기 자본금 업데이트 ---
             try:
                 futures_account = api.list_futures_accounts(SETTLE)
                 if futures_account and getattr(futures_account, 'available', None):
                     avail = Decimal(str(futures_account.available))
-                    sync_position()
                     with position_lock:
                         l_s = position_state[SYMBOL]["long"]["size"]
                         s_s = position_state[SYMBOL]["short"]["size"]
@@ -1143,31 +1131,52 @@ def periodic_health_check():
                         log("💰 BALANCE", f"{avail:.2f} USDT (Init Cap Updated)")
             except: pass
 
-            sync_position()
             with position_lock:
                 long_size = position_state[SYMBOL]["long"]["size"]
                 short_size = position_state[SYMBOL]["short"]["size"]
+                long_price = position_state[SYMBOL]["long"]["entry_price"]
+                short_price = position_state[SYMBOL]["short"]["entry_price"]
+            
             if long_size == 0 and short_size == 0: continue
 
+            # --- 최대 포지션 한도 체크 (position_monitor 기능 통합) ---
+            with balance_lock: balance = account_balance
+            max_value = balance * MAXPOSITIONRATIO
+            long_value = long_price * long_size
+            short_value = short_price * short_size
+
+            if long_value >= max_value and not max_position_locked["long"]:
+                log("⚠️ LIMIT", f"LONG ${long_value:.2f} >= ${max_value:.2f}")
+                max_position_locked["long"] = True
+                cancel_all_orders()
+            elif long_value < max_value and max_position_locked["long"]:
+                log("✅ UNLOCK", f"LONG ${long_value:.2f} < ${max_value:.2f}")
+                max_position_locked["long"] = False
+
+            if short_value >= max_value and not max_position_locked["short"]:
+                log("⚠️ LIMIT", f"SHORT ${short_value:.2f} >= ${max_value:.2f}")
+                max_position_locked["short"] = True
+                cancel_all_orders()
+            elif short_value < max_value and max_position_locked["short"]:
+                log("✅ UNLOCK", f"SHORT ${short_value:.2f} < ${max_value:.2f}")
+                max_position_locked["short"] = False
+            
+            # --- 기존 헬스 체크 로직 (주문, TP, OBV 등) ---
             try:
                 orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-                # ★ is_reduce_only 사용
                 grid_count = sum(1 for o in orders if not o.is_reduce_only)
                 tp_orders_list = [o for o in orders if o.is_reduce_only]
-                
-                tp_count = len(tp_orders_list)
-                log("📊 ORDERS", f"Grid(Open): {grid_count}, TP: {tp_count}")
+                log("📊 ORDERS", f"Grid(Open): {grid_count}, TP: {len(tp_orders_list)}")
 
                 current_hash = get_tp_orders_hash(tp_orders_list)
                 previous_hash = tp_order_hash.get(SYMBOL)
                 
-                tp_mismatch = False
                 if (long_size > 0 or short_size > 0) and len(tp_orders_list) < 2:
-                    log("🔧 HEALTH", "TP Count Mismatch")
-                    tp_mismatch = True
-                
-                if tp_mismatch or (current_hash != previous_hash):
-                    log("🔧 HEALTH", "TP Refreshing...")
+                    log("🔧 HEALTH", "TP Count Mismatch → Refreshing")
+                    refresh_all_tp_orders()
+                    tp_order_hash[SYMBOL] = get_tp_orders_hash(api.list_futures_orders(SETTLE, contract=SYMBOL, status='open', is_reduce_only=True))
+                elif current_hash != previous_hash:
+                    log("🔧 HEALTH", "TP Orders Changed → Refreshing")
                     refresh_all_tp_orders()
                     tp_order_hash[SYMBOL] = current_hash
             except: pass
@@ -1176,40 +1185,33 @@ def periodic_health_check():
                 calculate_obv_macd()
                 current_obv = float(obv_macd_value) * 100
                 if last_adjusted_obv == 0: last_adjusted_obv = current_obv
-                else:
-                    if abs(current_obv - last_adjusted_obv) >= 10:
-                        log("🔔 HEALTH", "OBV changed → Recalculating TP")
-                        tp_result = calculate_dynamic_tp_gap()
-                        new_tp_long = tp_result[0] if isinstance(tp_result, tuple) else Decimal(str(tp_result))
-                        if abs(float(new_tp_long) - float(tp_gap_min)) >= 0.0001:
-                            tp_gap_min = new_tp_long
-                            refresh_all_tp_orders()
-                            last_adjusted_obv = current_obv
+                elif abs(current_obv - last_adjusted_obv) >= 10:
+                    log("🔔 HEALTH", "OBV changed → Recalculating TP")
+                    refresh_all_tp_orders()
+                    last_adjusted_obv = current_obv
             except: pass
 
             try:
-                single_position = (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0)
-                
-                # 좀비 그리드 제거 로직
+                single_position = (long_size > 0) != (short_size > 0)
+                grid_count = sum(1 for o in api.list_futures_orders(SETTLE, contract=SYMBOL, status='open') if not o.is_reduce_only)
                 if single_position and grid_count > 0:
-                    log("⚠️ SINGLE", f"Zombie grid detected ({grid_count}) → Clearing...")
+                    log("⚠️ SINGLE", "Zombie grid detected → Clearing...")
                     cancel_all_orders()
                     time.sleep(0.5)
                     refresh_all_tp_orders()
-                    grid_count = 0
-
-                if single_position and grid_count == 0:
-                    current_price = get_current_price()
-                    if current_price > 0:
-                        log("⚠️ SINGLE", "Creating grid from single position...")
-                        initialize_grid(current_price)
+                elif single_position and grid_count == 0:
+                    log("⚠️ SINGLE", "Creating grid from single position...")
+                    initialize_grid()
             except: pass
 
             validate_strategy_consistency()
             remove_duplicate_orders()
             cancel_stale_orders()
             log("✅ HEALTH", "Complete")
-        except: time.sleep(5)
+        except Exception as e:
+            log("❌ HEALTH", f"Critical Error: {e}")
+            time.sleep(5)
+
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -1276,9 +1278,9 @@ if __name__ == '__main__':
     print_startup_summary()
     threading.Thread(target=fetch_kline_thread, daemon=True).start()
     threading.Thread(target=start_websocket, daemon=True).start()
-    threading.Thread(target=position_monitor, daemon=True).start()
     threading.Thread(target=start_grid_monitor, daemon=True).start()
     threading.Thread(target=tp_monitor, daemon=True).start()
     threading.Thread(target=idle_monitor, daemon=True).start()
     threading.Thread(target=periodic_health_check, daemon=True).start()
     app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
+
