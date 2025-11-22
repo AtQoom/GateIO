@@ -51,7 +51,7 @@ BASERATIO = Decimal("0.01")                 # ← 기본 수량 비율 (1%)
 MAXPOSITIONRATIO = Decimal("3.0")           # 최대 포지션 비율 (3배)
 HEDGE_RATIO_MAIN = Decimal("0.10")          # 주력 헤지 비율 (10%)
 
-# TP 설정 (동적 TP)
+# TP 설정 (동적 TP 기준값)
 TPMIN = Decimal("0.0021")                   # 최소 TP (0.21%)
 TPMAX = Decimal("0.004")                    # 최대 TP (0.4%)
 
@@ -744,7 +744,7 @@ def initialize_grid(current_price=None):
         long_qty = adjust_quantity_step(long_qty)
         short_qty = adjust_quantity_step(short_qty)
 
-        log("INFO", f"[GRID] init, LONG={long_qty}, SHORT={short_qty}, OBV={obv_macd_value}, mult={obv_multiplier}, loss={loss_multiplier}")
+        log("INFO", f"[GRID] init, LONG={long_qty}, SHORT={short_qty}, OBV={obv_macd_value:.4f}, mult={obv_multiplier:.2f}, loss={loss_multiplier:.2f}")
 
         try:
             order = FuturesOrder(contract=SYMBOL, size=str(long_qty), price="0", tif="ioc", reduce_only=False, text=generate_order_id())
@@ -760,6 +760,10 @@ def initialize_grid(current_price=None):
         except Exception as e: log("❌", f"short grid entry error: {e}")
 
         log("✅ GRID", "Grid orders entry completed")
+        
+        # ★ [핵심 수정] 주문 완료 후 이벤트 타임 갱신 (아이들 리셋)
+        update_event_time()
+        
         time.sleep(1.0)
         sync_position()
         refresh_all_tp_orders()
@@ -1035,9 +1039,6 @@ def check_idle_and_enter():
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
         
-        # (기존) 포지션 있으면 리턴 -> (삭제됨)
-        # 이제는 포지션이 있어도 아래 로직 실행됨
-        
         # 최대 포지션 한도 체크 (안전장치)
         with balance_lock:
             balance = account_balance
@@ -1107,7 +1108,7 @@ def periodic_health_check():
         try:
             time.sleep(120)
             
-            # ★ 아이들 시간 디버그 로그
+            # ★ 아이들 시간 디버그 로그 (소수점 정리)
             current_time = time.time()
             idle_time = current_time - last_event_time
             log("💊 HEALTH", f"Starting check... (Idle: {idle_time:.1f}s / {IDLE_TIME_SECONDS}s)")
@@ -1148,7 +1149,7 @@ def periodic_health_check():
                 previous_hash = tp_order_hash.get(SYMBOL)
                 
                 tp_mismatch = False
-                if (long_size > 0 or short_size > 0) and tp_count < 2:
+                if (long_size > 0 or short_size > 0) and len(tp_orders_list) < 2:
                     log("🔧 HEALTH", "TP Count Mismatch")
                     tp_mismatch = True
                 
