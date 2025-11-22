@@ -1008,34 +1008,75 @@ def tp_monitor():
         except: time.sleep(1)
 
 def check_idle_and_enter():
+    """
+    아이들 상태 체크 및 진입 (양방향 포지션 있어도 작동)
+    - 10분간 거래 없으면 추가 진입하여 평단 조절
+    """
     global idle_entry_in_progress, last_idle_entry_time, idle_entry_count
+    
     try:
         with idle_entry_progress_lock:
-            if idle_entry_in_progress: return
+            if idle_entry_in_progress:
+                return
+        
         current_time = time.time()
-        if current_time - last_idle_entry_time < IDLE_ENTRY_COOLDOWN: return
-        if current_time - last_event_time < IDLE_TIME_SECONDS: return
+        elapsed = current_time - last_event_time
+        
+        # 쿨다운 체크
+        if current_time - last_idle_entry_time < IDLE_ENTRY_COOLDOWN:
+            return
+        
+        # 10분(IDLE_TIME_SECONDS) 경과 체크
+        if elapsed < IDLE_TIME_SECONDS:
+            return
         
         sync_position()
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
-        if long_size > 0 or short_size > 0: return
         
-        with idle_entry_progress_lock: idle_entry_in_progress = True
+        # (기존) 포지션 있으면 리턴 -> (삭제됨)
+        # 이제는 포지션이 있어도 아래 로직 실행됨
+        
+        # 최대 포지션 한도 체크 (안전장치)
+        with balance_lock:
+            balance = account_balance
+        
+        current_price = get_current_price()
+        if current_price == 0: return
+
+        # 현재 포지션 가치 계산
+        total_position_value = (long_size + short_size) * current_price
+        max_allowed_value = balance * MAXPOSITIONRATIO
+        
+        # 이미 최대 포지션을 초과했다면 추가 진입 금지
+        if total_position_value >= max_allowed_value:
+            # log("🚫 IDLE", "Max position limit reached, skipping idle entry")
+            return
+
+        # 아이들 진입 시작
+        with idle_entry_progress_lock:
+            idle_entry_in_progress = True
+        
         try:
             idle_entry_count += 1
             log_event_header(f"IDLE ENTRY #{idle_entry_count}")
-            log("⏰ IDLE", "No activity → Market entry")
-            current_price = get_current_price()
+            log("⏰ IDLE", f"No activity for {elapsed/60:.1f} min → Adding Grid/Hedge")
+            
+            # 시장가 양방향 진입 (물타기/헷징)
             if current_price > 0:
                 initialize_grid(current_price)
                 last_idle_entry_time = current_time
-                update_event_time()
+                update_event_time() # 이벤트 시간 갱신하여 연속 진입 방지
+                
         finally:
-            with idle_entry_progress_lock: idle_entry_in_progress = False
-    except:
-        with idle_entry_progress_lock: idle_entry_in_progress = False
+            with idle_entry_progress_lock:
+                idle_entry_in_progress = False
+        
+    except Exception as e:
+        log("❌ IDLE", f"Error: {e}")
+        with idle_entry_progress_lock:
+            idle_entry_in_progress = False
 
 def idle_monitor():
     global last_idle_check
@@ -1060,11 +1101,16 @@ def get_tp_orders_hash(tp_orders):
     except: return ""
 
 def periodic_health_check():
-    global last_adjusted_obv, tp_gap_min, tp_gap_max
+    """2분마다 실행되는 헬스 체크 (아이들 시간 디버그 포함)"""
+    global last_adjusted_obv, tp_gap_min, tp_gap_max, last_event_time
     while True:
         try:
             time.sleep(120)
-            log("💊 HEALTH", "Starting health check...")
+            
+            # ★ 아이들 시간 디버그 로그
+            current_time = time.time()
+            idle_time = current_time - last_event_time
+            log("💊 HEALTH", f"Starting check... (Idle: {idle_time:.1f}s / {IDLE_TIME_SECONDS}s)")
             
             try:
                 futures_account = api.list_futures_accounts(SETTLE)
@@ -1091,7 +1137,7 @@ def periodic_health_check():
 
             try:
                 orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-                # ★ [수정] is_reduce_only 사용 (TP 오인식 해결)
+                # ★ is_reduce_only 사용
                 grid_count = sum(1 for o in orders if not o.is_reduce_only)
                 tp_orders_list = [o for o in orders if o.is_reduce_only]
                 
@@ -1102,7 +1148,7 @@ def periodic_health_check():
                 previous_hash = tp_order_hash.get(SYMBOL)
                 
                 tp_mismatch = False
-                if (long_size > 0 or short_size > 0) and len(tp_orders_list) < 2:
+                if (long_size > 0 or short_size > 0) and tp_count < 2:
                     log("🔧 HEALTH", "TP Count Mismatch")
                     tp_mismatch = True
                 
@@ -1130,7 +1176,7 @@ def periodic_health_check():
             try:
                 single_position = (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0)
                 
-                # 좀비 그리드 제거 로직 추가
+                # 좀비 그리드 제거 로직
                 if single_position and grid_count > 0:
                     log("⚠️ SINGLE", f"Zombie grid detected ({grid_count}) → Clearing...")
                     cancel_all_orders()
