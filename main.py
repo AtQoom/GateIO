@@ -418,47 +418,55 @@ def refresh_all_tp_orders():
         cancel_tp_only()
         time.sleep(1.0)
        
+        # --- LONG TP 설정 ---
         if long_size > 0 and long_entry_price > 0:
             tp_price_long = long_entry_price * (Decimal("1") + long_tp)
             tp_price_long = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-            long_qty = adjust_quantity_step(long_size)
             
-            if long_qty > 0:
+            # ★ [수정] adjust_quantity_step 제거하고 보유량 그대로 사용
+            # 단, 너무 긴 소수점 방지를 위해 문자열 포맷팅 사용 (BNB는 보통 3자리)
+            # 만약 long_size가 Decimal('0.0060000')이면 -> '0.006'으로 변환
+            long_qty_str = f"{float(long_size):.3f}" # 3자리로 고정 (필요시 4자리로 수정)
+            
+            # 0이 아니면 주문
+            if float(long_qty_str) > 0:
                 try:
                     order = FuturesOrder(
                         contract=SYMBOL,
-                        size=str(-long_qty),
+                        size=str(-float(long_qty_str)), # 음수 (매도)
                         price=str(tp_price_long),
                         tif="gtc",
                         reduce_only=True,
                         text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, order)
-                    log("✅ TP LONG", f"Qty: {long_qty}, Price: {float(tp_price_long):.4f}")
+                    log("✅ TP LONG", f"Qty: {long_qty_str} (Full), Price: {float(tp_price_long):.4f}")
                 except Exception as e:
-                    log("❌ TP LONG FAIL", f"Qty: {long_qty}, Error: {e}")
+                    log("❌ TP LONG FAIL", f"Qty: {long_qty_str}, Error: {e}")
        
         time.sleep(0.5)
        
+        # --- SHORT TP 설정 ---
         if short_size > 0 and short_entry_price > 0:
             tp_price_short = short_entry_price * (Decimal("1") - short_tp)
             tp_price_short = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-            short_qty = adjust_quantity_step(short_size)
             
-            if short_qty > 0:
+            short_qty_str = f"{float(short_size):.3f}"
+            
+            if float(short_qty_str) > 0:
                 try:
                     order = FuturesOrder(
                         contract=SYMBOL,
-                        size=str(short_qty),
+                        size=str(short_qty_str), # 양수 (매수)
                         price=str(tp_price_short),
                         tif="gtc",
                         reduce_only=True,
                         text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, order)
-                    log("✅ TP SHORT", f"Qty: {short_qty}, Price: {float(tp_price_short):.4f}")
+                    log("✅ TP SHORT", f"Qty: {short_qty_str} (Full), Price: {float(tp_price_short):.4f}")
                 except Exception as e:
-                    log("❌ TP SHORT FAIL", f"Qty: {short_qty}, Error: {e}")
+                    log("❌ TP SHORT FAIL", f"Qty: {short_qty_str}, Error: {e}")
        
         log("✅ TP", "TP refresh process completed")
     except Exception as e:
