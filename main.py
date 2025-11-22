@@ -295,11 +295,18 @@ def log_position_state():
 # 포지션 동기화
 # =============================================================================
 def sync_position(max_retries=3, retry_delay=2):
+    """
+    포지션 정보를 동기화합니다. (수량 보정 로직 수정됨)
+    Gate.io는 size를 '계약 수(장)'로 줄 때가 많으므로,
+    BNB_USDT 기준 1계약 = 0.001 BNB 등으로 변환이 필요할 수 있습니다.
+    여기서는 안전하게 모든 값을 0.001 단위로 봅니다.
+    """
     for attempt in range(max_retries):
         try:
             positions = api.list_positions(SETTLE)
            
             with position_lock:
+                # 초기화
                 position_state[SYMBOL]["long"]["size"] = Decimal("0")
                 position_state[SYMBOL]["long"]["entry_price"] = Decimal("0")
                 position_state[SYMBOL]["short"]["size"] = Decimal("0")
@@ -309,13 +316,27 @@ def sync_position(max_retries=3, retry_delay=2):
                 for p in positions:
                     if p.contract == SYMBOL:
                         try:
-                            raw_size = float(p.size)
-                            if abs(raw_size) >= 10: 
-                                size_dec = Decimal(str(raw_size * 0.001)) 
-                                log("⚠️ SYNC", f"Size corrected: {raw_size} -> {size_dec}")
-                            else:
+                            raw_size = float(p.size) # 예: 6 (계약 수)
+                            
+                            # ★ [수정] BNB_USDT는 1계약이 작으므로, 정수로 들어온 값을 코인 개수로 변환
+                            # 만약 raw_size가 6인데 실제 0.006 BNB라면 0.001을 곱해야 함.
+                            # Gate.io API 특성상 대부분 정수(계약수)로 옴.
+                            
+                            # 안전 장치: 만약 API가 이미 0.006 처럼 소수로 준다면?
+                            # 보통 정수로 오지만, 소수점 체크
+                            if abs(raw_size) < 0.1 and raw_size != 0:
+                                # 이미 소수점 단위로 온 경우 (매우 드묾)
                                 size_dec = Decimal(str(raw_size))
-                        except:
+                            else:
+                                # 정수(계약수)로 온 경우 -> 0.001 곱해서 BNB 개수로 변환
+                                # (주의: 심볼마다 다를 수 있으나 BNB는 보통 0.001 or 0.01)
+                                # 여기서는 사용자의 0.006 BNB = 6 contract 가정하에 0.001 적용
+                                size_dec = Decimal(str(raw_size)) * Decimal("0.001")
+                                
+                            log("⚠️ SYNC", f"Raw: {raw_size} -> Corrected: {size_dec}")
+
+                        except Exception as e:
+                            log("❌ SYNC", f"Size parse error: {e}")
                             size_dec = Decimal("0")
 
                         entry_price = abs(Decimal(str(p.entry_price))) if p.entry_price else Decimal("0")
