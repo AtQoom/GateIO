@@ -1012,47 +1012,39 @@ def tp_monitor():
         except: time.sleep(1)
 
 def check_idle_and_enter():
-    """
-    아이들 상태 체크 및 진입 (양방향 포지션 있어도 작동)
-    - 10분간 거래 없으면 추가 진입하여 평단 조절
-    """
     global idle_entry_in_progress, last_idle_entry_time, idle_entry_count
-    
     try:
         with idle_entry_progress_lock:
             if idle_entry_in_progress:
                 return
-        
+
         current_time = time.time()
         elapsed = current_time - last_event_time
-        
-        # 쿨다운 체크
+
         if current_time - last_idle_entry_time < IDLE_ENTRY_COOLDOWN:
+            log("IDLE-DEBUG", f"cooldown block: {current_time - last_idle_entry_time:.1f}s < {IDLE_ENTRY_COOLDOWN}")
             return
-        
-        # 10분(IDLE_TIME_SECONDS) 경과 체크
+
         if elapsed < IDLE_TIME_SECONDS:
+            log("IDLE-DEBUG", f"elapsed block: {elapsed:.1f}s < {IDLE_TIME_SECONDS}")
             return
-        
+
         sync_position()
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
-        
-        # 최대 포지션 한도 체크 (안전장치)
+
         with balance_lock:
             balance = account_balance
-        
         current_price = get_current_price()
-        if current_price == 0: return
+        if current_price == 0:
+            log("IDLE-DEBUG", "price == 0")
+            return
 
-        # 현재 포지션 가치 계산
         total_position_value = (long_size + short_size) * current_price
         max_allowed_value = balance * MAXPOSITIONRATIO
-        
-        # 이미 최대 포지션을 초과했다면 추가 진입 금지
         if total_position_value >= max_allowed_value:
-            # log("🚫 IDLE", "Max position limit reached, skipping idle entry")
+            log("IDLE-DEBUG", f"max-pos block: pos={total_position_value:.2f}, limit={max_allowed_value:.2f}")
             return
 
         # 아이들 진입 시작
