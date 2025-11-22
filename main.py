@@ -1036,11 +1036,11 @@ def check_idle_and_enter():
         elapsed = current_time - last_event_time
 
         if current_time - last_idle_entry_time < IDLE_ENTRY_COOLDOWN:
-            log("IDLE-DEBUG", f"cooldown block: {current_time - last_idle_entry_time:.1f}s < {IDLE_ENTRY_COOLDOWN}")
+            # log("IDLE-DEBUG", f"cooldown block: {current_time - last_idle_entry_time:.1f}s < {IDLE_ENTRY_COOLDOWN}")
             return
 
         if elapsed < IDLE_TIME_SECONDS:
-            log("IDLE-DEBUG", f"elapsed block: {elapsed:.1f}s < {IDLE_TIME_SECONDS}")
+            # log("IDLE-DEBUG", f"elapsed block: {elapsed:.1f}s < {IDLE_TIME_SECONDS}")
             return
 
         sync_position()
@@ -1055,7 +1055,11 @@ def check_idle_and_enter():
             log("IDLE-DEBUG", "price == 0")
             return
 
-        total_position_value = (long_size + short_size) * current_price
+        # ★ [수정] 계약 수(long_size)에 0.001을 곱해서 실제 BNB 가치로 변환
+        # BNB_USDT 1계약 = 0.001 BNB 가정 (또는 0.01 등 상황에 맞게)
+        multiplier = Decimal("0.001") 
+        total_position_value = (long_size + short_size) * multiplier * current_price
+        
         max_allowed_value = balance * MAXPOSITIONRATIO
         if total_position_value >= max_allowed_value:
             log("IDLE-DEBUG", f"max-pos block: pos={total_position_value:.2f}, limit={max_allowed_value:.2f}")
@@ -1070,11 +1074,10 @@ def check_idle_and_enter():
             log_event_header(f"IDLE ENTRY #{idle_entry_count}")
             log("⏰ IDLE", f"No activity for {elapsed/60:.1f} min → Adding Grid/Hedge")
             
-            # 시장가 양방향 진입 (물타기/헷징)
             if current_price > 0:
                 initialize_grid(current_price)
                 last_idle_entry_time = current_time
-                update_event_time() # 이벤트 시간 갱신하여 연속 진입 방지
+                update_event_time()
                 
         finally:
             with idle_entry_progress_lock:
@@ -1084,6 +1087,7 @@ def check_idle_and_enter():
         log("❌ IDLE", f"Error: {e}")
         with idle_entry_progress_lock:
             idle_entry_in_progress = False
+
 
 def idle_monitor():
     global last_idle_check
@@ -1153,8 +1157,11 @@ def periodic_health_check():
             # --- 최대 포지션 한도 체크 (position_monitor 기능 통합) ---
             with balance_lock: balance = account_balance
             max_value = balance * MAXPOSITIONRATIO
-            long_value = long_price * long_size
-            short_value = short_price * short_size
+            
+            # ★ [수정] 가치 계산 시 0.001 곱하기
+            multiplier = Decimal("0.001")
+            long_value = long_price * long_size * multiplier
+            short_value = short_price * short_size * multiplier
 
             if long_value >= max_value and not max_position_locked["long"]:
                 log("⚠️ LIMIT", f"LONG ${long_value:.2f} >= ${max_value:.2f}")
