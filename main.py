@@ -296,43 +296,49 @@ def log_position_state():
 # =============================================================================
 def sync_position(max_retries=3, retry_delay=2):
     """
-    포지션 정보를 동기화합니다. (디버깅 로그 제거)
+    포지션 정보를 동기화합니다.
+    - Gate 선물 size는 '계약 수' 기준이므로, 내부에서도 그대로 사용.
+    - 예전처럼 이상하게 큰 값(예: 1000배)만 0.001 곱해서 보정.
     """
     for attempt in range(max_retries):
         try:
             positions = api.list_positions(SETTLE)
-           
+
             with position_lock:
                 position_state[SYMBOL]["long"]["size"] = Decimal("0")
                 position_state[SYMBOL]["long"]["entry_price"] = Decimal("0")
                 position_state[SYMBOL]["short"]["size"] = Decimal("0")
                 position_state[SYMBOL]["short"]["entry_price"] = Decimal("0")
-           
+
             if positions:
                 for p in positions:
-                    if p.contract == SYMBOL:
-                        try:
-                            raw_size = float(p.size)
-                            if abs(raw_size) < 0.1 and raw_size != 0:
-                                size_dec = Decimal(str(raw_size))
-                            else:
-                                size_dec = Decimal(str(raw_size)) * Decimal("0.001")
-                        except Exception as e:
-                            log("❌ SYNC", f"Size parse error: {e}")
-                            size_dec = Decimal("0")
+                    if p.contract != SYMBOL:
+                        continue
 
-                        entry_price = abs(Decimal(str(p.entry_price))) if p.entry_price else Decimal("0")
-                       
-                        if size_dec > 0:
-                            with position_lock:
-                                position_state[SYMBOL]["long"]["size"] = size_dec
-                                position_state[SYMBOL]["long"]["entry_price"] = entry_price
-                        elif size_dec < 0:
-                            with position_lock:
-                                position_state[SYMBOL]["short"]["size"] = abs(size_dec)
-                                position_state[SYMBOL]["short"]["entry_price"] = entry_price
+                    try:
+                        raw_size = float(p.size)   # Gate에서 오는 계약 수 (정수여야 정상)
+                        # 예전 로직처럼, 비정상적으로 큰 값만 보정
+                        if abs(raw_size) >= 10:
+                            size_dec = Decimal(str(raw_size * 0.001))
+                            log("⚠️ SYNC", f"Size corrected: {raw_size} -> {size_dec}")
+                        else:
+                            size_dec = Decimal(str(raw_size))
+                    except Exception as e:
+                        log("❌ SYNC", f"Size parse error: {e}")
+                        size_dec = Decimal("0")
+
+                    entry_price = abs(Decimal(str(p.entry_price))) if p.entry_price else Decimal("0")
+
+                    if size_dec > 0:
+                        with position_lock:
+                            position_state[SYMBOL]["long"]["size"] = size_dec
+                            position_state[SYMBOL]["long"]["entry_price"] = entry_price
+                    elif size_dec < 0:
+                        with position_lock:
+                            position_state[SYMBOL]["short"]["size"] = abs(size_dec)
+                            position_state[SYMBOL]["short"]["entry_price"] = entry_price
             return True
-           
+
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(retry_delay)
@@ -400,10 +406,10 @@ def refresh_all_tp_orders():
             short_size = position_state[SYMBOL]["short"]["size"]
             long_entry_price = position_state[SYMBOL]["long"]["entry_price"]
             short_entry_price = position_state[SYMBOL]["short"]["entry_price"]
-       
+
         if long_size == 0 and short_size == 0:
             return
-       
+
         tp_result = calculate_dynamic_tp_gap()
         if isinstance(tp_result, (tuple, list)) and len(tp_result) >= 2:
             long_tp = tp_result[0]
@@ -411,65 +417,60 @@ def refresh_all_tp_orders():
         else:
             long_tp = TPMIN
             short_tp = TPMIN
-            
-        if not isinstance(long_tp, Decimal): long_tp = Decimal(str(long_tp))
-        if not isinstance(short_tp, Decimal): short_tp = Decimal(str(short_tp))
-       
+
+        if not isinstance(long_tp, Decimal):
+            long_tp = Decimal(str(long_tp))
+        if not isinstance(short_tp, Decimal):
+            short_tp = Decimal(str(short_tp))
+
         cancel_tp_only()
         time.sleep(1.0)
-        
-        # 소수점 처리를 위한 헬퍼 (반올림 방지용 내림 처리)
-        def floor_decimal(value, decimals=3):
-            factor = Decimal(str(10 ** decimals))
-            return (Decimal(str(value)) * factor).quantize(Decimal("1"), rounding=ROUND_DOWN) / factor
 
-        # --- LONG TP 설정 ---
+        # --- LONG TP (전체 수량) ---
         if long_size > 0 and long_entry_price > 0:
             tp_price_long = long_entry_price * (Decimal("1") + long_tp)
             tp_price_long = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-            
-            # ★ [수정] 문자열 포맷팅 대신 내림(floor) 처리로 보유량 초과 방지
-            long_qty = floor_decimal(long_size, 3) 
-            
+
+            # 계약 수 기준으로 스텝 맞추기 (보통 step=1)
+            long_qty = adjust_quantity_step(long_size)
             if long_qty > 0:
                 try:
                     order = FuturesOrder(
                         contract=SYMBOL,
-                        size=str(-long_qty), # 음수 (매도)
+                        size=str(-long_qty),   # 음수: LONG 청산 (숏 방향)
                         price=str(tp_price_long),
                         tif="gtc",
                         reduce_only=True,
                         text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, order)
-                    log("✅ TP LONG", f"Qty: {long_qty} (Full), Price: {float(tp_price_long):.4f}")
+                    log("✅ TP LONG", f"Qty: {long_qty}, Price: {float(tp_price_long):.4f}")
                 except Exception as e:
                     log("❌ TP LONG FAIL", f"Qty: {long_qty}, Error: {e}")
-       
+
         time.sleep(0.5)
-       
-        # --- SHORT TP 설정 ---
+
+        # --- SHORT TP (전체 수량) ---
         if short_size > 0 and short_entry_price > 0:
             tp_price_short = short_entry_price * (Decimal("1") - short_tp)
             tp_price_short = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-            
-            short_qty = floor_decimal(short_size, 3)
-            
+
+            short_qty = adjust_quantity_step(short_size)
             if short_qty > 0:
                 try:
                     order = FuturesOrder(
                         contract=SYMBOL,
-                        size=str(short_qty), # 양수 (매수)
+                        size=str(short_qty),   # 양수: SHORT 청산 (롱 방향)
                         price=str(tp_price_short),
                         tif="gtc",
                         reduce_only=True,
                         text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, order)
-                    log("✅ TP SHORT", f"Qty: {short_qty} (Full), Price: {float(tp_price_short):.4f}")
+                    log("✅ TP SHORT", f"Qty: {short_qty}, Price: {float(tp_price_short):.4f}")
                 except Exception as e:
                     log("❌ TP SHORT FAIL", f"Qty: {short_qty}, Error: {e}")
-       
+
         log("✅ TP", "TP refresh process completed")
     except Exception as e:
         log("❌ TP REFRESH", f"Critical Error: {e}")
