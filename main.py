@@ -405,33 +405,31 @@ def refresh_all_tp_orders():
             long_entry_price = position_state[SYMBOL]["long"]["entry_price"]
             short_entry_price = position_state[SYMBOL]["short"]["entry_price"]
        
+        # 둘 다 없으면 리턴
         if long_size == 0 and short_size == 0:
             return
        
+        # 동적 TP 비율 계산
         tp_result = calculate_dynamic_tp_gap()
         if isinstance(tp_result, (tuple, list)) and len(tp_result) >= 2:
-            long_tp = tp_result[0]
-            short_tp = tp_result[1]
+            long_tp_ratio = tp_result[0]
+            short_tp_ratio = tp_result[1]
         else:
-            long_tp = TPMIN
-            short_tp = TPMIN
+            long_tp_ratio = TPMIN
+            short_tp_ratio = TPMIN
             
-        if not isinstance(long_tp, Decimal): long_tp = Decimal(str(long_tp))
-        if not isinstance(short_tp, Decimal): short_tp = Decimal(str(short_tp))
+        if not isinstance(long_tp_ratio, Decimal): long_tp_ratio = Decimal(str(long_tp_ratio))
+        if not isinstance(short_tp_ratio, Decimal): short_tp_ratio = Decimal(str(short_tp_ratio))
        
+        # 기존 TP 모두 취소하고 새로 세팅 (가장 확실한 방법)
         cancel_tp_only()
         time.sleep(1.0)
         
-        # 계약 수 기준이므로 정수형으로 처리 (1, 2, ...)
-        # adjust_quantity_step 호출 시 소수점으로 바뀔 위험 있으므로, 그냥 long_size(Decimal) 그대로 사용
-        # 단, 혹시 모를 소수점 방지를 위해 quantize
-        
         # --- LONG TP 설정 ---
         if long_size > 0 and long_entry_price > 0:
-            tp_price_long = long_entry_price * (Decimal("1") + long_tp)
+            tp_price_long = long_entry_price * (Decimal("1") + long_tp_ratio)
             tp_price_long = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
             
-            # ★ [수정] 계약 수 그대로 사용 (정수)
             long_qty = long_size.quantize(Decimal("1"), rounding=ROUND_DOWN) 
             
             if long_qty > 0:
@@ -445,18 +443,18 @@ def refresh_all_tp_orders():
                         text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, order)
-                    log("✅ TP LONG", f"Qty: {long_qty} (Full), Price: {float(tp_price_long):.4f}")
+                    log("✅ TP LONG", f"Qty: {long_qty}, Price: {float(tp_price_long):.4f} (+{long_tp_ratio*100:.2f}%)")
                 except Exception as e:
                     log("❌ TP LONG FAIL", f"Qty: {long_qty}, Error: {e}")
-       
+        
+        # 딜레이를 줘서 API 요청 겹침 방지
         time.sleep(0.5)
        
         # --- SHORT TP 설정 ---
         if short_size > 0 and short_entry_price > 0:
-            tp_price_short = short_entry_price * (Decimal("1") - short_tp)
+            tp_price_short = short_entry_price * (Decimal("1") - short_tp_ratio)
             tp_price_short = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
             
-            # ★ [수정] 계약 수 그대로 사용 (정수)
             short_qty = short_size.quantize(Decimal("1"), rounding=ROUND_DOWN)
             
             if short_qty > 0:
@@ -470,11 +468,12 @@ def refresh_all_tp_orders():
                         text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, order)
-                    log("✅ TP SHORT", f"Qty: {short_qty} (Full), Price: {float(tp_price_short):.4f}")
+                    log("✅ TP SHORT", f"Qty: {short_qty}, Price: {float(tp_price_short):.4f} (-{short_tp_ratio*100:.2f}%)")
                 except Exception as e:
                     log("❌ TP SHORT FAIL", f"Qty: {short_qty}, Error: {e}")
        
         log("✅ TP", "TP refresh process completed")
+        
     except Exception as e:
         log("❌ TP REFRESH", f"Critical Error: {e}")
 
@@ -1136,25 +1135,47 @@ def periodic_health_check():
                 log("✅ UNLOCK", f"SHORT ${short_value:.2f} < ${max_value:.2f}")
                 max_position_locked["short"] = False
             
-            # --- 기존 헬스 체크 로직 (주문, TP, OBV 등) ---
+            # --- 기존 헬스 체크 로직 (TP 주문 검증 강화) ---
             try:
                 orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
                 grid_count = sum(1 for o in orders if not o.is_reduce_only)
                 tp_orders_list = [o for o in orders if o.is_reduce_only]
-                log("📊 ORDERS", f"Grid(Open): {grid_count}, TP: {len(tp_orders_list)}")
+                
+                long_tp_exists = False
+                short_tp_exists = False
+                
+                # TP 주문의 방향(side) 확인 (Close Long은 size가 음수, Close Short는 size가 양수)
+                for tp in tp_orders_list:
+                    size = float(tp.size)
+                    if size < 0: long_tp_exists = True # Close Long
+                    elif size > 0: short_tp_exists = True # Close Short
+
+                log("📊 ORDERS", f"Grid(Open): {grid_count}, TP(L/S): {long_tp_exists}/{short_tp_exists}")
 
                 current_hash = get_tp_orders_hash(tp_orders_list)
                 previous_hash = tp_order_hash.get(SYMBOL)
                 
-                if (long_size > 0 or short_size > 0) and len(tp_orders_list) < 2:
-                    log("🔧 HEALTH", "TP Count Mismatch → Refreshing")
+                # ★ [수정] 양방향 보유 시 둘 다 TP가 있는지 체크
+                need_refresh = False
+                
+                if long_size > 0 and not long_tp_exists:
+                    log("🔧 HEALTH", "Long Position exists but no TP → Refreshing")
+                    need_refresh = True
+                if short_size > 0 and not short_tp_exists:
+                    log("🔧 HEALTH", "Short Position exists but no TP → Refreshing")
+                    need_refresh = True
+                
+                # 해시 변경 시에도 갱신
+                if not need_refresh and current_hash != previous_hash:
+                    log("🔧 HEALTH", "TP Orders Changed → Refreshing")
+                    need_refresh = True
+
+                if need_refresh:
                     refresh_all_tp_orders()
                     tp_order_hash[SYMBOL] = get_tp_orders_hash(api.list_futures_orders(SETTLE, contract=SYMBOL, status='open', is_reduce_only=True))
-                elif current_hash != previous_hash:
-                    log("🔧 HEALTH", "TP Orders Changed → Refreshing")
-                    refresh_all_tp_orders()
-                    tp_order_hash[SYMBOL] = current_hash
-            except: pass
+
+            except Exception as e:
+                log("⚠️ HEALTH CHECK", f"Order check error: {e}")
             
             try:
                 calculate_obv_macd()
@@ -1186,6 +1207,7 @@ def periodic_health_check():
         except Exception as e:
             log("❌ HEALTH", f"Critical Error: {e}")
             time.sleep(5)
+
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
