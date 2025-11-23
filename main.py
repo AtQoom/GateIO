@@ -1114,7 +1114,7 @@ def periodic_health_check():
             with balance_lock: balance = account_balance
             max_value = balance * MAXPOSITIONRATIO
             
-            # ★ [수정] 가치 계산 시 0.001 곱하기
+            # ★ 가치 계산 시 0.001 곱하기
             multiplier = Decimal("0.001")
             long_value = long_price * long_size * multiplier
             short_value = short_price * short_size * multiplier
@@ -1135,11 +1135,16 @@ def periodic_health_check():
                 log("✅ UNLOCK", f"SHORT ${short_value:.2f} < ${max_value:.2f}")
                 max_position_locked["short"] = False
             
-            # --- 기존 헬스 체크 로직 (TP 주문 검증 강화) ---
+            # --- 기존 헬스 체크 로직 (주문, TP, OBV 등) ---
             try:
-                orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-                grid_count = sum(1 for o in orders if not o.is_reduce_only)
-                tp_orders_list = [o for o in orders if o.is_reduce_only]
+                # ★ [수정] is_reduce_only 파라미터 제거 후, 결과 리스트에서 필터링
+                all_orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
+                
+                # TP 주문(Reduce-Only)만 추출
+                tp_orders_list = [o for o in all_orders if o.is_reduce_only]
+                
+                # 일반 주문(Grid) 추출
+                grid_count = sum(1 for o in all_orders if not o.is_reduce_only)
                 
                 long_tp_exists = False
                 short_tp_exists = False
@@ -1155,7 +1160,7 @@ def periodic_health_check():
                 current_hash = get_tp_orders_hash(tp_orders_list)
                 previous_hash = tp_order_hash.get(SYMBOL)
                 
-                # ★ [수정] 양방향 보유 시 둘 다 TP가 있는지 체크
+                # 양방향 보유 시 둘 다 TP가 있는지 체크
                 need_refresh = False
                 
                 if long_size > 0 and not long_tp_exists:
@@ -1172,7 +1177,10 @@ def periodic_health_check():
 
                 if need_refresh:
                     refresh_all_tp_orders()
-                    tp_order_hash[SYMBOL] = get_tp_orders_hash(api.list_futures_orders(SETTLE, contract=SYMBOL, status='open', is_reduce_only=True))
+                    # 갱신 후 해시 다시 계산 (API 재호출)
+                    new_orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
+                    new_tp_orders = [o for o in new_orders if o.is_reduce_only]
+                    tp_order_hash[SYMBOL] = get_tp_orders_hash(new_tp_orders)
 
             except Exception as e:
                 log("⚠️ HEALTH CHECK", f"Order check error: {e}")
@@ -1189,7 +1197,10 @@ def periodic_health_check():
 
             try:
                 single_position = (long_size > 0) != (short_size > 0)
-                grid_count = sum(1 for o in api.list_futures_orders(SETTLE, contract=SYMBOL, status='open') if not o.is_reduce_only)
+                # 여기도 동일하게 필터링
+                open_orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
+                grid_count = sum(1 for o in open_orders if not o.is_reduce_only)
+                
                 if single_position and grid_count > 0:
                     log("⚠️ SINGLE", "Zombie grid detected → Clearing...")
                     cancel_all_orders()
@@ -1207,7 +1218,6 @@ def periodic_health_check():
         except Exception as e:
             log("❌ HEALTH", f"Critical Error: {e}")
             time.sleep(5)
-
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
