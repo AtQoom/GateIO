@@ -405,11 +405,9 @@ def refresh_all_tp_orders():
             long_entry_price = position_state[SYMBOL]["long"]["entry_price"]
             short_entry_price = position_state[SYMBOL]["short"]["entry_price"]
        
-        # 둘 다 없으면 리턴
         if long_size == 0 and short_size == 0:
             return
        
-        # 동적 TP 비율 계산
         tp_result = calculate_dynamic_tp_gap()
         if isinstance(tp_result, (tuple, list)) and len(tp_result) >= 2:
             long_tp_ratio = tp_result[0]
@@ -421,7 +419,6 @@ def refresh_all_tp_orders():
         if not isinstance(long_tp_ratio, Decimal): long_tp_ratio = Decimal(str(long_tp_ratio))
         if not isinstance(short_tp_ratio, Decimal): short_tp_ratio = Decimal(str(short_tp_ratio))
        
-        # 기존 TP 모두 취소하고 새로 세팅 (가장 확실한 방법)
         cancel_tp_only()
         time.sleep(1.0)
         
@@ -430,13 +427,15 @@ def refresh_all_tp_orders():
             tp_price_long = long_entry_price * (Decimal("1") + long_tp_ratio)
             tp_price_long = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
             
-            long_qty = long_size.quantize(Decimal("1"), rounding=ROUND_DOWN) 
+            # ★ [수정] 정수 강제 변환(quantize 1) 제거 -> adjust_quantity_step 사용
+            # BNB는 0.001 단위이므로 정수로 자르면 0.012 -> 0이 됨
+            long_qty = adjust_quantity_step(long_size)
             
             if long_qty > 0:
                 try:
                     order = FuturesOrder(
                         contract=SYMBOL,
-                        size=str(-long_qty), # 음수 (매도)
+                        size=str(-float(long_qty)), # 음수 (매도)
                         price=str(tp_price_long),
                         tif="gtc",
                         reduce_only=True,
@@ -447,7 +446,6 @@ def refresh_all_tp_orders():
                 except Exception as e:
                     log("❌ TP LONG FAIL", f"Qty: {long_qty}, Error: {e}")
         
-        # 딜레이를 줘서 API 요청 겹침 방지
         time.sleep(0.5)
        
         # --- SHORT TP 설정 ---
@@ -455,13 +453,14 @@ def refresh_all_tp_orders():
             tp_price_short = short_entry_price * (Decimal("1") - short_tp_ratio)
             tp_price_short = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
             
-            short_qty = short_size.quantize(Decimal("1"), rounding=ROUND_DOWN)
+            # ★ [수정] 정수 강제 변환 제거 -> adjust_quantity_step 사용
+            short_qty = adjust_quantity_step(short_size)
             
             if short_qty > 0:
                 try:
                     order = FuturesOrder(
                         contract=SYMBOL,
-                        size=str(short_qty), # 양수 (매수)
+                        size=str(float(short_qty)), # 양수 (매수)
                         price=str(tp_price_short),
                         tif="gtc",
                         reduce_only=True,
