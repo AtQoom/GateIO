@@ -422,14 +422,16 @@ def refresh_all_tp_orders():
         cancel_tp_only()
         time.sleep(1.0)
         
+        # 소수점 3자리(0.001) 강제 적용
+        forced_step = Decimal("0.001")
+
         # --- LONG TP 설정 ---
         if long_size > 0 and long_entry_price > 0:
             tp_price_long = long_entry_price * (Decimal("1") + long_tp_ratio)
             tp_price_long = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
             
-            # ★ [수정] 정수 강제 변환(quantize 1) 제거 -> adjust_quantity_step 사용
-            # BNB는 0.001 단위이므로 정수로 자르면 0.012 -> 0이 됨
-            long_qty = adjust_quantity_step(long_size)
+            # ★ step을 0.001로 강제 지정
+            long_qty = adjust_quantity_step(long_size, step=forced_step)
             
             if long_qty > 0:
                 try:
@@ -453,8 +455,8 @@ def refresh_all_tp_orders():
             tp_price_short = short_entry_price * (Decimal("1") - short_tp_ratio)
             tp_price_short = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
             
-            # ★ [수정] 정수 강제 변환 제거 -> adjust_quantity_step 사용
-            short_qty = adjust_quantity_step(short_size)
+            # ★ step을 0.001로 강제 지정
+            short_qty = adjust_quantity_step(short_size, step=forced_step)
             
             if short_qty > 0:
                 try:
