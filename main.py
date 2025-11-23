@@ -281,8 +281,10 @@ def log_position_state():
     with balance_lock:
         balance = account_balance
    
-    long_value = long_price * long_size
-    short_value = short_price * short_size
+    # ★ [수정] 가치 계산 시 0.001 곱하기
+    multiplier = Decimal("0.001")
+    long_value = long_price * long_size * multiplier
+    short_value = short_price * short_size * multiplier
    
     log("📊 POSITION", f"Long: {long_size} @ {long_price:.4f} (${long_value:.2f})")
     log("📊 POSITION", f"Short: {short_size} @ {short_price:.4f} (${short_value:.2f})")
@@ -296,49 +298,45 @@ def log_position_state():
 # =============================================================================
 def sync_position(max_retries=3, retry_delay=2):
     """
-    포지션 정보를 동기화합니다.
-    - Gate 선물 size는 '계약 수' 기준이므로, 내부에서도 그대로 사용.
-    - 예전처럼 이상하게 큰 값(예: 1000배)만 0.001 곱해서 보정.
+    포지션 정보를 동기화합니다. (디버깅 로그 제거)
     """
     for attempt in range(max_retries):
         try:
             positions = api.list_positions(SETTLE)
-
+           
             with position_lock:
                 position_state[SYMBOL]["long"]["size"] = Decimal("0")
                 position_state[SYMBOL]["long"]["entry_price"] = Decimal("0")
                 position_state[SYMBOL]["short"]["size"] = Decimal("0")
                 position_state[SYMBOL]["short"]["entry_price"] = Decimal("0")
-
+           
             if positions:
                 for p in positions:
-                    if p.contract != SYMBOL:
-                        continue
+                    if p.contract == SYMBOL:
+                        try:
+                            # ★ 계약 수(정수) 그대로 사용 (0.001 곱하지 않음)
+                            raw_size = float(p.size)
+                            if abs(raw_size) >= 10:
+                                # 혹시나 너무 큰 값이 오면 예외적으로 보정 (안전장치)
+                                size_dec = Decimal(str(raw_size * 0.001))
+                            else:
+                                size_dec = Decimal(str(raw_size))
+                        except Exception as e:
+                            # log("❌ SYNC", f"Size parse error: {e}") # 로그 너무 많으면 주석 처리
+                            size_dec = Decimal("0")
 
-                    try:
-                        raw_size = float(p.size)   # Gate에서 오는 계약 수 (정수여야 정상)
-                        # 예전 로직처럼, 비정상적으로 큰 값만 보정
-                        if abs(raw_size) >= 10:
-                            size_dec = Decimal(str(raw_size * 0.001))
-                            log("⚠️ SYNC", f"Size corrected: {raw_size} -> {size_dec}")
-                        else:
-                            size_dec = Decimal(str(raw_size))
-                    except Exception as e:
-                        log("❌ SYNC", f"Size parse error: {e}")
-                        size_dec = Decimal("0")
-
-                    entry_price = abs(Decimal(str(p.entry_price))) if p.entry_price else Decimal("0")
-
-                    if size_dec > 0:
-                        with position_lock:
-                            position_state[SYMBOL]["long"]["size"] = size_dec
-                            position_state[SYMBOL]["long"]["entry_price"] = entry_price
-                    elif size_dec < 0:
-                        with position_lock:
-                            position_state[SYMBOL]["short"]["size"] = abs(size_dec)
-                            position_state[SYMBOL]["short"]["entry_price"] = entry_price
+                        entry_price = abs(Decimal(str(p.entry_price))) if p.entry_price else Decimal("0")
+                       
+                        if size_dec > 0:
+                            with position_lock:
+                                position_state[SYMBOL]["long"]["size"] = size_dec
+                                position_state[SYMBOL]["long"]["entry_price"] = entry_price
+                        elif size_dec < 0:
+                            with position_lock:
+                                position_state[SYMBOL]["short"]["size"] = abs(size_dec)
+                                position_state[SYMBOL]["short"]["entry_price"] = entry_price
             return True
-
+           
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(retry_delay)
@@ -406,10 +404,10 @@ def refresh_all_tp_orders():
             short_size = position_state[SYMBOL]["short"]["size"]
             long_entry_price = position_state[SYMBOL]["long"]["entry_price"]
             short_entry_price = position_state[SYMBOL]["short"]["entry_price"]
-
+       
         if long_size == 0 and short_size == 0:
             return
-
+       
         tp_result = calculate_dynamic_tp_gap()
         if isinstance(tp_result, (tuple, list)) and len(tp_result) >= 2:
             long_tp = tp_result[0]
@@ -417,60 +415,65 @@ def refresh_all_tp_orders():
         else:
             long_tp = TPMIN
             short_tp = TPMIN
-
-        if not isinstance(long_tp, Decimal):
-            long_tp = Decimal(str(long_tp))
-        if not isinstance(short_tp, Decimal):
-            short_tp = Decimal(str(short_tp))
-
+            
+        if not isinstance(long_tp, Decimal): long_tp = Decimal(str(long_tp))
+        if not isinstance(short_tp, Decimal): short_tp = Decimal(str(short_tp))
+       
         cancel_tp_only()
         time.sleep(1.0)
-
-        # --- LONG TP (전체 수량) ---
+        
+        # 계약 수 기준이므로 정수형으로 처리 (1, 2, ...)
+        # adjust_quantity_step 호출 시 소수점으로 바뀔 위험 있으므로, 그냥 long_size(Decimal) 그대로 사용
+        # 단, 혹시 모를 소수점 방지를 위해 quantize
+        
+        # --- LONG TP 설정 ---
         if long_size > 0 and long_entry_price > 0:
             tp_price_long = long_entry_price * (Decimal("1") + long_tp)
             tp_price_long = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-
-            # 계약 수 기준으로 스텝 맞추기 (보통 step=1)
-            long_qty = adjust_quantity_step(long_size)
+            
+            # ★ [수정] 계약 수 그대로 사용 (정수)
+            long_qty = long_size.quantize(Decimal("1"), rounding=ROUND_DOWN) 
+            
             if long_qty > 0:
                 try:
                     order = FuturesOrder(
                         contract=SYMBOL,
-                        size=str(-long_qty),   # 음수: LONG 청산 (숏 방향)
+                        size=str(-long_qty), # 음수 (매도)
                         price=str(tp_price_long),
                         tif="gtc",
                         reduce_only=True,
                         text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, order)
-                    log("✅ TP LONG", f"Qty: {long_qty}, Price: {float(tp_price_long):.4f}")
+                    log("✅ TP LONG", f"Qty: {long_qty} (Full), Price: {float(tp_price_long):.4f}")
                 except Exception as e:
                     log("❌ TP LONG FAIL", f"Qty: {long_qty}, Error: {e}")
-
+       
         time.sleep(0.5)
-
-        # --- SHORT TP (전체 수량) ---
+       
+        # --- SHORT TP 설정 ---
         if short_size > 0 and short_entry_price > 0:
             tp_price_short = short_entry_price * (Decimal("1") - short_tp)
             tp_price_short = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-
-            short_qty = adjust_quantity_step(short_size)
+            
+            # ★ [수정] 계약 수 그대로 사용 (정수)
+            short_qty = short_size.quantize(Decimal("1"), rounding=ROUND_DOWN)
+            
             if short_qty > 0:
                 try:
                     order = FuturesOrder(
                         contract=SYMBOL,
-                        size=str(short_qty),   # 양수: SHORT 청산 (롱 방향)
+                        size=str(short_qty), # 양수 (매수)
                         price=str(tp_price_short),
                         tif="gtc",
                         reduce_only=True,
                         text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, order)
-                    log("✅ TP SHORT", f"Qty: {short_qty}, Price: {float(tp_price_short):.4f}")
+                    log("✅ TP SHORT", f"Qty: {short_qty} (Full), Price: {float(tp_price_short):.4f}")
                 except Exception as e:
                     log("❌ TP SHORT FAIL", f"Qty: {short_qty}, Error: {e}")
-
+       
         log("✅ TP", "TP refresh process completed")
     except Exception as e:
         log("❌ TP REFRESH", f"Critical Error: {e}")
@@ -518,10 +521,6 @@ def adjust_quantity_step(qty, step=QUANTITY_STEP, min_qty=MIN_QUANTITY):
     return floored
 
 def calculate_grid_qty():
-    """
-    initialize_grid에서 내부적으로 사용되므로,
-    여기서는 참고용으로만 유지 (또는 삭제해도 무방)
-    """
     return MIN_QUANTITY
 
 def get_current_price():
@@ -600,7 +599,10 @@ def handle_non_main_position_tp(non_main_size_at_tp):
         current_price = get_current_price()
         if current_price == 0: return
        
-        main_position_value = Decimal(str(main_size)) * current_price
+        # ★ [수정] 가치 계산 시 0.001 곱하기
+        multiplier = Decimal("0.001")
+        main_position_value = Decimal(str(main_size)) * current_price * multiplier
+        
         if main_position_value < capital * Decimal("1.0"): return
        
         if capital * Decimal("1.0") <= main_position_value < capital * Decimal("2.0"):
@@ -610,8 +612,9 @@ def handle_non_main_position_tp(non_main_size_at_tp):
             sl_qty = Decimal(str(non_main_size_at_tp)) * Decimal("1.5")
             tier = "Tier-2 (1.5x)"
        
-        sl_qty = adjust_quantity_step(sl_qty)
-        if sl_qty < MIN_QUANTITY: sl_qty = MIN_QUANTITY
+        # sl_qty는 계약 수 기준이므로 그대로 사용하거나, 정수로 변환
+        sl_qty = sl_qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
+        if sl_qty < 1: sl_qty = Decimal("1")
         if sl_qty > main_size: sl_qty = main_size
        
         log("💊 TP HANDLER", f"{tier}: {non_main_size_at_tp} TP → {main_side.upper()} {sl_qty} SL")
@@ -684,7 +687,7 @@ def remove_duplicate_orders():
 def cancel_stale_orders():
     try:
         orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-        now = time.time()
+        now = time.time()\
         for o in orders:
             if hasattr(o, 'create_time') and o.create_time:
                 order_age = now - float(o.create_time)
@@ -775,7 +778,6 @@ def initialize_grid(current_price=None):
 
         log("✅ GRID", "Grid orders entry completed")
         
-        # ★ [핵심 수정] 주문 완료 후 이벤트 타임 갱신 (아이들 리셋)
         update_event_time()
         
         time.sleep(1.0)
@@ -905,50 +907,6 @@ def start_websocket():
     asyncio.set_event_loop(loop)
     loop.run_until_complete(watch_positions())
 
-def position_monitor():
-    prev_long_size = Decimal("-1")
-    prev_short_size = Decimal("-1")
-    while True:
-        try:
-            time.sleep(5)
-            sync_position()
-            with position_lock:
-                long_size = position_state[SYMBOL]["long"]["size"]
-                short_size = position_state[SYMBOL]["short"]["size"]
-                long_price = position_state[SYMBOL]["long"]["entry_price"]
-                short_price = position_state[SYMBOL]["short"]["entry_price"]
-            
-            if long_size != prev_long_size or short_size != prev_short_size:
-                if prev_long_size != Decimal("-1"):
-                    log("🔄 CHANGE", f"Long {prev_long_size}→{long_size} | Short {prev_short_size}→{short_size}")
-                prev_long_size = long_size
-                prev_short_size = short_size
-            
-            with balance_lock: balance = account_balance
-            max_value = balance * MAXPOSITIONRATIO
-            long_value = long_price * long_size
-            short_value = short_price * short_size
-            
-            if long_value >= max_value and not max_position_locked["long"]:
-                log_event_header("MAX POSITION LIMIT")
-                log("⚠️ LIMIT", f"LONG ${long_value:.2f} >= ${max_value:.2f}")
-                max_position_locked["long"] = True
-                cancel_all_orders()
-            
-            if short_value >= max_value and not max_position_locked["short"]:
-                log_event_header("MAX POSITION LIMIT")
-                log("⚠️ LIMIT", f"SHORT ${short_value:.2f} >= ${max_value:.2f}")
-                max_position_locked["short"] = True
-                cancel_all_orders()
-            
-            if long_value < max_value and max_position_locked["long"]:
-                log("✅ UNLOCK", f"LONG ${long_value:.2f} < ${max_value:.2f}")
-                max_position_locked["long"] = False
-            if short_value < max_value and max_position_locked["short"]:
-                log("✅ UNLOCK", f"SHORT ${short_value:.2f} < ${max_value:.2f}")
-                max_position_locked["short"] = False
-        except: time.sleep(5)
-
 async def grid_fill_monitor():
     uri = f"wss://fx-ws.gateio.ws/v4/ws/{SETTLE}"
     while True:
@@ -1055,10 +1013,9 @@ def check_idle_and_enter():
             log("IDLE-DEBUG", "price == 0")
             return
 
-        # ★ [수정] 계약 수(long_size)에 0.001을 곱해서 실제 BNB 가치로 변환
-        # BNB_USDT 1계약 = 0.001 BNB 가정 (또는 0.01 등 상황에 맞게)
-        multiplier = Decimal("0.001") 
-        total_position_value = (long_size + short_size) * multiplier * current_price
+        # ★ [수정] 가치 계산 시 0.001 곱하기
+        multiplier = Decimal("0.001")
+        total_position_value = (long_size + short_size) * current_price * multiplier
         
         max_allowed_value = balance * MAXPOSITIONRATIO
         if total_position_value >= max_allowed_value:
@@ -1074,10 +1031,11 @@ def check_idle_and_enter():
             log_event_header(f"IDLE ENTRY #{idle_entry_count}")
             log("⏰ IDLE", f"No activity for {elapsed/60:.1f} min → Adding Grid/Hedge")
             
+            # 시장가 양방향 진입 (물타기/헷징)
             if current_price > 0:
                 initialize_grid(current_price)
                 last_idle_entry_time = current_time
-                update_event_time()
+                update_event_time() # 이벤트 시간 갱신하여 연속 진입 방지
                 
         finally:
             with idle_entry_progress_lock:
@@ -1087,7 +1045,6 @@ def check_idle_and_enter():
         log("❌ IDLE", f"Error: {e}")
         with idle_entry_progress_lock:
             idle_entry_in_progress = False
-
 
 def idle_monitor():
     global last_idle_check
@@ -1230,7 +1187,6 @@ def periodic_health_check():
             log("❌ HEALTH", f"Critical Error: {e}")
             time.sleep(5)
 
-
 @app.route('/webhook', methods=['POST'])
 def webhook():
     global obv_macd_value
@@ -1301,4 +1257,3 @@ if __name__ == '__main__':
     threading.Thread(target=idle_monitor, daemon=True).start()
     threading.Thread(target=periodic_health_check, daemon=True).start()
     app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
-
