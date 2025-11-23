@@ -378,6 +378,7 @@ def cancel_all_orders():
 def cancel_tp_only():
     try:
         orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
+        # 필터링 (API 인자 대신)
         tp_orders = [o for o in orders if o.is_reduce_only]
        
         if len(tp_orders) == 0:
@@ -394,7 +395,7 @@ def cancel_tp_only():
         log("❌", f"TP cancel error: {e}")
 
 # ============================================================================
-# TP 새로고침 (동적 TP)
+# TP 새로고침 (동적 TP) - 계약 수 변환 로직 적용
 # ============================================================================
 def refresh_all_tp_orders():
     try:
@@ -422,9 +423,6 @@ def refresh_all_tp_orders():
         cancel_tp_only()
         time.sleep(1.0)
         
-        # ★ Gate Futures Size 정책 대응
-        # BNB_USDT 1 계약 = 0.001 BNB 라고 가정
-        # 만약 size가 0.012라면 -> 12 계약으로 변환해야 함
         contract_multiplier = Decimal("0.001")
 
         # --- LONG TP 설정 ---
@@ -432,11 +430,10 @@ def refresh_all_tp_orders():
             tp_price_long = long_entry_price * (Decimal("1") + long_tp_ratio)
             tp_price_long = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
             
-            # 소수점(BNB개수)인 경우 계약 수(정수)로 환산
             if long_size < 1 and long_size > 0:
                 long_qty_contract = int(long_size / contract_multiplier)
             else:
-                long_qty_contract = int(long_size) # 이미 정수라면 그대로
+                long_qty_contract = int(long_size)
 
             if long_qty_contract > 0:
                 try:
@@ -460,7 +457,6 @@ def refresh_all_tp_orders():
             tp_price_short = short_entry_price * (Decimal("1") - short_tp_ratio)
             tp_price_short = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
             
-            # 소수점(BNB개수)인 경우 계약 수(정수)로 환산
             if short_size < 1 and short_size > 0:
                 short_qty_contract = int(short_size / contract_multiplier)
             else:
@@ -492,22 +488,14 @@ def refresh_all_tp_orders():
 # =============================================================================
 def calculate_obv_macd_weight(obv_value):
     obv_abs = abs(obv_value)
-    if obv_abs < 20:
-        multiplier = Decimal("1.1")
-    elif obv_abs < 30:
-        multiplier = Decimal("1.2")
-    elif obv_abs < 40:
-        multiplier = Decimal("1.3")
-    elif obv_abs < 50:
-        multiplier = Decimal("1.4")
-    elif obv_abs < 60:
-        multiplier = Decimal("1.5")
-    elif obv_abs < 70:
-        multiplier = Decimal("1.6")
-    elif obv_abs < 100:
-        multiplier = Decimal("1.8")
-    else:
-        multiplier = Decimal("2.0")
+    if obv_abs < 20: multiplier = Decimal("1.1")
+    elif obv_abs < 30: multiplier = Decimal("1.2")
+    elif obv_abs < 40: multiplier = Decimal("1.3")
+    elif obv_abs < 50: multiplier = Decimal("1.4")
+    elif obv_abs < 60: multiplier = Decimal("1.5")
+    elif obv_abs < 70: multiplier = Decimal("1.6")
+    elif obv_abs < 100: multiplier = Decimal("1.8")
+    else: multiplier = Decimal("2.0")
     return multiplier
 
 def safe_order_qty(qty, min_qty=MIN_QUANTITY):
@@ -542,7 +530,7 @@ def get_current_price():
         return Decimal("0")
 
 # =============================================================================
-# 리밸런싱 로직 (손실 가중치 강화!)
+# 리밸런싱 로직 (손실 가중치 + 계약 수 변환 적용)
 # =============================================================================
 def check_rebalancing_condition(tp_profit, current_loss):
     global last_no_position_time
@@ -570,18 +558,34 @@ def execute_rebalancing_sl():
             short_size = position_state[SYMBOL]["short"]["size"]
         if long_size == 0 and short_size == 0:
             return
+        
+        contract_multiplier = Decimal("0.001")
+        
         log("🔔 REBALANCE", "Executing SL market orders...")
         if long_size > 0:
-            close_qty = adjust_quantity_step(long_size)
-            order = FuturesOrder(contract=SYMBOL, size=f"-{str(close_qty)}", price="0", tif="ioc", reduce_only=True, text=generate_order_id())
+            # ★ 계약 수 변환
+            if long_size < 1 and long_size > 0:
+                close_qty_contract = int(long_size / contract_multiplier)
+            else:
+                close_qty_contract = int(long_size)
+                
+            order = FuturesOrder(contract=SYMBOL, size=f"-{str(close_qty_contract)}", price="0", tif="ioc", reduce_only=True, text=generate_order_id())
             api.create_futures_order(SETTLE, order)
-            log("✅ REBALANCE", f"LONG {close_qty} SL executed")
+            log("✅ REBALANCE", f"LONG {close_qty_contract} (Contract) SL executed")
+        
         time.sleep(0.3)
+        
         if short_size > 0:
-            close_qty = adjust_quantity_step(short_size)
-            order = FuturesOrder(contract=SYMBOL, size=str(close_qty), price="0", tif="ioc", reduce_only=True, text=generate_order_id())
+            # ★ 계약 수 변환
+            if short_size < 1 and short_size > 0:
+                close_qty_contract = int(short_size / contract_multiplier)
+            else:
+                close_qty_contract = int(short_size)
+                
+            order = FuturesOrder(contract=SYMBOL, size=str(close_qty_contract), price="0", tif="ioc", reduce_only=True, text=generate_order_id())
             api.create_futures_order(SETTLE, order)
-            log("✅ REBALANCE", f"SHORT {close_qty} SL executed")
+            log("✅ REBALANCE", f"SHORT {close_qty_contract} (Contract) SL executed")
+            
         time.sleep(0.5)
         sync_position()
         log("✅ REBALANCE", "Complete!")
@@ -607,7 +611,6 @@ def handle_non_main_position_tp(non_main_size_at_tp):
         current_price = get_current_price()
         if current_price == 0: return
        
-        # ★ [수정] 가치 계산 시 0.001 곱하기
         multiplier = Decimal("0.001")
         main_position_value = Decimal(str(main_size)) * current_price * multiplier
         
@@ -620,17 +623,29 @@ def handle_non_main_position_tp(non_main_size_at_tp):
             sl_qty = Decimal(str(non_main_size_at_tp)) * Decimal("1.5")
             tier = "Tier-2 (1.5x)"
        
-        # sl_qty는 계약 수 기준이므로 그대로 사용하거나, 정수로 변환
-        sl_qty = sl_qty.quantize(Decimal("1"), rounding=ROUND_DOWN)
-        if sl_qty < 1: sl_qty = Decimal("1")
-        if sl_qty > main_size: sl_qty = main_size
-       
-        log("💊 TP HANDLER", f"{tier}: {non_main_size_at_tp} TP → {main_side.upper()} {sl_qty} SL")
+        contract_multiplier = Decimal("0.001")
+        # sl_qty는 BNB 개수일 수 있으므로 계약 수로 변환
+        if sl_qty < 1 and sl_qty > 0:
+            sl_qty_contract = int(sl_qty / contract_multiplier)
+        else:
+            sl_qty_contract = int(sl_qty)
+            
+        if sl_qty_contract < 1: sl_qty_contract = 1
         
-        order_size_str = f"-{str(sl_qty)}" if main_side == "long" else str(sl_qty)
+        # 메인 포지션 크기(계약 수)도 확인 필요
+        if main_size < 1 and main_size > 0:
+            main_size_contract = int(main_size / contract_multiplier)
+        else:
+            main_size_contract = int(main_size)
+            
+        if sl_qty_contract > main_size_contract: sl_qty_contract = main_size_contract
+       
+        log("💊 TP HANDLER", f"{tier}: {non_main_size_at_tp} TP → {main_side.upper()} {sl_qty_contract} (Contract) SL")
+        
+        order_size_str = f"-{str(sl_qty_contract)}" if main_side == "long" else str(sl_qty_contract)
         order = FuturesOrder(contract=SYMBOL, size=order_size_str, price="0", tif="ioc", reduce_only=True, text=generate_order_id())
         api.create_futures_order(SETTLE, order)
-        log("✅ TP HANDLER", f"{main_side.upper()} {sl_qty} SL 완료!")
+        log("✅ TP HANDLER", f"{main_side.upper()} {sl_qty_contract} SL 완료!")
         time.sleep(0.5)
         sync_position()
     except Exception as e:
@@ -663,9 +678,9 @@ def validate_strategy_consistency():
         if current_price == 0: return
         
         try:
-            orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-            # ★ [수정] is_reduce_only 사용
-            grid_count = sum(1 for o in orders if not o.is_reduce_only)
+            # 필터링 수정
+            all_orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
+            grid_count = sum(1 for o in all_orders if not o.is_reduce_only)
         except: return
         
         single_position = (long_size > 0 or short_size > 0) and not (long_size > 0 and short_size > 0)
@@ -681,7 +696,6 @@ def remove_duplicate_orders():
         seen_orders = {}
         duplicates = []
         for o in orders:
-            # ★ [수정] is_reduce_only 사용
             key = f"{o.size}_{o.price}_{o.is_reduce_only}"
             if key in seen_orders: duplicates.append(o.id)
             else: seen_orders[key] = o.id
@@ -727,7 +741,7 @@ def initialize_grid(current_price=None):
         obv_display = float(obv_macd_value) * 100
         obv_multiplier = float(calculate_obv_macd_weight(obv_display))
 
-        # 3️⃣ ★ [수정] 손실 가중치 (Loss Multiplier) 추가
+        # 3️⃣ ★ 손실 가중치 (Loss Multiplier) 추가
         loss_multiplier = Decimal("1.0")
         try:
             with position_lock:
@@ -766,22 +780,31 @@ def initialize_grid(current_price=None):
             long_qty = safe_order_qty(base_qty * float(loss_multiplier))
             short_qty = safe_order_qty(base_qty * float(loss_multiplier))
 
-        long_qty = adjust_quantity_step(long_qty)
-        short_qty = adjust_quantity_step(short_qty)
+        # ★ [수정] 계약 수 변환 적용
+        contract_multiplier = Decimal("0.001")
+        
+        # 계산된 BNB 개수(long_qty)를 계약 수로 변환
+        if long_qty < 1: long_qty_contract = int(long_qty / float(contract_multiplier))
+        else: long_qty_contract = int(long_qty)
+        if long_qty_contract < 1: long_qty_contract = 1 # 최소 1계약
+        
+        if short_qty < 1: short_qty_contract = int(short_qty / float(contract_multiplier))
+        else: short_qty_contract = int(short_qty)
+        if short_qty_contract < 1: short_qty_contract = 1 # 최소 1계약
 
-        log("INFO", f"[GRID] init, LONG={long_qty}, SHORT={short_qty}, OBV={obv_macd_value:.4f}, mult={obv_multiplier:.2f}, loss={loss_multiplier:.2f}")
+        log("INFO", f"[GRID] init, LONG={long_qty_contract}(C), SHORT={short_qty_contract}(C), OBV={obv_macd_value:.4f}, mult={obv_multiplier:.2f}, loss={loss_multiplier:.2f}")
 
         try:
-            order = FuturesOrder(contract=SYMBOL, size=str(long_qty), price="0", tif="ioc", reduce_only=False, text=generate_order_id())
+            order = FuturesOrder(contract=SYMBOL, size=str(long_qty_contract), price="0", tif="ioc", reduce_only=False, text=generate_order_id())
             api.create_futures_order(SETTLE, order)
-            log("✅GRID", f"long {long_qty}")
+            log("✅GRID", f"long {long_qty_contract}")
         except Exception as e: log("❌", f"long grid entry error: {e}")
 
         time.sleep(0.2)
         try:
-            order = FuturesOrder(contract=SYMBOL, size=f"-{str(short_qty)}", price="0", tif="ioc", reduce_only=False, text=generate_order_id())
+            order = FuturesOrder(contract=SYMBOL, size=f"-{str(short_qty_contract)}", price="0", tif="ioc", reduce_only=False, text=generate_order_id())
             api.create_futures_order(SETTLE, order)
-            log("✅GRID", f"short {short_qty}")
+            log("✅GRID", f"short {short_qty_contract}")
         except Exception as e: log("❌", f"short grid entry error: {e}")
 
         log("✅ GRID", "Grid orders entry completed")
@@ -1021,7 +1044,7 @@ def check_idle_and_enter():
             log("IDLE-DEBUG", "price == 0")
             return
 
-        # ★ [수정] 가치 계산 시 0.001 곱하기
+        # ★ 가치 계산 시 0.001 곱하기
         multiplier = Decimal("0.001")
         total_position_value = (long_size + short_size) * current_price * multiplier
         
@@ -1070,7 +1093,7 @@ def get_tp_orders_hash(tp_orders):
         if not tp_orders: return ""
         order_strings = []
         for o in tp_orders: 
-            # ★ [수정] is_reduce_only 사용
+            # ★ is_reduce_only 사용
             order_strings.append(f"{o.size}_{o.price}_{o.is_reduce_only}")
         order_strings.sort()
         return hashlib.md5("_".join(order_strings).encode()).hexdigest()
