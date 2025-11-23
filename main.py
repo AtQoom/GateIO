@@ -687,7 +687,7 @@ def remove_duplicate_orders():
 def cancel_stale_orders():
     try:
         orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-        now = time.time()\
+        now = time.time()
         for o in orders:
             if hasattr(o, 'create_time') and o.create_time:
                 order_age = now - float(o.create_time)
