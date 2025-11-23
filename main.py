@@ -422,31 +422,36 @@ def refresh_all_tp_orders():
         cancel_tp_only()
         time.sleep(1.0)
         
-        # 소수점 3자리(0.001) 강제 적용
-        forced_step = Decimal("0.001")
+        # ★ Gate Futures Size 정책 대응
+        # BNB_USDT 1 계약 = 0.001 BNB 라고 가정
+        # 만약 size가 0.012라면 -> 12 계약으로 변환해야 함
+        contract_multiplier = Decimal("0.001")
 
         # --- LONG TP 설정 ---
         if long_size > 0 and long_entry_price > 0:
             tp_price_long = long_entry_price * (Decimal("1") + long_tp_ratio)
             tp_price_long = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
             
-            # ★ step을 0.001로 강제 지정
-            long_qty = adjust_quantity_step(long_size, step=forced_step)
-            
-            if long_qty > 0:
+            # 소수점(BNB개수)인 경우 계약 수(정수)로 환산
+            if long_size < 1 and long_size > 0:
+                long_qty_contract = int(long_size / contract_multiplier)
+            else:
+                long_qty_contract = int(long_size) # 이미 정수라면 그대로
+
+            if long_qty_contract > 0:
                 try:
                     order = FuturesOrder(
                         contract=SYMBOL,
-                        size=str(-float(long_qty)), # 음수 (매도)
+                        size=str(-long_qty_contract), # 음수 (매도)
                         price=str(tp_price_long),
                         tif="gtc",
                         reduce_only=True,
                         text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, order)
-                    log("✅ TP LONG", f"Qty: {long_qty}, Price: {float(tp_price_long):.4f} (+{long_tp_ratio*100:.2f}%)")
+                    log("✅ TP LONG", f"Qty: {long_qty_contract} (Contract), Price: {float(tp_price_long):.4f}")
                 except Exception as e:
-                    log("❌ TP LONG FAIL", f"Qty: {long_qty}, Error: {e}")
+                    log("❌ TP LONG FAIL", f"Qty: {long_qty_contract}, Error: {e}")
         
         time.sleep(0.5)
        
@@ -455,23 +460,26 @@ def refresh_all_tp_orders():
             tp_price_short = short_entry_price * (Decimal("1") - short_tp_ratio)
             tp_price_short = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
             
-            # ★ step을 0.001로 강제 지정
-            short_qty = adjust_quantity_step(short_size, step=forced_step)
-            
-            if short_qty > 0:
+            # 소수점(BNB개수)인 경우 계약 수(정수)로 환산
+            if short_size < 1 and short_size > 0:
+                short_qty_contract = int(short_size / contract_multiplier)
+            else:
+                short_qty_contract = int(short_size)
+
+            if short_qty_contract > 0:
                 try:
                     order = FuturesOrder(
                         contract=SYMBOL,
-                        size=str(float(short_qty)), # 양수 (매수)
+                        size=str(short_qty_contract), # 양수 (매수)
                         price=str(tp_price_short),
                         tif="gtc",
                         reduce_only=True,
                         text=generate_order_id()
                     )
                     api.create_futures_order(SETTLE, order)
-                    log("✅ TP SHORT", f"Qty: {short_qty}, Price: {float(tp_price_short):.4f} (-{short_tp_ratio*100:.2f}%)")
+                    log("✅ TP SHORT", f"Qty: {short_qty_contract} (Contract), Price: {float(tp_price_short):.4f}")
                 except Exception as e:
-                    log("❌ TP SHORT FAIL", f"Qty: {short_qty}, Error: {e}")
+                    log("❌ TP SHORT FAIL", f"Qty: {short_qty_contract}, Error: {e}")
        
         log("✅ TP", "TP refresh process completed")
         
