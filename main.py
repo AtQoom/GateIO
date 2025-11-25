@@ -736,20 +736,21 @@ def initialize_grid(current_price=None):
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
 
-        # ★ [중요] 잔고 확인 및 로그
+        # 잔고 확인
         with balance_lock:
             balance = account_balance
         log("💰 BALANCE", f"Current Balance: {balance:.2f} USDT")
         
+        # 기본 수량 계산
         base_value = Decimal(str(balance)) * BASERATIO
-        base_qty_bnb = base_value / Decimal(str(price))  # BNB 개수
-        
+        base_qty_bnb = base_value / Decimal(str(price))
         log("🔢 BASE QTY", f"{base_value:.2f} USDT → {base_qty_bnb:.6f} BNB @ {float(price):.2f}")
+        log("📐 FORMULA", f"Base = Balance({balance:.2f}) × Ratio({float(BASERATIO)*100:.0f}%) / Price({float(price):.2f})")
 
         obv_display = float(obv_macd_value) * 100
         obv_multiplier = float(calculate_obv_macd_weight(obv_display))
 
-        # --- 1. 손실 가중치 (Loss Multiplier) ---
+        # 1. 손실 가중치
         loss_multiplier = Decimal("1.0")
         try:
             with position_lock:
@@ -776,42 +777,44 @@ def initialize_grid(current_price=None):
             log("⚠️ QTY", f"Loss multiplier error: {e}")
             loss_multiplier = Decimal("1.0")
 
-        # --- 2. 아이들 시간 가중치 (Idle Multiplier) - 단리 적용 ---
+        # 2. 아이들 시간 가중치
         idle_multiplier = Decimal("1.0")
         if idle_entry_count > 1:
             added_weight = Decimal(str((idle_entry_count - 1) * 0.1))
             idle_multiplier = Decimal("1.0") + added_weight
             if idle_multiplier > Decimal("2.0"): idle_multiplier = Decimal("2.0")
-            log("⏳ IDLE WEIGHT", f"Count {idle_entry_count} -> Multiplier {idle_multiplier:.1f}x")
+            log("⏳ IDLE WEIGHT", f"Count {idle_entry_count} -> 1.0 + ({idle_entry_count - 1} × 0.1) = {idle_multiplier:.1f}x")
 
-        # --- 최종 수량 계산 (BNB 개수 기준, 중첩 적용) ---
+        # 최종 수량 계산
         final_long_bnb = base_qty_bnb * loss_multiplier * idle_multiplier
         final_short_bnb = base_qty_bnb * loss_multiplier * idle_multiplier
 
+        # ★ [수정] OBV 가중치 적용 방식 변경: (1 + OBV) -> OBV
         if obv_display > 0:
-            # OBV 양수: 숏에 OBV 가중치 적용
-            final_short_bnb *= Decimal(str(1 + obv_multiplier))
+            final_short_bnb *= Decimal(str(obv_multiplier))
+            log("📊 OBV", f"OBV {obv_display:.2f} > 0 → SHORT × {obv_multiplier:.2f}")
         elif obv_display < 0:
-            # OBV 음수: 롱에 OBV 가중치 적용
-            final_long_bnb *= Decimal(str(1 + obv_multiplier))
+            final_long_bnb *= Decimal(str(obv_multiplier))
+            log("📊 OBV", f"OBV {obv_display:.2f} < 0 → LONG × {obv_multiplier:.2f}")
 
+        log("📐 FORMULA", f"Final = Base({base_qty_bnb:.6f}) × Loss({loss_multiplier:.2f}) × Idle({idle_multiplier:.1f}) × OBV(if applied)")
         log("📊 FINAL BNB", f"Long: {final_long_bnb:.6f} BNB, Short: {final_short_bnb:.6f} BNB")
 
-        # ★ [수정] 계약 수 변환 (0.001 BNB = 1 Contract 기준)
-        # Gate.io BNB 선물: 1 계약 = 0.001 BNB
+        # 계약 수 변환
         contract_multiplier = Decimal("0.001")
         
         long_qty_contract = int(final_long_bnb / contract_multiplier)
         short_qty_contract = int(final_short_bnb / contract_multiplier)
         
-        # 최소 1계약 보장
         if long_qty_contract < 1: long_qty_contract = 1 
         if short_qty_contract < 1: short_qty_contract = 1 
 
-        log("🔢 CONTRACT QTY", f"Long: {long_qty_contract} Contract(s), Short: {short_qty_contract} Contract(s)")
+        log("📐 FORMULA", f"Contract = BNB / 0.001 (1 Contract = 0.001 BNB)")
+        log("🔢 CONTRACT QTY", f"Long: {final_long_bnb:.6f} / 0.001 = {long_qty_contract} Contract(s)")
+        log("🔢 CONTRACT QTY", f"Short: {final_short_bnb:.6f} / 0.001 = {short_qty_contract} Contract(s)")
         log("INFO", f"[GRID] OBV={obv_multiplier:.2f}, Loss={loss_multiplier:.2f}, Idle={idle_multiplier:.1f}")
 
-        # ★ 주문 실행 (계약 수로 주문)
+        # 주문 실행
         try:
             order = FuturesOrder(
                 contract=SYMBOL, 
@@ -855,7 +858,6 @@ def initialize_grid(current_price=None):
         log("❌ GRID", f"Init error: {e}")
     finally:
         initialize_grid_lock.release()
-
 
 def full_refresh(event_type, skip_grid=False):
     log_event_header(f"FULL REFRESH: {event_type}")
