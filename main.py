@@ -736,8 +736,16 @@ def initialize_grid(current_price=None):
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
 
-        base_value = Decimal(str(account_balance)) * BASERATIO
-        base_qty = float(Decimal(str(base_value)) / Decimal(str(price)))
+        # ★ [중요] 잔고 확인 및 로그
+        with balance_lock:
+            balance = account_balance
+        log("💰 BALANCE", f"Current Balance: {balance:.2f} USDT")
+        
+        base_value = Decimal(str(balance)) * BASERATIO
+        base_qty_bnb = base_value / Decimal(str(price))  # BNB 개수
+        
+        log("🔢 BASE QTY", f"{base_value:.2f} USDT → {base_qty_bnb:.6f} BNB @ {float(price):.2f}")
+
         obv_display = float(obv_macd_value) * 100
         obv_multiplier = float(calculate_obv_macd_weight(obv_display))
 
@@ -769,57 +777,70 @@ def initialize_grid(current_price=None):
             loss_multiplier = Decimal("1.0")
 
         # --- 2. 아이들 시간 가중치 (Idle Multiplier) - 단리 적용 ---
-        # 1회차: 1.0, 2회차: 1.1, 3회차: 1.2 ... (최대 2.0배)
-        idle_multiplier = 1.0
+        idle_multiplier = Decimal("1.0")
         if idle_entry_count > 1:
-            # 2회차부터 10%씩 증가 (단리)
-            added_weight = (idle_entry_count - 1) * 0.1
-            idle_multiplier = 1.0 + added_weight
-            if idle_multiplier > 2.0: idle_multiplier = 2.0
+            added_weight = Decimal(str((idle_entry_count - 1) * 0.1))
+            idle_multiplier = Decimal("1.0") + added_weight
+            if idle_multiplier > Decimal("2.0"): idle_multiplier = Decimal("2.0")
             log("⏳ IDLE WEIGHT", f"Count {idle_entry_count} -> Multiplier {idle_multiplier:.1f}x")
 
-        # --- 최종 수량 계산 (중첩 적용) ---
-        # Base * OBV * Loss * Idle
-        
-        final_long_qty = base_qty * float(loss_multiplier) * idle_multiplier
-        final_short_qty = base_qty * float(loss_multiplier) * idle_multiplier
+        # --- 최종 수량 계산 (BNB 개수 기준, 중첩 적용) ---
+        final_long_bnb = base_qty_bnb * loss_multiplier * idle_multiplier
+        final_short_bnb = base_qty_bnb * loss_multiplier * idle_multiplier
 
         if obv_display > 0:
-            # OBV 양수: 숏에 OBV 가중치 적용 (역추세)
-            final_short_qty *= (1 + obv_multiplier)
+            # OBV 양수: 숏에 OBV 가중치 적용
+            final_short_bnb *= Decimal(str(1 + obv_multiplier))
         elif obv_display < 0:
-            # OBV 음수: 롱에 OBV 가중치 적용 (역추세)
-            final_long_qty *= (1 + obv_multiplier)
-            
-        long_qty = safe_order_qty(final_long_qty)
-        short_qty = safe_order_qty(final_short_qty)
+            # OBV 음수: 롱에 OBV 가중치 적용
+            final_long_bnb *= Decimal(str(1 + obv_multiplier))
 
-        # ★ 계약 수 변환 (0.001 단위 등 고려)
+        log("📊 FINAL BNB", f"Long: {final_long_bnb:.6f} BNB, Short: {final_short_bnb:.6f} BNB")
+
+        # ★ [수정] 계약 수 변환 (0.001 BNB = 1 Contract 기준)
+        # Gate.io BNB 선물: 1 계약 = 0.001 BNB
         contract_multiplier = Decimal("0.001")
         
-        # 계산된 BNB 개수(long_qty)를 계약 수로 변환
-        if long_qty < 1: long_qty_contract = int(long_qty / float(contract_multiplier))
-        else: long_qty_contract = int(long_qty)
-        if long_qty_contract < 1: long_qty_contract = 1 
+        long_qty_contract = int(final_long_bnb / contract_multiplier)
+        short_qty_contract = int(final_short_bnb / contract_multiplier)
         
-        if short_qty < 1: short_qty_contract = int(short_qty / float(contract_multiplier))
-        else: short_qty_contract = int(short_qty)
+        # 최소 1계약 보장
+        if long_qty_contract < 1: long_qty_contract = 1 
         if short_qty_contract < 1: short_qty_contract = 1 
 
-        log("INFO", f"[GRID] init, LONG={long_qty_contract}(C), SHORT={short_qty_contract}(C), OBV={obv_multiplier:.2f}, Loss={loss_multiplier:.2f}, Idle={idle_multiplier:.1f}")
+        log("🔢 CONTRACT QTY", f"Long: {long_qty_contract} Contract(s), Short: {short_qty_contract} Contract(s)")
+        log("INFO", f"[GRID] OBV={obv_multiplier:.2f}, Loss={loss_multiplier:.2f}, Idle={idle_multiplier:.1f}")
 
+        # ★ 주문 실행 (계약 수로 주문)
         try:
-            order = FuturesOrder(contract=SYMBOL, size=str(long_qty_contract), price="0", tif="ioc", reduce_only=False, text=generate_order_id())
+            order = FuturesOrder(
+                contract=SYMBOL, 
+                size=str(long_qty_contract), 
+                price="0", 
+                tif="ioc", 
+                reduce_only=False, 
+                text=generate_order_id()
+            )
             api.create_futures_order(SETTLE, order)
-            log("✅GRID", f"long {long_qty_contract}")
-        except Exception as e: log("❌", f"long grid entry error: {e}")
+            log("✅GRID", f"long {long_qty_contract} Contract(s)")
+        except Exception as e: 
+            log("❌", f"long grid entry error: {e}")
 
         time.sleep(0.2)
+        
         try:
-            order = FuturesOrder(contract=SYMBOL, size=f"-{str(short_qty_contract)}", price="0", tif="ioc", reduce_only=False, text=generate_order_id())
+            order = FuturesOrder(
+                contract=SYMBOL, 
+                size=f"-{str(short_qty_contract)}", 
+                price="0", 
+                tif="ioc", 
+                reduce_only=False, 
+                text=generate_order_id()
+            )
             api.create_futures_order(SETTLE, order)
-            log("✅GRID", f"short {short_qty_contract}")
-        except Exception as e: log("❌", f"short grid entry error: {e}")
+            log("✅GRID", f"short {short_qty_contract} Contract(s)")
+        except Exception as e: 
+            log("❌", f"short grid entry error: {e}")
 
         log("✅ GRID", "Grid orders entry completed")
         
@@ -834,6 +855,7 @@ def initialize_grid(current_price=None):
         log("❌ GRID", f"Init error: {e}")
     finally:
         initialize_grid_lock.release()
+
 
 def full_refresh(event_type, skip_grid=False):
     log_event_header(f"FULL REFRESH: {event_type}")
