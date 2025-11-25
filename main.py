@@ -741,12 +741,10 @@ def initialize_grid(current_price=None):
         obv_display = float(obv_macd_value) * 100
         obv_multiplier = float(calculate_obv_macd_weight(obv_display))
 
-        # 3️⃣ ★ 손실 가중치 (Loss Multiplier) 추가
+        # --- 1. 손실 가중치 (Loss Multiplier) ---
         loss_multiplier = Decimal("1.0")
         try:
             with position_lock:
-                long_size = position_state[SYMBOL]["long"]["size"]
-                short_size = position_state[SYMBOL]["short"]["size"]
                 long_entry = position_state[SYMBOL]["long"]["entry_price"]
                 short_entry = position_state[SYMBOL]["short"]["entry_price"]
                 
@@ -770,29 +768,45 @@ def initialize_grid(current_price=None):
             log("⚠️ QTY", f"Loss multiplier error: {e}")
             loss_multiplier = Decimal("1.0")
 
-        if obv_display > 0:
-            short_qty = safe_order_qty(base_qty * (1 + obv_multiplier) * float(loss_multiplier))
-            long_qty = safe_order_qty(base_qty * float(loss_multiplier))
-        elif obv_display < 0:
-            long_qty = safe_order_qty(base_qty * (1 + obv_multiplier) * float(loss_multiplier))
-            short_qty = safe_order_qty(base_qty * float(loss_multiplier))
-        else:
-            long_qty = safe_order_qty(base_qty * float(loss_multiplier))
-            short_qty = safe_order_qty(base_qty * float(loss_multiplier))
+        # --- 2. 아이들 시간 가중치 (Idle Multiplier) - 단리 적용 ---
+        # 1회차: 1.0, 2회차: 1.1, 3회차: 1.2 ... (최대 2.0배)
+        idle_multiplier = 1.0
+        if idle_entry_count > 1:
+            # 2회차부터 10%씩 증가 (단리)
+            added_weight = (idle_entry_count - 1) * 0.1
+            idle_multiplier = 1.0 + added_weight
+            if idle_multiplier > 2.0: idle_multiplier = 2.0
+            log("⏳ IDLE WEIGHT", f"Count {idle_entry_count} -> Multiplier {idle_multiplier:.1f}x")
 
-        # ★ [수정] 계약 수 변환 적용
+        # --- 최종 수량 계산 (중첩 적용) ---
+        # Base * OBV * Loss * Idle
+        
+        final_long_qty = base_qty * float(loss_multiplier) * idle_multiplier
+        final_short_qty = base_qty * float(loss_multiplier) * idle_multiplier
+
+        if obv_display > 0:
+            # OBV 양수: 숏에 OBV 가중치 적용 (역추세)
+            final_short_qty *= (1 + obv_multiplier)
+        elif obv_display < 0:
+            # OBV 음수: 롱에 OBV 가중치 적용 (역추세)
+            final_long_qty *= (1 + obv_multiplier)
+            
+        long_qty = safe_order_qty(final_long_qty)
+        short_qty = safe_order_qty(final_short_qty)
+
+        # ★ 계약 수 변환 (0.001 단위 등 고려)
         contract_multiplier = Decimal("0.001")
         
         # 계산된 BNB 개수(long_qty)를 계약 수로 변환
         if long_qty < 1: long_qty_contract = int(long_qty / float(contract_multiplier))
         else: long_qty_contract = int(long_qty)
-        if long_qty_contract < 1: long_qty_contract = 1 # 최소 1계약
+        if long_qty_contract < 1: long_qty_contract = 1 
         
         if short_qty < 1: short_qty_contract = int(short_qty / float(contract_multiplier))
         else: short_qty_contract = int(short_qty)
-        if short_qty_contract < 1: short_qty_contract = 1 # 최소 1계약
+        if short_qty_contract < 1: short_qty_contract = 1 
 
-        log("INFO", f"[GRID] init, LONG={long_qty_contract}(C), SHORT={short_qty_contract}(C), OBV={obv_macd_value:.4f}, mult={obv_multiplier:.2f}, loss={loss_multiplier:.2f}")
+        log("INFO", f"[GRID] init, LONG={long_qty_contract}(C), SHORT={short_qty_contract}(C), OBV={obv_multiplier:.2f}, Loss={loss_multiplier:.2f}, Idle={idle_multiplier:.1f}")
 
         try:
             order = FuturesOrder(contract=SYMBOL, size=str(long_qty_contract), price="0", tif="ioc", reduce_only=False, text=generate_order_id())
