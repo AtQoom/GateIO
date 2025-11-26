@@ -1140,6 +1140,10 @@ def get_tp_orders_hash(tp_orders):
     except: return ""
 
 def periodic_health_check():
+    """
+    2분마다 실행되는 통합 헬스 체크
+    (기존 position_monitor의 최대 포지션 체크 기능 포함)
+    """
     global last_adjusted_obv, tp_gap_min, tp_gap_max, last_event_time
     while True:
         try:
@@ -1182,7 +1186,7 @@ def periodic_health_check():
             with balance_lock: balance = account_balance
             max_value = balance * MAXPOSITIONRATIO
             
-            # ★ [수정] 가치 계산 시 multiplier 제거
+            # 가치 계산 시 multiplier 제거 (정상)
             long_value = long_price * long_size 
             short_value = short_price * short_size 
 
@@ -1205,16 +1209,21 @@ def periodic_health_check():
             # --- 기존 헬스 체크 로직 ---
             try:
                 all_orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
+                
+                # TP 주문(Reduce-Only) 추출
                 tp_orders_list = [o for o in all_orders if o.is_reduce_only]
-                grid_count = sum(1 for o in all_orders if not o.is_reduce_only)
+                
+                # 일반 그리드 주문 추출 (진입 주문)
+                grid_orders_list = [o for o in all_orders if not o.is_reduce_only]
+                grid_count = len(grid_orders_list)
                 
                 long_tp_exists = False
                 short_tp_exists = False
                 
                 for tp in tp_orders_list:
                     size = float(tp.size)
-                    if size < 0: long_tp_exists = True
-                    elif size > 0: short_tp_exists = True
+                    if size < 0: long_tp_exists = True # Close Long
+                    elif size > 0: short_tp_exists = True # Close Short
 
                 log("📊 ORDERS", f"Grid(Open): {grid_count}, TP(L/S): {long_tp_exists}/{short_tp_exists}")
 
@@ -1240,6 +1249,26 @@ def periodic_health_check():
                     new_tp_orders = [o for o in new_orders if o.is_reduce_only]
                     tp_order_hash[SYMBOL] = get_tp_orders_hash(new_tp_orders)
 
+                # ★ [수정] 좀비 그리드 청산 로직 개선
+                # 한쪽 포지션만 남았는데 그리드 주문이 남아있다면, "그리드 주문만" 취소한다.
+                single_position = (long_size > 0) != (short_size > 0)
+                
+                if single_position and grid_count > 0:
+                    log("⚠️ SINGLE", f"Zombie grid detected ({grid_count} orders) → Clearing only grids...")
+                    for o in grid_orders_list:
+                        try:
+                            api.cancel_futures_order(SETTLE, o.id)
+                            time.sleep(0.1)
+                        except: pass
+                    # 전체 취소가 아니므로 TP 리프레시는 굳이 안 해도 됨 (위에서 체크함)
+                    
+                elif single_position and grid_count == 0:
+                    # 이미 정리된 상태라면 신규 진입 (물타기/헷지)
+                    # 단, 너무 잦은 진입을 막기 위해 idle 시간 등 체크 필요하지만
+                    # 여기서는 기존 로직대로 initialize_grid 호출 (내부 락 있음)
+                    log("⚠️ SINGLE", "Creating grid from single position...")
+                    initialize_grid()
+
             except Exception as e:
                 log("⚠️ HEALTH CHECK", f"Order check error: {e}")
             
@@ -1253,21 +1282,6 @@ def periodic_health_check():
                     last_adjusted_obv = current_obv
             except: pass
 
-            try:
-                single_position = (long_size > 0) != (short_size > 0)
-                open_orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-                grid_count = sum(1 for o in open_orders if not o.is_reduce_only)
-                
-                if single_position and grid_count > 0:
-                    log("⚠️ SINGLE", "Zombie grid detected → Clearing...")
-                    cancel_all_orders()
-                    time.sleep(0.5)
-                    refresh_all_tp_orders()
-                elif single_position and grid_count == 0:
-                    log("⚠️ SINGLE", "Creating grid from single position...")
-                    initialize_grid()
-            except: pass
-
             validate_strategy_consistency()
             remove_duplicate_orders()
             cancel_stale_orders()
@@ -1275,7 +1289,6 @@ def periodic_health_check():
         except Exception as e:
             log("❌ HEALTH", f"Critical Error: {e}")
             time.sleep(5)
-
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
