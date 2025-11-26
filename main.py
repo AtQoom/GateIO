@@ -281,10 +281,9 @@ def log_position_state():
     with balance_lock:
         balance = account_balance
    
-    # ★ [수정] 가치 계산 시 0.001 곱하기
-    multiplier = Decimal("0.001")
-    long_value = long_price * long_size * multiplier
-    short_value = short_price * short_size * multiplier
+    # ★ [수정] 가치 계산 시 multiplier 제거 (size가 이미 BNB 개수임)
+    long_value = long_price * long_size
+    short_value = short_price * short_size
    
     log("📊 POSITION", f"Long: {long_size} @ {long_price:.4f} (${long_value:.2f})")
     log("📊 POSITION", f"Short: {short_size} @ {short_price:.4f} (${short_value:.2f})")
@@ -611,11 +610,13 @@ def handle_non_main_position_tp(non_main_size_at_tp):
         current_price = get_current_price()
         if current_price == 0: return
        
-        multiplier = Decimal("0.001")
-        main_position_value = Decimal(str(main_size)) * current_price * multiplier
+        # ★ [수정] 가치 계산 시 multiplier 제거
+        main_position_value = Decimal(str(main_size)) * current_price
         
+        # 잔고의 1배 미만이면 손절 로직 동작 안함
         if main_position_value < capital * Decimal("1.0"): return
        
+        # Tier 판단 로직 (이제 정상 작동할 것임)
         if capital * Decimal("1.0") <= main_position_value < capital * Decimal("2.0"):
             sl_qty = Decimal(str(non_main_size_at_tp)) * Decimal("0.8")
             tier = "Tier-1 (0.8x)"
@@ -1139,10 +1140,6 @@ def get_tp_orders_hash(tp_orders):
     except: return ""
 
 def periodic_health_check():
-    """
-    2분마다 실행되는 통합 헬스 체크
-    (기존 position_monitor의 최대 포지션 체크 기능 포함)
-    """
     global last_adjusted_obv, tp_gap_min, tp_gap_max, last_event_time
     while True:
         try:
@@ -1181,14 +1178,13 @@ def periodic_health_check():
             
             if long_size == 0 and short_size == 0: continue
 
-            # --- 최대 포지션 한도 체크 (position_monitor 기능 통합) ---
+            # --- 최대 포지션 한도 체크 ---
             with balance_lock: balance = account_balance
             max_value = balance * MAXPOSITIONRATIO
             
-            # ★ 가치 계산 시 0.001 곱하기
-            multiplier = Decimal("0.001")
-            long_value = long_price * long_size * multiplier
-            short_value = short_price * short_size * multiplier
+            # ★ [수정] 가치 계산 시 multiplier 제거
+            long_value = long_price * long_size 
+            short_value = short_price * short_size 
 
             if long_value >= max_value and not max_position_locked["long"]:
                 log("⚠️ LIMIT", f"LONG ${long_value:.2f} >= ${max_value:.2f}")
@@ -1206,32 +1202,25 @@ def periodic_health_check():
                 log("✅ UNLOCK", f"SHORT ${short_value:.2f} < ${max_value:.2f}")
                 max_position_locked["short"] = False
             
-            # --- 기존 헬스 체크 로직 (주문, TP, OBV 등) ---
+            # --- 기존 헬스 체크 로직 ---
             try:
-                # ★ [수정] is_reduce_only 파라미터 제거 후, 결과 리스트에서 필터링
                 all_orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-                
-                # TP 주문(Reduce-Only)만 추출
                 tp_orders_list = [o for o in all_orders if o.is_reduce_only]
-                
-                # 일반 주문(Grid) 추출
                 grid_count = sum(1 for o in all_orders if not o.is_reduce_only)
                 
                 long_tp_exists = False
                 short_tp_exists = False
                 
-                # TP 주문의 방향(side) 확인 (Close Long은 size가 음수, Close Short는 size가 양수)
                 for tp in tp_orders_list:
                     size = float(tp.size)
-                    if size < 0: long_tp_exists = True # Close Long
-                    elif size > 0: short_tp_exists = True # Close Short
+                    if size < 0: long_tp_exists = True
+                    elif size > 0: short_tp_exists = True
 
                 log("📊 ORDERS", f"Grid(Open): {grid_count}, TP(L/S): {long_tp_exists}/{short_tp_exists}")
 
                 current_hash = get_tp_orders_hash(tp_orders_list)
                 previous_hash = tp_order_hash.get(SYMBOL)
                 
-                # 양방향 보유 시 둘 다 TP가 있는지 체크
                 need_refresh = False
                 
                 if long_size > 0 and not long_tp_exists:
@@ -1241,14 +1230,12 @@ def periodic_health_check():
                     log("🔧 HEALTH", "Short Position exists but no TP → Refreshing")
                     need_refresh = True
                 
-                # 해시 변경 시에도 갱신
                 if not need_refresh and current_hash != previous_hash:
                     log("🔧 HEALTH", "TP Orders Changed → Refreshing")
                     need_refresh = True
 
                 if need_refresh:
                     refresh_all_tp_orders()
-                    # 갱신 후 해시 다시 계산 (API 재호출)
                     new_orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
                     new_tp_orders = [o for o in new_orders if o.is_reduce_only]
                     tp_order_hash[SYMBOL] = get_tp_orders_hash(new_tp_orders)
@@ -1268,7 +1255,6 @@ def periodic_health_check():
 
             try:
                 single_position = (long_size > 0) != (short_size > 0)
-                # 여기도 동일하게 필터링
                 open_orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
                 grid_count = sum(1 for o in open_orders if not o.is_reduce_only)
                 
@@ -1289,6 +1275,7 @@ def periodic_health_check():
         except Exception as e:
             log("❌ HEALTH", f"Critical Error: {e}")
             time.sleep(5)
+
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
