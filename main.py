@@ -750,7 +750,7 @@ def initialize_grid(current_price=None):
         obv_display = float(obv_macd_value) * 100
         obv_multiplier = float(calculate_obv_macd_weight(obv_display))
 
-        # 1. 손실 가중치
+        # --- 1. 손실 가중치 (수정됨: Rate * 20, 최대 제한 없음) ---
         loss_multiplier = Decimal("1.0")
         try:
             with position_lock:
@@ -763,21 +763,23 @@ def initialize_grid(current_price=None):
                 
             if main_side == "long" and price < long_entry:
                 loss_rate = (long_entry - price) / long_entry
-                loss_multiplier = Decimal("1.0") + (loss_rate * Decimal("2"))
+                # ★ [수정] 기존 2 -> 20으로 변경
+                loss_multiplier = Decimal("1.0") + (loss_rate * Decimal("20"))
                 log("📉 LOSS WEIGHT", f"Main(LONG) Loss {loss_rate*100:.2f}% -> Multiplier {loss_multiplier:.2f}")
 
             elif main_side == "short" and price > short_entry:
                 loss_rate = (price - short_entry) / short_entry
-                loss_multiplier = Decimal("1.0") + (loss_rate * Decimal("2"))
+                # ★ [수정] 기존 2 -> 20으로 변경
+                loss_multiplier = Decimal("1.0") + (loss_rate * Decimal("20"))
                 log("📉 LOSS WEIGHT", f"Main(SHORT) Loss {loss_rate*100:.2f}% -> Multiplier {loss_multiplier:.2f}")
-                
-            if loss_multiplier > Decimal("3.0"): loss_multiplier = Decimal("3.0")
+            
+            # ★ [삭제] 최대 3배 제한 코드 삭제됨
                 
         except Exception as e:
             log("⚠️ QTY", f"Loss multiplier error: {e}")
             loss_multiplier = Decimal("1.0")
 
-        # 2. 아이들 시간 가중치
+        # --- 2. 아이들 시간 가중치 ---
         idle_multiplier = Decimal("1.0")
         if idle_entry_count > 1:
             added_weight = Decimal(str((idle_entry_count - 1) * 0.1))
@@ -785,11 +787,10 @@ def initialize_grid(current_price=None):
             if idle_multiplier > Decimal("2.0"): idle_multiplier = Decimal("2.0")
             log("⏳ IDLE WEIGHT", f"Count {idle_entry_count} -> 1.0 + ({idle_entry_count - 1} × 0.1) = {idle_multiplier:.1f}x")
 
-        # 최종 수량 계산
+        # --- 최종 수량 계산 ---
         final_long_bnb = base_qty_bnb * loss_multiplier * idle_multiplier
         final_short_bnb = base_qty_bnb * loss_multiplier * idle_multiplier
 
-        # ★ [수정] OBV 가중치 적용 방식 변경: (1 + OBV) -> OBV
         if obv_display > 0:
             final_short_bnb *= Decimal(str(obv_multiplier))
             log("📊 OBV", f"OBV {obv_display:.2f} > 0 → SHORT × {obv_multiplier:.2f}")
@@ -800,7 +801,7 @@ def initialize_grid(current_price=None):
         log("📐 FORMULA", f"Final = Base({base_qty_bnb:.6f}) × Loss({loss_multiplier:.2f}) × Idle({idle_multiplier:.1f}) × OBV(if applied)")
         log("📊 FINAL BNB", f"Long: {final_long_bnb:.6f} BNB, Short: {final_short_bnb:.6f} BNB")
 
-        # 계약 수 변환
+        # ★ 계약 수 변환
         contract_multiplier = Decimal("0.001")
         
         long_qty_contract = int(final_long_bnb / contract_multiplier)
@@ -814,7 +815,7 @@ def initialize_grid(current_price=None):
         log("🔢 CONTRACT QTY", f"Short: {final_short_bnb:.6f} / 0.001 = {short_qty_contract} Contract(s)")
         log("INFO", f"[GRID] OBV={obv_multiplier:.2f}, Loss={loss_multiplier:.2f}, Idle={idle_multiplier:.1f}")
 
-        # 주문 실행
+        # ★ 주문 실행
         try:
             order = FuturesOrder(
                 contract=SYMBOL, 
