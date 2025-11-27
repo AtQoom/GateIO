@@ -296,36 +296,27 @@ def log_position_state():
 # 포지션 동기화
 # =============================================================================
 def sync_position(max_retries=3, retry_delay=2):
-    """
-    포지션 정보를 동기화합니다. (디버깅 로그 제거)
-    """
     for attempt in range(max_retries):
         try:
             positions = api.list_positions(SETTLE)
-           
             with position_lock:
                 position_state[SYMBOL]["long"]["size"] = Decimal("0")
                 position_state[SYMBOL]["long"]["entry_price"] = Decimal("0")
                 position_state[SYMBOL]["short"]["size"] = Decimal("0")
                 position_state[SYMBOL]["short"]["entry_price"] = Decimal("0")
-           
+            
             if positions:
                 for p in positions:
                     if p.contract == SYMBOL:
-                        try:
-                            # ★ 계약 수(정수) 그대로 사용 (0.001 곱하지 않음)
-                            raw_size = float(p.size)
-                            if abs(raw_size) >= 10:
-                                # 혹시나 너무 큰 값이 오면 예외적으로 보정 (안전장치)
-                                size_dec = Decimal(str(raw_size * 0.001))
-                            else:
-                                size_dec = Decimal(str(raw_size))
-                        except Exception as e:
-                            # log("❌ SYNC", f"Size parse error: {e}") # 로그 너무 많으면 주석 처리
-                            size_dec = Decimal("0")
-
+                        raw_size = float(p.size)
                         entry_price = abs(Decimal(str(p.entry_price))) if p.entry_price else Decimal("0")
-                       
+                        
+                        # ★ [수정] 안전한 변환 로직 (무조건 0.001 곱하되, 너무 작으면 원본 사용)
+                        if abs(raw_size) > 0 and abs(raw_size * 0.001) < 0.001:
+                             size_dec = Decimal(str(raw_size)) # 이미 소수점 단위인 경우
+                        else:
+                             size_dec = Decimal(str(raw_size * 0.001)) # 계약 수인 경우
+
                         if size_dec > 0:
                             with position_lock:
                                 position_state[SYMBOL]["long"]["size"] = size_dec
@@ -335,11 +326,9 @@ def sync_position(max_retries=3, retry_delay=2):
                                 position_state[SYMBOL]["short"]["size"] = abs(size_dec)
                                 position_state[SYMBOL]["short"]["entry_price"] = entry_price
             return True
-           
         except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-            else:
+            if attempt < max_retries - 1: time.sleep(retry_delay)
+            else: 
                 log("❌ SYNC", f"Error: {e}")
                 return False
     return False
@@ -429,10 +418,8 @@ def refresh_all_tp_orders():
             tp_price_long = long_entry_price * (Decimal("1") + long_tp_ratio)
             tp_price_long = tp_price_long.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
             
-            if long_size < 1 and long_size > 0:
-                long_qty_contract = int(long_size / contract_multiplier)
-            else:
-                long_qty_contract = int(long_size)
+            # ★ [수정] 무조건 0.001로 나누어 계약 수 변환
+            long_qty_contract = int(long_size / contract_multiplier)
 
             if long_qty_contract > 0:
                 try:
@@ -456,10 +443,8 @@ def refresh_all_tp_orders():
             tp_price_short = short_entry_price * (Decimal("1") - short_tp_ratio)
             tp_price_short = tp_price_short.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
             
-            if short_size < 1 and short_size > 0:
-                short_qty_contract = int(short_size / contract_multiplier)
-            else:
-                short_qty_contract = int(short_size)
+            # ★ [수정] 무조건 0.001로 나누어 계약 수 변환
+            short_qty_contract = int(short_size / contract_multiplier)
 
             if short_qty_contract > 0:
                 try:
@@ -480,7 +465,6 @@ def refresh_all_tp_orders():
         
     except Exception as e:
         log("❌ TP REFRESH", f"Critical Error: {e}")
-
 
 # =============================================================================
 # 수량 계산 함수
@@ -562,11 +546,8 @@ def execute_rebalancing_sl():
         
         log("🔔 REBALANCE", "Executing SL market orders...")
         if long_size > 0:
-            # ★ 계약 수 변환
-            if long_size < 1 and long_size > 0:
-                close_qty_contract = int(long_size / contract_multiplier)
-            else:
-                close_qty_contract = int(long_size)
+            # ★ [수정] 무조건 0.001로 나누어 계약 수 변환
+            close_qty_contract = int(long_size / contract_multiplier)
                 
             order = FuturesOrder(contract=SYMBOL, size=f"-{str(close_qty_contract)}", price="0", tif="ioc", reduce_only=True, text=generate_order_id())
             api.create_futures_order(SETTLE, order)
@@ -575,11 +556,8 @@ def execute_rebalancing_sl():
         time.sleep(0.3)
         
         if short_size > 0:
-            # ★ 계약 수 변환
-            if short_size < 1 and short_size > 0:
-                close_qty_contract = int(short_size / contract_multiplier)
-            else:
-                close_qty_contract = int(short_size)
+            # ★ [수정] 무조건 0.001로 나누어 계약 수 변환
+            close_qty_contract = int(short_size / contract_multiplier)
                 
             order = FuturesOrder(contract=SYMBOL, size=str(close_qty_contract), price="0", tif="ioc", reduce_only=True, text=generate_order_id())
             api.create_futures_order(SETTLE, order)
@@ -590,6 +568,7 @@ def execute_rebalancing_sl():
         log("✅ REBALANCE", "Complete!")
     except Exception as e:
         log("❌ REBALANCE", f"Execution error: {e}")
+
 
 def handle_non_main_position_tp(non_main_size_at_tp):
     try:
@@ -610,13 +589,11 @@ def handle_non_main_position_tp(non_main_size_at_tp):
         current_price = get_current_price()
         if current_price == 0: return
        
-        # ★ [수정] 가치 계산 시 multiplier 제거
+        # 가치 계산 (이미 수정됨)
         main_position_value = Decimal(str(main_size)) * current_price
         
-        # 잔고의 1배 미만이면 손절 로직 동작 안함
         if main_position_value < capital * Decimal("1.0"): return
        
-        # Tier 판단 로직 (이제 정상 작동할 것임)
         if capital * Decimal("1.0") <= main_position_value < capital * Decimal("2.0"):
             sl_qty = Decimal(str(non_main_size_at_tp)) * Decimal("0.8")
             tier = "Tier-1 (0.8x)"
@@ -625,19 +602,14 @@ def handle_non_main_position_tp(non_main_size_at_tp):
             tier = "Tier-2 (1.5x)"
        
         contract_multiplier = Decimal("0.001")
-        # sl_qty는 BNB 개수일 수 있으므로 계약 수로 변환
-        if sl_qty < 1 and sl_qty > 0:
-            sl_qty_contract = int(sl_qty / contract_multiplier)
-        else:
-            sl_qty_contract = int(sl_qty)
+        
+        # ★ [수정] 무조건 0.001로 나누어 계약 수 변환
+        sl_qty_contract = int(sl_qty / contract_multiplier)
             
         if sl_qty_contract < 1: sl_qty_contract = 1
         
         # 메인 포지션 크기(계약 수)도 확인 필요
-        if main_size < 1 and main_size > 0:
-            main_size_contract = int(main_size / contract_multiplier)
-        else:
-            main_size_contract = int(main_size)
+        main_size_contract = int(main_size / contract_multiplier)
             
         if sl_qty_contract > main_size_contract: sl_qty_contract = main_size_contract
        
@@ -764,18 +736,14 @@ def initialize_grid(current_price=None):
                 
             if main_side == "long" and price < long_entry:
                 loss_rate = (long_entry - price) / long_entry
-                # ★ [수정] 기존 2 -> 20으로 변경
                 loss_multiplier = Decimal("1.0") + (loss_rate * Decimal("20"))
                 log("📉 LOSS WEIGHT", f"Main(LONG) Loss {loss_rate*100:.2f}% -> Multiplier {loss_multiplier:.2f}")
 
             elif main_side == "short" and price > short_entry:
                 loss_rate = (price - short_entry) / short_entry
-                # ★ [수정] 기존 2 -> 20으로 변경
                 loss_multiplier = Decimal("1.0") + (loss_rate * Decimal("20"))
                 log("📉 LOSS WEIGHT", f"Main(SHORT) Loss {loss_rate*100:.2f}% -> Multiplier {loss_multiplier:.2f}")
             
-            # ★ [삭제] 최대 3배 제한 코드 삭제됨
-                
         except Exception as e:
             log("⚠️ QTY", f"Loss multiplier error: {e}")
             loss_multiplier = Decimal("1.0")
@@ -802,7 +770,7 @@ def initialize_grid(current_price=None):
         log("📐 FORMULA", f"Final = Base({base_qty_bnb:.6f}) × Loss({loss_multiplier:.2f}) × Idle({idle_multiplier:.1f}) × OBV(if applied)")
         log("📊 FINAL BNB", f"Long: {final_long_bnb:.6f} BNB, Short: {final_short_bnb:.6f} BNB")
 
-        # ★ 계약 수 변환
+        # ★ [수정] 계약 수 변환 (무조건 0.001로 나눔)
         contract_multiplier = Decimal("0.001")
         
         long_qty_contract = int(final_long_bnb / contract_multiplier)
