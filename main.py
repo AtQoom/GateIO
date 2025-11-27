@@ -209,22 +209,23 @@ def load_initial_capital():
         if os.path.exists(CAPITAL_FILE):
             with open(CAPITAL_FILE, 'r') as f:
                 data = json.load(f)
-           
+            
             loaded_capital = Decimal(data.get("initial_capital", "0"))
             saved_symbol = data.get("symbol", "")
-            timestamp = data.get("timestamp", 0)
-           
+            
             if saved_symbol == SYMBOL and loaded_capital > 0:
                 initial_capital = loaded_capital
-                saved_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-                log("📂 LOAD", f"Initial Capital loaded: {initial_capital:.2f} USDT (saved at {saved_time})")
+                # 저장된 시간도 로깅에 포함하면 좋음
+                saved_ts = data.get("timestamp", 0)
+                saved_time = datetime.fromtimestamp(saved_ts).strftime("%Y-%m-%d %H:%M:%S") if saved_ts else "?"
+                log("📂 LOAD", f"Initial Capital loaded: {initial_capital:.2f} USDT (Saved: {saved_time})")
                 return True
             else:
                 log("⚠️ LOAD", "Invalid saved data (symbol mismatch or zero capital)")
-                return False
         else:
-            log("ℹ️ LOAD", "No saved capital file found")
-            return False
+            log("ℹ️ LOAD", "No saved capital file found. Will set on first run.")
+            
+        return False
     except Exception as e:
         log("❌ LOAD", f"Failed to load capital: {e}")
         return False
@@ -296,9 +297,15 @@ def log_position_state():
 # 포지션 동기화
 # =============================================================================
 def sync_position(max_retries=3, retry_delay=2):
+    """
+    포지션 정보를 동기화합니다.
+    API가 반환하는 size가 '계약 수(정수)'인지 'BNB 개수(소수)'인지 모호할 때를 대비하여
+    BNB 가격을 기반으로 합리적인 범위를 추론하여 변환합니다.
+    """
     for attempt in range(max_retries):
         try:
             positions = api.list_positions(SETTLE)
+            
             with position_lock:
                 position_state[SYMBOL]["long"]["size"] = Decimal("0")
                 position_state[SYMBOL]["long"]["entry_price"] = Decimal("0")
@@ -311,11 +318,18 @@ def sync_position(max_retries=3, retry_delay=2):
                         raw_size = float(p.size)
                         entry_price = abs(Decimal(str(p.entry_price))) if p.entry_price else Decimal("0")
                         
-                        # ★ [수정] 안전한 변환 로직 (무조건 0.001 곱하되, 너무 작으면 원본 사용)
+                        # ★ [수정] 안전한 변환 로직
+                        # raw_size가 1500(계약)이면 -> 1.5 BNB
+                        # raw_size가 1.5(BNB)면 -> 1.5 BNB
+                        # 0.001을 곱해보고 너무 작아지면(0.001 미만) 원본이 BNB 개수라고 판단
+                        
+                        # 절대값이 0보다 크고, 0.001 곱했을 때 0.001보다 작다면? (예: raw=0.5 -> 0.0005)
+                        # -> 이미 BNB 개수 단위임.
                         if abs(raw_size) > 0 and abs(raw_size * 0.001) < 0.001:
-                             size_dec = Decimal(str(raw_size)) # 이미 소수점 단위인 경우
+                             size_dec = Decimal(str(raw_size))
                         else:
-                             size_dec = Decimal(str(raw_size * 0.001)) # 계약 수인 경우
+                             # 그 외 (예: 1, 10, 1500) -> 계약 수로 보고 변환
+                             size_dec = Decimal(str(raw_size * 0.001))
 
                         if size_dec > 0:
                             with position_lock:
@@ -325,10 +339,13 @@ def sync_position(max_retries=3, retry_delay=2):
                             with position_lock:
                                 position_state[SYMBOL]["short"]["size"] = abs(size_dec)
                                 position_state[SYMBOL]["short"]["entry_price"] = entry_price
+
             return True
+           
         except Exception as e:
-            if attempt < max_retries - 1: time.sleep(retry_delay)
-            else: 
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+            else:
                 log("❌ SYNC", f"Error: {e}")
                 return False
     return False
@@ -576,6 +593,8 @@ def handle_non_main_position_tp(non_main_size_at_tp):
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
+        
+        # ★ [수정] Tier 계산 기준을 '초기 자본금'으로 고정
         with balance_lock:
             capital = initial_capital if initial_capital > 0 else account_balance
        
@@ -589,9 +608,10 @@ def handle_non_main_position_tp(non_main_size_at_tp):
         current_price = get_current_price()
         if current_price == 0: return
        
-        # 가치 계산 (이미 수정됨)
+        # 가치 계산
         main_position_value = Decimal(str(main_size)) * current_price
         
+        # Tier 로직
         if main_position_value < capital * Decimal("1.0"): return
        
         if capital * Decimal("1.0") <= main_position_value < capital * Decimal("2.0"):
@@ -608,12 +628,11 @@ def handle_non_main_position_tp(non_main_size_at_tp):
             
         if sl_qty_contract < 1: sl_qty_contract = 1
         
-        # 메인 포지션 크기(계약 수)도 확인 필요
+        # 메인 포지션 크기 초과 방지
         main_size_contract = int(main_size / contract_multiplier)
-            
         if sl_qty_contract > main_size_contract: sl_qty_contract = main_size_contract
        
-        log("💊 TP HANDLER", f"{tier}: {non_main_size_at_tp} TP → {main_side.upper()} {sl_qty_contract} (Contract) SL")
+        log("💊 TP HANDLER", f"{tier}: {non_main_size_at_tp} TP → {main_side.upper()} {sl_qty_contract} (C) SL")
         
         order_size_str = f"-{str(sl_qty_contract)}" if main_side == "long" else str(sl_qty_contract)
         order = FuturesOrder(contract=SYMBOL, size=order_size_str, price="0", tif="ioc", reduce_only=True, text=generate_order_id())
@@ -692,7 +711,7 @@ def cancel_stale_orders():
     except: pass
 
 def initialize_grid(current_price=None):
-    global last_grid_time
+    global last_grid_time, initial_capital
     if not initialize_grid_lock.acquire(blocking=False):
         log("🔒 GRID", "Already running → skip")
         return
@@ -709,21 +728,29 @@ def initialize_grid(current_price=None):
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
 
-        # 잔고 확인
+        # ★ [수정] 자본금 기준 확정 로직
         with balance_lock:
-            balance = account_balance
-        log("💰 BALANCE", f"Current Balance: {balance:.2f} USDT")
+            current_balance = account_balance
+            
+        # 초기 자본금이 설정되지 않았다면 현재 잔고로 고정하고 저장
+        if initial_capital <= 0:
+            initial_capital = current_balance
+            save_initial_capital()
+            log("💾 INIT", f"Initial Capital set to {initial_capital:.2f} USDT")
+            
+        # ★ [핵심] 가용 잔고가 아닌 '초기 자본금' 기준으로 수량 계산
+        calc_basis = initial_capital if initial_capital > 0 else current_balance
         
-        # 기본 수량 계산
-        base_value = Decimal(str(balance)) * BASERATIO
+        base_value = Decimal(str(calc_basis)) * BASERATIO
         base_qty_bnb = base_value / Decimal(str(price))
-        log("🔢 BASE QTY", f"{base_value:.2f} USDT → {base_qty_bnb:.6f} BNB @ {float(price):.2f}")
-        log("📐 FORMULA", f"Base = Balance({balance:.2f}) × Ratio({float(BASERATIO)*100:.0f}%) / Price({float(price):.2f})")
+        
+        log("💰 CALC BASIS", f"Using Capital: {calc_basis:.2f} USDT (Current: {current_balance:.2f})")
+        log("🔢 BASE QTY", f"{base_value:.2f} USDT → {base_qty_bnb:.6f} BNB")
 
         obv_display = float(obv_macd_value) * 100
         obv_multiplier = float(calculate_obv_macd_weight(obv_display))
 
-        # --- 1. 손실 가중치 (수정됨: Rate * 20, 최대 제한 없음) ---
+        # --- 1. 손실 가중치 (20배 적용) ---
         loss_multiplier = Decimal("1.0")
         try:
             with position_lock:
@@ -743,7 +770,7 @@ def initialize_grid(current_price=None):
                 loss_rate = (price - short_entry) / short_entry
                 loss_multiplier = Decimal("1.0") + (loss_rate * Decimal("20"))
                 log("📉 LOSS WEIGHT", f"Main(SHORT) Loss {loss_rate*100:.2f}% -> Multiplier {loss_multiplier:.2f}")
-            
+                
         except Exception as e:
             log("⚠️ QTY", f"Loss multiplier error: {e}")
             loss_multiplier = Decimal("1.0")
@@ -754,7 +781,7 @@ def initialize_grid(current_price=None):
             added_weight = Decimal(str((idle_entry_count - 1) * 0.1))
             idle_multiplier = Decimal("1.0") + added_weight
             if idle_multiplier > Decimal("2.0"): idle_multiplier = Decimal("2.0")
-            log("⏳ IDLE WEIGHT", f"Count {idle_entry_count} -> 1.0 + ({idle_entry_count - 1} × 0.1) = {idle_multiplier:.1f}x")
+            log("⏳ IDLE WEIGHT", f"Count {idle_entry_count} -> {idle_multiplier:.1f}x")
 
         # --- 최종 수량 계산 ---
         final_long_bnb = base_qty_bnb * loss_multiplier * idle_multiplier
@@ -762,13 +789,10 @@ def initialize_grid(current_price=None):
 
         if obv_display > 0:
             final_short_bnb *= Decimal(str(obv_multiplier))
-            log("📊 OBV", f"OBV {obv_display:.2f} > 0 → SHORT × {obv_multiplier:.2f}")
+            log("📊 OBV", f"OBV > 0 → SHORT × {obv_multiplier:.2f}")
         elif obv_display < 0:
             final_long_bnb *= Decimal(str(obv_multiplier))
-            log("📊 OBV", f"OBV {obv_display:.2f} < 0 → LONG × {obv_multiplier:.2f}")
-
-        log("📐 FORMULA", f"Final = Base({base_qty_bnb:.6f}) × Loss({loss_multiplier:.2f}) × Idle({idle_multiplier:.1f}) × OBV(if applied)")
-        log("📊 FINAL BNB", f"Long: {final_long_bnb:.6f} BNB, Short: {final_short_bnb:.6f} BNB")
+            log("📊 OBV", f"OBV < 0 → LONG × {obv_multiplier:.2f}")
 
         # ★ [수정] 계약 수 변환 (무조건 0.001로 나눔)
         contract_multiplier = Decimal("0.001")
@@ -779,50 +803,28 @@ def initialize_grid(current_price=None):
         if long_qty_contract < 1: long_qty_contract = 1 
         if short_qty_contract < 1: short_qty_contract = 1 
 
-        log("📐 FORMULA", f"Contract = BNB / 0.001 (1 Contract = 0.001 BNB)")
-        log("🔢 CONTRACT QTY", f"Long: {final_long_bnb:.6f} / 0.001 = {long_qty_contract} Contract(s)")
-        log("🔢 CONTRACT QTY", f"Short: {final_short_bnb:.6f} / 0.001 = {short_qty_contract} Contract(s)")
-        log("INFO", f"[GRID] OBV={obv_multiplier:.2f}, Loss={loss_multiplier:.2f}, Idle={idle_multiplier:.1f}")
+        log("🔢 CONTRACT QTY", f"L: {long_qty_contract} / S: {short_qty_contract} (C)")
 
         # ★ 주문 실행
         try:
-            order = FuturesOrder(
-                contract=SYMBOL, 
-                size=str(long_qty_contract), 
-                price="0", 
-                tif="ioc", 
-                reduce_only=False, 
-                text=generate_order_id()
-            )
+            order = FuturesOrder(contract=SYMBOL, size=str(long_qty_contract), price="0", tif="ioc", reduce_only=False, text=generate_order_id())
             api.create_futures_order(SETTLE, order)
-            log("✅GRID", f"long {long_qty_contract} Contract(s)")
-        except Exception as e: 
-            log("❌", f"long grid entry error: {e}")
+            log("✅GRID", f"long {long_qty_contract} (C)")
+        except Exception as e: log("❌", f"long grid error: {e}")
 
         time.sleep(0.2)
         
         try:
-            order = FuturesOrder(
-                contract=SYMBOL, 
-                size=f"-{str(short_qty_contract)}", 
-                price="0", 
-                tif="ioc", 
-                reduce_only=False, 
-                text=generate_order_id()
-            )
+            order = FuturesOrder(contract=SYMBOL, size=f"-{str(short_qty_contract)}", price="0", tif="ioc", reduce_only=False, text=generate_order_id())
             api.create_futures_order(SETTLE, order)
-            log("✅GRID", f"short {short_qty_contract} Contract(s)")
-        except Exception as e: 
-            log("❌", f"short grid entry error: {e}")
+            log("✅GRID", f"short {short_qty_contract} (C)")
+        except Exception as e: log("❌", f"short grid error: {e}")
 
-        log("✅ GRID", "Grid orders entry completed")
-        
+        log("✅ GRID", "Entry completed")
         update_event_time()
-        
         time.sleep(1.0)
         sync_position()
         refresh_all_tp_orders()
-        log("✅ GRID", "Initial TP orders created")
 
     except Exception as e:
         log("❌ GRID", f"Init error: {e}")
@@ -1108,154 +1110,100 @@ def get_tp_orders_hash(tp_orders):
     except: return ""
 
 def periodic_health_check():
-    """
-    2분마다 실행되는 통합 헬스 체크
-    (기존 position_monitor의 최대 포지션 체크 기능 포함)
-    """
-    global last_adjusted_obv, tp_gap_min, tp_gap_max, last_event_time
+    global last_adjusted_obv, last_event_time, initial_capital
     while True:
         try:
             time.sleep(120)
-            
-            # --- 함수 시작 시점, Sync 1회 ---
             sync_position()
             
             current_time = time.time()
             idle_time = current_time - last_event_time
-            log("💊 HEALTH", f"Starting check... (Idle: {idle_time:.1f}s / {IDLE_TIME_SECONDS}s)")
-            log_position_state() # 현재 포지션 상태 로그
+            log("💊 HEALTH", f"Starting check... (Idle: {idle_time:.1f}s)")
+            log_position_state()
             
-            # --- 잔고 및 초기 자본금 업데이트 ---
+            # --- 잔고 및 초기 자본금 업데이트 로직 개선 ---
             try:
                 futures_account = api.list_futures_accounts(SETTLE)
                 if futures_account and getattr(futures_account, 'available', None):
                     avail = Decimal(str(futures_account.available))
-                    with position_lock:
-                        l_s = position_state[SYMBOL]["long"]["size"]
-                        s_s = position_state[SYMBOL]["short"]["size"]
-                    if l_s == 0 and s_s == 0 and avail > 0:
-                        with balance_lock:
-                            global initial_capital, account_balance
-                            initial_capital = avail
-                            account_balance = avail
+                    
+                    with balance_lock:
+                        account_balance = avail
+                    
+                    # ★ [수정] 초기 자본금이 0일 때만 설정 (덮어쓰기 금지)
+                    if initial_capital <= 0 and avail > 0:
+                        initial_capital = avail
                         save_initial_capital()
-                        log("💰 BALANCE", f"{avail:.2f} USDT (Init Cap Updated)")
+                        log("💰 BALANCE", f"Initial Capital Fixed: {avail:.2f} USDT")
             except: pass
 
             with position_lock:
-                long_size = position_state[SYMBOL]["long"]["size"]
-                short_size = position_state[SYMBOL]["short"]["size"]
-                long_price = position_state[SYMBOL]["long"]["entry_price"]
-                short_price = position_state[SYMBOL]["short"]["entry_price"]
+                l_s = position_state[SYMBOL]["long"]["size"]
+                s_s = position_state[SYMBOL]["short"]["size"]
+                l_p = position_state[SYMBOL]["long"]["entry_price"]
+                s_p = position_state[SYMBOL]["short"]["entry_price"]
             
-            if long_size == 0 and short_size == 0: continue
+            if l_s == 0 and s_s == 0: continue
 
-            # --- 최대 포지션 한도 체크 ---
-            with balance_lock: balance = account_balance
-            max_value = balance * MAXPOSITIONRATIO
+            with balance_lock: 
+                check_cap = initial_capital if initial_capital > 0 else account_balance
+                
+            max_v = check_cap * MAXPOSITIONRATIO
             
-            # 가치 계산 시 multiplier 제거 (정상)
-            long_value = long_price * long_size 
-            short_value = short_price * short_size 
+            l_v = l_p * l_s
+            s_v = s_p * s_s
 
-            if long_value >= max_value and not max_position_locked["long"]:
-                log("⚠️ LIMIT", f"LONG ${long_value:.2f} >= ${max_value:.2f}")
+            if l_v >= max_v and not max_position_locked["long"]:
+                log("⚠️ LIMIT", f"LONG Locked (${l_v:.2f})")
                 max_position_locked["long"] = True
                 cancel_all_orders()
-            elif long_value < max_value and max_position_locked["long"]:
-                log("✅ UNLOCK", f"LONG ${long_value:.2f} < ${max_value:.2f}")
+            elif l_v < max_v and max_position_locked["long"]:
                 max_position_locked["long"] = False
 
-            if short_value >= max_value and not max_position_locked["short"]:
-                log("⚠️ LIMIT", f"SHORT ${short_value:.2f} >= ${max_value:.2f}")
+            if s_v >= max_v and not max_position_locked["short"]:
+                log("⚠️ LIMIT", f"SHORT Locked (${s_v:.2f})")
                 max_position_locked["short"] = True
                 cancel_all_orders()
-            elif short_value < max_value and max_position_locked["short"]:
-                log("✅ UNLOCK", f"SHORT ${short_value:.2f} < ${max_value:.2f}")
+            elif s_v < max_v and max_position_locked["short"]:
                 max_position_locked["short"] = False
             
-            # --- 기존 헬스 체크 로직 ---
             try:
-                all_orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
+                orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
+                tp_list = [o for o in orders if o.is_reduce_only]
+                grid_list = [o for o in orders if not o.is_reduce_only]
                 
-                # TP 주문(Reduce-Only) 추출
-                tp_orders_list = [o for o in all_orders if o.is_reduce_only]
+                l_tp = any(float(o.size) < 0 for o in tp_list)
+                s_tp = any(float(o.size) > 0 for o in tp_list)
                 
-                # 일반 그리드 주문 추출 (진입 주문)
-                grid_orders_list = [o for o in all_orders if not o.is_reduce_only]
-                grid_count = len(grid_orders_list)
+                need_r = False
+                if l_s > 0 and not l_tp: need_r = True
+                if s_s > 0 and not s_tp: need_r = True
                 
-                long_tp_exists = False
-                short_tp_exists = False
+                cur_h = get_tp_orders_hash(tp_list)
+                if not need_r and cur_h != tp_order_hash.get(SYMBOL): need_r = True
                 
-                for tp in tp_orders_list:
-                    size = float(tp.size)
-                    if size < 0: long_tp_exists = True # Close Long
-                    elif size > 0: short_tp_exists = True # Close Short
-
-                log("📊 ORDERS", f"Grid(Open): {grid_count}, TP(L/S): {long_tp_exists}/{short_tp_exists}")
-
-                current_hash = get_tp_orders_hash(tp_orders_list)
-                previous_hash = tp_order_hash.get(SYMBOL)
-                
-                need_refresh = False
-                
-                if long_size > 0 and not long_tp_exists:
-                    log("🔧 HEALTH", "Long Position exists but no TP → Refreshing")
-                    need_refresh = True
-                if short_size > 0 and not short_tp_exists:
-                    log("🔧 HEALTH", "Short Position exists but no TP → Refreshing")
-                    need_refresh = True
-                
-                if not need_refresh and current_hash != previous_hash:
-                    log("🔧 HEALTH", "TP Orders Changed → Refreshing")
-                    need_refresh = True
-
-                if need_refresh:
+                if need_r:
                     refresh_all_tp_orders()
-                    new_orders = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
-                    new_tp_orders = [o for o in new_orders if o.is_reduce_only]
-                    tp_order_hash[SYMBOL] = get_tp_orders_hash(new_tp_orders)
-
-                # ★ [수정] 좀비 그리드 청산 로직 개선
-                # 한쪽 포지션만 남았는데 그리드 주문이 남아있다면, "그리드 주문만" 취소한다.
-                single_position = (long_size > 0) != (short_size > 0)
+                    new_o = api.list_futures_orders(SETTLE, contract=SYMBOL, status='open')
+                    tp_order_hash[SYMBOL] = get_tp_orders_hash([o for o in new_o if o.is_reduce_only])
                 
-                if single_position and grid_count > 0:
-                    log("⚠️ SINGLE", f"Zombie grid detected ({grid_count} orders) → Clearing only grids...")
-                    for o in grid_orders_list:
-                        try:
-                            api.cancel_futures_order(SETTLE, o.id)
-                            time.sleep(0.1)
+                # 좀비 그리드 선별 취소
+                single = (l_s > 0) != (s_s > 0)
+                if single and grid_list:
+                    log("⚠️ SINGLE", f"Zombie grid detected ({len(grid_list)}) -> Clearing GRIDS only")
+                    for o in grid_list:
+                        try: api.cancel_futures_order(SETTLE, o.id); time.sleep(0.1)
                         except: pass
-                    # 전체 취소가 아니므로 TP 리프레시는 굳이 안 해도 됨 (위에서 체크함)
-                    
-                elif single_position and grid_count == 0:
-                    # 이미 정리된 상태라면 신규 진입 (물타기/헷지)
-                    # 단, 너무 잦은 진입을 막기 위해 idle 시간 등 체크 필요하지만
-                    # 여기서는 기존 로직대로 initialize_grid 호출 (내부 락 있음)
-                    log("⚠️ SINGLE", "Creating grid from single position...")
+                elif single and not grid_list:
+                    log("⚠️ SINGLE", "Creating grid...")
                     initialize_grid()
-
-            except Exception as e:
-                log("⚠️ HEALTH CHECK", f"Order check error: {e}")
+                    
+            except Exception as e: log("⚠️ HEALTH", f"Check error: {e}")
             
-            try:
-                calculate_obv_macd()
-                current_obv = float(obv_macd_value) * 100
-                if last_adjusted_obv == 0: last_adjusted_obv = current_obv
-                elif abs(current_obv - last_adjusted_obv) >= 10:
-                    log("🔔 HEALTH", "OBV changed → Recalculating TP")
-                    refresh_all_tp_orders()
-                    last_adjusted_obv = current_obv
-            except: pass
-
             validate_strategy_consistency()
-            remove_duplicate_orders()
-            cancel_stale_orders()
-            log("✅ HEALTH", "Complete")
+            log("✅ HEALTH", "Done")
         except Exception as e:
-            log("❌ HEALTH", f"Critical Error: {e}")
+            log("❌ HEALTH", f"Err: {e}")
             time.sleep(5)
 
 @app.route('/webhook', methods=['POST'])
