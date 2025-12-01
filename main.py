@@ -721,26 +721,33 @@ def initialize_grid(current_price=None):
             return
         last_grid_time = now
         price = current_price if current_price and current_price > 0 else get_current_price()
-        if price == 0: return
+        if price == 0:
+            return
 
         sync_position()
         with position_lock:
             long_size = position_state[SYMBOL]["long"]["size"]
             short_size = position_state[SYMBOL]["short"]["size"]
 
-        # ★ [수정] 자본금 기준 확정 로직
+        # 현재 잔고 읽기
         with balance_lock:
             current_balance = account_balance
-            
-        # 초기 자본금이 설정되지 않았다면 현재 잔고로 고정하고 저장
-        if initial_capital <= 0:
+
+        # 🔁 수정 포인트: 완전 무포지션이면 초기 자본을 '현재 잔고'로 리셋
+        if long_size == 0 and short_size == 0:
+            # 완전 플랫 상태에서 새로 진입하는 시점 → 기준 자본 리셋
             initial_capital = current_balance
             save_initial_capital()
-            log("💾 INIT", f"Initial Capital set to {initial_capital:.2f} USDT")
-            
-        # ★ [핵심] 가용 잔고가 아닌 '초기 자본금' 기준으로 수량 계산
+            log("💾 INIT", f"Initial Capital RESET (flat) -> {initial_capital:.2f} USDT")
+        else:
+            # 아직 포지션이 남아 있는 상태에서 초기 자본이 0이면 안전장치로 1회만 설정
+            if initial_capital <= 0:
+                initial_capital = current_balance
+                save_initial_capital()
+                log("💾 INIT", f"Initial Capital set -> {initial_capital:.2f} USDT")
+
+        # 이후 로직은 그대로 유지
         calc_basis = initial_capital if initial_capital > 0 else current_balance
-        
         base_value = Decimal(str(calc_basis)) * BASERATIO
         base_qty_bnb = base_value / Decimal(str(price))
         
